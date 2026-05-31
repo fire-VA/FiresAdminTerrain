@@ -1,0 +1,1083 @@
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                                                                             ║
+# ║  FiresAdminTerrain — Infinity Hammer tools                                 ║
+# ║                                                                             ║
+# ║  Tile_* tools live on the HOE. Admin/utility tools stay on the hammer.      ║
+# ║                                                                             ║
+# ║  CLICK-TO-PLACE: each tile brush includes `<area>` which IH expands to      ║
+# ║    `from=<x>,<z>,<y> circle=<r>-<r2> …`                                     ║
+# ║  The brush command parses `from=` for the click position. This is what     ║
+# ║  makes IH WAIT for the player to click on the terrain instead of firing    ║
+# ║  the command on tool-select.                                                ║
+# ║                                                                             ║
+# ║  RADIUS: the positional radius (10/25/50) controls the brush actual size.  ║
+# ║  initialSize matches it so the IH ruler ring shows the same. Scrolling the ║
+# ║  ruler does NOT currently resize the brush — pick a tool with the radius   ║
+# ║  you want.                                                                  ║
+# ║                                                                             ║
+# ║  INSTALL                                                                    ║
+# ║    Copy to BepInEx/config/infinity_tools.yaml (REPLACING the existing one). ║
+# ║    Restart client OR run /reload_infinity_hammer in console.                ║
+# ║                                                                             ║
+# ║  TEST FLOW                                                                  ║
+# ║    devcommands                                                              ║
+# ║    1. Equip HOE → Custom tab → pick Tile_Flat_25m                           ║
+# ║    2. CLICK ON GROUND → flat platform appears at your click point's Y       ║
+# ║    3. Click elsewhere → another platform, seams visually continuous         ║
+# ║    4. Save world → main menu → reload → tiles re-stream from ZDOs           ║
+# ║                                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  HAMMER  —  admin / util tools                                              ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+hammer:
+
+# ── PIPETTE ──────────────────────────────────────────────────────────────────
+
+  - name: Pipette
+    description: |-
+      Press <mod1> to pick up.
+      Press <mod2> to freeze.
+    icon: hammer
+    command: hammer pick=<mod1> freeze=<mod2>
+    index: 1
+
+  - name: Building pipette
+    description: |-
+      Select entire buildings.
+      Press <mod1> to pick up.
+      Press <mod2> to freeze.
+    icon: hammer
+    command: hammer connect pick=<mod1> freeze=<mod2>
+
+  - name: Area pipette
+    description: |-
+      Select multiple objects.
+      Press <mod1> to pick up.
+      Press <mod2> to freeze.
+    icon: hammer
+    command: hammer pick=<mod1> freeze=<mod2> height=<h> <area>
+    initialHeight: 0
+    highlight: true
+
+# ── ADMIN PROTECTION ─────────────────────────────────────────────────────────
+
+  - name: Admin Buildings
+    description: |-
+      Set objects in area applies <#00ffff>all admin effects</color>.<size=10>
+      - <#fff000>Infinite Health</color> for build pieces, destructible objects.
+      - <#fff000>Infinite Fuel</color> for fireplaces, bathtubs.
+      - <#fff000>Irremovable</color> build pieces, itemstands.
+      - <#fff000>Unpickable</color> pickable objects.
+      </size>
+    icon: HelmetMage
+    commands:
+      - command: tool_object health=-1 f=WearNTear,health,-1
+      - command: tool_object f=Destructible,minToolTier,999 f=TreeBase,minToolTier,999 f=MineRock5,minToolTier,999
+      - command: tool_object type=Piece f=Piece,canBeRemoved,false <area>
+      - command: tool_object type=ItemStand f=ItemStand,canBeRemoved,false <area>
+      - command: tool_object type=Fireplace f=Fireplace,infiniteFuel,true
+      - command: tool_object id=piece_bathtub f=Smelter,fuel,10 f=Smelter,fuelPerProduct,0
+      - command: tool_object type=Pickable f=Pickable,picked,1 f=Pickable,hideWhenPicked,vfx_odin_despawn <area>
+    highlight: true
+    instant: false
+
+  - name: Area Cannot Be Removed & Indestructible
+    description: Pieces can't be removed in the area, infinite health, no targeting.
+    icon: hammer
+    command: object f=WearNTear,health,-1 health=-1 f=Piece,canBeRemoved,false f=Piece,primaryTarget,false f=Piece,randomTarget,false height=<h> <area>
+    initialHeight: 0
+    highlight: true
+
+  - name: WearNTear Burnable FALSE
+    description: Set structures to not be burnable at all in area.
+    icon: BombSmoke
+    command: object type=Structure f=WearNTear,burnable,false <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+# ── SCALE & TRANSFORM ────────────────────────────────────────────────────────
+
+  - name: Scale Objects Small AREA
+    description: Scales objects in the area to half size (0.5).
+    icon: piece_workbench
+    command: object scale=.5 <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+  - name: Reset Object Scale AREA
+    description: Resets object scales in the area to normal (1).
+    icon: piece_workbench
+    command: object scale=1 <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+  - name: Slight Tilt Objects AREA
+    description: Slight 0.5° tilt on all axes, 50% chance.
+    icon: wood_wall_2x2
+    command: object rotate=0.5,0.5,0.5 <area> height=<h> chance=0.5
+    initialHeight: 0
+    highlight: true
+
+  - name: Rundown Twists
+    description: Random tilts -2° to +2° per axis, 50% chance.
+    icon: wood_wall_2x2
+    command: object rotate=-2-2,-2-2,-2-2 <area> height=<h> origin=object
+    initialHeight: 0
+    highlight: true
+
+# ── VISIBILITY & INTERACTION ─────────────────────────────────────────────────
+
+  - name: Invisible Piece
+    description: |-
+      Make build pieces invisible.
+      Hold <mod1> to undo. Hold <mod2> to affect connected pieces.
+    icon: TrophyWolf
+    commands:
+      - command: object health=-1 f=WearNTear,health,-4 f=WearNTear,broken,vfx_odin_despawn
+      - command: data remove=WearNTear.m_broken,health,WearNTear.m_health
+        keys: <mod1>
+      - command: object health=-1 f=WearNTear,health,-4 f=WearNTear,broken,vfx_odin_despawn connect
+        keys: <mod2>
+      - command: data remove=WearNTear.m_broken,health,WearNTear.m_health connect
+        keys: <mod1>,<mod2>
+    instant: false
+
+  - name: Disable Interaction AREA
+    description: Disables interaction on objects in the area.
+    icon: Eyescream
+    command: tweak_object interact=false <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+  - name: Enable Interaction AREA
+    description: Enables interaction on objects in the area.
+    icon: Eyescream
+    command: tweak_object interact=true <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+# ── HEALTH & WEAR ────────────────────────────────────────────────────────────
+
+  - name: Structure Health Infinite AREA
+    description: Set structure health to infinite in area.
+    icon: hammer
+    command: object type=Structure health=-1 f=WearNTear,health,-1 <area>
+    initialHeight: 0
+    highlight: true
+
+  - name: Structure Health DEFAULT AREA
+    description: Restore default health in area.
+    icon: hammer
+    command: data remove=health,WearNTear.m_health type=Structure <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+  - name: Worn Pieces AREA
+    description: |-
+      Set all pieces in area to worn with infinite health.
+    icon: SurtlingCore
+    command: object type=Structure f=WearNTear,health,-2 health=-1 <area> height=<h>
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Broken Pieces 20% AREA
+    description: |-
+      Randomly set 20% of pieces to broken with infinite health.
+    icon: BlackCore
+    command: object type=Structure f=WearNTear,health,-4 health=-1 chance=0.2 <area> height=<h>
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+# ── DATA & DESTRUCTION ───────────────────────────────────────────────────────
+
+  - name: Clear Object Data AREA
+    description: Clear object data in area.
+    icon: hammer
+    command: data clear <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+  - name: AreaRuiner
+    description: Randomly removes pieces in the highlighted area.
+    icon: SledgeDemolisher
+    command: object remove chance=0.5 type=Piece height=<h> <area>
+    initialHeight: 0
+    highlight: true
+
+  - name: Creator 0 AREA
+    description: Set object creator to 0 in area.
+    icon: piece_xmascrown
+    command: object creator=0 <area> height=<h>
+    initialHeight: 0
+    highlight: true
+
+  - name: Area Fueler
+    description: Fireplaces in area get infinite fuel.
+    icon: bonfire
+    command: object type=Fireplace f=Fireplace,infiniteFuel,true height=<h> <area>
+    initialHeight: 0
+    highlight: true
+
+# ── SHIP TOOLS (most-used) ───────────────────────────────────────────────────
+
+  - name: Ship Landing - Sea Level
+    description: Land your ship gracefully to sea level.
+    icon: MushroomYellow
+    command: object id=Raft,Karve,VikingShip,TrailerShip f=Ship,force,0.4 radius=15
+
+  - name: Ship Landing - Hover Off Ground
+    description: Land your ship and hover above the waves.
+    icon: MagicallyStuffedShroomUncooked
+    instant: true
+    command: object id=Raft,Karve,VikingShip,TrailerShip f=Ship,force,1 radius=15
+
+  - name: Ship Takeoff
+    description: Take off to the skies!
+    icon: MagicallyStuffedShroom
+    instant: true
+    command: object id=Raft,Karve,VikingShip,TrailerShip f=Ship,force,2 radius=15
+
+# ── FX (admin theatrics — kept the most-used) ────────────────────────────────
+
+  - name: Bloodbath
+    description: Make it look like a massacre happened where you click.
+    icon: Bloodbag
+    command: tool_spawn vfx_deer_death pos=0,0,0 radius=1;tool_spawn sfx_draugrpile_hit pos=0,0,0 radius=1;tool_spawn vfx_deer_death amount=20;tool_spawn sfx_draugrpile_hit amount=3 pos=0,0,0 radius=1;tool_spawn vfx_goblin_death amount=20
+
+  - name: Meteor
+    description: Drops a Meteor from the sky.
+    icon: QueenDrop
+    instant: false
+    command: tool_spawn projectile_meteor f=Projectile,gravity,4 pos=0,0,80
+
+  - name: Healdropper
+    description: Heals in an area where aimed.
+    icon: AmberPearl
+    instant: false
+    snapGround: true
+    command: tool_spawn DvergerStaffHeal_aoe radius=1;tool_spawn sfx_dverger_heal_finish radius=1
+
+# ── DEBUG & KEYS ─────────────────────────────────────────────────────────────
+
+  - name: ZoneCorners
+    description: Toggle Zone Corner Rays
+    icon: Crystal
+    command: esp_toggle ZoneCorner
+
+  - name: ESP Spawns Toggle
+    description: Toggle spawner rays on and off.
+    icon: ancientseed
+    command: esp_toggle SpawnPointOneTime;esp_toggle SpawnPointRespawning;esp_toggle SpawnZone
+
+  - name: Disable Late-Game Keys
+    description: Remove Yagluth, Queen, Goblin King, Surtling, Fader keys.
+    icon: TrophyFader
+    command: removekey defeated_goblinking;removekey defeated_queen;removekey defeated_goblinking;removekey killed_surtling;removekey defeated_fader;removekey bosshildir2;removekey bosshildir3
+    instant: false
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  HOE                                                                        ║
+# ║                                                                             ║
+# ║  FiresAdminTerrain Tile_* tools at the top.                                 ║
+# ║  Vanilla WEC terrain ops below.                                             ║
+# ║                                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+hoe:
+
+# ── FIRES ADMIN TERRAIN — TILE TOOLS ─────────────────────────────────────────
+# `<area>` makes IH wait for player click; brush parses `from=` for position.
+
+  # All Tile_Brush tools share these IH tokens:
+  #   <area>  → expands to `from=<x>,<z>,<y> circle=<r>-<r2> …`
+  #               • from= drives click position (parsed by brush)
+  #               • circle=R-R2 → outer ruler radius (player scroll)
+  #                 overrides the positional default in the command
+  #   <h>     → ruler height offset (player Page Up / Page Down).
+  #             For flat: ADDED to click Y. For raise: used as delta.
+  #
+  # initialSize sets the ruler's starting radius; initialHeight sets the
+  # starting <h>. snapGround=true keeps the ruler on the terrain surface.
+
+  # ─── Brush tools ─────────────────────────────────────────────────────
+  # All brush tools below use the IH ruler scroll as the sole radius source.
+  # <area> expands to `from=x,z,y circle=R-R2` where R is the player's
+  # current scroll size — that's what our command parser reads. The positional
+  # radius from earlier YAML revisions is gone; the brush will ALWAYS follow
+  # the ring you see. Scroll up/down to resize, Page Up/Down for height.
+
+  - name: Floor
+    description: |-
+      Place a <#FFFF00>flat floating floor</color> at the cursor.
+      <#FFFF00>Scroll</color> to resize, <#FFFF00>Page Up/Down</color> to offset Y.
+    icon: mud_road
+    command: va_brush_flat height=<h> <area>
+    initialSize: 10
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Raise Terrain
+    description: |-
+      Raise terrain by <#FFFF00><h></color> at the cursor, linear falloff.
+      <#FFFF00>Scroll</color> to resize, <#FFFF00>Page Up/Down</color> to set delta.
+    icon: raise
+    command: va_brush_raise height=<h> 1 <area>
+    initialSize: 10
+    initialHeight: 1
+    highlight: true
+    snapGround: true
+
+  - name: Raise (Sharp)
+    description: |-
+      Raise terrain with <#FFFF00>quadratic falloff</color> (sharper peak / edge).
+      <#FFFF00>Scroll</color> to resize, <#FFFF00>Page Up/Down</color> to set delta.
+    icon: stone_wall_2x1
+    command: va_brush_raise height=<h> 2 <area>
+    initialSize: 10
+    initialHeight: 3
+    highlight: true
+    snapGround: true
+
+  - name: Lower Terrain
+    description: |-
+      Lower terrain by <#FFFF00><h></color> at the cursor, linear falloff.
+      <#FFFF00>Page Up/Down</color> sets the depth (positive = deeper).
+    icon: woodiron_pole
+    command: va_brush_lower height=<h> 1 <area>
+    initialSize: 10
+    initialHeight: 1
+    highlight: true
+    snapGround: true
+
+  # ── FLOATING ISLAND VARIANTS (2026-05-26 round-30) ─────────────────────
+  # Same brush math as the standard Floor / Raise / Lower tools BUT they
+  # flag the tile with FloatingIslandMode=true. When a tile's top sits
+  # ≥50m above local terrain, its underside auto-rounds into a domed
+  # teardrop bottom instead of stretching all the way down to terrain.
+  # Below that 50m trigger height, the underside still stretches like
+  # the default tools. Use these for placing floating sky-islands with
+  # a rounded rock bottom; use the standard variants for terrain that
+  # should always stretch down (cliffs, sloped builds).
+
+  - name: Floor (Floating Island)
+    description: |-
+      Place a <#88CCFF>flat floating-island floor</color> at the cursor.
+      Tile's underside auto-rounds into a teardrop dome when sitting
+      <#FFFF00>50m+ above terrain</color>. Below that height it still
+      stretches down like the standard Floor.
+      <#FFFF00>Scroll</color> to resize, <#FFFF00>Page Up/Down</color> for Y offset.
+    icon: mud_road
+    command: va_brush_flat_island height=<h> <area>
+    initialSize: 10
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Raise Terrain (Floating Island)
+    description: |-
+      Raise terrain by <#FFFF00><h></color> at the cursor with the
+      floating-island underside (dome bottom when ≥50m above terrain).
+      <#FFFF00>Scroll</color> to resize, <#FFFF00>Page Up/Down</color> to set delta.
+    icon: raise
+    command: va_brush_raise_island height=<h> 1 <area>
+    initialSize: 10
+    initialHeight: 1
+    highlight: true
+    snapGround: true
+
+  - name: Lower Terrain (Floating Island)
+    description: |-
+      Lower terrain by <#FFFF00><h></color> on a floating-island tile.
+      Useful for carving lake basins / valleys on sky islands where
+      the underside should keep its rounded teardrop shape.
+    icon: woodiron_pole
+    command: va_brush_lower_island height=<h> 1 <area>
+    initialSize: 10
+    initialHeight: 1
+    highlight: true
+    snapGround: true
+
+  # ── BLENDER-STYLE SMOOTH BRUSH (round-31 B-2) ──────────────────────────
+  # Dedicated Smooth brush ported from Blender's Smooth (Laplacian) brush.
+  # Uniform 1-ring kernel + iteration_strengths (up to 4 sub-passes per
+  # dab) + per-stroke origHeights snapshot. Hold-and-drag converges to a
+  # smoothed target and STOPS (won't depress past it like the post-pass
+  # smoothing in the standard tools does).
+  # Strength arg controls iteration count: 0.25 = 1 pass, 0.5 = 2 passes,
+  # 0.75 = 3 passes, 1.0 = 4 passes per dab.
+
+  - name: Smooth Terrain
+    description: |-
+      <#88FF88>Smooth</color> terrain with a Blender-style Laplacian brush.
+      Hold and drag — the brush converges to a smoothed target and stops
+      (no runaway depression). <#FFFF00>Scroll</color> to resize.
+      Strength 0.5 = balanced; tweak via <#FFFF00>strength=N</color> arg.
+    icon: cultivate
+    command: va_brush_smooth 10 0.5 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Grab Terrain
+    description: |-
+      <#FFAA88>Grab + drag</color> terrain like Blender's Grab brush.
+      Click on terrain → hold LMB and move cursor up/down → terrain
+      follows the cursor's Y delta. Releasing locks in the current
+      shape; clicking again starts a fresh grab from the new baseline.
+      <#FFFF00>Target-toward-snapshot</color> — holding still stops moving
+      the mesh (doesn't accumulate like Raise/Lower).
+      <#FFFF00>Scroll</color> to resize.
+    icon: hammer
+    command: va_brush_grab dy=<h> <area>
+    initialSize: 10
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Noise Terrain
+    description: |-
+      Adds <#CCAA88>Perlin-noise displacement</color> for organic rocky
+      / eroded detail. Great for breaking up flat platforms or adding
+      texture to cliff faces.
+      • <#FFFF00>intensity=N</color>  max bump in meters (default 0.5, ±)
+      • <#FFFF00>scale=N</color>      noise frequency (0.05=large, 0.5=fine)
+      Deterministic on world XZ — re-applying produces the same pattern.
+    icon: hammer
+    command: va_brush_noise intensity=<h> scale=0.1 <area>
+    initialSize: 10
+    initialHeight: 0.5
+    highlight: true
+    snapGround: true
+
+  # ── BRUSH MODE TOGGLES (round-32) ──────────────────────────────────────
+  # Instant tools — no click needed. Each fires once to flip a global
+  # brush-behavior bit. Modes persist via PlayerPrefs so they survive
+  # logout / re-login. Use these to bind hammer hotkeys for quick
+  # mid-session switching between "RPG-maker style" and "default" feel.
+
+  - name: Mode → Toggle Height Lock
+    description: |-
+      Toggle <#FFFF00>brush height lock</color>:
+      • <#FFFFFF>TrackCursor</color> (default): drag follows the terrain Y.
+      • <#FFFF00>Locked</color>: drag holds the FIRST-CLICK ruler Y across the
+        whole stroke (RPG-maker style — sweep flat platforms across
+        uneven ground).
+      Affects Floor (Flat) brush. Raise/Lower/Smooth ignore this toggle.
+    icon: hammer
+    command: va_brush_toggle_heightlock
+    instant: true
+
+  - name: Mode → Toggle Placement
+    description: |-
+      Toggle <#FFFF00>placement mode</color>:
+      • <#FFFFFF>Connected</color> (default): underside stretches down to meet
+        vanilla terrain.
+      • <#FFFF00>Floating</color>: underside auto-rounds into a teardrop dome
+        when the tile sits ≥20m above terrain.
+      Both Floor / Raise / Lower respect this. Use the *_island YAML
+      variants if you want it per-stroke instead.
+    icon: hammer
+    command: va_brush_toggle_placement
+    instant: true
+
+  - name: Repair Seams
+    description: |-
+      <#88FF88>Stitch separated tile-mesh seams</color> in the cursor radius.
+      Brush ops auto-stitch their own footprint now — this tool only
+      needs to run if you have <#FFFF00>pre-existing breaks</color> from
+      before the auto-stitch landed.
+      <#FFFF00>Scroll</color> to resize the repair area.
+    icon: hammer
+    command: va_stitch_seams <area>
+    initialSize: 50
+    highlight: true
+    snapGround: true
+
+  # NOTE on positional args: `va_brush_paint` expects radius at args[1],
+  # then R G B A at args[2..5]. The `<area>` token's `circle=R-R2`
+  # overrides the radius, but the positional slot still needs to exist
+  # or the RGBA channels shift by one. The `10` below is a placeholder
+  # — the actual radius comes from the IH ruler scroll.
+
+  - name: Paint Dirt
+    description: |-
+      Paint <#AA6644>vanilla dirt</color> (red channel) at click.
+      <#FFFF00>Scroll</color> to resize.
+    icon: Hoe
+    command: va_brush_paint 10 255 0 0 255 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Paint Cultivated
+    description: |-
+      Paint <#66FF66>vanilla cultivated</color> (green channel) at the cursor.
+    icon: cultivate
+    command: va_brush_paint 10 0 255 0 255 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Paint Paved
+    description: |-
+      Paint <#6666FF>vanilla paved</color> (blue channel) at the cursor.
+    icon: paved_road
+    command: va_brush_paint 10 0 0 255 255 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Paint Grass
+    description: |-
+      Restore <#88FF66>vanilla grass</color> (clears any prior dirt /
+      cultivated / paved paint, brings back the default meadows look).
+      Writes m_paintMaskNothing (0,0,0,255) — same effect as
+      IH "terrain paint=grass" and the vanilla hoe's reset paint.
+    icon: replant
+    command: va_brush_paint 10 0 0 0 255 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Clear Brushed Area
+    description: |-
+      Reset modified vertices back to unmodified at the cursor.
+      Anchor + ZDO stay — only the brushed verts are cleared so the
+      floating-terrain edge moves inward.
+      <#FFFF00>Scroll</color> to resize.
+    icon: SledgeDemolisher
+    command: va_brush_clear <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  # ── HOLE PUNCH / PATCH ──────────────────────────────────────────────────
+  #
+  # Precision tools for carving cave entrances on floating platforms then
+  # restoring the surface later. Hole Punch clears ONLY Heights (paint +
+  # biome stay) so the hole is a clean gap in the mesh. Patch fills
+  # unmodified verts by sampling nearby modified heights — the inverse
+  # operation. Use these instead of Clear/Delete when you want to keep the
+  # surrounding paint + biome intact.
+
+  - name: Precision Hole Punch
+    description: |-
+      <#FF4444>Punch</color> a precise hole through the tile mesh in radius.
+      Clears ONLY heights — paint + biome stay so re-patching restores the look.
+      <#FFFF00>Scroll</color> to resize.
+      <#00FFFF>Perfect for creating cave entrances on floating platforms.</color>
+    icon: PickaxeIron
+    command: va_brush_hole_punch <area>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Patch Hole
+    description: |-
+      <#00FF00>Patch</color> (fill) holes in custom terrain by interpolating
+      heights from nearby modified vertices. Inverse of Precision Hole Punch.
+      <#FFFF00>Scroll</color> to resize.
+      <#00FFFF>Use to repair terrain or close cave entrances.</color>
+    icon: Stone
+    command: va_brush_hole_patch <area>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Delete Tiles
+    description: |-
+      <#FF6666>HARD DELETE</color>: destroy every TileAnchor (mesh + collider +
+      underside + ZDO) whose center is inside the brush.
+      Unlike Clear Brushed Area, this removes the anchor entirely — the tile
+      will not load on next session unless re-placed.
+      <#FFFF00>Scroll</color> to resize.
+    icon: SledgeDemolisher
+    command: va_brush_delete <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  # ── BIOME PAINT (per-tile, 64m granularity) ────────────────────────────
+  #
+  # Each tile (64m × 64m) carries one biome override. Painting with one of
+  # these tools sets that override on every tile the brush touches.
+  # Use 'Clear Biome' to remove the override (vanilla biome wins again).
+  # Patches Heightmap.FindBiome + WorldGenerator.GetBiome so vegetation,
+  # ambient sound, AI, and lighting all see the override.
+  # Icons mirror the RPG-maker biome tool icons — distinct per biome for
+  # visual ID.
+
+  - name: Biome Meadows
+    description: |-
+      Paint <#88FF66>Meadows</color> biome on overlapping tiles.
+    icon: Dandelion
+    command: va_brush_biome 1 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome BlackForest
+    description: |-
+      Paint <#557755>Black Forest</color> biome on overlapping tiles.
+    icon: FineWood
+    command: va_brush_biome 8 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome Plains
+    description: |-
+      Paint <#DDCC88>Plains</color> biome on overlapping tiles.
+    icon: Barley
+    command: va_brush_biome 16 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome Swamp
+    description: |-
+      Paint <#446644>Swamp</color> biome on overlapping tiles.
+    icon: Guck
+    command: va_brush_biome 2 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome Mountain
+    description: |-
+      Paint <#CCDDEE>Mountain</color> biome on overlapping tiles.
+    icon: Crystal
+    command: va_brush_biome 4 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome Mistlands
+    description: |-
+      Paint <#888899>Mistlands</color> biome on overlapping tiles.
+    icon: BlackCore
+    command: va_brush_biome 512 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome Ashlands (Lava)
+    description: |-
+      Paint <#FF4422>Ashlands</color> biome on overlapping tiles.
+      Overlay-only — sits on top of terrain at an alpha-controlled
+      Y offset (center = +0.8m, edge = +0.1m) so the lava naturally
+      ramps down to terrain at the boundary, no dig required.
+      No swimmable custom-water layer — use Swimmable Lava for that.
+    icon: FlametalOre
+    command: va_brush_biome 32 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Biome DeepNorth
+    description: |-
+      Paint <#EEEEFF>Deep North</color> biome on overlapping tiles.
+    icon: SnowCovered
+    command: va_brush_biome 64 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Clear Biome
+    description: |-
+      Remove biome override on overlapping tiles (vanilla biome wins again).
+    icon: SledgeDemolisher
+    command: va_brush_biome 0 <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Tile Info
+    description: |-
+      Print the look-point world position + which 64m tile it belongs to.
+      No click required — runs immediately.
+    icon: hammer
+    command: va_brush_where
+    instant: true
+
+  - name: List Tile Anchors
+    description: |-
+      List all loaded TileAnchors (and any standalone test objects).
+    icon: hammer
+    command: va_tile_list
+    instant: true
+
+  - name: Force VATile Prefab Register
+    description: |-
+      Force-register the VATile prefab now. Use only if the log shows
+      'TileAnchorPrefab' failed to register on ZNetScene.Awake.
+    icon: hammer
+    command: va_tile_prefab_ensure
+    instant: true
+
+# ── VANILLA TERRAIN OPS (WEC) ────────────────────────────────────────────────
+
+  - name: Level
+    description: |-
+      Flattens vanilla terrain.
+      Hold <mod1> to smooth. Hold <mod2> for free mode. Hold <alt> for player height.
+    icon: mud_road
+    command: terrain level smooth=<mod1>?.5:0 <area>
+    terrainGrid: -<mod2>
+    playerHeight: <alt>
+
+  - name: Raise
+    description: |-
+      Raises vanilla terrain.
+      Hold <mod1> to smooth. Hold <mod2> for free mode.
+    icon: raise
+    command: terrain raise=<h> smooth=<mod1>?.5:0 <area>
+    initialHeight: 0.2
+    terrainGrid: -<mod2>
+    snapGround: true
+
+  - name: Slope
+    description: Slope between you and aim point.
+    icon: wood_wall_roof_45
+    command: terrain slope <to>
+    targetEdge: true
+    initialShape: rectangle
+
+  - name: Pave
+    description: Paves vanilla terrain.
+    icon: paved_road
+    command: terrain paint=paved <area>
+    snapGround: true
+
+  - name: Dirt
+    description: Paint vanilla dirt.
+    icon: Hoe
+    command: terrain paint=dirt <area>
+    snapGround: true
+
+  - name: Grass
+    description: Paint vanilla grass.
+    icon: replant
+    command: terrain paint=grass <area>
+    snapGround: true
+
+  - name: Cultivate
+    description: Cultivate vanilla terrain.
+    icon: cultivate
+    command: terrain paint=cultivated <area>
+    snapGround: true
+
+  - name: Reset Terrain
+    description: Reset vanilla terrain in area.
+    icon: Hoe
+    command: terrain reset <area>
+    snapGround: true
+
+# ── CREATURE / OBJECT REMOVAL ────────────────────────────────────────────────
+
+  - name: Tame
+    description: |-
+      Tames creatures. Hold <mod1> to untame.
+    icon: Carrot
+    command: object tame keys=-<mod1> <area>;object wild keys=<mod1> <area>
+
+  - name: Remove
+    description: |-
+      Removes objects. Hold <mod1> to also reset the terrain.
+    icon: softdeath
+    command: tool_object remove id=*;tool_terrain keys=<mod1> reset
+    highlight: true
+
+# ── VA WATER PLACEMENT (FiresAdminTerrain) ──────────────────────────────────
+# Each tool places a CustomLiquidType disk at the IH ruler cursor.
+# Scroll to resize ruler radius; ruler height (Page Up/Down) snaps the
+# disk's Y. Delete tool removes any custom water disks overlapping the
+# ruler radius.
+
+  - name: Water
+    description: |-
+      Place a <#66CCFF>Water</color> disk at the cursor — hold LMB to
+      drag-paint a river/pond. Surface stays flat at the ruler Y; terrain
+      can clip through (use the Waterfall tool for slope-hugging water).
+      Scroll to resize. Page Up/Down for Y offset.
+    icon: Bucket
+    command: va_brush_water <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Waterfall
+    description: |-
+      Brush-drag a <#66CCFF>Waterfall</color> down a cliff or slope.
+      Each dab samples the terrain raycast under the cursor and places a
+      shallow water sheet that HUGS the slope at a constant offset, so
+      water flows down the rock face like a real waterfall.
+      Scroll to resize the stream width.
+    icon: gp_waterfall
+    command: va_brush_waterfall <area>
+    initialSize: 4
+    highlight: true
+    snapGround: true
+    # Round-W-3: ring deforms to terrain shape so the user can see
+    # exactly which slope segment the next dab will hit. Every other
+    # va_brush_* tool keeps the default flat ring at the cursor Y.
+    terrainGrid: true
+
+  - name: Lava
+    description: |-
+      Place a standalone <#FF4422>Lava</color> disk at the cursor.
+      No terrain dig, no biome paint. For Ashlands biome + dig (no swimmable), use Biome Ashlands.
+    icon: FlametalOre
+    command: va_brush_lava <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Swimmable Lava
+    description: |-
+      Place a swimmable <#FF4422>lava</color> disk at the cursor.
+      Custom lava layer + thin 0.002m water overlay (molten-glass refraction).
+      No terrain dig, no biome paint — pair with Biome Ashlands to carve a pit underneath.
+    icon: FlametalOre
+    command: va_brush_swimmable_lava <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Snow
+    description: |-
+      Place a <#EEEEFF>snow drift</color> at the cursor. Uses the
+      <#FFFF00>LandSnow terrain-anchor</color> pipeline (EXACT clone of
+      LandIce mesh-gen): visual-only white mesh that drapes the terrain,
+      no MeshCollider, NOT registered with the water system. Zero
+      swim/wet/InWater side effects — characters walk straight through
+      on the underlying ground.
+    icon: WolfPelt
+    command: va_brush_snow <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Tar
+    description: |-
+      Place a <#332222>Tar</color> disk at the cursor.
+      Tarred-debuff applied to swimmers; slows movement.
+    icon: Tar
+    command: va_brush_water_tar <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Boiling Water
+    description: |-
+      Place a <#FF8866>boiling-water</color> disk at the cursor.
+      Deals fire damage while swimming; steam VFX at surface.
+    icon: SurtlingCore
+    command: va_brush_water_boiling <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Freezing Water
+    description: |-
+      Place a <#88CCFF>freezing-water</color> disk at the cursor.
+      Deals frost damage, applies Freezing status, slows swimming.
+    icon: Frost_arrow
+    command: va_brush_water_freezing <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Ice
+    description: |-
+      Place a <#CCEEFF>solid ice</color> disk at the cursor (walkable + slippery).
+      Can be broken to reveal water below — fall through holes and swim under,
+      then climb back out via the edge prompt (RPG-maker style).
+    icon: Crystal
+    command: va_brush_water_ice <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+  - name: Delete Water
+    description: |-
+      <#FF4444>Delete</color> any custom water disks overlapping the cursor radius.
+    icon: SledgeDemolisher
+    command: va_brush_water_delete <area>
+    initialSize: 10
+    highlight: true
+    snapGround: true
+
+# ── LAND ICE / LAND SNOW (terrain-anchor mesh, EXACT RPG-maker port) ────────
+# Land Ice = slippery walkable overlay that conforms to terrain shape.
+#   Includes raise/lower/level/smooth height mods (like a sub-terrain).
+# Land Snow = visual-only white drift, no collider, no swim trigger.
+#   Same height-mod tools available.
+
+  - name: Place Ice (Auto)
+    description: |-
+      Place ice at the cursor. <#FFFF00>Auto-detects</color>:
+      - On water → <#88CCFF>floating iceberg</color> (collision sides, slippery top, breakable holes).
+      - On land  → <#CCEEFF>terrain ice overlay</color> (slippery walkable surface).
+      Scroll to resize, Page Up/Down for Y offset.
+    icon: Crystal
+    command: place_ice circle=<r>-<r2> from=<x>,<z>,<y> offset=<h>
+    initialSize: 5
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Place Ice (Land Force)
+    description: |-
+      Force a <#CCEEFF>terrain-overlay ice</color> at the cursor (ignores
+      water detection). Slippery, conforms to ground shape.
+    icon: Crystal
+    command: place_ice_land circle=<r>-<r2> from=<x>,<z>,<y> offset=<h>
+    initialSize: 5
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Place Ice (Water Force)
+    description: |-
+      Force a <#88CCFF>floating ice disk</color> at the cursor (ignores
+      land detection). Walkable platform with breakable holes.
+    icon: Crystal
+    command: place_ice_water circle=<r>-<r2> from=<x>,<z>,<y> offset=<h>
+    initialSize: 5
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Ice Raise (Land)
+    description: |-
+      Raise <#CCEEFF>land ice</color> height by <h>m, smoothstep falloff.
+    icon: raise
+    command: ice_land_raise circle=<r>-<r2> from=<x>,<z>,<y> raise=<h>
+    initialSize: 5
+    initialHeight: 0.5
+    highlight: true
+    snapGround: true
+
+  - name: Ice Lower (Land)
+    description: |-
+      Lower <#CCEEFF>land ice</color> height by <h>m, smoothstep falloff.
+    icon: woodiron_pole
+    command: ice_land_lower circle=<r>-<r2> from=<x>,<z>,<y> lower=<h>
+    initialSize: 5
+    initialHeight: 0.5
+    highlight: true
+    snapGround: true
+
+  - name: Ice Level (Land)
+    description: |-
+      Flatten <#CCEEFF>land ice</color> to the ruler Y (or specify level=).
+    icon: mud_road
+    command: ice_land_level circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Ice Smooth (Land)
+    description: |-
+      Smooth <#CCEEFF>land ice</color> surface within radius.
+    icon: piece_workbench
+    command: ice_land_smooth circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Delete Land Ice
+    description: |-
+      <#FF6666>Delete</color> all land-ice disks overlapping the cursor radius.
+    icon: SledgeDemolisher
+    command: delete_ice_land circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Break Ice Hole
+    description: |-
+      Punch a hole in <#88CCFF>floating ice</color> at the cursor.
+      Reveals water below — fall through and swim under.
+    icon: PickaxeIron
+    command: break_standalone_ice circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 2
+    highlight: true
+    snapGround: true
+
+  - name: Delete Ice (Any)
+    description: |-
+      <#FF6666>Delete</color> both floating + land ice within radius.
+    icon: SledgeDemolisher
+    command: delete_ice circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Place Land Snow
+    description: |-
+      Place a <#EEEEFF>terrain-anchor snow</color> overlay at the cursor.
+      EXACT clone of LandIce mesh: white drape that conforms to terrain.
+      <#FFFF00>NO collider, NO swim/wet trigger</color> — walk-through visual.
+    icon: WolfPelt
+    command: place_land_snow circle=<r>-<r2> from=<x>,<z>,<y> offset=<h>
+    initialSize: 5
+    initialHeight: 0
+    highlight: true
+    snapGround: true
+
+  - name: Snow Raise (Land)
+    description: |-
+      Raise <#EEEEFF>land snow</color> height by <h>m.
+    icon: raise
+    command: snow_land_raise circle=<r>-<r2> from=<x>,<z>,<y> raise=<h>
+    initialSize: 5
+    initialHeight: 0.5
+    highlight: true
+    snapGround: true
+
+  - name: Snow Lower (Land)
+    description: |-
+      Lower <#EEEEFF>land snow</color> height by <h>m.
+    icon: woodiron_pole
+    command: snow_land_lower circle=<r>-<r2> from=<x>,<z>,<y> lower=<h>
+    initialSize: 5
+    initialHeight: 0.5
+    highlight: true
+    snapGround: true
+
+  - name: Snow Level (Land)
+    description: |-
+      Flatten <#EEEEFF>land snow</color> to the ruler Y.
+    icon: mud_road
+    command: snow_land_level circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Snow Smooth (Land)
+    description: |-
+      Smooth <#EEEEFF>land snow</color> surface within radius.
+    icon: piece_workbench
+    command: snow_land_smooth circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true
+
+  - name: Delete Land Snow
+    description: |-
+      <#FF6666>Delete</color> all land-snow disks overlapping the cursor radius.
+    icon: SledgeDemolisher
+    command: delete_land_snow circle=<r>-<r2> from=<x>,<z>,<y>
+    initialSize: 5
+    highlight: true
+    snapGround: true

@@ -1,0 +1,146 @@
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                                                                             ║
+# ║  FiresAdminTerrain — Infinity Hammer test tools                             ║
+# ║                                                                             ║
+# ║  Wires the va_brush_* commands (Phase 8d test surface) into the hammer's    ║
+# ║  custom tool menu so you can place tile-anchored terrain in-world without   ║
+# ║  typing console commands.                                                   ║
+# ║                                                                             ║
+# ║  INSTALL                                                                    ║
+# ║    Copy this file into BepInEx/config/infinity_hammer.yaml, then either:    ║
+# ║      • Restart the client, OR                                               ║
+# ║      • Run /reload_infinity_hammer in console                               ║
+# ║                                                                             ║
+# ║  USAGE                                                                      ║
+# ║    1. devcommands                                                           ║
+# ║    2. Equip hammer, switch to the "Custom" tab                              ║
+# ║    3. Pick a Tile_* tool, aim at the ground, click                          ║
+# ║                                                                             ║
+# ║  RADIUS                                                                     ║
+# ║    Tools are fixed-radius (the IH ruler ring shows the brush size).         ║
+# ║    Multiple sizes (10m / 25m / 50m) are exposed as separate tools rather    ║
+# ║    than a single resizable one so IH's <area> token (which expects WEC      ║
+# ║    syntax) doesn't have to translate to our positional command args.        ║
+# ║    Pick the size you want from the menu.                                    ║
+# ║                                                                             ║
+# ║  HEIGHT                                                                     ║
+# ║    Flat tools snap to your camera raycast hit's Y (the height you're        ║
+# ║    looking at). Sky-build by aiming at a piece elevated to Y=10000+.        ║
+# ║                                                                             ║
+# ║  PHASE                                                                      ║
+# ║    These tools target the new tile-anchor system at Y=-5000. They work      ║
+# ║    regardless of the Terrain.UseNewTilePersistence config flag (the         ║
+# ║    flag gates the legacy disk-placement entry points, not these brushes).   ║
+# ║                                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+hammer:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # FLAT PLATFORMS — set every vertex inside the radius to the look-point Y.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  - name: Tile_Flat_10m
+    description: |-
+      Flat platform, 10m radius.
+      Height auto-snaps to your look point's Y.
+    icon: paved_road
+    command: va_brush_flat 10
+    initialSize: 10
+    highlight: true
+
+  - name: Tile_Flat_25m
+    description: |-
+      Flat platform, 25m radius (spans ~1 tile).
+      Height auto-snaps to your look point's Y.
+    icon: paved_road
+    command: va_brush_flat 25
+    initialSize: 25
+    highlight: true
+
+  - name: Tile_Flat_50m
+    description: |-
+      Flat platform, 50m radius (spans ~4 tiles).
+      Height auto-snaps to your look point's Y.
+      Use to test cross-tile border-vertex consistency.
+    icon: paved_road
+    command: va_brush_flat 50
+    initialSize: 50
+    highlight: true
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # RAISE / LOWER — additive delta with linear falloff from center to edge.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  - name: Tile_Raise_+3m
+    description: |-
+      Raise terrain by +3m at center, linear falloff to 0 at 10m edge.
+    icon: raise
+    command: va_brush_raise 10 3 1
+    initialSize: 10
+    highlight: true
+
+  - name: Tile_Lower_-3m
+    description: |-
+      Lower terrain by -3m at center, linear falloff to 0 at 10m edge.
+    icon: raise
+    command: va_brush_raise 10 -3 1
+    initialSize: 10
+    highlight: true
+
+  - name: Tile_Mountain_+10m
+    description: |-
+      Quick mountain — +10m at center, quadratic falloff (sharper peak) over 15m radius.
+    icon: raise
+    command: va_brush_raise 15 10 2
+    initialSize: 15
+    highlight: true
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PAINT — vanilla heightmap paint mask colors (R=dirt, G=cultivated, B=paved).
+  # ─────────────────────────────────────────────────────────────────────────
+
+  - name: Tile_Paint_Dirt
+    description: |-
+      Paint vanilla dirt (red channel) in 10m radius.
+    icon: Hoe
+    command: va_brush_paint 10 255 0 0 255
+    initialSize: 10
+    highlight: true
+
+  - name: Tile_Paint_Cultivated
+    description: |-
+      Paint vanilla cultivated (green channel) in 10m radius.
+    icon: cultivate
+    command: va_brush_paint 10 0 255 0 255
+    initialSize: 10
+    highlight: true
+
+  - name: Tile_Paint_Paved
+    description: |-
+      Paint vanilla paved (blue channel) in 10m radius.
+    icon: paved_road
+    command: va_brush_paint 10 0 0 255 255
+    initialSize: 10
+    highlight: true
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # CLEAR + INFO
+  # ─────────────────────────────────────────────────────────────────────────
+
+  - name: Tile_Clear
+    description: |-
+      Clear modified vertices back to unmodified in 15m radius.
+      Anchor + ZDO stay in place — only the brushed verts are reset.
+    icon: SledgeDemolisher
+    command: va_brush_clear 15
+    initialSize: 15
+    highlight: true
+
+  - name: Tile_Info
+    description: |-
+      Print look-point world position + which 64m tile it belongs to.
+      Use to confirm pointer raycast works before brushing.
+    icon: hammer
+    command: va_brush_where
+    instant: true
