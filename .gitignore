@@ -1,24 +1,15 @@
-# C# / .NET build outputs
-bin/
-obj/
-*.pdb
-*.dll.config
-
-# Visual Studio workspace
+# Build output
+[Bb]in/
+[Oo]bj/
 .vs/
 *.user
 *.suo
-*.userosscache
-*.sln.docstates
 
-# JetBrains Rider
-.idea/
+# Never ship game assemblies or shared deps
+libs/
+packages/
+*.dll.before-*.bak
 
-# OS / editor scratch
-*~
-.DS_Store
+# OS noise
 Thumbs.db
-
-# Local secrets (none expected in this project but defensive)
-*.env
-*.secret
+desktop.ini
