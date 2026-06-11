@@ -283,6 +283,7 @@
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxController.cs" />
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxPatches.cs" />
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxScaler.cs" />
+    <Compile Include="Modules\Performance\ClutterSpreadPatches.cs" />
     <Compile Include="Modules\Utilities\NetworkObjectHelper.cs" />
     <Compile Include="Modules\Utilities\PlayerSpawnGate.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
