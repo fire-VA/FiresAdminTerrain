@@ -178,6 +178,20 @@ namespace VerdantsAscent.Utilities
             return _customTerrainLayerMask;
         }
 
+        // Ground normal from the heightmap grid via finite difference — three cheap
+        // Heightmap.GetHeight samples (center + 1m in X and Z) instead of reading a
+        // raycast hit normal. Accuracy matches the grid the collider is built from.
+        // Always returns an upward normal.
+        private static Vector3 SampleHeightmapNormal(Vector3 p, float centerHeight)
+        {
+            const float d = 1f; // 1m — matches vanilla heightmap vertex spacing
+            float hx, hz;
+            if (!Heightmap.GetHeight(new Vector3(p.x + d, 0f, p.z), out hx)) hx = centerHeight;
+            if (!Heightmap.GetHeight(new Vector3(p.x, 0f, p.z + d), out hz)) hz = centerHeight;
+            // Surface slope → normal: (-dH/dx, 1, -dH/dz), scaled by d and normalized.
+            return new Vector3(centerHeight - hx, d, centerHeight - hz).normalized;
+        }
+
         /// <summary>
         /// PREFIX patch for ClutterSystem.GetGroundInfo to handle custom terrain.
         /// 
@@ -214,6 +228,40 @@ namespace VerdantsAscent.Utilities
             hmap = null;
             biome = Heightmap.Biome.Meadows;
 
+            // ── FAST GROUND SAMPLE (no custom terrain loaded) ─────────────────
+            // ClutterSystem fires one ground query per grass candidate — thousands
+            // per 8m patch, every one a full Physics.Raycast in vanilla. But a
+            // vanilla heightmap's collider IS its height grid, so when no custom
+            // tile is loaded (TerrainTile.AnyActive == false) the terrain layer
+            // holds nothing BUT heightmaps and we can read the ground analytically:
+            // Heightmap.GetHeight is a couple of array lookups vs. a physics ray.
+            // This ELIMINATES the per-patch cost instead of spreading it across
+            // frames. With a custom tile present, its surface sits above the
+            // vanilla grid and only a raycast finds it — so we fall through to the
+            // faithful raycast path below.
+            if (!VerdantsAscent.Terrain.Persistence.TerrainTile.AnyActive
+                && Heightmap.GetHeight(p, out float groundY))
+            {
+                point = new Vector3(p.x, groundY, p.z);
+                normal = SampleHeightmapNormal(p, groundY);
+                hmap = Heightmap.FindHeightmap(point);
+                if (hmap != null)
+                {
+                    biome = hmap.GetBiome(point);
+
+                    // Env box biome override (no-op fast when no boxes are placed).
+                    var envBoxSample = EnvironmentBoxController.GetEnvBoxAtPosition(point);
+                    if (envBoxSample != null && envBoxSample.ForcedBiome != Heightmap.Biome.None)
+                    {
+                        biome = envBoxSample.ForcedBiome;
+                    }
+
+                    __result = true;
+                    return false; // handled analytically — no raycast
+                }
+                // Height but no Heightmap object (unexpected) — fall through to raycast.
+            }
+
             // Do the raycast ourselves (same as vanilla)
             int layerMask = GetTerrainLayerMask();
             RaycastHit hitInfo;
@@ -225,41 +273,45 @@ namespace VerdantsAscent.Utilities
                 return false; // Skip original
             }
 
-            // Phase F: legacy DirtFloor probes removed. Custom terrain
-            // detection now keys off the new TerrainTile component (one
-            // per loaded tile under each TileAnchor).
-            var customTile = hitInfo.collider.GetComponentInParent<VerdantsAscent.Terrain.Persistence.TerrainTile>();
-            bool isCustomTerrain = customTile != null;
-
-            if (!isCustomTerrain)
+            // COMMON CASE FIRST: an ordinary vanilla Heightmap collider is by far
+            // the most frequent hit. ClutterSystem fires one raycast per grass
+            // candidate — thousands per 8m patch — so doing this cheap single-object
+            // GetComponent<Heightmap> BEFORE the GetComponentInParent<TerrainTile>
+            // hierarchy walk keeps the common path off the walk entirely. A collider
+            // carrying a Heightmap is never one of our custom tiles, so the outcome
+            // is identical to checking the tile first.
+            var vanillaHeightmap = hitInfo.collider.GetComponent<Heightmap>();
+            if (vanillaHeightmap != null)
             {
-                // It's vanilla terrain - check if it has a Heightmap component
-                var vanillaHeightmap = hitInfo.collider.GetComponent<Heightmap>();
-                if (vanillaHeightmap != null)
-                {
-                    // Vanilla terrain with Heightmap - handle it
-                    point = hitInfo.point;
-                    normal = hitInfo.normal;
-                    hmap = vanillaHeightmap;
-                    biome = vanillaHeightmap.GetBiome(point);
+                point = hitInfo.point;
+                normal = hitInfo.normal;
+                hmap = vanillaHeightmap;
+                biome = vanillaHeightmap.GetBiome(point);
 
-                    // Check for env box biome override
-                    var envBox = EnvironmentBoxController.GetEnvBoxAtPosition(point);
-                    if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
-                    {
-                        biome = envBox.ForcedBiome;
-                    }
-
-                    __result = true;
-                    return false; // Skip original since we handled it
-                }
-                else
+                // Check for env box biome override
+                var envBox = EnvironmentBoxController.GetEnvBoxAtPosition(point);
+                if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
                 {
-                    // Hit something on terrain layer without Heightmap or CustomHeightmap
-                    // This would cause NRE in vanilla - return false to avoid clutter spawning here
-                    __result = false;
-                    return false;
+                    biome = envBox.ForcedBiome;
                 }
+
+                __result = true;
+                return false; // Skip original since we handled it
+            }
+
+            // Not a vanilla Heightmap. ONLY now pay for the parent walk — and only
+            // when at least one custom tile is actually loaded. A pure-vanilla world,
+            // or any area with no placed custom terrain, never walks the hierarchy.
+            var customTile = VerdantsAscent.Terrain.Persistence.TerrainTile.AnyActive
+                ? hitInfo.collider.GetComponentInParent<VerdantsAscent.Terrain.Persistence.TerrainTile>()
+                : null;
+
+            if (customTile == null)
+            {
+                // Terrain-layer collider with neither a Heightmap nor a custom tile.
+                // Vanilla would NRE on hmap.GetBiome here — bail safely (no clutter).
+                __result = false;
+                return false;
             }
 
             // It's our custom terrain! Handle it properly.

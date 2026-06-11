@@ -67,6 +67,19 @@ namespace VerdantsAscent.Terrain.Persistence
         // re-decode.
         public uint LastSeenDataRevision { get; internal set; }
 
+        // ── Cheap "any custom terrain loaded?" gate ───────────────────────────
+        // ClutterSystem.GetGroundInfo fires one raycast per grass candidate —
+        // thousands per 8m patch — and FAT prefixes that method. When no custom
+        // tile is loaded, the prefix must NOT pay for a GetComponentInParent<
+        // TerrainTile> hierarchy walk on every one of those hits. Count ACTIVE
+        // instances (matching GetComponentInParent's active-only lookup) so the
+        // hot path can short-circuit the walk with a single int compare.
+        private static int s_activeCount;
+        public static bool AnyActive => s_activeCount > 0;
+
+        private void OnEnable() { s_activeCount++; }
+        private void OnDisable() { if (s_activeCount > 0) s_activeCount--; }
+
         // Initialize from decoded TileData. Called once on tile spawn.
         // Safe to call again with fresh data on remote-driven re-decode.
         public void Initialize(TileData data, uint dataRevision)
