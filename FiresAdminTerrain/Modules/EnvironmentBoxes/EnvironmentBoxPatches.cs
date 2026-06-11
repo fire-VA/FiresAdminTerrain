@@ -178,20 +178,6 @@ namespace VerdantsAscent.Utilities
             return _customTerrainLayerMask;
         }
 
-        // Ground normal from the heightmap grid via finite difference — three cheap
-        // Heightmap.GetHeight samples (center + 1m in X and Z) instead of reading a
-        // raycast hit normal. Accuracy matches the grid the collider is built from.
-        // Always returns an upward normal.
-        private static Vector3 SampleHeightmapNormal(Vector3 p, float centerHeight)
-        {
-            const float d = 1f; // 1m — matches vanilla heightmap vertex spacing
-            float hx, hz;
-            if (!Heightmap.GetHeight(new Vector3(p.x + d, 0f, p.z), out hx)) hx = centerHeight;
-            if (!Heightmap.GetHeight(new Vector3(p.x, 0f, p.z + d), out hz)) hz = centerHeight;
-            // Surface slope → normal: (-dH/dx, 1, -dH/dz), scaled by d and normalized.
-            return new Vector3(centerHeight - hx, d, centerHeight - hz).normalized;
-        }
-
         /// <summary>
         /// PREFIX patch for ClutterSystem.GetGroundInfo to handle custom terrain.
         /// 
@@ -227,40 +213,6 @@ namespace VerdantsAscent.Utilities
             normal = Vector3.up;
             hmap = null;
             biome = Heightmap.Biome.Meadows;
-
-            // ── FAST GROUND SAMPLE (no custom terrain loaded) ─────────────────
-            // ClutterSystem fires one ground query per grass candidate — thousands
-            // per 8m patch, every one a full Physics.Raycast in vanilla. But a
-            // vanilla heightmap's collider IS its height grid, so when no custom
-            // tile is loaded (TerrainTile.AnyActive == false) the terrain layer
-            // holds nothing BUT heightmaps and we can read the ground analytically:
-            // Heightmap.GetHeight is a couple of array lookups vs. a physics ray.
-            // This ELIMINATES the per-patch cost instead of spreading it across
-            // frames. With a custom tile present, its surface sits above the
-            // vanilla grid and only a raycast finds it — so we fall through to the
-            // faithful raycast path below.
-            if (!VerdantsAscent.Terrain.Persistence.TerrainTile.AnyActive
-                && Heightmap.GetHeight(p, out float groundY))
-            {
-                point = new Vector3(p.x, groundY, p.z);
-                normal = SampleHeightmapNormal(p, groundY);
-                hmap = Heightmap.FindHeightmap(point);
-                if (hmap != null)
-                {
-                    biome = hmap.GetBiome(point);
-
-                    // Env box biome override (no-op fast when no boxes are placed).
-                    var envBoxSample = EnvironmentBoxController.GetEnvBoxAtPosition(point);
-                    if (envBoxSample != null && envBoxSample.ForcedBiome != Heightmap.Biome.None)
-                    {
-                        biome = envBoxSample.ForcedBiome;
-                    }
-
-                    __result = true;
-                    return false; // handled analytically — no raycast
-                }
-                // Height but no Heightmap object (unexpected) — fall through to raycast.
-            }
 
             // Do the raycast ourselves (same as vanilla)
             int layerMask = GetTerrainLayerMask();
