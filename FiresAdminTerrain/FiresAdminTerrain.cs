@@ -112,16 +112,9 @@ namespace VerdantsAscent
 
         private void InstallLogFilter()
         {
-            try
-            {
-                if (_originalLogHandler != null) return;
-                _originalLogHandler = Debug.unityLogger.logHandler;
-                Debug.unityLogger.logHandler = new RateLimitedLogHandler(_originalLogHandler);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[{PluginName}] Failed to install log filter: {ex.Message}");
-            }
+            // FiresUnifiedCore installs the one shared rate-limit/suppression log handler now
+            // (FiresCore.Logging.RateLimitedLogHandler). This per-mod copy was collapsed into Core so the handler
+            // chain stays a single wrapper instead of one-per-mod — intentionally a no-op.
         }
 
         private IEnumerator DelayedDedicatedServerInit()
