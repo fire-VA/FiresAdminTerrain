@@ -1406,11 +1406,34 @@ namespace VerdantsAscent.Water.Core
                         }
                     }
 
+                    // 2026-05-30 round-55 — DISABLED edge gravity-settle
+                    // pull-down. User spec (round-W-5):
+                    //   "the settle with gravity is only meant to be for
+                    //    letting the skirts settle and for it to smooth
+                    //    out over slopes"
+                    //
+                    // Previously: every edge cell >0.5m above terrain
+                    // with no nearby bank support got yanked DOWN to
+                    // `terrainY + WATER_TERRAIN_OFFSET` (~terrain Y).
+                    // For a small ruler-placed disk in mid-air, EVERY
+                    // cell is an edge cell with no bank support, so the
+                    // entire visible surface dropped 10m below the
+                    // ruler Y while the swim trigger stayed at the
+                    // ruler Y. User saw "water mesh ~10m below the
+                    // swim plane".
+                    //
+                    // The balloon-shell wall (round-49/52b) is what
+                    // visually bridges floating water down to terrain
+                    // now — we don't need GravitySettleEdges to also
+                    // be dragging the surface down. Rule 2 above (push
+                    // buried disk-center cells UP) is still active for
+                    // the case where IDW interpolation underestimated
+                    // surface height inside terrain.
                     if (!hasBankSupport)
                     {
-                        // No bank support � water is floating at the edge.
-                        // Pull it down to just above terrain (gravity settle).
-                        _surfaceHeights[idx] = terrainY + WATER_TERRAIN_OFFSET;
+                        // No-op: leave the surface at its IDW-computed
+                        // height. The shell wall handles the visual
+                        // drop to terrain.
                     }
                 }
             }

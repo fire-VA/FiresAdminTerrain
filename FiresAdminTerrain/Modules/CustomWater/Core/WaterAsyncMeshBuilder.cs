@@ -745,10 +745,14 @@ namespace VerdantsAscent.Water.Core
                         }
                     }
 
+                    // 2026-05-30 round-55 — DISABLED edge gravity-settle
+                    // pull-down (see WaterMeshCombiner.MeshGen.cs for the
+                    // full rationale). The visible water surface must
+                    // respect the ruler Y. Shell wall handles the visual
+                    // bridge down to terrain.
                     if (!hasBankSupport)
                     {
-                        // No bank support � water floating at edge ? pull down to terrain
-                        surfaceHeights[idx] = terrainY + input.WaterTerrainOffset;
+                        // No-op: leave surface at IDW-computed height.
                     }
                 }
             }
