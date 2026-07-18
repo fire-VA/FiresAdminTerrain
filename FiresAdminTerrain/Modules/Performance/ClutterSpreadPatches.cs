@@ -52,11 +52,47 @@ namespace VerdantsAscent.Performance
             public float HalfSize;
             public Heightmap.Biome Biomes;
             public int ClutterIndex;        // resume cursor — next clutter type to place
+            public int InstanceIndex;       // resume cursor WITHIN the current type (hard budget)
+            public bool MidType;            // true = InstanceIndex/RngState are live
+            public UnityEngine.Random.State RngState;   // RNG snapshot for deterministic mid-type resume
+            public float EnqueuedAt;        // queue→done latency accounting
         }
 
         private static readonly Dictionary<Vector2Int, Builder> s_builders =
             new Dictionary<Vector2Int, Builder>();
         private static readonly List<Vector2Int> s_tmpKeys = new List<Vector2Int>();
+
+        // Throughput accounting — answers "why does clutter take minutes"
+        // with counters instead of theories. One line per 5s window whenever
+        // there was any activity (or any starvation). STARVED = frames the
+        // driver refused to run because a nearby heightmap had a queued
+        // rebuild (vanilla's own generation gate; if voxel work re-pokes
+        // heightmaps continuously this shows up here as the smoking gun).
+        private static float s_winStart = -1f;
+        private static int s_winFrames, s_winStarved, s_winQueued, s_winDone, s_winPlaced;
+        private static double s_winDriverMs, s_winLatencySum;
+        private static float s_oldestEnq = float.MaxValue;
+
+        private static void FlushWindow()
+        {
+            float now = Time.unscaledTime;
+            if (s_winStart < 0f) { s_winStart = now; return; }
+            if (now - s_winStart < 5f) return;
+            if (s_winQueued > 0 || s_winDone > 0 || s_winStarved > 0 || s_builders.Count > 0)
+            {
+                float oldestAge = 0f;
+                foreach (var b in s_builders.Values)
+                    if (now - b.EnqueuedAt > oldestAge) oldestAge = now - b.EnqueuedAt;
+                string lat = s_winDone > 0 ? $"{s_winLatencySum / s_winDone:0.0}s" : "-";
+                Debug.Log($"[FiresClutter] 5s: pending {s_builders.Count} (oldest {oldestAge:0.0}s) | " +
+                          $"+{s_winQueued} queued, {s_winDone} done (avg latency {lat}) | " +
+                          $"placed {s_winPlaced:N0} inst | driver {s_winDriverMs:0.0}ms over {s_winFrames} frames | " +
+                          $"STARVED {s_winStarved}/{s_winFrames + s_winStarved} (hm rebuild queued)");
+            }
+            s_winStart = now;
+            s_winFrames = 0; s_winStarved = 0; s_winQueued = 0; s_winDone = 0; s_winPlaced = 0;
+            s_winDriverMs = 0; s_winLatencySum = 0;
+        }
 
         // Reflection — only the genuinely private members; the rest of ClutterSystem
         // (m_clutter / m_amountScale / m_waterLevel / m_distance / m_grassPatchSize /
@@ -132,7 +168,9 @@ namespace VerdantsAscent.Performance
                 HalfSize = halfSize,
                 Biomes = biomes,
                 ClutterIndex = 0,
+                EnqueuedAt = Time.unscaledTime,
             };
+            s_winQueued++;
 
             result = patch;                             // vanilla adds this empty patch to m_patches
             return false;
@@ -143,6 +181,13 @@ namespace VerdantsAscent.Performance
         // the time budget.
         internal static void OnLateUpdatePostfix(ClutterSystem cs)
         {
+            FlushWindow();
+            // Grass render-distance override (0 = keep vanilla). Grass tris
+            // scale with distance², so trimming the reach is the single biggest
+            // lever on the forest-floor carpet. Applied before the early-outs so
+            // it takes effect even on idle frames.
+            float grassDist = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.GrassRenderDistance?.Value ?? 0f;
+            if (grassDist > 1f && cs.m_distance != grassDist) cs.m_distance = grassDist;
             if (!Enabled || s_reflectionFailed || s_builders.Count == 0) return;
 
             // Faithful to vanilla: don't place clutter while a nearby heightmap is
@@ -150,7 +195,8 @@ namespace VerdantsAscent.Performance
             // gates all generation on this; we gate the deferred fill the same way.
             Camera cam = Utils.GetMainCamera();
             if (cam == null) return;
-            if (Heightmap.HaveQueuedRebuild(cam.transform.position, cs.m_distance)) return;
+            if (Heightmap.HaveQueuedRebuild(cam.transform.position, cs.m_distance)) { s_winStarved++; return; }
+            s_winFrames++;
 
             var grassRoot = (GameObject) f_grassRoot.GetValue(cs);
             if (grassRoot == null) return;
@@ -181,7 +227,11 @@ namespace VerdantsAscent.Performance
                     try
                     {
                         if (AdvanceBuilder(cs, b, quality, grassRoot, sw))
+                        {
                             s_builders.Remove(key);
+                            s_winDone++;
+                            s_winLatencySum += Time.unscaledTime - b.EnqueuedAt;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -199,6 +249,7 @@ namespace VerdantsAscent.Performance
             finally
             {
                 UnityEngine.Random.state = rng;
+                s_winDriverMs += sw.Elapsed.TotalMilliseconds;
             }
         }
 
@@ -209,15 +260,28 @@ namespace VerdantsAscent.Performance
         {
             List<ClutterSystem.Clutter> clutter = cs.m_clutter;
             int count = clutter.Count;
-            float amountScale = cs.m_amountScale;
+            // Fires clutter density lever — scales the whole grass carpet down
+            // (config hot-reloads on the next patch regen). The dense forest
+            // floor at vanilla density was tens of millions of tris.
+            float densityScale = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.ClutterDensityScale?.Value ?? 1f;
+            float amountScale = cs.m_amountScale * densityScale;
             float waterLevel = cs.m_waterLevel;
             float lodCap = cs.m_distance - cs.m_grassPatchSize / 2f;
 
             while (b.ClutterIndex < count)
             {
-                PlaceClutterType(cs, b, clutter[b.ClutterIndex], b.ClutterIndex,
-                    quality, amountScale, waterLevel, grassRoot, lodCap);
+                // HARD budget: PlaceClutterType is resumable MID-TYPE. The
+                // old between-types check made the budget soft — one heavy
+                // type (hundreds of raycast instances, ×128 registered
+                // clutter entries after the FAP re-injection) still burned a
+                // 20-80ms frame. Now no frame ever exceeds the budget by more
+                // than one 8-instance slice.
+                if (!PlaceClutterType(cs, b, clutter[b.ClutterIndex], b.ClutterIndex,
+                    quality, amountScale, waterLevel, grassRoot, lodCap, sw))
+                    return false;                       // budget hit mid-type; resume next frame
                 b.ClutterIndex++;
+                b.InstanceIndex = 0;
+                b.MidType = false;
                 if (sw.Elapsed.TotalMilliseconds >= FrameBudgetMs) break;
             }
             return b.ClutterIndex >= count;
@@ -226,13 +290,31 @@ namespace VerdantsAscent.Performance
         // Faithful transcription of vanilla ClutterSystem.GenerateVegPatch's inner
         // per-clutter body (assembly_valheim ClutterSystem.cs:260-353). Same RNG
         // seed, same filter order, same placement. Only the framing differs.
-        private static void PlaceClutterType(ClutterSystem cs, Builder b, ClutterSystem.Clutter c, int index1,
-            ClutterSystem.Quality quality, float amountScale, float waterLevel, GameObject grassRoot, float lodCap)
+        // Returns FALSE when the frame budget was hit mid-type (the builder
+        // resumes at b.InstanceIndex with the saved RNG state next frame —
+        // instance placement stays byte-identical to a single-frame run).
+        private static bool PlaceClutterType(ClutterSystem cs, Builder b, ClutterSystem.Clutter c, int index1,
+            ClutterSystem.Quality quality, float amountScale, float waterLevel, GameObject grassRoot, float lodCap,
+            Stopwatch sw)
         {
-            if (!c.m_enabled || (b.Biomes & c.m_biome) == Heightmap.Biome.None) return;
+            if (!c.m_enabled || (b.Biomes & c.m_biome) == Heightmap.Biome.None) return true;
 
             InstanceRenderer instanceRenderer = null;
-            UnityEngine.Random.InitState(b.Id.x * (b.Id.y * 1374) + index1 * 9321);
+            if (b.MidType && b.InstanceIndex > 0)
+            {
+                UnityEngine.Random.state = b.RngState;   // resume mid-type, deterministic
+                // re-find the shared InstanceRenderer this type already spawned
+                for (int oi = b.Objects.Count - 1; oi >= 0 && instanceRenderer == null; oi--)
+                {
+                    var go0 = b.Objects[oi];
+                    if (go0 != null && go0.name.StartsWith(c.m_prefab.name))
+                        instanceRenderer = go0.GetComponent<InstanceRenderer>();
+                }
+            }
+            else
+            {
+                UnityEngine.Random.InitState(b.Id.x * (b.Id.y * 1374) + index1 * 9321);
+            }
             Vector3 fractalOffset = new Vector3(c.m_fractalOffset, 0f, 0f);
             float cosMaxTilt = Mathf.Cos((float)Math.PI / 180f * c.m_maxTilt);
             float cosMinTilt = Mathf.Cos((float)Math.PI / 180f * c.m_minTilt);
@@ -245,8 +327,16 @@ namespace VerdantsAscent.Performance
             Vector3 center = b.Center;
             float halfSize = b.HalfSize;
 
-            for (int i = 0; i < amount; i++)
+            for (int i = b.InstanceIndex; i < amount; i++)
             {
+                if ((i & 7) == 0 && i > b.InstanceIndex
+                    && sw.Elapsed.TotalMilliseconds >= FrameBudgetMs)
+                {
+                    b.InstanceIndex = i;
+                    b.MidType = true;
+                    b.RngState = UnityEngine.Random.state;
+                    return false;
+                }
                 Vector3 pos = new Vector3(
                     UnityEngine.Random.Range(center.x - halfSize, center.x + halfSize), 0f,
                     UnityEngine.Random.Range(center.z - halfSize, center.z + halfSize));
@@ -306,13 +396,16 @@ namespace VerdantsAscent.Performance
                     }
                     float scale = UnityEngine.Random.Range(c.m_scaleMin, c.m_scaleMax);
                     instanceRenderer.AddInstance(pos, rot, scale);
+                    s_winPlaced++;
                 }
                 else
                 {
                     GameObject go = UnityEngine.Object.Instantiate(c.m_prefab, pos, rot, grassRoot.transform);
                     b.Objects.Add(go);
+                    s_winPlaced++;
                 }
             }
+            return true;
         }
 
         internal static void OnClearAll() => s_builders.Clear();

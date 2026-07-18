@@ -118,6 +118,32 @@ namespace VerdantsAscent.Terrain.Persistence
                 },
                 isCheat: true);
 
+            new Terminal.ConsoleCommand("va_brush_toggle_clutter_clear",
+                "Toggle between Clear (default — paint hides clutter grass under dirt/paved/cultivated, like Infinity Hammer) and Keep (paint leaves grass in place for overgrown/ruined areas). The grass-paint always restores grass regardless.",
+                (args) =>
+                {
+                    var mode = TileBrushModes.ToggleClutterClear();
+                    args.Context.AddString($"Brush clutter clear → {mode}");
+                },
+                isCheat: true);
+
+            // Round-63 — draw-speed throttle for ALL drag brushes
+            // (terrain + water). Lower = slower deposition = more
+            // precision. Persists via PlayerPrefs.
+            new Terminal.ConsoleCommand("va_brush_drawspeed",
+                "[0.05-1] Set the brush draw-speed multiplier (1 = full speed, 0.25 = quarter speed for precise work). No arg prints current.",
+                (args) =>
+                {
+                    if (args.Length > 1
+                        && float.TryParse(args[1], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out float v))
+                    {
+                        TileBrushModes.DrawSpeed = v;
+                    }
+                    args.Context.AddString($"Brush draw speed → {TileBrushModes.DrawSpeed:F2}");
+                },
+                isCheat: true);
+
             new Terminal.ConsoleCommand("va_brush_mode",
                 "[heightlock=tracked|locked] [placement=connected|floating] — set one or both global brush modes explicitly. Both args optional; no args prints current state.",
                 (args) =>
@@ -406,6 +432,26 @@ namespace VerdantsAscent.Terrain.Persistence
                 {
                     args.Context.AddString($"va_brush_paint → VANILLA failed: {ex.Message}");
                 }
+            }
+
+            // Refresh clutter grass so the paint's cleared/uncleared state takes
+            // effect immediately, matching Infinity Hammer + vanilla terrain paint.
+            // ClutterSystem.IsCleared reads the paint mask (any RGB > 0.5 => cleared
+            // => no grass), so ResetGrass re-rolls the in-radius patches to match:
+            //   * dirt / cultivated / paved (RGB painted) HIDE the grass
+            //   * the grass-paint (0,0,0) brings it BACK
+            // The dedicated biome brush already does this (TileBrush.BrushBiome);
+            // texture paint was the one path that skipped it, so grass showed
+            // through painted dirt/paved. Gated on the ClutterClear mode so "Keep"
+            // lays texture UNDER existing grass (overgrown/ruined) — except the
+            // grass-paint always re-rolls, since restoring grass is its whole point.
+            bool clearingPaint = r > 127 || g > 127 || b > 127;
+            bool refreshClutter = !clearingPaint
+                || TileBrushModes.CurrentClutterClear == TileBrushModes.ClutterClear.Clear;
+            if (refreshClutter && ClutterSystem.instance != null)
+            {
+                try { ClutterSystem.instance.ResetGrass(center, radius); }
+                catch (System.Exception ex) { FiresLogger.LogWarning($"[va_brush_paint] ResetGrass threw: {ex.Message}"); }
             }
         }
 

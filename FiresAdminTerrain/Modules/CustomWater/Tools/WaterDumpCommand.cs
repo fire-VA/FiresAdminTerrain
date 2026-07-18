@@ -87,6 +87,7 @@ namespace VerdantsAscent.Water.Core
             public string  shader;
             public string  path;
             public string  kind;   // "Renderer", "WaterVolume", "NamedGO"
+            public string  vis;    // "on" / "DISABLED" / "CULLED" — the square-hole discriminator
             public float   dist;
         }
 
@@ -132,6 +133,7 @@ namespace VerdantsAscent.Water.Core
                     shader = mat.shader.name,
                     path   = Hierarchy(r.transform),
                     kind   = "Renderer",
+                    vis    = !r.enabled ? "DISABLED" : (r.isVisible ? "on" : "CULLED"),
                     dist   = Vector3.Distance(pos, origin),
                 });
             }
@@ -162,9 +164,15 @@ namespace VerdantsAscent.Water.Core
 
                 Vector3 pos = wv.transform.position;
                 string shaderName = "<no renderer>";
+                string vis = "n/a";
                 var rOnGO = wv.GetComponent<Renderer>();
-                if (rOnGO != null && rOnGO.sharedMaterial != null && rOnGO.sharedMaterial.shader != null)
-                    shaderName = rOnGO.sharedMaterial.shader.name;
+                if (rOnGO == null && wv.m_waterSurface != null) rOnGO = wv.m_waterSurface;
+                if (rOnGO != null)
+                {
+                    if (rOnGO.sharedMaterial != null && rOnGO.sharedMaterial.shader != null)
+                        shaderName = rOnGO.sharedMaterial.shader.name;
+                    vis = !rOnGO.enabled ? "DISABLED" : (rOnGO.isVisible ? "on" : "CULLED");
+                }
 
                 finds.Add(new Find {
                     pos    = pos,
@@ -172,6 +180,7 @@ namespace VerdantsAscent.Water.Core
                     shader = shaderName,
                     path   = Hierarchy(wv.transform),
                     kind   = "WaterVolume",
+                    vis    = vis,
                     dist   = Vector3.Distance(pos, origin),
                 });
             }
@@ -245,7 +254,7 @@ namespace VerdantsAscent.Water.Core
                 var f = finds[i];
                 report.AppendLine(
                     $"  y={f.pos.y,8:F2} | xz=({f.pos.x,8:F1},{f.pos.z,8:F1}) | " +
-                    $"layer={f.layer,2} | kind={f.kind,-22} | " +
+                    $"layer={f.layer,2} | kind={f.kind,-22} | vis={f.vis ?? "?",-8} | " +
                     $"shader='{f.shader}' | dist={f.dist,7:F1}m | path='{f.path}'");
             }
 

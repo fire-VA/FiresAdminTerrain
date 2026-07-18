@@ -77,6 +77,19 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
+        /// Round-65 — the RAW captured vanilla Custom/Water material,
+        /// explicitly bypassing the FiresTossinShade WaterShaderBridge wrap.
+        /// Used by the `va_water_mat_debug 1` A/B switch: if raw vanilla
+        /// renders on a combiner mesh while the wrapped material doesn't,
+        /// the wrap is what breaks combiner rendering.
+        /// </summary>
+        public static Material GetRawWaterMaterial()
+        {
+            Initialize();
+            return s_waterMaterial;
+        }
+
+        /// <summary>
         /// Gets the appropriate material for a custom liquid type.
         /// This is the preferred method for the expanded liquid system.
         /// </summary>
@@ -195,7 +208,7 @@ namespace VerdantsAscent.Water.Core
                 if (s_snowMaterial.HasProperty("_SpecColor"))
                     s_snowMaterial.SetColor("_SpecColor", new Color(0.78f, 0.85f, 0.95f, 1f));
 
-                Debug.Log("[WaterMaterialManager] Created snow material from ice/water base (cool-tinted real-snow look)");
+                FiresLogger.LogVerbose("[WaterMaterialManager] Created snow material from ice/water base (cool-tinted real-snow look)");
                 return s_snowMaterial;
             }
 
@@ -211,7 +224,7 @@ namespace VerdantsAscent.Water.Core
             s_snowMaterial.SetFloat("_Metallic", 0.05f);
             if (s_snowMaterial.HasProperty("_SpecColor"))
                 s_snowMaterial.SetColor("_SpecColor", new Color(0.78f, 0.85f, 0.95f, 1f));
-            Debug.Log("[WaterMaterialManager] Created fallback snow material (Standard shader, cool tint)");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Created fallback snow material (Standard shader, cool tint)");
             return s_snowMaterial;
         }
 
@@ -284,7 +297,7 @@ namespace VerdantsAscent.Water.Core
                         s_waterMaterial = new Material(wv.m_waterSurface.sharedMaterial);
                         s_waterMaterial.name = "CustomWater_Surface";
                         s_waterCaptured = true;
-                        Debug.Log($"[WaterMaterialManager] Captured water material from WaterVolume");
+                        FiresLogger.LogVerbose($"[WaterMaterialManager] Captured water material from WaterVolume");
                         return;
                     }
                 }
@@ -310,7 +323,7 @@ namespace VerdantsAscent.Water.Core
                     s_waterMaterial = new Material(wv.m_waterSurface.sharedMaterial);
                     s_waterMaterial.name = "CustomWater_Surface";
                     s_waterCaptured = true;
-                    Debug.Log($"[WaterMaterialManager] Captured water material from ZNetScene prefab '{prefabName}'");
+                    FiresLogger.LogVerbose($"[WaterMaterialManager] Captured water material from ZNetScene prefab '{prefabName}'");
                     return;
                 }
             }
@@ -347,7 +360,7 @@ namespace VerdantsAscent.Water.Core
                         s_waterMaterial = new Material(wv.m_waterSurface.sharedMaterial);
                         s_waterMaterial.name = "CustomWater_Surface";
                         s_waterCaptured = true;
-                        Debug.Log($"[WaterMaterialManager] Captured water material from scanned prefab '{prefab.name}'");
+                        FiresLogger.LogVerbose($"[WaterMaterialManager] Captured water material from scanned prefab '{prefab.name}'");
                         return;
                     }
                 }
@@ -368,7 +381,7 @@ namespace VerdantsAscent.Water.Core
                         s_waterMaterial = new Material(wv.m_waterSurface.sharedMaterial);
                         s_waterMaterial.name = "CustomWater_Surface";
                         s_waterCaptured = true;
-                        Debug.Log($"[WaterMaterialManager] Captured water material from scanned prefab '{prefab.name}'");
+                        FiresLogger.LogVerbose($"[WaterMaterialManager] Captured water material from scanned prefab '{prefab.name}'");
                         return;
                     }
                 }
@@ -391,7 +404,7 @@ namespace VerdantsAscent.Water.Core
                     s_tarMaterial = new Material(renderer.sharedMaterial);
                     s_tarMaterial.name = "CustomWater_Tar";
                     s_tarCaptured = true;
-                    Debug.Log($"[WaterMaterialManager] Captured tar material from LiquidVolume: {lv.name}");
+                    FiresLogger.LogVerbose($"[WaterMaterialManager] Captured tar material from LiquidVolume: {lv.name}");
                     return;
                 }
             }
@@ -410,7 +423,7 @@ namespace VerdantsAscent.Water.Core
                             s_tarMaterial = new Material(tarMat);
                             s_tarMaterial.name = "CustomWater_Tar";
                             s_tarCaptured = true;
-                            Debug.Log($"[WaterMaterialManager] Captured tar material from prefab: {prefabName}");
+                            FiresLogger.LogVerbose($"[WaterMaterialManager] Captured tar material from prefab: {prefabName}");
                             return;
                         }
                     }
@@ -447,7 +460,7 @@ namespace VerdantsAscent.Water.Core
                                     s_tarMaterial = new Material(tarMat);
                                     s_tarMaterial.name = "CustomWater_Tar";
                                     s_tarCaptured = true;
-                                    Debug.Log($"[WaterMaterialManager] Captured tar material from prefab: {prefab.name}");
+                                    FiresLogger.LogVerbose($"[WaterMaterialManager] Captured tar material from prefab: {prefab.name}");
                                     return;
                                 }
                             }
@@ -592,7 +605,7 @@ namespace VerdantsAscent.Water.Core
                         s_iceMaterial = new Material(mat);
                         s_iceMaterial.name = "CustomWater_Ice";
                         TuneIceMaterial(s_iceMaterial);
-                        Debug.Log($"[WaterMaterialManager] Captured ice material from prefab: {name}");
+                        FiresLogger.LogVerbose($"[WaterMaterialManager] Captured ice material from prefab: {name}");
                         return;
                     }
                 }
@@ -611,12 +624,12 @@ namespace VerdantsAscent.Water.Core
                     s_iceMaterial = new Material(mat);
                     s_iceMaterial.name = "CustomWater_Ice";
                     TuneIceMaterial(s_iceMaterial);
-                    Debug.Log($"[WaterMaterialManager] Captured ice material from prefab: {prefab.name}");
+                    FiresLogger.LogVerbose($"[WaterMaterialManager] Captured ice material from prefab: {prefab.name}");
                     return;
                 }
             }
 
-            Debug.Log("[WaterMaterialManager] Could not capture ice material from vanilla - will use fallback");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Could not capture ice material from vanilla - will use fallback");
         }
 
         private static Material CreateIceFallback()
@@ -634,7 +647,7 @@ namespace VerdantsAscent.Water.Core
             s_iceMaterial.SetFloat("_Smoothness", 0.35f);
             SetupTransparentMaterial(s_iceMaterial);
 
-            Debug.Log("[WaterMaterialManager] Created fallback ice material");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Created fallback ice material");
             return s_iceMaterial;
         }
 
@@ -680,7 +693,7 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            Debug.Log($"[WaterMaterialManager] Tuned ice material: smoothness/glossiness capped at 0.4, metallic at 0.05");
+            FiresLogger.LogVerbose($"[WaterMaterialManager] Tuned ice material: smoothness/glossiness capped at 0.4, metallic at 0.05");
         }
 
         /// <summary>
@@ -715,7 +728,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     s_lavaMaterial = new Material(renderer.sharedMaterial);
                     s_lavaMaterial.name = "CustomWater_Lava";
-                    Debug.Log($"[WaterMaterialManager] Captured lava material from LiquidVolume: {lv.name} (shader: {renderer.sharedMaterial.shader?.name})");
+                    FiresLogger.LogVerbose($"[WaterMaterialManager] Captured lava material from LiquidVolume: {lv.name} (shader: {renderer.sharedMaterial.shader?.name})");
                     return;
                 }
             }
@@ -753,7 +766,7 @@ namespace VerdantsAscent.Water.Core
                         {
                             s_lavaMaterial = new Material(lvRenderer.sharedMaterial);
                             s_lavaMaterial.name = "CustomWater_Lava";
-                            Debug.Log($"[WaterMaterialManager] Captured lava material from LiquidVolume in prefab: {name} (shader: {lvRenderer.sharedMaterial.shader?.name})");
+                            FiresLogger.LogVerbose($"[WaterMaterialManager] Captured lava material from LiquidVolume in prefab: {name} (shader: {lvRenderer.sharedMaterial.shader?.name})");
                             return;
                         }
                     }
@@ -764,7 +777,7 @@ namespace VerdantsAscent.Water.Core
                     {
                         s_lavaMaterial = new Material(mat);
                         s_lavaMaterial.name = "CustomWater_Lava";
-                        Debug.Log($"[WaterMaterialManager] Captured lava material from prefab: {name} (shader: {mat.shader?.name})");
+                        FiresLogger.LogVerbose($"[WaterMaterialManager] Captured lava material from prefab: {name} (shader: {mat.shader?.name})");
                         return;
                     }
                 }
@@ -788,7 +801,7 @@ namespace VerdantsAscent.Water.Core
                     {
                         s_lavaMaterial = new Material(lvRenderer.sharedMaterial);
                         s_lavaMaterial.name = "CustomWater_Lava";
-                        Debug.Log($"[WaterMaterialManager] Captured lava material from LiquidVolume in: {prefab.name}");
+                        FiresLogger.LogVerbose($"[WaterMaterialManager] Captured lava material from LiquidVolume in: {prefab.name}");
                         return;
                     }
                 }
@@ -798,7 +811,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     s_lavaMaterial = new Material(mat);
                     s_lavaMaterial.name = "CustomWater_Lava";
-                    Debug.Log($"[WaterMaterialManager] Captured lava material from prefab: {prefab.name}");
+                    FiresLogger.LogVerbose($"[WaterMaterialManager] Captured lava material from prefab: {prefab.name}");
                     return;
                 }
             }
@@ -819,11 +832,11 @@ namespace VerdantsAscent.Water.Core
                     s_lavaMaterial.EnableKeyword("_EMISSION");
                     s_lavaMaterial.SetColor("_EmissionColor", new Color(1f, 0.35f, 0.05f) * 2.5f);
                 }
-                Debug.Log("[WaterMaterialManager] Created lava material by tinting captured tar material");
+                FiresLogger.LogVerbose("[WaterMaterialManager] Created lava material by tinting captured tar material");
                 return;
             }
 
-            Debug.Log("[WaterMaterialManager] Could not capture lava material from vanilla - will use fallback");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Could not capture lava material from vanilla - will use fallback");
         }
 
         private static Material CreateLavaFallback()
@@ -853,7 +866,7 @@ namespace VerdantsAscent.Water.Core
                     s_lavaMaterial.SetColor("_EmissionColor", new Color(1f, 0.35f, 0.05f) * 2.5f);
                 }
 
-                Debug.Log("[WaterMaterialManager] Created lava fallback by tinting captured water material");
+                FiresLogger.LogVerbose("[WaterMaterialManager] Created lava fallback by tinting captured water material");
                 return s_lavaMaterial;
             }
 
@@ -880,7 +893,7 @@ namespace VerdantsAscent.Water.Core
             s_lavaMaterial.DisableKeyword("_ALPHAPREMULTIPLY_ON");
             s_lavaMaterial.renderQueue = 2000;
 
-            Debug.Log("[WaterMaterialManager] Created fallback lava material (Standard shader)");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Created fallback lava material (Standard shader)");
             return s_lavaMaterial;
         }
 
@@ -917,7 +930,7 @@ namespace VerdantsAscent.Water.Core
                 SetupTransparentMaterial(s_boilingMaterial);
             }
 
-            Debug.Log("[WaterMaterialManager] Created boiling water material");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Created boiling water material");
             return s_boilingMaterial;
         }
 
@@ -952,7 +965,7 @@ namespace VerdantsAscent.Water.Core
                 SetupTransparentMaterial(s_freezingMaterial);
             }
 
-            Debug.Log("[WaterMaterialManager] Created freezing water material");
+            FiresLogger.LogVerbose("[WaterMaterialManager] Created freezing water material");
             return s_freezingMaterial;
         }
 

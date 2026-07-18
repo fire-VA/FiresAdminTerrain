@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -19,7 +19,7 @@
       the local libs\assembly_valheim_publicized.dll was refreshed against the
       upcoming public-test build (Vector2s migration). With the publicized DLL
       now exposing Vector2s-style ZoneSystem.GetZone, the live-build (#else)
-      code path no longer compiles — Vector2i ↔ Vector2s mismatches are the
+      code path no longer compiles â€” Vector2i â†” Vector2s mismatches are the
       expected failure mode if you flip this back to `false`.
 
       To return to live-build compilation: regenerate
@@ -186,6 +186,7 @@
     <Compile Include="Modules\CustomTerrain\Persistence\TerrainTile.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TerrainTileCodec.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileAnchor.cs" />
+    <Compile Include="Modules\CustomTerrain\Persistence\VAFatToolIcons.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\BrushFalloffCurves.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileBrushModes.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileAnchorPrefab.cs" />
@@ -207,6 +208,7 @@
     <Compile Include="Modules\CustomTerrain\Persistence\TileUndoLog.cs" />
     <Compile Include="Modules\CustomTerrain\Lifecycle\AdminCheck.cs" />
     <Compile Include="Modules\CustomTerrain\Lifecycle\InfinityHammerRulerProbe.cs" />
+    <Compile Include="Modules\CustomTerrain\Lifecycle\RulerColorDriver.cs" />
     <Compile Include="Modules\CustomTerrain\Lifecycle\LavaPlacement.cs" />
     <Compile Include="Modules\CustomTerrain\Lifecycle\RegionScrubber.cs" />
     <Compile Include="Modules\CustomTerrain\Lifecycle\RegionScrubberRPC.cs" />
@@ -234,12 +236,48 @@
     <Compile Include="Modules\CustomWater\Core\WaterDisk.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombiner.MeshGen.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombiner.cs" />
+    <Compile Include="Modules\CustomWater\Volume\FiresLiquidWaterDebug.cs" />
+    <Compile Include="Modules\CustomWater\Volume\FiresLiquidWaterPrefab.cs" />
+    <!-- Round-82: FiresLiquidSpringEmitter retired (replaced by
+         FiresLiquidRiverController â€” the emitter fought vanilla's threaded
+         flatten). File kept on disk but not compiled. -->
+    <Compile Include="Modules\CustomWater\Volume\FiresLiquidGridOps.cs" />
+    <Compile Include="Modules\CustomWater\Volume\FiresLiquidRiverController.cs" />
+    <Compile Include="Modules\CustomWater\Volume\FiresLiquidConfig.cs" />
+    <Compile Include="Modules\CustomWater\Volume\WaterVolumeSettle.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombinerAnchor.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterOperationRPC.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterPaintController.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterPersistence.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterSegmentAnchor.cs" />
     <Compile Include="Modules\CustomWater\CustomWaterPatches.cs" />
+    <Compile Include="Modules\CustomWater\ShipWaterImpactFxGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresVoxelConfig.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelChunk.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelWorld.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelMesherSurfaceNets.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelMeshPipeline.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelChunkView.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelBrushCommands.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelSeamAudit.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelToolPieces.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelGenWaterMesh.cs" />
+    <Compile Include="Modules\VoxelTerrain\WaterCensus.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCavePopGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\FarVegImpostors.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelLiquidBridge.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldGenBase.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresPng.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelOnlyPatches.cs" />
+    <Compile Include="Modules\VoxelTerrain\FarQuilt.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveNoise.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelZoneStreamer.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelBrushDrag.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelClutterBridge.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelAnchorPrefab.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelChunkAnchor.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveEnv.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelHydrology.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceCombiner.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceCommands.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceController.cs" />
@@ -279,10 +317,9 @@
     <Compile Include="Modules\CustomWater\Tools\WaterPlacementTool.cs" />
     <Compile Include="Modules\CustomWater\VFX\WaterAmbientVFX.cs" />
     <Compile Include="Modules\CustomWater\Waterfall\CustomWaterfallController.cs" />
+    <Compile Include="Bridge\EnvironmentBoxTerrainProvider.cs" />
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxClutterSpawner.cs" />
-    <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxController.cs" />
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxPatches.cs" />
-    <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxScaler.cs" />
     <Compile Include="Modules\Performance\ClutterSpreadPatches.cs" />
     <Compile Include="Modules\Utilities\NetworkObjectHelper.cs" />
     <Compile Include="Modules\Utilities\PlayerSpawnGate.cs" />
@@ -294,7 +331,7 @@
     <Compile Include="Utilities\VATileRestoreBatch.cs" />
   </ItemGroup>
   <!--
-    Source-link block — shared utility files that live in sibling Fires-* mods.
+    Source-link block â€” shared utility files that live in sibling Fires-* mods.
     Uses <Link> to expose them inside this project's tree without copying files.
     Pattern documented in reference_source_link_pattern.md (first applied to
     PlayerSpawnGate 2026-05-20). FAP holds the newer/better implementations.

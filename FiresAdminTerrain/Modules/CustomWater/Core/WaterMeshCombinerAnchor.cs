@@ -46,6 +46,11 @@ namespace VerdantsAscent.Water.Core
         private static readonly int s_settledLevelHash = "va_water_settled_level".GetStableHashCode();
         private static readonly int s_isPondModeHash = "va_water_pond_mode".GetStableHashCode();
         private static readonly int s_waterDisksHash = "va_water_disks".GetStableHashCode();
+        // Round-56: gelled-volume flag — the combiner's surface grid is
+        // authoritative (settled water volume), regen must never recompute
+        // it from the disk list. Independent key: absent on old anchors
+        // reads as false, no version bump needed.
+        private static readonly int s_isGelledHash = "va_water_is_gelled".GetStableHashCode();
 
         // Segment anchor keys (v3)
         private static readonly int s_segmentCountHash = "va_water_segment_count".GetStableHashCode();
@@ -523,6 +528,8 @@ namespace VerdantsAscent.Water.Core
                 zdo.Set(s_liquidTypeHash, (int)_combiner.LiquidType);
                 zdo.Set(s_customLiquidTypeHash, (int)_combiner.CustomLiquidType);
                 zdo.Set(s_waveIntensityHash, _combiner.WaveIntensity);
+                // Round-56: gelled volumes restore grid-authoritative.
+                zdo.Set(s_isGelledHash, _combiner.IsGelled);
 
                 // CRITICAL: Save water disks FIRST - this is the source of truth
                 SaveWaterDisks(zdo);
@@ -1029,6 +1036,11 @@ namespace VerdantsAscent.Water.Core
             _combiner.LiquidType = (LiquidType)zdo.GetInt(s_liquidTypeHash, 0);
             _combiner.CustomLiquidType = (CustomLiquidType)zdo.GetInt(s_customLiquidTypeHash, 0);
             _combiner.WaveIntensity = zdo.GetFloat(s_waveIntensityHash, 0.5f);
+            // Round-56: set the gelled flag BEFORE RestoreFromAnchorData /
+            // any regen so a later MarkDirty routes to the grid rebuild
+            // instead of recomputing the settled surface from disks.
+            // Old anchors have no key → false → unchanged behaviour.
+            _combiner.IsGelled = zdo.GetBool(s_isGelledHash, false);
 
             yield return null;
 

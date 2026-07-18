@@ -153,6 +153,17 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
+            // Round-84 — FiresLiquidWater vanilla-LiquidVolume pours (springs +
+            // water volumes). These aren't combiners or legacy water, so add
+            // their surface here — this is what makes swimming trigger at the
+            // top of our custom liquid mesh.
+            float pourLevel = FiresLiquidWaterPrefab.GetSurfaceAt(pos);
+            if (pourLevel > float.MinValue && !IsWaterBlockedFromCharacter(pos, pourLevel, isLocalPlayer))
+            {
+                if (pourLevel > bestWaterLevel)
+                    bestWaterLevel = pourLevel;
+            }
+
             return bestWaterLevel;
         }
 
@@ -187,6 +198,37 @@ namespace VerdantsAscent.Water.Core
         #endregion
 
         #region Character Swimming Patches
+
+        // W4.2 — a character deep inside a voxel cave BELOW the waterline
+        // still gets the zone-wide water trigger's level pushed at them, so
+        // swim engaged and dragged them up through the rock ("it tries to
+        // force us up"). If solid ground separates the character from the
+        // reported surface, that water isn't theirs — report dry instead
+        // (caves under the water table are walkable; a cave OPEN to the
+        // water still swims because the raycast reaches the surface).
+        // Surface swimming (level within 1.5m overhead) never raycasts.
+        private static readonly AccessTools.FieldRef<Character, float> s_waterLevelRef =
+            AccessTools.FieldRefAccess<Character, float>("m_waterLevel");
+        private static readonly AccessTools.FieldRef<Character, float> s_tarLevelRef =
+            AccessTools.FieldRefAccess<Character, float>("m_tarLevel");
+        private static readonly AccessTools.FieldRef<Character, float> s_liquidLevelRef =
+            AccessTools.FieldRefAccess<Character, float>("m_liquidLevel");
+
+        [HarmonyPatch(typeof(Character), nameof(Character.SetLiquidLevel))]
+        [HarmonyPrefix]
+        private static bool Character_SetLiquidLevel_CaveGate(Character __instance, float level, LiquidType type)
+        {
+            if (type != LiquidType.Water || __instance == null) return true;
+            var mode = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.WorldMode;
+            if (mode == null || mode.Value == VerdantsAscent.Terrain.Voxel.VoxelWorldMode.Vanilla) return true;
+            Vector3 pos = __instance.transform.position;
+            if (level - pos.y < 1.5f) return true;
+            if (!IsTerrainBlockingVertically(pos, level)) return true;
+
+            s_waterLevelRef(__instance) = -10000f;
+            s_liquidLevelRef(__instance) = Mathf.Max(-10000f, s_tarLevelRef(__instance));
+            return false;
+        }
 
         /// <summary>
         /// Patch Character.InLiquid to detect custom water.
@@ -289,6 +331,28 @@ namespace VerdantsAscent.Water.Core
             {
                 __result = waterLevel;
             }
+        }
+
+        #endregion
+
+        #region Underwater Env / Buoyancy Integration
+
+        /// <summary>
+        /// Round-85 — feed FiresLiquidWater pours into the GLOBAL water-level
+        /// query. FiresUnderwaterEnv reads Floating.GetWaterLevel(eye) for its
+        /// fog + submersion ramp (_FiresPlayerSubmerged) and the underwater env
+        /// switch; buoyancy uses it too. So diving under a custom pool now fogs
+        /// the view and floats objects. Position-accurate — GetSurfaceAt returns
+        /// below-ground for dry cells, so no far-water false positives (unlike
+        /// the old bounding-box WaterVolume patch that had to be disabled).
+        /// </summary>
+        [HarmonyPatch(typeof(Floating), nameof(Floating.GetWaterLevel))]
+        [HarmonyPostfix]
+        private static void Floating_GetWaterLevel_Postfix(Vector3 p, ref float __result)
+        {
+            float pour = FiresLiquidWaterPrefab.GetSurfaceAt(p);
+            if (pour > float.MinValue && pour > __result)
+                __result = pour;
         }
 
         #endregion

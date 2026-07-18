@@ -93,9 +93,22 @@ namespace VerdantsAscent.Terrain.Lifecycle
         public static bool TryGetRulerPosition(out Vector3 worldPos)
         {
             worldPos = default;
+            if (!TryGetProjector(out var go)) return false;
+            if (!IsRulerActive()) return false;
+            worldPos = go.transform.position;
+            return true;
+        }
+
+        // Round-57 — raw projector accessor for the ruler ring colorizer.
+        // Unlike TryGetRulerPosition this does NOT require the ruler to be
+        // active — the colorizer wants to tint the segments even while the
+        // projector is momentarily hidden so the color is right the frame
+        // it reappears.
+        public static bool TryGetProjector(out GameObject projector)
+        {
+            projector = null;
             TryResolve();
             if (!s_available) return false;
-            if (!IsRulerActive()) return false;
 
             try
             {
@@ -103,17 +116,11 @@ namespace VerdantsAscent.Terrain.Lifecycle
                 if (proj == null) return false;
 
                 // The Projector field's runtime type might be DecalProjector,
-                // GameObject, Component, etc. — we just need its Transform.
-                // Component path covers MonoBehaviour, Behaviour, Component
-                // subclasses (DecalProjector inherits Behaviour); GameObject
-                // path covers the bare-GO case.
-                Transform tr = null;
-                if (proj is Component comp) tr = comp.transform;
-                else if (proj is GameObject go) tr = go.transform;
+                // GameObject, Component, etc. — normalize to the GameObject.
+                if (proj is GameObject go) projector = go;
+                else if (proj is Component comp) projector = comp.gameObject;
 
-                if (tr == null) return false;
-                worldPos = tr.position;
-                return true;
+                return projector != null;
             }
             catch { return false; }
         }

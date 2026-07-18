@@ -289,6 +289,22 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             if (_undersideMesh == null || topMesh == null) return;
 
+            // Round-93 (user directive) — the underside "cave layer" exists ONLY
+            // for FLOATING terrain disks now. On grounded tiles it drew a jet-
+            // black darkened sheet under/around real voxel caves and confused
+            // the env/underwater systems. Real caves are voxel geometry; their
+            // env comes from VoxelCaveEnv's honest up-raycast instead.
+            if (_tile == null || !_tile.FloatingIslandMode)
+            {
+                _undersideMesh.Clear();
+                if (_undersideCollider != null) _undersideCollider.sharedMesh = null;
+                if (_undersideRenderer != null) _undersideRenderer.enabled = false;
+                if (_undersideCollider != null) _undersideCollider.enabled = false;
+                _rendererCurrentlyEnabled = false;
+                _colliderCurrentlyEnabled = false;
+                return;
+            }
+
             int vertCount = topMesh.vertexCount;
             if (vertCount == 0)
             {

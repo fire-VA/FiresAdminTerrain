@@ -995,6 +995,13 @@ namespace VerdantsAscent.Water.Core
             // ruler is outlining".
             foreach (var combiner in s_allCombiners)
             {
+                // Round-56: settling/gelled VOLUME combiners never absorb
+                // new disks — their surface grid is authoritative data and
+                // an added disk would trigger the IDW recompute that
+                // clobbers the settled shape. A new disk near a gelled
+                // volume gets its own combiner (stencil handles overlap).
+                if (combiner != null && (combiner._isGelled || combiner._isSettling)) continue;
+
                 if (combiner != null
                     && combiner.CustomLiquidType == disk.CustomLiquidType
                     && combiner.WouldOverlapWith(disk))

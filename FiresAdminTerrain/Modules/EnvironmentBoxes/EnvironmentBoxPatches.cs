@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using VerdantsAscent.Terrain.Biome;
+using FiresCore.Utilities; // EnvironmentBoxController (moved to Core)
 
 
 namespace VerdantsAscent.Utilities
@@ -164,6 +165,9 @@ namespace VerdantsAscent.Utilities
         // Cached layer mask for custom terrain raycast
         private static int _customTerrainLayerMask = 0;
 
+        // Round-89 — one-time proof-of-life logs for clutter on voxel terrain.
+        private static int s_voxelClutterLogs = 0;
+
         // Track which patches have logged NRE to avoid spam
         private static readonly HashSet<Vector2Int> _loggedNrePatches = new HashSet<Vector2Int>();
         private static int _lastClearFrame = 0;
@@ -249,6 +253,36 @@ namespace VerdantsAscent.Utilities
 
                 __result = true;
                 return false; // Skip original since we handled it
+            }
+
+            // Round-89 — VOXEL terrain (wrapped zones + brush chunks). This
+            // prefix REPLACES vanilla GetGroundInfo entirely, so the old bail
+            // below silently starved wrapped zones of ALL clutter ("grass gone
+            // when returning"): a voxel collider is neither a vanilla Heightmap
+            // nor a TerrainTile. The wrapped zone's Heightmap component is
+            // still alive as the data API — use it exactly like the tile path.
+            if (VerdantsAscent.Terrain.Voxel.VoxelWorld.ChunkCount > 0
+                && hitInfo.collider.GetComponent<VerdantsAscent.Terrain.Voxel.VoxelChunkView>() != null)
+            {
+                point = hitInfo.point;
+                normal = hitInfo.normal;
+                hmap = Heightmap.FindHeightmap(point);
+                if (hmap == null)
+                {
+                    __result = false;   // zone data not up yet — no clutter this pass
+                    return false;
+                }
+                biome = hmap.GetBiome(point);
+                var envBoxVoxel = EnvironmentBoxController.GetEnvBoxAtPosition(point);
+                if (envBoxVoxel != null && envBoxVoxel.ForcedBiome != Heightmap.Biome.None)
+                    biome = envBoxVoxel.ForcedBiome;
+                if (s_voxelClutterLogs < 3)
+                {
+                    s_voxelClutterLogs++;
+                    Debug.Log($"[FiresVoxel] clutter ground resolved on voxel terrain at {point} biome={biome} (log {s_voxelClutterLogs}/3).");
+                }
+                __result = true;
+                return false;
             }
 
             // Not a vanilla Heightmap. ONLY now pay for the parent walk — and only
@@ -446,8 +480,12 @@ namespace VerdantsAscent.Utilities
                     _lastClearFrame = Time.frameCount;
                 }
 
-                // Only log each unique patch once per session to avoid spam during zone loading
-                if (_loggedNrePatches.Add(patchID))
+                // Only log each unique patch once per session, and only when
+                // timing diagnostics are on — these NREs are expected transient
+                // zone-load noise on our voxel terrain (the finalizer retries).
+                if (_loggedNrePatches.Add(patchID)
+                    && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.LogTimings != null
+                    && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.LogTimings.Value)
                 {
                     Debug.LogWarning($"[EnvironmentBoxPatches] Suppressed ClutterSystem NRE for patch {patchID} (custom terrain or zone loading - heightmap unavailable)");
                 }

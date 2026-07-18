@@ -1188,7 +1188,73 @@ namespace VerdantsAscent.Terrain.Persistence
                 int idxB = j * gridSize + iB;
                 if (StitchVertPair(tileA, idxA, tileB, idxB)) changed++;
             }
+
+            // Round-63 — soften the crease the averaging leaves behind.
+            // Averaging ONLY the border verts bends the surface at a
+            // single vert width → visible hard ridge along the seam
+            // (user screenshots). Relax each tile's column ADJACENT to
+            // the border halfway toward the midpoint of its lateral
+            // neighbors (border col + next-inner col). Each tile relaxes
+            // its OWN inner column with its own data + the now-shared
+            // border → deterministic, no cross-tile divergence.
+            if (changed > 0)
+            {
+                // Round-64 — smooth the border LINE itself first. The
+                // smooth brush deliberately skips border verts (round-41
+                // order-dependence guard), so after a strong smooth the
+                // interior has moved while the border kept its stale
+                // pre-smooth height → residual hard edge (user report).
+                // Here in the stitch we have BOTH tiles' final data, so
+                // a border Laplacian is deterministic: blend each border
+                // vert toward the average of its seam neighbours + the
+                // first inner vert from EACH side, written to both tiles.
+                SmoothSeamColumn(tileA, iA, tileB, iB, gridSize);
+
+                SoftenCreaseColumn(tileA, iA, gridSize);
+                SoftenCreaseColumn(tileB, iB, gridSize);
+            }
             return changed;
+        }
+
+        // Deterministic border-line smooth for an east-west seam. For
+        // each seam vert: avg( seamPrev, seamNext, innerA, innerB ) —
+        // the full cross-tile 1-ring — then blend halfway and write the
+        // SAME value into both tiles' border verts.
+        private static void SmoothSeamColumn(TerrainTile tileA, int iA, TerrainTile tileB, int iB, int gridSize)
+        {
+            int innerColA = iA == 0 ? 1 : iA - 1;
+            int innerColB = iB == 0 ? 1 : iB - 1;
+
+            // Snapshot the seam line so the pass reads consistent inputs.
+            var seam = new float[gridSize];
+            var seamValid = new bool[gridSize];
+            for (int j = 0; j < gridSize; j++)
+            {
+                int idxA = j * gridSize + iA;
+                seam[j] = tileA.Heights[idxA];
+                seamValid[j] = tileA.HeightModified[idxA];
+            }
+
+            for (int j = 0; j < gridSize; j++)
+            {
+                if (!seamValid[j]) continue;
+
+                int idxA = j * gridSize + iA;
+                int idxB = j * gridSize + iB;
+                int idxInnerA = j * gridSize + innerColA;
+                int idxInnerB = j * gridSize + innerColB;
+
+                float sum = 0f; int n = 0;
+                if (j > 0 && seamValid[j - 1]) { sum += seam[j - 1]; n++; }
+                if (j < gridSize - 1 && seamValid[j + 1]) { sum += seam[j + 1]; n++; }
+                if (tileA.HeightModified[idxInnerA]) { sum += tileA.Heights[idxInnerA]; n++; }
+                if (tileB.HeightModified[idxInnerB]) { sum += tileB.Heights[idxInnerB]; n++; }
+                if (n < 2) continue;
+
+                float smoothed = Mathf.Lerp(seam[j], sum / n, 0.5f);
+                tileA.Heights[idxA] = smoothed;
+                tileB.Heights[idxB] = smoothed;
+            }
         }
 
         // North-south seam: tile A's row at jA == tile B's row at jB.
@@ -1201,7 +1267,98 @@ namespace VerdantsAscent.Terrain.Persistence
                 int idxB = jB * gridSize + i;
                 if (StitchVertPair(tileA, idxA, tileB, idxB)) changed++;
             }
+
+            if (changed > 0)
+            {
+                // Round-64 — see SmoothSeamColumn.
+                SmoothSeamRow(tileA, jA, tileB, jB, gridSize);
+
+                SoftenCreaseRow(tileA, jA, gridSize);
+                SoftenCreaseRow(tileB, jB, gridSize);
+            }
             return changed;
+        }
+
+        // North-south twin of SmoothSeamColumn.
+        private static void SmoothSeamRow(TerrainTile tileA, int jA, TerrainTile tileB, int jB, int gridSize)
+        {
+            int innerRowA = jA == 0 ? 1 : jA - 1;
+            int innerRowB = jB == 0 ? 1 : jB - 1;
+
+            var seam = new float[gridSize];
+            var seamValid = new bool[gridSize];
+            for (int i = 0; i < gridSize; i++)
+            {
+                int idxA = jA * gridSize + i;
+                seam[i] = tileA.Heights[idxA];
+                seamValid[i] = tileA.HeightModified[idxA];
+            }
+
+            for (int i = 0; i < gridSize; i++)
+            {
+                if (!seamValid[i]) continue;
+
+                int idxA = jA * gridSize + i;
+                int idxB = jB * gridSize + i;
+                int idxInnerA = innerRowA * gridSize + i;
+                int idxInnerB = innerRowB * gridSize + i;
+
+                float sum = 0f; int n = 0;
+                if (i > 0 && seamValid[i - 1]) { sum += seam[i - 1]; n++; }
+                if (i < gridSize - 1 && seamValid[i + 1]) { sum += seam[i + 1]; n++; }
+                if (tileA.HeightModified[idxInnerA]) { sum += tileA.Heights[idxInnerA]; n++; }
+                if (tileB.HeightModified[idxInnerB]) { sum += tileB.Heights[idxInnerB]; n++; }
+                if (n < 2) continue;
+
+                float smoothed = Mathf.Lerp(seam[i], sum / n, 0.5f);
+                tileA.Heights[idxA] = smoothed;
+                tileB.Heights[idxB] = smoothed;
+            }
+        }
+
+        // Relax the column ADJACENT to a stitched border column: pull it
+        // halfway toward the midpoint of (border, next-inner) so the
+        // surface curves smoothly through the averaged border instead of
+        // kinking at it. Skips verts whose 3-sample stencil isn't fully
+        // modified (don't invent heights at floating-terrain edges).
+        private static void SoftenCreaseColumn(TerrainTile tile, int borderCol, int gridSize)
+        {
+            int dir = borderCol == 0 ? 1 : -1;   // toward tile interior
+            int innerCol = borderCol + dir;
+            int inner2Col = borderCol + dir * 2;
+            if (innerCol < 0 || innerCol >= gridSize || inner2Col < 0 || inner2Col >= gridSize) return;
+
+            for (int j = 0; j < gridSize; j++)
+            {
+                int idxB = j * gridSize + borderCol;
+                int idxI = j * gridSize + innerCol;
+                int idxI2 = j * gridSize + inner2Col;
+                if (!tile.HeightModified[idxB] || !tile.HeightModified[idxI] || !tile.HeightModified[idxI2])
+                    continue;
+
+                float target = (tile.Heights[idxB] + tile.Heights[idxI2]) * 0.5f;
+                tile.Heights[idxI] = Mathf.Lerp(tile.Heights[idxI], target, 0.5f);
+            }
+        }
+
+        private static void SoftenCreaseRow(TerrainTile tile, int borderRow, int gridSize)
+        {
+            int dir = borderRow == 0 ? 1 : -1;
+            int innerRow = borderRow + dir;
+            int inner2Row = borderRow + dir * 2;
+            if (innerRow < 0 || innerRow >= gridSize || inner2Row < 0 || inner2Row >= gridSize) return;
+
+            for (int i = 0; i < gridSize; i++)
+            {
+                int idxB = borderRow * gridSize + i;
+                int idxI = innerRow * gridSize + i;
+                int idxI2 = inner2Row * gridSize + i;
+                if (!tile.HeightModified[idxB] || !tile.HeightModified[idxI] || !tile.HeightModified[idxI2])
+                    continue;
+
+                float target = (tile.Heights[idxB] + tile.Heights[idxI2]) * 0.5f;
+                tile.Heights[idxI] = Mathf.Lerp(tile.Heights[idxI], target, 0.5f);
+            }
         }
 
         // Sync a single border-vert pair. Three cases:

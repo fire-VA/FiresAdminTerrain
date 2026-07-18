@@ -563,6 +563,17 @@ namespace VerdantsAscent.Terrain.Persistence
             FillMesh(_renderMesh, t);
             FillMesh(_colliderMesh, t);
 
+            // Round-63 — seam-consistent BORDER NORMALS. RecalculateNormals
+            // (inside FillMesh) only sees THIS tile's triangles, so a
+            // shared border vert gets a different normal on each side of
+            // the seam → a hard lighting crease along every tile border
+            // even when the heights are perfectly stitched (the "weird
+            // hard edges" in the user's screenshots). Overwrite border-
+            // vert normals with analytic central-difference normals whose
+            // neighbor samples cross the tile boundary — both tiles then
+            // compute IDENTICAL normals at shared verts by construction.
+            ApplySeamNormals(_renderMesh, size);
+
             // 2026-05-25 round-15 — rebuild and bind the per-tile paint mask
             // so paved/dirt/cultivated colors from `_tile.Paint[]` actually
             // appear on the rendered surface. Before this hook the data was
@@ -756,6 +767,72 @@ namespace VerdantsAscent.Terrain.Persistence
             }
 
             _materialInstance.SetTexture(s_clearedMaskTexProp, _paintMask);
+        }
+
+        // Round-63 — analytic normals for border verts, sampled ACROSS
+        // tile boundaries so adjacent tiles agree exactly at shared
+        // verts. Central differences over the world height field:
+        //   n = normalize(hL−hR, 2·spacing, hD−hU)
+        // Neighbor heights come from this tile's grid when in-bounds and
+        // modified, else from the adjacent tile via TileAnchorRegistry.
+        // Unavailable samples fall back to the vert's own height, which
+        // degrades the same way from BOTH sides (an unmodified cell is
+        // unmodified in either tile's view) so consistency holds.
+        private void ApplySeamNormals(Mesh mesh, int size)
+        {
+            if (_tile == null || _tile.Heights == null) return;
+
+            var normals = mesh.normals;
+            if (normals == null || normals.Length != size * size) return;
+
+            float spacing = TerrainTile.VERTEX_SPACING;
+            float originX = _tile.TileXZ.x * TerrainTile.TILE_SIZE;
+            float originZ = _tile.TileXZ.y * TerrainTile.TILE_SIZE;
+            bool changed = false;
+
+            for (int j = 0; j < size; j++)
+            {
+                for (int i = 0; i < size; i++)
+                {
+                    bool isBorder = i == 0 || i == size - 1 || j == 0 || j == size - 1;
+                    if (!isBorder) continue;
+
+                    int idx = j * size + i;
+                    if (!_tile.HeightModified[idx]) continue;
+
+                    float h0 = _tile.Heights[idx];
+                    float hL = SampleWorldHeight(i - 1, j, size, originX, originZ, h0);
+                    float hR = SampleWorldHeight(i + 1, j, size, originX, originZ, h0);
+                    float hD = SampleWorldHeight(i, j - 1, size, originX, originZ, h0);
+                    float hU = SampleWorldHeight(i, j + 1, size, originX, originZ, h0);
+
+                    var n = new Vector3(hL - hR, 2f * spacing, hD - hU);
+                    normals[idx] = n.normalized;
+                    changed = true;
+                }
+            }
+
+            if (changed) mesh.normals = normals;
+        }
+
+        // World-height sample for the normal stencil: in-tile grid when
+        // possible, cross-tile registry lookup at the boundary, fallback
+        // = the center vert's own height.
+        private float SampleWorldHeight(int i, int j, int size, float originX, float originZ, float fallback)
+        {
+            if (i >= 0 && i < size && j >= 0 && j < size)
+            {
+                int idx = j * size + i;
+                return _tile.HeightModified[idx] ? _tile.Heights[idx] : fallback;
+            }
+
+            var probe = new Vector3(
+                originX + i * TerrainTile.VERTEX_SPACING,
+                0f,
+                originZ + j * TerrainTile.VERTEX_SPACING);
+            if (TileAnchorRegistry.TrySampleHeightAtWorld(probe, out float h))
+                return h;
+            return fallback;
         }
 
         // Helper to populate a Mesh with the current rebuild buffers.

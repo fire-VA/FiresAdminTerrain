@@ -33,7 +33,7 @@ namespace VerdantsAscent
     {
         public const string PluginGUID = "com.Fire.FiresAdminTerrain";
         public const string PluginName = "FiresAdminTerrain";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.2.168";
 
         public static readonly Harmony harmony = new Harmony(PluginGUID);
         public static FiresAdminTerrain Instance { get; private set; }
@@ -45,8 +45,13 @@ namespace VerdantsAscent
         public ConfigSync configSync;
         private static ILogHandler _originalLogHandler;
 
+        // BepInEx log source — banner emitters route through this (not Debug.Log)
+        // so banner lines don't stdout-echo a raw white console duplicate.
+        public static BepInEx.Logging.ManualLogSource Log;
+
         private void Awake()
         {
+            Log = Logger;
             // BIG floating-island banner — fires FIRST so it sits at
             // the top of the FAT console output as the load
             // announcement. The compact tree-island-waterfall banner
@@ -78,6 +83,8 @@ namespace VerdantsAscent
             PrefabContainer.SetActive(false);
 
             ConfigManager.Instance.Initialize(Config);
+            VerdantsAscent.Water.Core.FiresLiquidConfig.Bind(Config);   // round-84 FiresLiquid look sliders
+            VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.Bind(Config); // voxel P0 prototype toggles
 
             configSync = new ConfigSync(PluginGUID)
             {
@@ -93,6 +100,12 @@ namespace VerdantsAscent
             configSync.AddConfigEntry(ConfigManager.Instance.configUseNewTilePersistence);
 
             LoadAssets();
+
+            // Register the env-box terrain provider so Core's portable EnvironmentBoxController routes its
+            // heightmap/clutter/snow work back into FAT's systems. Without this, Core env boxes still apply the
+            // env/skybox atmosphere but do no terrain/biome paint (the dark-crypt case needs no terrain anyway).
+            try { FiresCore.Bridge.EnvironmentBoxBridge.Register(new VerdantsAscent.Utilities.EnvironmentBoxTerrainProvider()); }
+            catch (Exception ex) { Debug.LogWarning($"[{PluginName}] env-box provider register failed: {ex.Message}"); }
 
             // Tile-restore batch tracker — starts an infinite polling
             // coroutine that emits the 🪨 TILES banner whenever a wave
@@ -317,6 +330,32 @@ namespace VerdantsAscent
             StartCoroutine(EmitCompactBannerWhenZNetReady());
         }
 
+        // 📡 RPCs mini-banner — one visual summary of the session's RPC
+        // handler registrations (ConfigSync + RegionScrubberRPC +
+        // TileBrushRPC). All three register from their own ZNet.Awake
+        // postfixes; Priority.Last guarantees this postfix runs after
+        // every registration so the counts are real. Replaces the
+        // per-system "Registered N handlers" lines (now verbose-gated).
+        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Awake))]
+        private static class ZNet_Awake_EmitRpcSummary
+        {
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix()
+            {
+                try
+                {
+                    VerdantsAscent.Utilities.VAFatLoadSummary.EmitRpcs(
+                        configSync: ConfigSync.configSyncs.Count,
+                        scrubber: VerdantsAscent.Terrain.Lifecycle.RegionScrubberRPC.RegisteredHandlers,
+                        tileBrush: TileBrushRPC.RegisteredHandlers);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[{PluginName}] RPC summary banner failed: {ex.Message}");
+                }
+            }
+        }
+
         // Waits for ZNetScene + prefab table to be live, then emits
         // the compact floating-island brand banner. Failure is
         // non-fatal — falls back to the plain "mod loaded" log so
@@ -376,6 +415,19 @@ namespace VerdantsAscent
                     return;
                 }
                 Debug.Log($"[{PluginName}] Loaded asset bundle: {assetBundle.name}");
+
+                // The voxel-mesh terrain shader (Custom/FiresVoxelHeightmap):
+                // vanilla layer logic with voxel-proper projection — ceilings
+                // wear cliff rock instead of top-down grass, steep faces
+                // triplanar-blend the ground/paint/snow/ash layers instead of
+                // smearing them. Handed to the material cache; it swaps the
+                // shared terrain material's shader (flat ground renders
+                // identical to vanilla by construction).
+                var voxelShader = assetBundle.LoadAsset<Shader>("FiresVoxelHeightmap");
+                if (voxelShader != null)
+                    VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.SetVoxelShader(voxelShader);
+                else
+                    Debug.LogWarning($"[{PluginName}] Custom/FiresVoxelHeightmap missing from adminterrain bundle — voxel skin stays on the vanilla heightmap shader (top-down projection).");
             }
             catch (Exception ex)
             {

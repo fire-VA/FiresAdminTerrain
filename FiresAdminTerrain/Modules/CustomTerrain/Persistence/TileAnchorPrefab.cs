@@ -100,7 +100,7 @@ namespace VerdantsAscent.Terrain.Persistence
                     return true;
                 }
 
-                FiresLogger.LogInfo("[TileAnchorPrefab] Ensure: session-change detected (logout/login same process) — re-inserting cached VATile into new ZNetScene dict.");
+                FiresLogger.LogVerbose("[TileAnchorPrefab] Ensure: session-change detected (logout/login same process) — re-inserting cached VATile into new ZNetScene dict.");
                 ScrubFakeNulls("pre-reinsert");
                 ZNetScene.instance.m_namedPrefabs[hash] = _prefab;
                 ScrubFakeNulls("post-reinsert");
@@ -115,7 +115,8 @@ namespace VerdantsAscent.Terrain.Persistence
                     // Re-run TileHammerCompat in case IH was reloaded too.
                     try { TileHammerCompat.Initialize(); }
                     catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileHammerCompat.Initialize threw — {ex}"); }
-                    FiresLogger.LogInfo("[TileAnchorPrefab] Ensure: SUCCESS via session-change reinsert.");
+                    FiresLogger.LogVerbose("[TileAnchorPrefab] Ensure: SUCCESS via session-change reinsert.");
+                    EmitRegistrationSummary();
                     return true;
                 }
 
@@ -129,7 +130,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             int beforeDictCount = ZNetScene.instance.m_namedPrefabs?.Count ?? -1;
             int beforeListCount = ZNetScene.instance.m_prefabs?.Count ?? -1;
-            FiresLogger.LogInfo($"[TileAnchorPrefab] Ensure: starting | hash={hash} | dict={beforeDictCount} list={beforeListCount}");
+            FiresLogger.LogVerbose($"[TileAnchorPrefab] Ensure: starting | hash={hash} | dict={beforeDictCount} list={beforeListCount}");
 
             // ── Step 1: scrub pre-existing fake-nulls left by other mods ──
             ScrubFakeNulls("pre-register");
@@ -139,8 +140,9 @@ namespace VerdantsAscent.Terrain.Persistence
             {
                 _prefab = existing;
                 _registered = true;
-                FiresLogger.LogInfo($"[TileAnchorPrefab] '{PrefabName}' already in m_namedPrefabs (hash={hash}); reusing.");
+                FiresLogger.LogVerbose($"[TileAnchorPrefab] '{PrefabName}' already in m_namedPrefabs (hash={hash}); reusing.");
                 ClearInfinityHammerSpriteCache("idempotent-reuse");
+                EmitRegistrationSummary();
                 return true;
             }
 
@@ -154,7 +156,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             // ── Step 5: register in m_namedPrefabs only ───────────────────
             ZNetScene.instance.m_namedPrefabs[hash] = clone;
-            FiresLogger.LogInfo($"[TileAnchorPrefab] Added '{PrefabName}' to m_namedPrefabs (hash={hash}). Dict size {beforeDictCount} → {ZNetScene.instance.m_namedPrefabs.Count}.");
+            FiresLogger.LogVerbose($"[TileAnchorPrefab] Added '{PrefabName}' to m_namedPrefabs (hash={hash}). Dict size {beforeDictCount} → {ZNetScene.instance.m_namedPrefabs.Count}.");
 
             // ── Step 6: scrub again — paranoia + race compensation ────────
             ScrubFakeNulls("post-register");
@@ -171,7 +173,8 @@ namespace VerdantsAscent.Terrain.Persistence
 
             _prefab = clone;
             _registered = true;
-            FiresLogger.LogInfo($"[TileAnchorPrefab] Ensure: SUCCESS — VATile fully registered and IH cache cleared.");
+            FiresLogger.LogVerbose($"[TileAnchorPrefab] Ensure: SUCCESS — VATile fully registered and IH cache cleared.");
+            EmitRegistrationSummary();
 
             // IH ruler-snap patch must be initialized HERE, not from
             // FiresAdminTerrain.FinishInit. Plugins load alphabetically and
@@ -192,6 +195,10 @@ namespace VerdantsAscent.Terrain.Persistence
             try { VerdantsAscent.Water.Tools.WaterBrushDrag.EnsureAttached(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] WaterBrushDrag.EnsureAttached threw — {ex}"); }
 
+            // Round-57 — IH ruler ring tint (green=terrain, blue=water).
+            try { VerdantsAscent.Terrain.Lifecycle.RulerColorDriver.EnsureAttached(); }
+            catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] RulerColorDriver.EnsureAttached threw — {ex}"); }
+
             return true;
         }
 
@@ -206,7 +213,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 if (source != null)
                 {
                     int compCount = source.GetComponentsInChildren<Component>(includeInactive: true).Length;
-                    FiresLogger.LogInfo($"[TileAnchorPrefab] LoadSourcePrefab: '{SourcePrefabName}' loaded from FiresAdminTerrain bundle | activeSelf={source.activeSelf} components={compCount}");
+                    FiresLogger.LogVerbose($"[TileAnchorPrefab] LoadSourcePrefab: '{SourcePrefabName}' loaded from FiresAdminTerrain bundle | activeSelf={source.activeSelf} components={compCount}");
                 }
                 else
                 {
@@ -222,7 +229,7 @@ namespace VerdantsAscent.Terrain.Persistence
             {
                 source = ZNetScene.instance.GetPrefab(SourcePrefabName);
                 if (source != null)
-                    FiresLogger.LogInfo($"[TileAnchorPrefab] LoadSourcePrefab: '{SourcePrefabName}' loaded from ZNetScene registry (fallback).");
+                    FiresLogger.LogVerbose($"[TileAnchorPrefab] LoadSourcePrefab: '{SourcePrefabName}' loaded from ZNetScene registry (fallback).");
             }
 
             if (source == null)
@@ -278,7 +285,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // activeSelf=true so spawned instances inherit it. Awake still doesn't
             // fire on the template because activeInHierarchy=false (root inactive).
             clone.SetActive(true);
-            FiresLogger.LogInfo($"[TileAnchorPrefab] CloneAndPrepare: clone created under inactive root — activeSelf={clone.activeSelf} activeInHierarchy={clone.activeInHierarchy} nameAccessOK={SafeNameAccessible(clone)}. Template will NOT Awake; spawned instances WILL.");
+            FiresLogger.LogVerbose($"[TileAnchorPrefab] CloneAndPrepare: clone created under inactive root — activeSelf={clone.activeSelf} activeInHierarchy={clone.activeInHierarchy} nameAccessOK={SafeNameAccessible(clone)}. Template will NOT Awake; spawned instances WILL.");
 
             DisableVisualsAndBehaviors(clone);
 
@@ -347,7 +354,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 if (mb.enabled) { mb.enabled = false; mbs++; }
             }
 
-            FiresLogger.LogInfo($"[TileAnchorPrefab] DisableVisualsAndBehaviors '{go.name}': renderers={renderers} colliders={colliders} audio={audios} particles={particles} lights={lights} mbs={mbs}");
+            FiresLogger.LogVerbose($"[TileAnchorPrefab] DisableVisualsAndBehaviors '{go.name}': renderers={renderers} colliders={colliders} audio={audios} particles={particles} lights={lights} mbs={mbs}");
         }
 
         // ─── Scrub helpers (matches Ascend.cs:540 + FAP pattern) ──────────
@@ -417,7 +424,7 @@ namespace VerdantsAscent.Terrain.Persistence
                     ? string.Join(",", deadHashes.Take(8).Select(h => h.ToString()))
                     + (deadHashes.Count > 8 ? "…" : "")
                     : "";
-                FiresLogger.LogInfo($"[TileAnchorPrefab] ScrubFakeNulls ({siteLabel}): REMOVED {listScrubbed} from m_prefabs + {dictScrubbed} from m_namedPrefabs (sample hashes: [{sampleHashes}]). Dict size now {dict?.Count ?? -1}.");
+                FiresLogger.LogVerbose($"[TileAnchorPrefab] ScrubFakeNulls ({siteLabel}): REMOVED {listScrubbed} from m_prefabs + {dictScrubbed} from m_namedPrefabs (sample hashes: [{sampleHashes}]). Dict size now {dict?.Count ?? -1}.");
             }
             else
             {
@@ -442,7 +449,7 @@ namespace VerdantsAscent.Terrain.Persistence
                         .FirstOrDefault(a => a.GetName().Name == "InfinityHammer");
                     if (ihAssembly == null)
                     {
-                        FiresLogger.LogInfo("[TileAnchorPrefab] ClearInfinityHammerSpriteCache: InfinityHammer assembly not loaded — IH integration skipped (this is fine if you don't use IH).");
+                        FiresLogger.LogVerbose("[TileAnchorPrefab] ClearInfinityHammerSpriteCache: InfinityHammer assembly not loaded — IH integration skipped (this is fine if you don't use IH).");
                         return;
                     }
                     var spriteHelper = ihAssembly.GetType("InfinityHammer.SpriteHelper");
@@ -459,7 +466,7 @@ namespace VerdantsAscent.Terrain.Persistence
                         FiresLogger.LogWarning("[TileAnchorPrefab] ClearInfinityHammerSpriteCache: SpriteHelper.PrefabNames field not found (IH API changed?). IH cache won't be cleared — first hammer-equip may still hit NRE if late fake-nulls appear.");
                         return;
                     }
-                    FiresLogger.LogInfo($"[TileAnchorPrefab] ClearInfinityHammerSpriteCache: IH detected, PrefabNames field bound — runtime clears now active.");
+                    FiresLogger.LogVerbose($"[TileAnchorPrefab] ClearInfinityHammerSpriteCache: IH detected, PrefabNames field bound — runtime clears now active.");
                 }
 
                 if (_ihSpriteHelperPrefabNamesField == null) return;
@@ -469,7 +476,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 {
                     int count = dict.Count;
                     dict.Clear();
-                    FiresLogger.LogInfo($"[TileAnchorPrefab] ClearInfinityHammerSpriteCache ({siteLabel}): cleared {count} entries from IH's PrefabNames cache — IH will rebuild on next FindSprite.");
+                    FiresLogger.LogVerbose($"[TileAnchorPrefab] ClearInfinityHammerSpriteCache ({siteLabel}): cleared {count} entries from IH's PrefabNames cache — IH will rebuild on next FindSprite.");
                 }
                 else
                 {
@@ -488,6 +495,25 @@ namespace VerdantsAscent.Terrain.Persistence
             catch { return false; }
         }
 
+        // 🪨 TILE PREFAB mini-banner — the default-visible summary that
+        // replaces the per-step Ensure chatter (now verbose-gated). Fired
+        // once per successful registration path.
+        private static void EmitRegistrationSummary()
+        {
+            try
+            {
+                if (_prefab == null) return;
+                int components = _prefab.GetComponentsInChildren<Component>(includeInactive: true).Length;
+                int renderers = _prefab.GetComponentsInChildren<Renderer>(includeInactive: true).Length;
+                int colliders = _prefab.GetComponentsInChildren<Collider>(includeInactive: true).Length;
+                VerdantsAscent.Utilities.VAFatLoadSummary.EmitTilePrefab(components, renderers, colliders);
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"[TileAnchorPrefab] EmitRegistrationSummary threw — {ex.Message}");
+            }
+        }
+
         // Inactive parent for the VATile template clone. Pattern from FAP's
         // VAClutterStandinFactory — the template stays activeSelf=true so
         // spawned instances inherit activeSelf=true, but its
@@ -500,7 +526,7 @@ namespace VerdantsAscent.Terrain.Persistence
             _inactiveRoot = new GameObject("FiresAdminTerrain_PrefabPool");
             _inactiveRoot.SetActive(false);
             UnityEngine.Object.DontDestroyOnLoad(_inactiveRoot);
-            FiresLogger.LogInfo("[TileAnchorPrefab] GetOrCreateInactiveRoot: created 'FiresAdminTerrain_PrefabPool' (inactive, DontDestroyOnLoad).");
+            FiresLogger.LogVerbose("[TileAnchorPrefab] GetOrCreateInactiveRoot: created 'FiresAdminTerrain_PrefabPool' (inactive, DontDestroyOnLoad).");
             return _inactiveRoot;
         }
 
@@ -523,7 +549,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 return false;
             }
 
-            FiresLogger.LogInfo($"[TileAnchorPrefab] ValidateRegistration: VATile present and accessible | .name='{go.name}' activeSelf={go.activeSelf}");
+            FiresLogger.LogVerbose($"[TileAnchorPrefab] ValidateRegistration: VATile present and accessible | .name='{go.name}' activeSelf={go.activeSelf}");
             return true;
         }
 

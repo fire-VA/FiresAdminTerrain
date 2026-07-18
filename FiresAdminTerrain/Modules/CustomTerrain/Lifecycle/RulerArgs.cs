@@ -56,6 +56,15 @@ namespace VerdantsAscent.Terrain.Lifecycle
             return TileBrush.TryGetPointerWorldPosition(out center);
         }
 
+        // Round-69 — there is deliberately NO "correction" of the ruler
+        // position. `from=` IS the coordinate readout the user sees in
+        // the tool tooltip (proven 07-10: tooltip x:333.4 z:258.2 y:35.5,
+        // command from=333.4134,258.2081,35.52475). The round-68 attempt
+        // to re-anchor Y to a crosshair raycast placed water on top of
+        // PREVIOUSLY PLACED water (the ray hit gelled swim boxes at
+        // y=40.0 exactly) and once moved a pour 9m off-ring in XZ.
+        // Water goes EXACTLY where the tool says. Period.
+
         // Ruler radius wins (`circle=R-R2` outer R). Falls through to the
         // positional arg at index 1 (legacy console convention), then to
         // the default.

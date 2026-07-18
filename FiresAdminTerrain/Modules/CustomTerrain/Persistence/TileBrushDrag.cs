@@ -329,8 +329,16 @@ namespace VerdantsAscent.Terrain.Persistence
             float spacing = _radius * DAB_SPACING_RATIO;
             if (spacing < 0.01f) return;
 
-            int dabsThisFrame = 0;
-            while (dabsThisFrame < MAX_DABS_PER_FRAME)
+            // Round-63 — draw-speed throttle. The dab budget accrues
+            // `DrawSpeed × MAX_DABS_PER_FRAME` per frame (capped) and
+            // each dab spends 1. At DrawSpeed=1 this is the old
+            // 16-dabs-per-frame behavior; at 0.25 the brush deposits a
+            // quarter as fast, letting the user paint precisely.
+            _dabBudget = Mathf.Min(
+                _dabBudget + TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME,
+                MAX_DABS_PER_FRAME);
+
+            while (_dabBudget >= 1f)
             {
                 float pdx = _brushPos.x - _lastDabPos.x;
                 float pdz = _brushPos.z - _lastDabPos.z;
@@ -346,9 +354,12 @@ namespace VerdantsAscent.Terrain.Persistence
 
                 DispatchBrushAt(nextDab);
                 _lastDabPos = nextDab;
-                dabsThisFrame++;
+                _dabBudget -= 1f;
             }
         }
+
+        // Round-63 — fractional dab allowance for the draw-speed throttle.
+        private float _dabBudget;
 
         // Dispatch the cached brush kind at a specific world position.
         // Used by both the per-frame final dispatch and the dab pump.

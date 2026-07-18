@@ -813,7 +813,7 @@ namespace VerdantsAscent
 
                 if (ConfigSync.isServer)
                 {
-                    Debug.Log($"[{FiresAdminTerrain.PluginName}] Registered '{configSync.Name} ConfigSync' RPC");
+                    FiresLogger.LogVerbose($"Registered '{configSync.Name} ConfigSync' RPC");
                 }
             }
         }

@@ -10,7 +10,7 @@ namespace VerdantsAscent.Water.Core
 {
     /// <summary>
     /// File-based cache for WaterMeshCombiner data.
-    /// Mirrors DirtFloorCombinerCache — stores water disk and grid data locally so
+    /// Mirrors DirtFloorCombinerCache ï¿½ stores water disk and grid data locally so
     /// clients can restore water without relying on ZDO byte array sync (which is
     /// unreliable for large payloads).
     ///
@@ -46,6 +46,10 @@ namespace VerdantsAscent.Water.Core
             public float CellSize;
             public float SettledWaterLevel;
             public bool IsPondMode;
+            // Round-56 (cache v2): gelled water-volume flag. When true the
+            // SurfaceHeights grid is authoritative and the combiner must
+            // never recompute it from WaterDiskData.
+            public bool IsGelled;
 
             // Water properties
             public int LiquidType;
@@ -185,7 +189,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Gets cached data for an anchor at a given position.
-        /// Used for cache-first loading — check cache before ZDO restoration.
+        /// Used for cache-first loading ï¿½ check cache before ZDO restoration.
         /// </summary>
         public static WaterCombinerGroupData GetCachedDataForPosition(Vector3 position, float searchRadius = 5f)
         {
@@ -247,7 +251,7 @@ namespace VerdantsAscent.Water.Core
 
             if (groupId < 0)
             {
-                // New combiner — assign a group
+                // New combiner ï¿½ assign a group
                 groupId = _nextGroupId++;
                 _groupToCombiners[groupId] = combiner;
                 groupData = new WaterCombinerGroupData { GroupId = groupId };
@@ -273,6 +277,7 @@ namespace VerdantsAscent.Water.Core
             groupData.CellSize = combiner.CellSize;
             groupData.SettledWaterLevel = combiner.SettledWaterLevel;
             groupData.IsPondMode = combiner.IsPondMode;
+            groupData.IsGelled = combiner.IsGelled;
             groupData.LiquidType = (int)combiner.LiquidType;
             groupData.CustomLiquidType = (int)combiner.CustomLiquidType;
             groupData.WaveIntensity = combiner.WaveIntensity;
@@ -331,7 +336,7 @@ namespace VerdantsAscent.Water.Core
             if (groupIdToRemove >= 0)
             {
                 // Update cache with final state before removing runtime reference.
-                // Do NOT trigger an immediate save — zone unloads are frequent and
+                // Do NOT trigger an immediate save ï¿½ zone unloads are frequent and
                 // saving the full cache for each one is wasteful. The periodic
                 // Update() timer will batch-save all dirty groups together.
                 UpdateCombinerCache(combiner);
@@ -539,6 +544,9 @@ namespace VerdantsAscent.Water.Core
             combiner.LiquidType = (LiquidType)groupData.LiquidType;
             combiner.CustomLiquidType = (CustomLiquidType)groupData.CustomLiquidType;
             combiner.WaveIntensity = groupData.WaveIntensity;
+            // Round-56: BEFORE any restore/regen so gelled volumes route to
+            // the grid-authoritative rebuild, never disk recomputation.
+            combiner.IsGelled = groupData.IsGelled;
 
             // Restore water disks from cache
             if (groupData.WaterDiskData != null && groupData.WaterDiskData.Length >= WaterCombinerGroupData.DISK_STRIDE)
@@ -673,7 +681,7 @@ namespace VerdantsAscent.Water.Core
                 using (var stream = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
                 using (var writer = new BinaryWriter(stream))
                 {
-                    writer.Write(1); // Version
+                    writer.Write(2); // Version (v2: + per-group IsGelled)
                     writer.Write(cache.WorldName ?? "");
                     writer.Write(cache.WorldSeed);
 
@@ -693,6 +701,7 @@ namespace VerdantsAscent.Water.Core
                         writer.Write(group.CellSize);
                         writer.Write(group.SettledWaterLevel);
                         writer.Write(group.IsPondMode);
+                        writer.Write(group.IsGelled); // v2
 
                         // Water properties
                         writer.Write(group.LiquidType);
@@ -734,7 +743,7 @@ namespace VerdantsAscent.Water.Core
             using (var reader = new BinaryReader(stream))
             {
                 int version = reader.ReadInt32();
-                if (version < 1 || version > 1)
+                if (version < 1 || version > 2)
                 {
                     Debug.LogWarning($"[WaterCombinerCache] Unknown version {version}");
                     return cache;
@@ -758,6 +767,7 @@ namespace VerdantsAscent.Water.Core
                     group.CellSize = reader.ReadSingle();
                     group.SettledWaterLevel = reader.ReadSingle();
                     group.IsPondMode = reader.ReadBoolean();
+                    group.IsGelled = version >= 2 && reader.ReadBoolean();
 
                     group.LiquidType = reader.ReadInt32();
                     group.CustomLiquidType = reader.ReadInt32();

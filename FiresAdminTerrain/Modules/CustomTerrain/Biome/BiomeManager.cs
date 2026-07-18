@@ -1,5 +1,6 @@
 using UnityEngine;
 using VerdantsAscent.Utilities;
+using FiresCore.Utilities; // EnvironmentBoxController (moved to Core)
 
 namespace VerdantsAscent.Terrain.Biome
 {

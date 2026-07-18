@@ -1,6 +1,6 @@
 {
     "name":  "FiresAdminTerrain",
-    "version_number":  "0.1.0",
+    "version_number":  "0.2.168",
     "website_url":  "https://github.com/fire-VA/FiresAdminTerrain",
     "description":  "Part of the Fires mod family for Valheim.",
     "dependencies":  [

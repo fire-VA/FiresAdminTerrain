@@ -158,9 +158,18 @@ namespace VerdantsAscent.Utilities
         //  Public entry points
         // ─────────────────────────────────────────────────────────────
 
+        // Routes a one-line banner header through the plugin's BepInEx log source
+        // (not Debug.Log) so it prints once instead of colour+white. FUC colours it
+        // by the Fires source name.
+        private static void EmitHeader(string text)
+        {
+            if (FiresAdminTerrain.Log != null) FiresAdminTerrain.Log.LogInfo(text);
+            else Debug.Log($"[FiresAdminTerrain] {text}");
+        }
+
         public static void Print()
         {
-            try { Debug.Log($"[FiresAdminTerrain] Fires Admin Terrain Loaded."); }
+            try { EmitHeader("Fires Admin Terrain Loaded."); }
             catch { }
 
             try
@@ -176,7 +185,7 @@ namespace VerdantsAscent.Utilities
 
         public static void PrintBig()
         {
-            try { Debug.Log($"[FiresAdminTerrain] Fires Admin Terrain Loading..."); }
+            try { EmitHeader("Fires Admin Terrain Loading..."); }
             catch { }
 
             try

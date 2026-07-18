@@ -64,7 +64,7 @@ namespace VerdantsAscent.Water.Core
             else if (water is CustomWaterfallController waterfall)
                 s_waterfalls.Add(waterfall);
 
-            Debug.Log($"[CustomWaterManager] Registered {water.GetWaterType()} at {water.transform.position}");
+            FiresLogger.LogVerbose($"[CustomWaterManager] Registered {water.GetWaterType()} at {water.transform.position}");
         }
 
         public static void Unregister(CustomWaterBase water)
@@ -236,7 +236,7 @@ namespace VerdantsAscent.Water.Core
             // Register with combiner system
             WaterMeshCombiner.GetOrCreateCombinerFor(disk);
 
-            Debug.Log($"[CustomWaterManager] Created water disk at {position}, radius={radius}");
+            FiresLogger.LogVerbose($"[CustomWaterManager] Created water disk at {position}, radius={radius}");
             return disk;
         }
 
@@ -267,7 +267,7 @@ namespace VerdantsAscent.Water.Core
         {
             var disk = new WaterDisk(position, radius, maxDepth, liquid);
             WaterMeshCombiner.GetOrCreateCombinerFor(disk);
-            Debug.Log($"[CustomWaterManager] Created {liquid} disk at {position}, radius={radius}");
+            FiresLogger.LogVerbose($"[CustomWaterManager] Created {liquid} disk at {position}, radius={radius}");
             return disk;
         }
 
@@ -409,7 +409,7 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            Debug.Log($"[CustomWaterManager] Cleared {count} water instances from zone {zone}");
+            FiresLogger.LogVerbose($"[CustomWaterManager] Cleared {count} water instances from zone {zone}");
         }
 
         /// <summary>

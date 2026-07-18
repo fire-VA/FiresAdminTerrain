@@ -132,21 +132,30 @@ namespace VerdantsAscent.Utilities
                 string topFrame = "╭─── " + title + " " + new string('─', fillDashes) + "╮";
                 string botFrame = "╰" + new string('─', InnerWidth) + "╯";
 
-                Debug.Log($"[FiresAdminTerrain] {Tag} {topFrame}");
+                EmitLine(topFrame);
                 foreach (var line in lines)
                 {
                     string body = line ?? string.Empty;
                     if (body.Length > InnerWidth - 2) body = body.Substring(0, InnerWidth - 2);
                     body = body.PadRight(InnerWidth - 2);
-                    Debug.Log($"[FiresAdminTerrain] {Tag} │ {body} │");
+                    EmitLine($"│ {body} │");
                 }
-                Debug.Log($"[FiresAdminTerrain] {Tag} {botFrame}");
+                EmitLine(botFrame);
             }
             catch (Exception ex)
             {
-                try { Debug.Log($"[FiresAdminTerrain] {Tag} (summary render failed: {ex.Message}) {title}: {string.Join(", ", lines ?? new string[0])}"); }
+                try { EmitLine($"(summary render failed: {ex.Message}) {title}: {string.Join(", ", lines ?? new string[0])}"); }
                 catch { }
             }
+        }
+
+        // Routes a summary line through the plugin's BepInEx log source (not
+        // Debug.Log) so banner lines print once — Debug.Log would also stdout-echo
+        // a raw white console duplicate. The {Tag} stays for FUC colouring.
+        private static void EmitLine(string frame)
+        {
+            if (FiresAdminTerrain.Log != null) FiresAdminTerrain.Log.LogInfo($"{Tag} {frame}");
+            else Debug.Log($"[FiresAdminTerrain] {Tag} {frame}");
         }
     }
 }

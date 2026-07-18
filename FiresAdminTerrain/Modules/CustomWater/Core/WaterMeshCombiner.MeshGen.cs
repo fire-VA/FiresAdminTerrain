@@ -239,6 +239,20 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private void RegenerateMesh()
         {
+            // ── Volume settle/gel guards (round-56) ─────────────────────
+            // Settling: the pour coroutine owns the grid + mesh; any regen
+            // here would fight it mid-animation.
+            // Gelled: the stored surface grid IS the data — rebuilding
+            // through the IDW pipeline would clobber the settled shape
+            // with disk-derived values. Route to the grid-authoritative
+            // rebuild instead. See Docs/PLAN_WaterVolumePlacement.md.
+            if (_isSettling) return;
+            if (_isGelled)
+            {
+                RebuildFromStoredGrid();
+                return;
+            }
+
             if (_waterDisks.Count == 0)
             {
                 _waterMesh?.Clear();
@@ -313,6 +327,16 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void RegenerateMeshAsync()
         {
+            // Round-56 volume guards — same rationale as RegenerateMesh:
+            // settling combiners are owned by the pour coroutine; gelled
+            // combiners rebuild straight from their stored grid.
+            if (_isSettling) return;
+            if (_isGelled)
+            {
+                RebuildFromStoredGrid();
+                return;
+            }
+
             if (_isRegeneratingAsync) return;
 
             if (_asyncRegenCoroutine != null)
@@ -2083,6 +2107,11 @@ namespace VerdantsAscent.Water.Core
             for (int i = 0; i < _surfaceHeights.Length; i++)
             {
                 if (_surfaceHeights[i] <= -50f) { validCells[i] = false; continue; }
+                // Round-56: settling/gelled volumes legitimately spread
+                // OUTSIDE the original ruler circle (that's the settle) —
+                // the strict disk-footprint cull would clip the spread.
+                // The -50 sentinel above already culls dry cells for them.
+                if (_isGelled || _isSettling) { validCells[i] = true; continue; }
                 int gx = i % _gridWidth;
                 int gz = i / _gridWidth;
                 Vector3 cellWorld = GridToWorld(gx, gz);
@@ -2254,6 +2283,9 @@ namespace VerdantsAscent.Water.Core
             for (int i = 0; i < _waterDepths.Length; i++)
             {
                 if (_surfaceHeights[i] <= -50f) { validCells[i] = false; continue; }
+                // Round-56: settled volumes spread outside the ruler circle;
+                // skip the footprint cull for them (see sync path comment).
+                if (_isGelled || _isSettling) { validCells[i] = true; continue; }
                 int gx = i % _gridWidth;
                 int gz = i / _gridWidth;
                 Vector3 cellWorld = GridToWorld(gx, gz);
@@ -2479,8 +2511,107 @@ namespace VerdantsAscent.Water.Core
 
         #region Material Setup
 
+        // Round-65/66 — material A/B debug switch (`va_water_mat_debug`).
+        //   0 = normal (wrapped FiresWater when FTS installed)
+        //   1 = vanilla `water_liquid` (Custom/Tar family, the tar-pit
+        //       shader tinted for water) — a shader PROVEN to render in
+        //       this world (tar pits use it). Round-66: was "raw captured
+        //       vanilla water", but FTS swaps zone water IN PLACE before
+        //       FAT captures, so the captured material is ALREADY
+        //       FiresWater — mode 1 was comparing FiresWater to itself.
+        //   2 = bright debug material — ground truth for "is the MESH
+        //       visible at all". Round-66: Shader.Find("Standard")
+        //       returned null in-game (no per-combiner log lines after
+        //       ReapplyMaterialsAll mode=2), so we now walk a candidate
+        //       list and LOG the outcome instead of failing silently.
+        public static int DebugMaterialMode;
+        private static Material s_debugBrightMaterial;
+        private static Material s_debugTarWaterMaterial;
+
+        private static readonly string[] DEBUG_SHADER_CANDIDATES =
+        {
+            "Standard", "Sprites/Default", "Unlit/Color", "GUI/Text Shader",
+        };
+
+        private static Material GetDebugOverrideMaterial()
+        {
+            if (DebugMaterialMode == 1)
+            {
+                if (s_debugTarWaterMaterial == null)
+                {
+                    foreach (var m in Resources.FindObjectsOfTypeAll<Material>())
+                    {
+                        if (m != null && m.name == "water_liquid")
+                        {
+                            s_debugTarWaterMaterial = m;
+                            break;
+                        }
+                    }
+                    Debug.Log(s_debugTarWaterMaterial != null
+                        ? $"[WaterMeshCombiner] mat_debug 1: using vanilla 'water_liquid' ({s_debugTarWaterMaterial.shader?.name})"
+                        : "[WaterMeshCombiner] mat_debug 1: vanilla 'water_liquid' NOT FOUND — falling back to captured water material");
+                }
+                return s_debugTarWaterMaterial != null
+                    ? s_debugTarWaterMaterial
+                    : WaterMaterialManager.GetRawWaterMaterial();
+            }
+            if (DebugMaterialMode == 2)
+            {
+                if (s_debugBrightMaterial == null)
+                {
+                    Shader shader = null;
+                    foreach (var name in DEBUG_SHADER_CANDIDATES)
+                    {
+                        shader = Shader.Find(name);
+                        if (shader != null) break;
+                    }
+                    if (shader == null)
+                    {
+                        Debug.LogError($"[WaterMeshCombiner] mat_debug 2: NO debug shader found (tried {string.Join(", ", DEBUG_SHADER_CANDIDATES)}) — mode 2 unavailable.");
+                        return null;
+                    }
+                    s_debugBrightMaterial = new Material(shader)
+                    {
+                        name = "VA_WaterDebug_Bright",
+                        color = new Color(0.1f, 0.6f, 1f, 1f),
+                    };
+                    Debug.Log($"[WaterMeshCombiner] mat_debug 2: built bright debug material on shader '{shader.name}'");
+                }
+                return s_debugBrightMaterial;
+            }
+            return null;
+        }
+
+        // Round-65 — force every live combiner to re-resolve its material
+        // through SetupMaterial. Clears the cached _waterMaterial first so
+        // switching debug modes (including back to 0) actually swaps the
+        // renderer material instead of hitting the early-return cache.
+        public static int ReapplyMaterialsAll()
+        {
+            int n = 0;
+            foreach (var c in AllCombiners)
+            {
+                if (c == null || c._meshRenderer == null) continue;
+                c._waterMaterial = null;
+                c.SetupMaterial();
+                n++;
+            }
+            Debug.Log($"[WaterMeshCombiner] ReapplyMaterialsAll mode={DebugMaterialMode} → {n} combiner(s)");
+            return n;
+        }
+
         private void SetupMaterial()
         {
+            // Debug override wins over everything (round-65).
+            var dbg = GetDebugOverrideMaterial();
+            if (dbg != null)
+            {
+                _waterMaterial = dbg;
+                _meshRenderer.material = dbg;
+                Debug.Log($"[WaterMeshCombiner] SetupMaterial DEBUG override mode={DebugMaterialMode} mat={dbg.name} shader={dbg.shader?.name} queue={dbg.renderQueue}");
+                return;
+            }
+
             if (_waterMaterial != null)
             {
                 _meshRenderer.material = _waterMaterial;

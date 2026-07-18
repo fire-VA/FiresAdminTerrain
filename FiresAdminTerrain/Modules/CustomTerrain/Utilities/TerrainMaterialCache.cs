@@ -34,6 +34,7 @@ namespace VerdantsAscent.Terrain.Utilities
     public static class TerrainMaterialCache
     {
         private static Material s_cachedMaterial;
+        private static Material s_distantMaterial;
         private static Material s_fallbackMaterial;
         private static Texture2D s_paintMaskNothing;
 
@@ -50,11 +51,69 @@ namespace VerdantsAscent.Terrain.Utilities
         // Public read API used by TileMeshRenderer. Returns the cached
         // Custom/Heightmap material when available, otherwise a Standard
         // fallback that's at least visible.
+        private static readonly int s_lodHideProp = Shader.PropertyToID("_LodHideDistance");
+
+        // Custom/FiresVoxelHeightmap from FAT's own adminterrain bundle:
+        // vanilla layer logic, voxel-proper projection (ceilings = cliff rock,
+        // steep faces triplanar). Handed in at bundle load; the shared
+        // terrain material swaps to it on the next GetCurrentMaterial. All
+        // property names match vanilla's, so the captured textures/values
+        // survive the shader swap untouched.
+        private static Shader s_voxelShader;
+        private static bool s_voxelSwapLogged;
+
+        public static void SetVoxelShader(Shader shader) => s_voxelShader = shader;
+
         public static Material GetCurrentMaterial()
         {
-            if (s_cachedMaterial != null) return s_cachedMaterial;
+            if (s_cachedMaterial != null)
+            {
+                // THE VOID BUBBLE, finally: vanilla's near material carries a
+                // DITHERED DISTANCE DISCARD (_LodHideDistance=180 — shader
+                // line "distance dither discard ... len(xz)/_LodHideDistance")
+                // because vanilla hands off to its distant lod at ~180m. We
+                // put that material on EVERYTHING — chunks, lod tiles — so
+                // the whole world self-faded to void past ~180m regardless of
+                // how much geometry stood behind it. Our surfaces render to
+                // the horizon; the discard is neutralized.
+                if (s_voxelShader != null && s_cachedMaterial.shader != s_voxelShader)
+                {
+                    s_cachedMaterial.shader = s_voxelShader;
+                    if (!s_voxelSwapLogged)
+                    {
+                        s_voxelSwapLogged = true;
+                        Debug.Log("[FiresVoxel] terrain material now wears Custom/FiresVoxelHeightmap (voxel-proper projection: cliff ceilings, triplanar steep faces).");
+                    }
+                }
+                if (s_cachedMaterial.HasProperty(s_lodHideProp)
+                    && s_cachedMaterial.GetFloat(s_lodHideProp) < 10000f)
+                    s_cachedMaterial.SetFloat(s_lodHideProp, 100000f);
+                return s_cachedMaterial;
+            }
             if (s_fallbackMaterial == null) BuildFallback();
             return s_fallbackMaterial;
+        }
+
+        // DISTANT-LOD variant of the captured material. Vanilla hides its
+        // horizon mesh near the camera via the _ISDISTANTLOD_ON shader path
+        // (~150m near-fade) — dressing the distant LOD in the NEAR material
+        // disabled that fade, and vanilla's uncarved no-collision horizon
+        // mesh rendered right up to the player: flat sheets bridging every
+        // divot, bright slivers inside every carved cave. Same look as ours,
+        // vanilla's hide-near behavior restored.
+        public static Material GetDistantMaterial()
+        {
+            if (s_distantMaterial != null) return s_distantMaterial;
+            var src = GetCurrentMaterial();
+            if (src == null) return null;
+            var mat = new Material(src) { name = "FiresAdminTerrain_DistantLodMaterial" };
+            mat.EnableKeyword("_ISDISTANTLOD_ON");
+            if (mat.HasProperty("_IsDistantLod")) mat.SetFloat("_IsDistantLod", 1f);
+            if (mat.HasProperty("_LodHideDistance")) mat.SetFloat("_LodHideDistance", 150f);
+            if (mat.HasProperty("_Displacement")) mat.SetFloat("_Displacement", 0.2f);
+            Object.DontDestroyOnLoad(mat);
+            s_distantMaterial = mat;
+            return mat;
         }
 
         // ── Capture path ─────────────────────────────────────────────────
@@ -113,6 +172,19 @@ namespace VerdantsAscent.Terrain.Utilities
                 return;
             }
 
+            // The premise "LOD variants lack _ClearedMaskTex" is FALSE — the
+            // vanilla distant-LOD material HAS it (with _UVScale=0.2 and
+            // _ISDISTANTLOD_ON). Capturing it put 2.5x-frequency textures on
+            // every voxel chunk/tile, and a later recapture mixed instances at
+            // 32m borders. Reject the LOD variant explicitly.
+            bool isDistantLod = source.IsKeywordEnabled("_ISDISTANTLOD_ON")
+                || (source.HasProperty("_IsDistantLod") && source.GetFloat("_IsDistantLod") > 0.5f);
+            if (isDistantLod)
+            {
+                Debug.Log($"[TerrainMaterialCache] Skipping DISTANT-LOD heightmap material from {hm.name} — waiting for a near material.");
+                return;
+            }
+
             // Clone — we're going to mutate cornerBiomes + paint mask, do
             // NOT touch the source material that the vanilla terrain uses.
             var mat = new Material(source) { name = "FiresAdminTerrain_TileMaterial" };
@@ -136,6 +208,10 @@ namespace VerdantsAscent.Terrain.Utilities
                 mat.SetTextureScale("_MainTex", Vector2.one);
                 mat.SetTextureOffset("_MainTex", Vector2.zero);
             }
+            // Kill vanilla's ~180m dithered distance discard on OUR clone —
+            // we have no vanilla distant lod to hand off to (see the void-
+            // bubble note in GetCurrentMaterial).
+            if (mat.HasProperty(s_lodHideProp)) mat.SetFloat(s_lodHideProp, 100000f);
 
             // Force cornerBiomes default to Meadows-x-4. We INHERIT whatever
             // the source heightmap had set, which would tie our tile's look
@@ -152,6 +228,13 @@ namespace VerdantsAscent.Terrain.Utilities
 
             // Upgrade every existing TileMeshRenderer in one pass.
             VerdantsAscent.Terrain.Persistence.TileMeshRenderer.UpgradeAllRenderersToCachedMaterial();
+            // Voxel chunk views only self-healed their material on the next
+            // remesh — after a capture upgrade or va_terrain_recapture,
+            // adjacent chunks wore DIFFERENT instances meeting exactly at the
+            // 32m border until each happened to remesh. Sweep them all now,
+            // live FarQuilt tiles included (pooled tiles rebind on reuse).
+            VerdantsAscent.Terrain.Voxel.VoxelWorld.RefreshAllViewMaterials(mat);
+            VerdantsAscent.Terrain.Voxel.FarQuilt.RefreshAllTileMaterials(mat);
         }
 
         /// <summary>
@@ -164,6 +247,7 @@ namespace VerdantsAscent.Terrain.Utilities
         public static int ForceRecaptureFromScene()
         {
             s_cachedMaterial = null;
+            s_distantMaterial = null;   // rebuilt from the fresh capture
             return ForceCaptureFromScene();
         }
 

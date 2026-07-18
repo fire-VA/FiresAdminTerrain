@@ -41,6 +41,10 @@ namespace VerdantsAscent.Terrain.Persistence
 
         private static bool _registered;
 
+        // Real handler count from the last Register() — feeds the 📡 RPCs
+        // mini-banner (VAFatLoadSummary.EmitRpcs).
+        public static int RegisteredHandlers { get; private set; }
+
         public static void Register()
         {
             if (_registered) return;
@@ -63,7 +67,8 @@ namespace VerdantsAscent.Terrain.Persistence
             rpc.Register<ZPackage>(RPC_GRAB,       (sender, pkg) => RecvWithAdminGate(sender, "Grab",      pkg, Recv_Grab));
             rpc.Register<ZPackage>(RPC_NOISE,      (sender, pkg) => RecvWithAdminGate(sender, "Noise",     pkg, Recv_Noise));
 
-            FiresLogger.LogInfo("[TileBrushRPC] Registered 7 RPC handlers (flat / raise / paint / clear / biome / hole_punch / hole_patch) — admin-gated.");
+            RegisteredHandlers = 10;
+            FiresLogger.LogVerbose("[TileBrushRPC] Registered 10 RPC handlers (flat / raise / paint / clear / biome / hole_punch / hole_patch / smooth / grab / noise) — admin-gated.");
         }
 
         // Resets the registration flag so the next ZRoutedRpc instance gets

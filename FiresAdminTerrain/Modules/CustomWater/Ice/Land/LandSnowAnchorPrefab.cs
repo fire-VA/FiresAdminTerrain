@@ -41,7 +41,7 @@ namespace VerdantsAscent.Water.Core
                 && !ZNetScene.instance.m_namedPrefabs.ContainsKey(hash))
             {
                 ZNetScene.instance.m_namedPrefabs[hash] = _prefab;
-                Debug.Log($"[LandSnowAnchorPrefab] Re-inserted cached '{PrefabName}' into new ZNetScene dict (post-login).");
+                FiresLogger.LogVerbose($"[LandSnowAnchorPrefab] Re-inserted cached '{PrefabName}' into new ZNetScene dict (post-login).");
                 _registered = true;
                 return true;
             }
@@ -84,7 +84,7 @@ namespace VerdantsAscent.Water.Core
             ZNetScene.instance.m_namedPrefabs[hash] = clone;
             _prefab = clone;
             _registered = true;
-            Debug.Log($"[LandSnowAnchorPrefab] Registered '{PrefabName}' in ZNetScene.m_namedPrefabs (hash={hash}).");
+            FiresLogger.LogVerbose($"[LandSnowAnchorPrefab] Registered '{PrefabName}' in ZNetScene.m_namedPrefabs (hash={hash}).");
             return true;
         }
 

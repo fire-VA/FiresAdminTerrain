@@ -97,8 +97,56 @@ namespace VerdantsAscent.Water.Tools
             _lastBrushTime = Time.realtimeSinceStartup;
         }
 
+        // Water ghost — the dotted sphere cage wearing THE WATER SHADER at
+        // the cursor, scaled by the live ruler radius. You see the water you
+        // are about to place, and it follows the raycast while you hold.
+        private GameObject _ghost;
+
+        private void UpdateGhost(Player player)
+        {
+            bool show = player != null && IsOurBrushToolSelected(player);
+            Vector3 cursor = Vector3.zero;
+            if (show)
+            {
+                if (!InfinityHammerRulerProbe.TryGetRulerPosition(out cursor)
+                    && !TileBrush.TryGetPointerWorldPosition(out cursor))
+                    show = false;
+            }
+            if (!show)
+            {
+                if (_ghost != null && _ghost.activeSelf) _ghost.SetActive(false);
+                return;
+            }
+            if (_ghost == null)
+            {
+                _ghost = Terrain.Voxel.VoxelBrushDrag.BuildSphereGizmo(transform, Terrain.Voxel.VoxelBrushDrag.SharedLineMat());
+                Terrain.Voxel.VoxelBrushDrag.AddSolidChild(_ghost, PrimitiveType.Sphere);
+                var blue = new Color(0.35f, 0.75f, 1f, 1f);
+                foreach (var lr in _ghost.GetComponentsInChildren<LineRenderer>(true))
+                {
+                    lr.startColor = blue;
+                    lr.endColor = blue;
+                }
+            }
+            _ghost.SetActive(true);
+            _ghost.transform.position = cursor;
+            _ghost.transform.localScale = Vector3.one * (Terrain.Voxel.VoxelBrushDrag.EffectiveGizmoRadius() * 2f);
+            var cage = _ghost.transform.Find("cage");
+            if (cage != null)
+                cage.localRotation = Quaternion.Euler(0f, Time.time * Terrain.Voxel.VoxelBrushDrag.CAGE_SPIN_DEG_PER_SEC, 0f);
+            var solid = _ghost.transform.Find("solid");
+            if (solid != null)
+            {
+                var mr = solid.GetComponent<MeshRenderer>();
+                var mat = Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
+                if (mr != null && mat != null && mr.sharedMaterial != mat) mr.sharedMaterial = mat;
+            }
+        }
+
         private void Update()
         {
+            UpdateGhost(Player.m_localPlayer);
+
             if (_kind == BrushKind.None) return;
             if (Time.realtimeSinceStartup - _lastBrushTime > DRAG_FRESHNESS_SECONDS) return;
 
@@ -174,8 +222,13 @@ namespace VerdantsAscent.Water.Tools
             float spacing = _radius * spacingRatio;
             if (spacing < 0.01f) return;
 
-            int dabsThisFrame = 0;
-            while (dabsThisFrame < MAX_DABS_PER_FRAME)
+            // Round-63 — same draw-speed throttle as the terrain pump
+            // (shared TileBrushModes.DrawSpeed, `va_brush_drawspeed`).
+            _dabBudget = Mathf.Min(
+                _dabBudget + VerdantsAscent.Terrain.Persistence.TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME,
+                MAX_DABS_PER_FRAME);
+
+            while (_dabBudget >= 1f)
             {
                 float pdx = _brushPos.x - _lastDabPos.x;
                 float pdz = _brushPos.z - _lastDabPos.z;
@@ -190,9 +243,12 @@ namespace VerdantsAscent.Water.Tools
 
                 DispatchAt(nextDab);
                 _lastDabPos = nextDab;
-                dabsThisFrame++;
+                _dabBudget -= 1f;
             }
         }
+
+        // Round-63 — fractional dab allowance for the draw-speed throttle.
+        private float _dabBudget;
 
         private void DispatchAt(Vector3 cursor)
         {
@@ -213,22 +269,15 @@ namespace VerdantsAscent.Water.Tools
 
                 case BrushKind.Waterfall:
                     // Waterfall: each dab sits a constant distance above
-                    // the local terrain raycast. Surface FOLLOWS the
-                    // slope, so the water reads as flowing down the cliff
-                    // face at uniform thickness.
-                    float terrainY;
-                    if (ZoneSystem.instance != null
-                        && ZoneSystem.instance.GetGroundHeight(
-                            new Vector3(cursor.x, cursor.y + 50f, cursor.z),
-                            out terrainY))
-                    {
+                    // the local terrain. Surface FOLLOWS the slope so the
+                    // water reads as flowing down the cliff face at
+                    // uniform thickness. Round-68: physics probe against
+                    // real colliders — GetGroundHeight is heightmap-blind
+                    // and put dabs meters under custom cliffs.
+                    if (TryProbeGroundBelow(cursor, out float terrainY))
                         placeCenter = new Vector3(cursor.x, terrainY + WATERFALL_OFFSET, cursor.z);
-                    }
                     else
-                    {
-                        // Fallback: just use the cursor Y unchanged.
                         placeCenter = cursor;
-                    }
                     placeDepth = WATERFALL_DAB_DEPTH;
                     break;
 
@@ -244,6 +293,36 @@ namespace VerdantsAscent.Water.Tools
             {
                 FiresLogger.LogWarning($"[WaterBrushDrag] DispatchAt threw at {placeCenter}: {ex.Message}");
             }
+        }
+
+        // Round-68 — ground probe against REAL colliders for waterfall
+        // dabs (and the waterfall command's first dab). The dab point
+        // comes from a crosshair raycast, so it already sits ON the
+        // visible surface — probe a short window around it to normalize
+        // onto the exact collider height. Never uses GetGroundHeight
+        // (heightmap-blind — meters off on FAT custom terrain).
+        private static readonly RaycastHit[] s_probeHits = new RaycastHit[8];
+        private static int s_probeMask = -1;
+
+        public static bool TryProbeGroundBelow(Vector3 point, out float groundY)
+        {
+            groundY = point.y;
+            if (s_probeMask < 0)
+                s_probeMask = LayerMask.GetMask(
+                    "Default", "static_solid", "piece", "terrain", "Default_small");
+
+            var origin = new Vector3(point.x, point.y + 2f, point.z);
+            int n = Physics.RaycastNonAlloc(origin, Vector3.down, s_probeHits, 60f,
+                s_probeMask, QueryTriggerInteraction.Ignore);
+            float best = float.NegativeInfinity;
+            for (int i = 0; i < n; i++)
+            {
+                float y = s_probeHits[i].point.y;
+                if (y > best) best = y;
+            }
+            if (float.IsNegativeInfinity(best)) return false;
+            groundY = best;
+            return true;
         }
 
         // Tools where drag should re-fire water dispatches. Match

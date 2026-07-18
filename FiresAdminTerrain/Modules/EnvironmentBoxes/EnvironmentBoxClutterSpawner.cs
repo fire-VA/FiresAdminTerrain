@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using FiresCore.Utilities; // EnvironmentBoxController (moved to Core)
 
 namespace VerdantsAscent.Utilities
 {

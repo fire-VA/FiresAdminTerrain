@@ -30,6 +30,10 @@ namespace VerdantsAscent.Terrain.Lifecycle
 
         private static bool _registered;
 
+        // Real handler count from the last Register() — feeds the 📡 RPCs
+        // mini-banner (VAFatLoadSummary.EmitRpcs).
+        public static int RegisteredHandlers { get; private set; }
+
         // Register handlers on the ZRoutedRpc instance. Idempotent — safe
         // to call repeatedly. Called from ZNet.Awake postfix below so we
         // re-register on logout/reconnect (without this, _registered
@@ -43,7 +47,8 @@ namespace VerdantsAscent.Terrain.Lifecycle
             rpc.Register<ZPackage>(RPC_REQUEST_SCRUB, (sender, pkg) => RPC_HandleRequest(sender, pkg));
             rpc.Register<ZPackage>(RPC_APPLY_SCRUB,   (sender, pkg) => RPC_HandleApply(sender, pkg));
             _registered = true;
-            FiresLogger.LogInfo("[RegionScrubberRPC] Registered 2 handlers (request + apply).");
+            RegisteredHandlers = 2;
+            FiresLogger.LogVerbose("[RegionScrubberRPC] Registered 2 handlers (request + apply).");
         }
 
         // Called on ZNet shutdown / logout so the next session re-registers
