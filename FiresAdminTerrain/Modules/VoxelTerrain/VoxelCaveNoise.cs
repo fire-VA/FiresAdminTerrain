@@ -14,6 +14,10 @@ namespace VerdantsAscent.Terrain.Voxel
     // so tunnel walls interpolate smoothly instead of stair-stepping.
     public static class VoxelCaveNoise
     {
+        // Smallest carve a sinkhole is allowed to make (metres). Anything less
+        // is a sliver, not a hole — see the ribbon note in CarveSdf.
+        private const float SINK_MIN_BITE = 0.75f;
+
         private static int s_seed;
         public static void SetSeed(int worldSeed) => s_seed = worldSeed;
 
@@ -68,13 +72,80 @@ namespace VerdantsAscent.Terrain.Voxel
         public static float CarveSdf(float wx, float wy, float wz, float depthBelowSurface)
         {
             if (wy < FiresVoxelConfig.CaveMinY.Value) return -10f;
-            if (depthBelowSurface > FiresVoxelConfig.CaveMaxDepth.Value) return -10f;
-
-            float width = FiresVoxelConfig.CaveWidth.Value
-                        * Mathf.Clamp01(depthBelowSurface / FiresVoxelConfig.CaveSurfacePinch.Value);
-            if (width <= 0.002f) return -10f;
 
             float f = FiresVoxelConfig.CaveFrequency.Value;
+
+            // SINKHOLES — rare open vertical drops from the surface into the
+            // tunnel layer. A sparse HORIZONTAL mask (no Y term) makes each one a
+            // column rather than a blob; the noise level-set doubles as the radial
+            // falloff, so the shaft is widest at its centre and tapers to nothing
+            // at the rim. Evaluated before the depth gate because a sinkhole is
+            // exactly the case that must reach the open air.
+            float sinkhole = -10f;
+            float sinkDepth = FiresVoxelConfig.SinkholeDepth.Value;
+            if (depthBelowSurface <= sinkDepth)
+            {
+                float sThresh = FiresVoxelConfig.SinkholeRarity.Value;
+                float sf = f * 0.22f;
+                float sh = Noise(wx * sf + 1721.3f, 7.77f, wz * sf + 449.9f);
+                if (sh > sThresh)
+                {
+                    float t = (sh - sThresh) / Mathf.Max(1f - sThresh, 1e-4f);
+                    // FUNNEL, not a column. Narrow at the lip and opening out as
+                    // it descends, so the cave ROOF survives everywhere except
+                    // the entrance itself. The first cut had this inverted —
+                    // widest at the surface — which stripped the roof across the
+                    // whole shaft footprint and left the ceiling in floating
+                    // fragments over a butchered crater.
+                    float depthT = Mathf.Clamp01(depthBelowSurface / Mathf.Max(sinkDepth, 1f));
+                    float profile = Mathf.Lerp(0.28f, 1f, depthT * depthT);
+                    float bite = t * FiresVoxelConfig.SinkholeRadius.Value * profile;
+                    // A shaft either cuts properly or not at all. Around the
+                    // threshold contour `bite` ramps up from ~0, and a carve of a
+                    // few centimetres leaves a paper-thin shell sitting on the
+                    // original surface — those are the ribbons//checkerboard
+                    // slivers left hanging around a sinkhole. Below the minimum
+                    // bite the shaft simply doesn't cut, giving a clean rim.
+                    sinkhole = bite >= SINK_MIN_BITE ? bite : -10f;
+                }
+            }
+
+            if (depthBelowSurface > FiresVoxelConfig.CaveMaxDepth.Value)
+                return Mathf.Clamp(sinkhole, -10f, 12f);
+
+            // ENTRANCES — tunnels normally pinch shut approaching the surface so
+            // they stay buried. Where this sparse horizontal mask runs high the
+            // pinch is released and the tunnel drives clean through to open air,
+            // which is what turns "occasional accidental breakthrough" into
+            // findable entrances.
+            float pinch = Mathf.Clamp01(depthBelowSurface / FiresVoxelConfig.CaveSurfacePinch.Value);
+            float eThresh = FiresVoxelConfig.EntranceRarity.Value;
+            float ef = f * 0.35f;
+            float ent = Noise(wx * ef + 913.1f, 3.21f, wz * ef + 285.7f);
+            if (ent > eThresh)
+            {
+                float e = (ent - eThresh) / Mathf.Max(1f - eThresh, 1e-4f);
+                pinch = Mathf.Lerp(pinch, 1f, Mathf.SmoothStep(0f, 1f, e));
+            }
+
+            float width = FiresVoxelConfig.CaveWidth.Value * pinch;
+
+            // CAVERNS — a much lower-frequency octave that locally fattens the
+            // tunnel into a chamber. Because it is low frequency the rooms are
+            // large and occasional, and because it only ADDS width the tunnel
+            // network stays continuous: passages open out and close back down
+            // instead of running at one gauge forever.
+            float cThresh = FiresVoxelConfig.CavernRarity.Value;
+            float cf = f * FiresVoxelConfig.CavernScale.Value;
+            float ch = Noise(wx * cf + 411.2f, wy * cf * 0.6f + 88.5f, wz * cf + 77.4f);
+            if (ch > cThresh)
+            {
+                float c = (ch - cThresh) / Mathf.Max(1f - cThresh, 1e-4f);
+                width += FiresVoxelConfig.CavernBoost.Value * Mathf.SmoothStep(0f, 1f, c) * pinch;
+            }
+
+            if (width <= 0.002f) return Mathf.Clamp(sinkhole, -10f, 12f);
+
             float fy = FiresVoxelConfig.CaveFrequencyY.Value;
             float n1 = Mathf.Abs(Noise(wx * f, wy * fy, wz * f) - 0.5f);
             float n2 = Mathf.Abs(Noise((wx + 137.7f) * f * 1.31f, (wy - 91.3f) * fy * 1.27f, (wz + 53.9f) * f * 1.31f) - 0.5f);
@@ -83,7 +154,11 @@ namespace VerdantsAscent.Terrain.Voxel
             // noise-units → metres: value-noise gradient ≈ 0.5·freq per metre,
             // so distance-to-wall ≈ (width − m) / (0.5·freq). width 0.05 @
             // freq 0.025 ≈ 4m-radius tunnels. Clamped to keep the SDF band sane.
-            return Mathf.Clamp((width - m) / Mathf.Max(0.5f * f, 1e-4f), -10f, 12f);
+            float tunnel = (width - m) / Mathf.Max(0.5f * f, 1e-4f);
+
+            // Union of the two carves — a sinkhole punches through regardless of
+            // whether a tunnel happens to run here, and drops into one where it does.
+            return Mathf.Clamp(Mathf.Max(tunnel, sinkhole), -10f, 12f);
         }
     }
 }

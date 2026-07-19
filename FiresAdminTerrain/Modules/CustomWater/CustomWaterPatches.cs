@@ -164,6 +164,19 @@ namespace VerdantsAscent.Water.Core
                     bestWaterLevel = pourLevel;
             }
 
+            // GENERATED river/lake water. THIS is the function every swim check
+            // actually calls (InWater / IsSwimming / GetLiquidLevel all route
+            // here) — CustomWaterManager.GetWaterLevelAt is NOT consulted by
+            // them, so reporting there did nothing and generated water stayed
+            // unswimmable. Reported here it behaves exactly like a pour: the
+            // same blocked-by-geometry test, the same swim thresholds.
+            float genLevel = VerdantsAscent.Terrain.Voxel.VoxelGenWaterMesh.SurfaceAt(pos);
+            if (genLevel > -9999f && !IsWaterBlockedFromCharacter(pos, genLevel, isLocalPlayer))
+            {
+                if (genLevel > bestWaterLevel)
+                    bestWaterLevel = genLevel;
+            }
+
             return bestWaterLevel;
         }
 

@@ -20,6 +20,14 @@ namespace VerdantsAscent.Terrain.Voxel
         public static int ChunkCount => s_chunks.Count;
         public static IEnumerable<VoxelChunk> AllChunks => s_chunks.Values;
 
+        // What the memory governor budgets against: chunks that actually hold
+        // density arrays + a mesh/collider. Uniform (all-solid/all-air) chunks
+        // carry no arrays and no GameObject, so they cost almost nothing and do
+        // not count toward the RAM ceiling. s_fullChunkCount tracks it directly
+        // (a running counter beats scanning s_chunks every governor pass).
+        public static int BudgetedChunkCount => s_fullChunkCount;
+        internal static int s_fullChunkCount;
+
         // Highest voxel surface (solid→air crossing) at (wx,wz) within world-Y
         // [botY, topY], reading the edited density directly — no physics, no
         // raycast-miss defaults, no async-collider races. solidAtTop = the
@@ -75,13 +83,65 @@ namespace VerdantsAscent.Terrain.Voxel
         // the chunk + column indices like a brush chunk.
         public static VoxelChunk CreateStreamed(Vector3Int key)
         {
-            if (s_chunks.TryGetValue(key, out var existing)) return existing;
-            var chunk = new VoxelChunk(key);
-            s_chunks[key] = chunk;
-            var colKey = new Vector2Int(key.x, key.z);
+            if (s_chunks.TryGetValue(key, out var existing))
+            {
+                PromoteToFull(existing);
+                return existing;
+            }
+            return RegisterNewChunk(new VoxelChunk(key));
+        }
+
+        // Deep-solid / high-air stack: a chunk that participates in the Y-range
+        // union + border ownership but holds no arrays, mesh or collider. An
+        // existing FULL chunk is only downgraded when it carries no brush edits
+        // (frozen brushwork stays Full); an existing uniform chunk just retunes
+        // its kind (solid↔air is free).
+        public static VoxelChunk EnsureUniformChunk(Vector3Int key, ChunkKind kind)
+        {
+            if (s_chunks.TryGetValue(key, out var existing))
+            {
+                if (existing.Kind == ChunkKind.Full)
+                {
+                    if (existing.HasBrushEdits) return existing;
+                    DropView(key);
+                    existing.MakeUniform(kind);
+                    if (s_fullChunkCount > 0) s_fullChunkCount--;
+                }
+                else existing.RetuneUniform(kind);
+                return existing;
+            }
+            return RegisterNewChunk(VoxelChunk.NewUniform(key, kind));
+        }
+
+        public static void PromoteToFull(VoxelChunk chunk)
+        {
+            if (chunk == null || chunk.Kind == ChunkKind.Full) return;
+            chunk.MakeFull();
+            s_fullChunkCount++;
+        }
+
+        // Drop a chunk's scene presence (mesh + collider) WITHOUT dropping the
+        // chunk — used when a Full chunk reclassifies to uniform.
+        public static void DropView(Vector3Int key)
+        {
+            if (s_views.TryGetValue(key, out var view))
+            {
+                s_views.Remove(key);
+                if (view != null) Object.Destroy(view.gameObject);
+            }
+        }
+
+        // Single registration point for a freshly-constructed chunk: the chunk
+        // dictionary, the per-column stack (Y-range union + liquid queries), and
+        // the governor's full-chunk counter all stay in lockstep here.
+        private static VoxelChunk RegisterNewChunk(VoxelChunk chunk)
+        {
+            s_chunks[chunk.Key] = chunk;
+            var colKey = new Vector2Int(chunk.Key.x, chunk.Key.z);
             if (!s_columns.TryGetValue(colKey, out var stack))
                 s_columns[colKey] = stack = new List<VoxelChunk>(2);
             stack.Add(chunk);
+            if (chunk.HoldsArrays) s_fullChunkCount++;
             return chunk;
         }
 
@@ -95,6 +155,9 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (s_chunks.TryGetValue(key, out var existing))
             {
+                // A persisted edit landing on a deep uniform chunk needs a real
+                // array to import into — promote before anything reads _density.
+                PromoteToFull(existing);
                 // Streamed chunk still awaiting worker generation: ImportDensity
                 // would set PendingGenerate=false and null the gather payload —
                 // _seed (and interior biome) would stay ALL-ZERO forever, so
@@ -108,15 +171,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 return existing;
             }
-            if (s_chunks.Count >= FiresVoxelConfig.MaxLoadedChunks.Value) return null;
+            if (s_fullChunkCount >= FiresVoxelConfig.MaxLoadedChunks.Value) return null;
             var chunk = new VoxelChunk(key);
             chunk.SeedFromGround();
-            s_chunks[key] = chunk;
-            var colKey = new Vector2Int(key.x, key.z);
-            if (!s_columns.TryGetValue(colKey, out var stack))
-                s_columns[colKey] = stack = new List<VoxelChunk>(2);
-            stack.Add(chunk);
-            return chunk;
+            return RegisterNewChunk(chunk);
         }
 
         // ── P1 — debounced persistence flush ─────────────────────────────────
@@ -220,18 +278,22 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (!s_chunks.TryGetValue(key, out var chunk))
                         {
                             if (mode == VoxelBrushMode.Restore) continue;   // nothing here to delete
-                            if (s_chunks.Count >= FiresVoxelConfig.MaxLoadedChunks.Value) { capped++; continue; }
+                            if (s_fullChunkCount >= FiresVoxelConfig.MaxLoadedChunks.Value) { capped++; continue; }
                             chunk = new VoxelChunk(key);
                             sw.Restart();
                             chunk.SeedFromGround();
                             sw.Stop();
                             seedMs += (float)sw.Elapsed.TotalMilliseconds;
-                            s_chunks[key] = chunk;
-                            var colKey = new Vector2Int(key.x, key.z);
-                            if (!s_columns.TryGetValue(colKey, out var stack))
-                                s_columns[colKey] = stack = new List<VoxelChunk>(2);
-                            stack.Add(chunk);
+                            RegisterNewChunk(chunk);
                             seeded++;
+                        }
+
+                        // Carve/fill landing on a deep uniform chunk needs real
+                        // arrays; Restore on pristine (uniform) ground is a no-op.
+                        if (chunk.Kind != ChunkKind.Full)
+                        {
+                            if (mode == VoxelBrushMode.Restore) continue;
+                            PromoteToFull(chunk);
                         }
 
                         // Streamed chunk still awaiting worker generation —
@@ -370,6 +432,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_chunks.TryGetValue(key, out var chunk))
             {
                 s_chunks.Remove(key);
+                if (chunk.HoldsArrays && s_fullChunkCount > 0) s_fullChunkCount--;
                 var colKey = new Vector2Int(key.x, key.z);
                 if (s_columns.TryGetValue(colKey, out var stack))
                 {
@@ -391,6 +454,15 @@ namespace VerdantsAscent.Terrain.Voxel
         // Material capture/recapture fan-out: chunk views only self-heal
         // their material on remesh — sweep them all so adjacent chunks never
         // wear different instances meeting at a 32m border.
+        // Push the terrain shadow-cast setting onto every live chunk so the
+        // config applies without a relog (the cost/benefit is only judgeable
+        // by toggling it in place).
+        public static void RefreshAllViewShadows()
+        {
+            foreach (var kv in s_views)
+                if (kv.Value != null) kv.Value.RefreshShadowMode();
+        }
+
         public static void RefreshAllViewMaterials(Material mat)
         {
             if (mat == null) return;
@@ -422,6 +494,7 @@ namespace VerdantsAscent.Terrain.Voxel
             s_chunks.Clear();
             s_views.Clear();
             s_columns.Clear();
+            s_fullChunkCount = 0;
             foreach (var kv in s_paintMasks)
                 if (kv.Value != null) Object.Destroy(kv.Value);
             s_paintMasks.Clear();

@@ -45,12 +45,33 @@ namespace VerdantsAscent.Terrain.Voxel
         private static byte[] _biomeMap;       // W4.1 — OUR biome placement, same grid
         private static byte[] _riverMask;      // 0 none, 1 river bed, 2 bank
         private static float[] _waterLevel;    // v8 — min(flood fill, original terrain): the spring fill level
+        // int16-PACKED resident copies. The float _grid/_waterLevel above are
+        // gen/init scratch; after init they are packed into these and FREED, so
+        // the resident 2m grid halves (~1.1GB → ~550MB — the dedi's runtime OOM).
+        // Every RUNTIME sampler reads these. PACK=46 → ±712m range, ~2cm step;
+        // bilinear + the ±2.6m detail noise in SampleFinalMeters dither it away.
+        // Deterministic (client+dedi pack/unpack identically), gen output & the
+        // on-disk cache stay float so the offline mirror is unaffected.
+        private static short[] _gridS;
+        private static short[] _waterS;
+        private const float PACK = 46f, UNPACK = 1f / 46f;
+        private static short[] PackI16(float[] f)
+        {
+            if (f == null) return null;
+            var s = new short[f.Length];
+            for (int i = 0; i < f.Length; i++)
+            {
+                float v = f[i] * PACK;
+                s[i] = v >= 32767f ? (short)32767 : v <= -32768f ? (short)-32768 : (short)v;
+            }
+            return s;
+        }
         private static int _res;
         private static float _half = HALF;     // VAHC bases can span a different radius
         private static bool _active;
         private static int _seed;              // world seed (detail noise)
 
-        public static bool Active => _active && _grid != null;
+        public static bool Active => _active && _gridS != null;
 
         // Biome codes (grid) → Heightmap.Biome. Order matches the offline
         // mirror: Meadows, BlackForest, Swamp, Mountain, Plains, Mistlands,
@@ -83,7 +104,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // must WAIT for this — sampling before the grid exists returns 0m
         // (below sea) and the quilt tombstoned its whole far ring as
         // "underwater" on fresh worlds: ocean to the horizon.
-        public static bool GridReady => _grid != null;
+        public static bool GridReady => _gridS != null;
 
         // One-entry memo per thread: the vanilla heightmap build calls this
         // 4× per vertex (corner-biome blending) and biome selection hammers
@@ -143,19 +164,20 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetGenWater(float wx, float wz, out float level, out bool wet)
         {
             level = 0f; wet = false;
-            var m = _riverMask; var w = _waterLevel; var g = _grid;
+            var m = _riverMask; var w = _waterS; var g = _gridS;
             if (m == null || w == null || g == null) return false;
             int n = _res; float half = _half;
             int gx = Mathf.RoundToInt((wx + half) / (2f * half) * (n - 1));
             int gz = Mathf.RoundToInt((wz + half) / (2f * half) * (n - 1));
             if (gx < 0 || gx >= n || gz < 0 || gz >= n) return false;
             int i = gz * n + gx;
-            level = w[i];
+            level = w[i] * UNPACK;
             byte mk = m[i];
+            float gi = g[i] * UNPACK;
             // Channel cells (v29 single-stem carve — genuinely dug trench)
             // wet at real submersion; everything else = pond rule (post
             // basin-normalize).
-            wet = (mk == 1 || mk == 3) ? level - g[i] >= 0.4f : level - g[i] >= 1.2f;
+            wet = (mk == 1 || mk == 3) ? level - gi >= 0.4f : level - gi >= 1.2f;
             return true;
         }
 
@@ -177,7 +199,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetGenWaterSmooth(float wx, float wz, out float level, out float depth)
         {
             level = 0f; depth = 0f;
-            var w = _waterLevel; var g = _grid;
+            var w = _waterS; var g = _gridS;
             if (w == null || g == null) return false;
             int n = _res; float half = _half;
             float cell = (2f * half) / (n - 1);
@@ -187,13 +209,13 @@ namespace VerdantsAscent.Terrain.Voxel
             int xi = (int)gx, zi = (int)gz;
             float fx = gx - xi, fz = gz - zi;
             int i = zi * n + xi;
-            float w00 = w[i], w10 = w[i + 1], w01 = w[i + n], w11 = w[i + n + 1];
+            float w00 = w[i] * UNPACK, w10 = w[i + 1] * UNPACK, w01 = w[i + n] * UNPACK, w11 = w[i + n + 1] * UNPACK;
             level = w00 * (1f - fx) * (1f - fz) + w10 * fx * (1f - fz)
                   + w01 * (1f - fx) * fz + w11 * fx * fz;
-            float d00 = Mathf.Max(0f, w00 - g[i]);
-            float d10 = Mathf.Max(0f, w10 - g[i + 1]);
-            float d01 = Mathf.Max(0f, w01 - g[i + n]);
-            float d11 = Mathf.Max(0f, w11 - g[i + n + 1]);
+            float d00 = Mathf.Max(0f, w00 - g[i] * UNPACK);
+            float d10 = Mathf.Max(0f, w10 - g[i + 1] * UNPACK);
+            float d01 = Mathf.Max(0f, w01 - g[i + n] * UNPACK);
+            float d11 = Mathf.Max(0f, w11 - g[i + n + 1] * UNPACK);
             depth = d00 * (1f - fx) * (1f - fz) + d10 * fx * (1f - fz)
                   + d01 * (1f - fx) * fz + d11 * fx * fz;
             return true;
@@ -218,12 +240,19 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             _active = false;
             s_sampleGen++;   // invalidate every thread's sampler memo
-            _grid = null;
+            _grid = null; _gridS = null;
             _biomeMap = null;
             _riverMask = null;
-            _waterLevel = null;
+            _waterLevel = null; _waterS = null;
             if (world == null || world.m_menu) return;
 
+            // Master switch: OFF ⇒ never activate Fires worldgen, exactly like WorldGenMode.Off. Leaves
+            // _active=false so all five WorldGenerator patches (height/biome/rivers) passthrough to vanilla.
+            if (FiresVoxelConfig.CustomGeneration != null && !FiresVoxelConfig.CustomGeneration.Value)
+            {
+                Debug.Log("[FiresWorldGen] Fires Custom Generation master switch is OFF — vanilla generation.");
+                return;
+            }
             var mode = FiresVoxelConfig.WorldGenMode?.Value ?? FiresWorldGenMode.Auto;
             if (mode == FiresWorldGenMode.Off) return;
             bool nameHit = (world.m_name ?? "").StartsWith("Fires", StringComparison.OrdinalIgnoreCase);
@@ -307,6 +336,12 @@ namespace VerdantsAscent.Terrain.Voxel
             _seed = world.m_seed;
             NormalizeBasinWater();
             AuditWater();
+            // Pack the resident grid to int16 and free the float copies — halves
+            // the 2m grid's runtime footprint (the dedi OOM). Gen/Save/Normalize/
+            // Audit above all ran on the float arrays; every runtime sampler
+            // below reads _gridS/_waterS.
+            _gridS = PackI16(_grid); _waterS = PackI16(_waterLevel);
+            _grid = null; _waterLevel = null;
             _active = true;
             Debug.Log($"[FiresWorldGen] ACTIVE for '{world.m_name}' seed={world.m_seed} grid={n} half={half:F0} droplets={droplets} " +
                       $"({source}) in {sw.ElapsedMilliseconds}ms | {path}");
@@ -355,8 +390,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 var pour = PriorityFloodFill(g, n);
                 int settledCells = 0;
                 for (int i = 0; i < n * n; i++)
-                    if (w[i] > pour[i]) { w[i] = pour[i]; settledCells++; }
-                Debug.Log($"[FiresWorldGen] water settled: {settledCells:N0} cells lowered to the pour surface in {sw.ElapsedMilliseconds}ms.");
+                    // RIVER REWORK — rivers FLOW (not at rest), so they legitimately
+                    // ride above the local flat pour surface as they run downhill.
+                    // Settling them to the pour surface flattened the sloped channel
+                    // into flat pools with step-falls wherever it crossed low ground
+                    // (the user: "rides the right height in some spots, not others").
+                    // Only STILL water (non-river cells: lakes/ocean) settles.
+                    if (m[i] != 1 && m[i] != 3 && w[i] > pour[i]) { w[i] = pour[i]; settledCells++; }
+                Debug.Log($"[FiresWorldGen] water settled: {settledCells:N0} non-river cells lowered to the pour surface in {sw.ElapsedMilliseconds}ms.");
             }
             var seen = new bool[n * n];
             var stack = new Stack<int>(1024);
@@ -499,7 +540,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static float SampleBaseNormalizedUncached(float wx, float wy)
         {
-            var g = _grid;
+            var g = _gridS;
             int n = _res;
             float half = _half;
             if (g == null) return 0f;
@@ -512,8 +553,8 @@ namespace VerdantsAscent.Terrain.Voxel
             int xi = (int)gx, zi = (int)gz;
             float fx = gx - xi, fz = gz - zi;
             int i = zi * n + xi;
-            float h = g[i] * (1f - fx) * (1f - fz) + g[i + 1] * fx * (1f - fz)
-                    + g[i + n] * (1f - fx) * fz + g[i + n + 1] * fx * fz;
+            float h = (g[i] * (1f - fx) * (1f - fz) + g[i + 1] * fx * (1f - fz)
+                    + g[i + n] * (1f - fx) * fz + g[i + n + 1] * fx * fz) * UNPACK;
 
             float baseN = h / 200f;
             float r = Mathf.Sqrt(wx * wx + wy * wy);
@@ -534,6 +575,8 @@ namespace VerdantsAscent.Terrain.Voxel
             var h = new float[n * n];
             float cell = (2f * HALF) / (n - 1);
             int s = seed * 7;
+            var gsw = System.Diagnostics.Stopwatch.StartNew();
+            Debug.Log($"[FiresWorldGen] GENERATING {n}x{n} grid (~{cell:F1}m cells) — first-load build. On a 2m grid this takes SEVERAL MINUTES (mono is ~3x the offline tool); watch these stage logs so you know it is alive, not hung.");
 
             // Crater ring-basins — the reference map's signature. Large floors
             // dip below the waterline and become circular lakes; the erosion
@@ -739,6 +782,21 @@ namespace VerdantsAscent.Terrain.Voxel
                         y += mass[mi + 3] * (1f - Smooth(0.55f, 1.1f, dm));
                     }
 
+                    // v21 — MOUNTAIN RIDGE STRUCTURE: the range + alpine lifts are
+                    // smooth domes; real mountains have crests, spurs and gullies.
+                    // Layer ridged relief scaled by how high we already are (nil in
+                    // lowland, full above the ~85m mountain line) so ranges read as
+                    // ridgelines, not blobs — two scales (broad crest spines + finer
+                    // spurs). The erosion pass then bites these into a dissected
+                    // massif. World-meter noise = resolution-independent.
+                    float mtnT = Smooth(85f, 140f, y);
+                    if (mtnT > 0.001f)
+                    {
+                        float crest = Ridged(wx, wz, 1f / 340f, 4, s + 205) - 0.5f;
+                        float spur = Ridged(wx, wz, 1f / 110f, 3, s + 206) - 0.5f;
+                        y += mtnT * (crest * 44f + spur * 20f);
+                    }
+
                     y += (Fbm(qx, qz, 1f / 240f, 2, s + 14) - 0.5f) * 9f;
 
                     for (int ci = 0; ci < crat.Length; ci += 8)
@@ -802,8 +860,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             });
 
+            Debug.Log($"[FiresWorldGen]  ├ base relief done ({gsw.ElapsedMilliseconds}ms); eroding {(long)droplets * n * n / (2048L * 2048L):N0} droplets...");
             Erode(h, n, droplets, seed ^ 0x51ED);
+            Debug.Log($"[FiresWorldGen]  ├ erosion done ({gsw.ElapsedMilliseconds}ms); carving rivers (the longest stage)...");
             riverMask = CarveRivers(h, n, seed, out waterLevel);
+            Debug.Log($"[FiresWorldGen]  └ rivers carved ({gsw.ElapsedMilliseconds}ms) — base grid complete; building biomes + saving cache next.");
             return h;
         }
 
@@ -992,67 +1053,91 @@ namespace VerdantsAscent.Terrain.Voxel
             // parallel dry slit channels beside the painted rivers
             // (live-cache-proven; unaffected by any mask/paint fix because
             // the grooves are in the TERRAIN, not the water field).
-            var dir = new int[n * n];
+            // v32 — D-INFINITY flow (Tarboton 1997): CONTINUOUS flow direction,
+            // replacing the D8 single-flow that locked every channel to one of 8
+            // compass headings — rivers drew as straight axis/diagonal segments
+            // with 45°/90° jogs (user-caught at native res). Each cell takes the
+            // steepest of its 8 triangular facets → a REAL-VALUED flow angle, and
+            // SPLITS its flow between the two neighbours bracketing that angle, so
+            // accumulation (and every incised channel) follows smooth curves.
+            // (The dominant-receiver array `dir[]` was dropped with the tree
+            // level-solve that consumed it — nothing reads it now; removing it
+            // saves a full n² int buffer at 2m, part of the CarveRivers OOM fix.)
+            var fr1 = new int[n * n];       // facet cardinal-side receiver
+            var fr2 = new int[n * n];       // facet diagonal-side receiver (-1 = pure cardinal)
+            var fp1 = new float[n * n];     // fraction of flow to fr1
             var order = new int[n * n];
-            for (int i2 = 0; i2 < n * n; i2++) { dir[i2] = -1; order[i2] = i2; }
-            // v31 — WANDERING DESCENT: pure steepest-descent locks onto one
-            // of 8 compass headings across smooth ground — kilometer-ruler
-            // rivers (map-proven). Choose among ALL lower neighbors weighted
-            // by slope² through a deterministic cell hash: deep troughs still
-            // dominate, open slopes wander and the lines meander naturally.
-            var wjs = new int[8];
-            var wws = new float[8];
+            for (int i2 = 0; i2 < n * n; i2++) { fr1[i2] = -1; fr2[i2] = -1; fp1[i2] = 1f; order[i2] = i2; }
+            // Facet f (0..7): cardinal neighbour CARD[f], adjacent diagonal
+            // DIAG[f], indexing RIV_DX/RIV_DZ (0E 1W 2N 3S 4NE 5SE 6NW 7SW).
+            int[] CARD = { 0, 2, 2, 1, 1, 3, 3, 0 };
+            int[] DIAG = { 4, 4, 6, 6, 7, 7, 5, 5 };
+            const float QPI = 0.7853982f;                   // π/4 = facet angular width
+            float invCellM = 1f / cellM;
             for (int z2 = 1; z2 < n - 1; z2++)
             {
                 for (int x2 = 1; x2 < n - 1; x2++)
                 {
                     int i2 = z2 * n + x2;
-                    int cand = 0; float tot = 0f;
-                    for (int e = 0; e < 8; e++)
+                    float zc = wr[i2];
+                    float bestS = 0f; int bC = -1, bD = -1; float bR = 0f;
+                    for (int f = 0; f < 8; f++)
                     {
-                        int j = (z2 + RIV_DZ[e]) * n + (x2 + RIV_DX[e]);
-                        float drop = wr[i2] - wr[j];
-                        if (drop <= 0f) continue;
-                        float wgt = drop / RIV_DL[e];
-                        wgt *= wgt;
-                        wjs[cand] = j; wws[cand] = wgt; tot += wgt; cand++;
+                        int cj = (z2 + RIV_DZ[CARD[f]]) * n + (x2 + RIV_DX[CARD[f]]);
+                        int dj = (z2 + RIV_DZ[DIAG[f]]) * n + (x2 + RIV_DX[DIAG[f]]);
+                        float s1 = (zc - wr[cj]) * invCellM;
+                        float s2 = (wr[cj] - wr[dj]) * invCellM;
+                        if (s1 <= 0f && s2 <= 0f) continue;
+                        float r = (float)Math.Atan2(s2, s1);
+                        float s;
+                        if (r < 0f) { r = 0f; s = s1; }
+                        else if (r > QPI) { r = QPI; s = (zc - wr[dj]) * invCellM * 0.70710678f; }
+                        else s = (float)Math.Sqrt(s1 * s1 + s2 * s2);
+                        if (s > bestS) { bestS = s; bC = cj; bD = dj; bR = r; }
                     }
-                    if (cand == 0) continue;
-                    float pick = WanderHash01(x2, z2, seed) * tot;
-                    int sel = cand - 1;
-                    for (int k3 = 0; k3 < cand; k3++)
-                    { pick -= wws[k3]; if (pick <= 0f) { sel = k3; break; } }
-                    dir[i2] = wjs[sel];
+                    if (bC < 0) continue;
+                    float pc = 1f - bR / QPI;               // fraction to the cardinal receiver
+                    fr1[i2] = bC;
+                    if (pc >= 0.99995f) { fp1[i2] = 1f; fr2[i2] = -1; }
+                    else { fp1[i2] = pc; fr2[i2] = bD; }
                 }
             }
-            var wrKeys = (float[])wr.Clone();
-            Array.Sort(wrKeys, order);                      // ascending fill surface
+            Array.Sort(wr, order);                          // ascending fill surface — sort IN PLACE (wr is dead after this; skips a full n² clone that OOM'd the 2m carve)
+            wr = null; GC.Collect();                         // reclaim the corrugated fill before acc1 grows the heap — keeps the accumulation phase off the OOM ceiling
             var acc1 = new float[n * n];
             for (int i2 = 0; i2 < n * n; i2++) acc1[i2] = 1f;
             for (int k2 = n * n - 1; k2 >= 0; k2--)         // upstream → downstream
             {
                 int i2 = order[k2];
-                if (dir[i2] >= 0) acc1[dir[i2]] += acc1[i2];
+                int c = fr1[i2];
+                if (c < 0) continue;
+                float a = acc1[i2], f1 = fp1[i2];
+                acc1[c] += a * f1;
+                int d = fr2[i2];
+                if (d >= 0) acc1[d] += a * (1f - f1);
             }
 
-            // v18 — STREAM-POWER INCISION on the TREE: the drainage draws
-            // itself into the surface along the single-flow stems; dissection
-            // provinces keep plains smooth while highlands dissect hard.
-            for (int z2 = 0; z2 < n; z2++)
-            {
-                for (int x2 = 0; x2 < n; x2++)
-                {
-                    int i2 = z2 * n + x2;
-                    if (h[i2] <= SEA + 0.5f) continue;
-                    float dissect = 0.35f + 1.0f * Smooth(0.35f, 0.65f, Fbm(x2, z2, RS / 440f, 2, ms + 11));
-                    float cut = Math.Min(14f, 1.35f * Mathf.Log(1f + acc1[i2] * cellA / 3157f)) * dissect;
-                    float floorY = Math.Max(SEA - 0.5f, w[i2] - 12f);
-                    float target = Math.Max(floorY, h[i2] - cut);
-                    if (target < h[i2]) h[i2] = target;
-                }
-            }
+            // RIVER REWORK — the traced smooth polylines ARE the rivers now, so
+            // the drainage no longer draws itself into the terrain by hand.
+            var riverPolys = TraceRivers(h, acc1, fr1, fr2, w, n, cellM, (n - 1) * cellM * 0.5f);
 
-            const float THR = 5000f;        // v29: single-flow catchment (cells) — tree acc concentrates the whole basin on the stem, so the old multi-flow 780 lit every corrugation trough
+            // MEMORY: free the flow-routing scratch NOW — the carve below
+            // allocates its own large n² buffers (hOrig clone, widthOf, seedIdx,
+            // rDist, paintLvl) and the 2m transient set otherwise peaks ~5.5GB
+            // and threw OutOfMemory at the hOrig clone on the client (32GB box +
+            // heavy modpack + LOH pressure). wr/fp1/order are dead after the acc
+            // walk, fr1/fr2/acc1 after the trace; none is read again. The forced
+            // collect reclaims the LOH before the carve grows the heap.
+            wr = null; fp1 = null; fr1 = null; fr2 = null; order = null; acc1 = null;
+            GC.Collect();
+
+            // RIVER REWORK — the global stream-power incision is REMOVED. It cut
+            // the raw D-inf accumulation field into every 0.25 km² channel,
+            // painting angular drainage lines across floodplains and valley
+            // flats. Rivers now come ONLY from the traced polylines (carved
+            // below); the mountains keep their ridge relief + droplet erosion.
+            // Nothing incises flat/floodplain terrain any more.
+
             var mask = new byte[n * n];
             var hOrig = (float[])h.Clone();
 
@@ -1077,108 +1162,49 @@ namespace VerdantsAscent.Terrain.Voxel
             var seedIdx = new int[n * n];
             for (int i2 = 0; i2 < seedIdx.Length; i2++) seedIdx[i2] = -1;
 
-            // v29 — SINGLE-STEM EXTRACTION from the tree built above (one
-            // outflow per cell → braids structurally cannot exist).
+            // RIVER REWORK — the spine is the SMOOTH TRACED NETWORK, not a
+            // per-cell accumulation threshold. Rasterize each traced polyline
+            // into widthOf/w/riverCells (DDA at ½-cell steps so the spine is
+            // unbroken): width = power law of the node catchment area (2m brook
+            // … 14m trunk), level = the traced water table − 0.9m freeboard so
+            // banks stand above, never perched above local ground, never below
+            // the sea. The tuned Dijkstra valley + cross-section carve below
+            // then draw the terrain around this smooth spine exactly as before.
             var riverCells = new List<int>(16384);
-            // RIVER REWORK — resolution-independent hydraulic geometry. Width is
-            // a power law of PHYSICAL drainage area A = acc1·cell² (m²), never a
-            // cell count, so a river is the same width on a 10m or a 2m grid.
-            // Spec: brook 2m at the 0.06km² onset, common river 6-8m, biggest
-            // trunks clamp at 14m — 10m+ is already a big Valheim river. On the
-            // 2m grid this whole 2-14m range is finally REPRESENTABLE; on the
-            // old 10m grid everything under a cell just aliased away.
             const float AREA_ONSET = 60000f;    // m² — below = ephemeral, no channel
             const float WK = 0.039f, WP = 0.36f;
-            for (int k2 = n * n - 1; k2 >= 0; k2--)         // upstream-first order
+            float rhalf = (n - 1) * cellM * 0.5f;
+            if (riverPolys != null)
             {
-                int i = order[k2];
-                int z = i / n, x = i - z * n;
-                if (x < 2 || x >= n - 2 || z < 2 || z >= n - 2) continue;
-                float area = acc1[i] * cellA;
-                if (area <= AREA_ONSET || hOrig[i] <= 8f) continue;
-                float width = WK * (float)Math.Pow(area, WP);
-                if (width < 2f) continue;                              // below a brook — no channel
-                width = Math.Min(14f, width);
-                width *= 1f + 0.5f * Smooth(6f, 1f, w[i] - SEA);       // mouth flare
-                widthOf[i] = width;
-                riverCells.Add(i);
-            }
-
-            // v30 — PARALLEL-STEM SUPPRESSION. Corrugation grooves run stems
-            // side by side at offset levels through one dug lowland; the
-            // higher one's water then edges the shared floor (transect-proven
-            // 38.27 beside 30.00, 90m apart). Bigger catchment rules: a stem
-            // cell dies when a ≥2.5× stem passes within ~80m. One river's own
-            // stations never suppress each other (adjacent acc ratio ≈ 1).
-            {
-                const int SUP_R = 8;
-                var byAcc = riverCells.ToArray();
-                Array.Sort(byAcc, (a, b) => acc1[b].CompareTo(acc1[a]));
-                var keptMark = new bool[n * n];
-                var keptList = new List<int>(riverCells.Count);
-                for (int k2 = 0; k2 < byAcc.Length; k2++)
+                foreach (var poly in riverPolys)
                 {
-                    int i = byAcc[k2];
-                    int cz2 = i / n, cx2 = i - cz2 * n;
-                    bool dead = false;
-                    for (int dz2 = -SUP_R; dz2 <= SUP_R && !dead; dz2++)
+                    int nn = poly.Length / 4;
+                    for (int seg = 0; seg < nn - 1; seg++)
                     {
-                        int zz = cz2 + dz2;
-                        if (zz < 0 || zz >= n) continue;
-                        for (int dx2 = -SUP_R; dx2 <= SUP_R && !dead; dx2++)
+                        float aar = poly[seg * 4 + 2], alv = poly[seg * 4 + 3];
+                        float bar = poly[(seg + 1) * 4 + 2], blv = poly[(seg + 1) * 4 + 3];
+                        float acx = (poly[seg * 4] + rhalf) / cellM, acz = (poly[seg * 4 + 1] + rhalf) / cellM;
+                        float bcx = (poly[(seg + 1) * 4] + rhalf) / cellM, bcz = (poly[(seg + 1) * 4 + 1] + rhalf) / cellM;
+                        float ddx = bcx - acx, ddz = bcz - acz;
+                        int steps = (int)Mathf.Max(1f, Mathf.Max(Mathf.Abs(ddx), Mathf.Abs(ddz)) * 2f);
+                        for (int s2 = 0; s2 <= steps; s2++)
                         {
-                            int xx = cx2 + dx2;
-                            if (xx < 0 || xx >= n) continue;
-                            int j = zz * n + xx;
-                            if (keptMark[j] && acc1[j] >= acc1[i] * 2.5f) dead = true;
+                            float t = (float)s2 / steps;
+                            int cx = (int)Mathf.Round(acx + ddx * t);
+                            int cz = (int)Mathf.Round(acz + ddz * t);
+                            if (cx < 2 || cx >= n - 2 || cz < 2 || cz >= n - 2) continue;
+                            int i = cz * n + cx;
+                            float area = aar + (bar - aar) * t;
+                            float width = Math.Min(14f, Math.Max(2f, WK * (float)Math.Pow(Math.Max(area, AREA_ONSET), WP)));
+                            float lvl = alv + (blv - alv) * t - 0.9f;
+                            if (lvl > hOrig[i] - 0.5f) lvl = hOrig[i] - 0.5f;
+                            if (lvl < SEA) lvl = SEA;
+                            bool fresh = widthOf[i] <= 0f;
+                            if (fresh) riverCells.Add(i);
+                            if (width > widthOf[i]) widthOf[i] = width;
+                            if (fresh || lvl < w[i]) w[i] = lvl;
                         }
                     }
-                    if (dead) { widthOf[i] = 0f; continue; }
-                    keptMark[i] = true;
-                    keptList.Add(i);
-                }
-                riverCells = keptList;
-            }
-
-            // v29 — LEVELS ON THE TREE: the never-above-banks INVARIANT.
-            // Walk every cell upstream→downstream; a stem station's level =
-            // min(level arriving from upstream, local ORIGINAL floor (3×3
-            // min) − 0.9), floored at SEA; the level then rides the flow
-            // chain down (through pruned gaps too). Monotone downstream by
-            // construction; ≥0.9m below the ground beside it by construction
-            // — water standing above a bank is impossible in the data. Where
-            // the floor steps down, the surface steps with it (falls).
-            {
-                var lvlIn = new float[n * n];
-                for (int i2 = 0; i2 < n * n; i2++) lvlIn[i2] = float.MaxValue;
-                float cellM0 = (2f * _half) / (n - 1);
-                for (int k2 = n * n - 1; k2 >= 0; k2--)
-                {
-                    int i = order[k2];
-                    float outLvl = lvlIn[i];
-                    if (widthOf[i] > 0f)
-                    {
-                        // Floor scan radius = the PAINT radius (1.6×half):
-                        // the 3×3 scan let a stem on a rise hold 38m water
-                        // while its own paint disk reached a natural 26m
-                        // groove 50m away (transect-proven). Whatever ground
-                        // the stem can wet must stand above its level.
-                        int cz2 = i / n, cx2 = i - cz2 * n;
-                        int rr2 = Math.Max(1, (int)Math.Ceiling(0.8f * widthOf[i] / cellM0));
-                        float gmin = hOrig[i];
-                        int z0 = Math.Max(0, cz2 - rr2), z1 = Math.Min(n - 1, cz2 + rr2);
-                        int x0 = Math.Max(0, cx2 - rr2), x1 = Math.Min(n - 1, cx2 + rr2);
-                        for (int zz = z0; zz <= z1; zz++)
-                            for (int xx = x0; xx <= x1; xx++)
-                            { float gv = hOrig[zz * n + xx]; if (gv < gmin) gmin = gv; }
-                        float lvl = Math.Min(outLvl, gmin - 0.9f);
-                        if (lvl < SEA) lvl = SEA;
-                        w[i] = lvl;
-                        outLvl = lvl;
-                    }
-                    if (outLvl == float.MaxValue) continue;
-                    int dn = dir[i];
-                    if (dn >= 0 && lvlIn[dn] > outLvl) lvlIn[dn] = outLvl;
                 }
             }
 
@@ -1375,30 +1401,21 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
 
-            // v8 — the stored water level is BANK-REFERENCED: min(fill
-            // surface, ORIGINAL terrain). The raw fill surface stands at each
-            // basin's rim pour point — on relief with big closed basins (the
-            // Craters map) that "water table" sat metres above kilometres of
-            // lowland and flooded the world. Clamped to the pre-carve ground
-            // it can never stand above the banks; it is the SPRING FILL LEVEL
-            // for the river sources, and the liquid sim owns actual pooling.
-            // Sea snap first: the fill's +0.0002/cell tie-breaker accumulates
-            // to +0.2..0.4m across the ocean flat.
-            // v22 — river cells KEEP the monotone fill level (thalweg = fill
-            // table; the profile carved the bed exactly `depth` below it, so
-            // fill depth is correct by construction). Non-river cells keep
-            // the v8 bank clamp for legacy consumers.
+            // RIVER REWORK — WATER IS THE CARVED RIVER NETWORK ONLY.
+            // Sea snap first (the fill's +0.0002/cell tie-breaker accumulates to
+            // +0.2..0.4m across the ocean flat). River cells (mask 1 channel,
+            // mask 3 spine) KEEP their monotone level (bed = level − depth by the
+            // cross-section, so depth is correct by construction). EVERY other
+            // land cell is dried to its bed: the global fill otherwise ponds
+            // every shallow basin AND every valley shoulder the Dijkstra carve
+            // lowered below the pre-carve ground — a map-wide flood. Deliberate
+            // lakes/ponds are a separate placement pass, not this fill.
             for (int i2 = 0; i2 < n * n; i2++)
             {
                 if (w[i2] < SEA + 0.5f) w[i2] = SEA;
-                else if (mask[i2] == 0)
+                else if (mask[i2] != 1 && mask[i2] != 3)
                 {
-                    if (w[i2] > hOrig[i2]) w[i2] = hOrig[i2];
-                    // v24 — ponds need REAL depth. Every damp depression in
-                    // the fill table was emitting a water blob lying on the
-                    // grass (the meadow screenshots); standing water outside
-                    // rivers now requires ≥1.2m of fill.
-                    if (w[i2] - h[i2] < 1.2f && w[i2] > h[i2]) w[i2] = h[i2];
+                    if (w[i2] > h[i2]) w[i2] = h[i2];
                 }
             }
             waterLevel = w;
@@ -1415,6 +1432,117 @@ namespace VerdantsAscent.Terrain.Voxel
             float t = (v - fromA) / (fromB - fromA);
             if (t < 0f) t = 0f; else if (t > 1f) t = 1f;
             return toA + (toB - toA) * t;
+        }
+
+        // ── VECTOR-SPINE river tracing (mirrored offline — keep identical) ──
+        // Compute WHERE the rivers go as smooth polylines; the carve then draws
+        // the terrain around them. From each major MOUTH (big catchment draining
+        // to the sea) walk UPSTREAM along the real drainage (max inflow),
+        // recording the cell path; branch a tributary wherever a second sizeable
+        // inflow joins; Chaikin-smooth each path into a meandering curve. Each
+        // node carries [x,z,area,level] — level = the water table at the traced
+        // cell (before meander) so the carve seats the surface correctly.
+        private static List<float[]> TraceRivers(float[] h, float[] acc1, int[] fr1, int[] fr2, float[] wlvl, int n, float cellM, float half)
+        {
+            var polys = new List<float[]>();
+            float cellA = cellM * cellM;
+            const float MOUTH_A = 1.2e7f;   // >=12 km² catchment = a MAIN river mouth
+            const float HEAD_A = 4.0e5f;    // stop tracing below 0.4 km² (no tiny threads)
+            const float TRIB_A = 1.8e6f;    // branch a tributary only at >=1.8 km² side inflow
+
+            var mouths = new List<int>();
+            for (int i = 0; i < n * n; i++)
+            {
+                if (h[i] <= SEA || acc1[i] * cellA < MOUTH_A) continue;
+                int d1 = fr1[i], d2 = fr2[i];
+                if ((d1 >= 0 && h[d1] <= SEA + 0.2f) || (d2 >= 0 && h[d2] <= SEA + 0.2f)) mouths.Add(i);
+            }
+            mouths.Sort((a, b) => acc1[b].CompareTo(acc1[a]));
+            var mstart = new List<int>();
+            int rad = (int)(250f / cellM);
+            foreach (var mm in mouths)
+            {
+                int mx = mm % n, mz = mm / n; bool near = false;
+                foreach (var t in mstart) if (Math.Abs(t % n - mx) < rad && Math.Abs(t / n - mz) < rad) { near = true; break; }
+                if (!near) mstart.Add(mm);
+            }
+
+            var visited = new bool[n * n];
+            var q = new Queue<int>();
+            foreach (var mm in mstart) q.Enqueue(mm);
+            while (q.Count > 0)
+            {
+                int cur = q.Dequeue();
+                if (visited[cur]) continue;
+                var raw = new List<float>();
+                int guard = 0;
+                while (cur >= 0 && !visited[cur] && guard++ < 40000)
+                {
+                    visited[cur] = true;
+                    int cx = cur % n, cz = cur / n;
+                    float area = acc1[cur] * cellA;
+                    raw.Add(cx); raw.Add(cz); raw.Add(area); raw.Add(wlvl[cur]);
+                    if (area < HEAD_A) break;
+                    int best = -1; float bestA = 0f; int second = -1; float secA = 0f;
+                    for (int e = 0; e < 8; e++)
+                    {
+                        int nx = cx + RIV_DX[e], nz = cz + RIV_DZ[e];
+                        if (nx < 0 || nx >= n || nz < 0 || nz >= n) continue;
+                        int j = nz * n + nx;
+                        if (fr1[j] != cur && fr2[j] != cur) continue;
+                        float aj = acc1[j];
+                        if (aj > bestA) { second = best; secA = bestA; best = j; bestA = aj; }
+                        else if (aj > secA) { second = j; secA = aj; }
+                    }
+                    if (best < 0) break;
+                    if (second >= 0 && !visited[second] && secA * cellA >= TRIB_A) q.Enqueue(second);
+                    cur = best;
+                }
+                if (raw.Count >= 12) polys.Add(ChaikinSmooth(raw, cellM, half, 3));
+            }
+            return polys;
+        }
+
+        // Chaikin corner-cutting: angular cell path → smooth curve, then a
+        // two-scale perpendicular meander tapered to 0 at the mouth + headwater
+        // so joins hold. raw = [cx,cz,area,lvl,...] cell coords; output =
+        // [x,z,area,lvl,...] world metres (level carried through, never meandered).
+        private static float[] ChaikinSmooth(List<float> raw, float cellM, float half, int iters)
+        {
+            int m = raw.Count / 4;
+            var xs = new float[m]; var zs = new float[m]; var ar = new float[m]; var lv = new float[m];
+            for (int i = 0; i < m; i++) { xs[i] = raw[i * 4]; zs[i] = raw[i * 4 + 1]; ar[i] = raw[i * 4 + 2]; lv[i] = raw[i * 4 + 3]; }
+            for (int it = 0; it < iters && xs.Length > 2; it++)
+            {
+                int k = xs.Length;
+                var nx = new float[(k - 1) * 2]; var nz = new float[(k - 1) * 2]; var na = new float[(k - 1) * 2]; var nl = new float[(k - 1) * 2];
+                for (int i = 0; i < k - 1; i++)
+                {
+                    nx[i * 2] = 0.75f * xs[i] + 0.25f * xs[i + 1]; nz[i * 2] = 0.75f * zs[i] + 0.25f * zs[i + 1]; na[i * 2] = 0.75f * ar[i] + 0.25f * ar[i + 1]; nl[i * 2] = 0.75f * lv[i] + 0.25f * lv[i + 1];
+                    nx[i * 2 + 1] = 0.25f * xs[i] + 0.75f * xs[i + 1]; nz[i * 2 + 1] = 0.25f * zs[i] + 0.75f * zs[i + 1]; na[i * 2 + 1] = 0.25f * ar[i] + 0.75f * ar[i + 1]; nl[i * 2 + 1] = 0.25f * lv[i] + 0.75f * lv[i + 1];
+                }
+                xs = nx; zs = nz; ar = na; lv = nl;
+            }
+            int kk = xs.Length;
+            var outp = new float[kk * 4];
+            float s = 0f;
+            float phase = xs[0] * 0.011f + zs[0] * 0.017f;    // per-river phase
+            for (int i = 0; i < kk; i++)
+            {
+                if (i > 0) s += Mathf.Sqrt((xs[i] - xs[i - 1]) * (xs[i] - xs[i - 1]) + (zs[i] - zs[i - 1]) * (zs[i] - zs[i - 1])) * cellM;
+                int a = Math.Max(0, i - 1), b = Math.Min(kk - 1, i + 1);
+                float tx = xs[b] - xs[a], tz = zs[b] - zs[a];
+                float tl = Mathf.Sqrt(tx * tx + tz * tz); if (tl < 1e-4f) tl = 1f;
+                float perpx = -tz / tl, perpz = tx / tl;                    // unit perpendicular
+                float amp = Mathf.Min(130f, 18f + Mathf.Sqrt(ar[i]) / 45f);
+                float off = amp * (0.68f * Mathf.Sin(s / 110f + phase) + 0.32f * Mathf.Sin(s / 260f + phase * 1.7f));
+                off *= Mathf.Min(1f, Mathf.Min(i, kk - 1 - i) / 10f);
+                outp[i * 4] = -half + xs[i] * cellM + perpx * off;
+                outp[i * 4 + 1] = -half + zs[i] * cellM + perpz * off;
+                outp[i * 4 + 2] = ar[i];
+                outp[i * 4 + 3] = lv[i];
+            }
+            return outp;
         }
 
         // Cubic smooth minimum — the anti-terracing keystone: the carve only
@@ -1481,7 +1609,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             outSpots.Clear();
             var m = _riverMask;
-            var w = _waterLevel;
+            var w = _waterS;
             int n = _res;
             float half = _half;
             if (m == null || w == null) return;
@@ -1496,7 +1624,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int gx = gx0; gx <= gx1; gx++)
                 {
                     if (m[gz * n + gx] != 3) continue;   // v26 — SPINE cells only: pours pin dead-center
-                    float y = w[gz * n + gx] - RIVER_DROP;
+                    float y = w[gz * n + gx] * UNPACK - RIVER_DROP;
                     if (y <= SEA + 0.6f) continue;
                     float wx = -half + gx * cell;
                     float wz = -half + gz * cell;
@@ -1809,19 +1937,21 @@ namespace VerdantsAscent.Terrain.Voxel
         // when they reach the sea so coasts keep their shelves.
         private static void Erode(float[] h, int n, int count, int seed)
         {
-            // Erosion DENSITY (droplets per unit area) must be constant across
-            // resolutions or a fine grid is barely touched and terraces. The
-            // droplet budget is authored at the 2048 reference grid; scale it by
-            // the cell-count ratio (2m grid → ~26× the droplets of a 10m one).
-            // Single source of truth so every base path — procedural, image,
-            // VAHC — erodes at the same physical density.
-            count = (int)Math.Min(int.MaxValue, (long)count * n * n / (2048L * 2048L));
+            // Resolution-INDEPENDENT erosion (the 2m "30 parallel rills" fix): a
+            // droplet models a fixed PHYSICAL rain path, so its LIFE must scale
+            // with cells-per-metre — else at 2m it dies after ~128m, far too
+            // short to find and merge into channels, so it just scratches a local
+            // track straight down the slope and thousands of them read as a comb.
+            // Longer paths mean each droplet covers more ground, so COUNT scales
+            // only LINEARLY with side length: total work stays ~constant across
+            // resolutions and the droplets consolidate into a dendritic tree.
+            float cellM = (2f * HALF) / (n - 1);
+            float resK = 10.2591f / cellM;                 // 1 at 2048, ~5.1 at 2m
+            int LIFE = (int)(64f * resK);                  // physical path length constant
+            const int RADIUS = 2;
+            count = (int)Math.Min(int.MaxValue, (long)count * (n - 1) / 2047L);
             if (count <= 0) return;
             var rng = new Random(seed);
-            // v17 — EROSION-DOMINATED look (the Gaea-class reference DEM):
-            // longer droplet lives, stronger carve, tighter brush → dendritic
-            // filigree on every slope instead of light seasoning.
-            const int LIFE = 64, RADIUS = 2;
             const float INERTIA = 0.08f, CAPACITY = 7.5f, MIN_SLOPE = 0.01f;
             const float ERODE = 0.42f, DEPOSIT = 0.3f, EVAP = 0.012f, GRAVITY = 4f;
 
@@ -1861,6 +1991,13 @@ namespace VerdantsAscent.Terrain.Voxel
 
                     dirX = dirX * INERTIA - gradX * (1f - INERTIA);
                     dirY = dirY * INERTIA - gradY * (1f - INERTIA);
+                    // Symmetry-break: without this, thousands of droplets track
+                    // the SAME gentle gradient straight down a uniform slope and
+                    // carve dead-parallel rills (the "30 rivers" comb). A small
+                    // seeded per-step jitter lets erosion feedback pull them into
+                    // dendritic channels instead. Deterministic (mirrored offline).
+                    dirX += (float)(rng.NextDouble() - 0.5) * 0.35f;
+                    dirY += (float)(rng.NextDouble() - 0.5) * 0.35f;
                     float len = Mathf.Sqrt(dirX * dirX + dirY * dirY);
                     if (len < 1e-5f) break;
                     dirX /= len; dirY /= len;
@@ -1886,7 +2023,13 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     else
                     {
-                        float amount = Mathf.Min((capacity - sediment) * ERODE, -dh);
+                        // SLOPE-GATE the carve (user directive): droplets do NOT
+                        // erode gentle floodplains — only real hillsides/mountains
+                        // carve. Rivers in the flats are drawn by CarveRivers'
+                        // stream-power incision, not by parallel droplet rills.
+                        // grade = vertical drop per metre this step (dh<=0 here).
+                        float slopeGate = Smooth(0.12f, 0.30f, -dh / cellM);
+                        float amount = Mathf.Min((capacity - sediment) * ERODE, -dh) * slopeGate;
                         for (int b = 0; b < brushN; b++)
                         {
                             int bx = xi + bdx[b], by = yi + bdy[b];

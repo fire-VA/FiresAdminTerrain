@@ -27,26 +27,44 @@ namespace VerdantsAscent.Terrain.Voxel
     // Sphere/Cube = the 3D gizmo tools (radius = half-extent).
     public enum VoxelBrushShape { Sphere, Cylinder, Cube }
 
+    // A Full chunk holds the density arrays + (once meshed) a mesh/collider.
+    // A UNIFORM chunk is entirely solid (below all cave reach) or entirely air
+    // (above the surface) — the plan's "one RLE run": no arrays, no GameObject,
+    // no mesh, no collider. It stays registered so the Y-range union + border
+    // ownership hold, and serves its constant density/seed/biome to neighbours.
+    public enum ChunkKind : byte { Full, UniformSolid, UniformAir }
+
     public sealed class VoxelChunk
     {
         public const int CELLS = 32;              // cells per axis (1m each)
         public const int SAMPLES = CELLS + 2;     // sample grid [-1..32] = 34
         public const float QUANT = 20f;           // sbyte units per metre (0.05m)
 
+        // Saturated density a uniform chunk serves at its border ring (>0 solid).
+        private const sbyte UniformSolidDensity = 127;
+        private const sbyte UniformAirDensity = -127;
+
         public readonly Vector3Int Key;           // chunk coords (world / 32)
         public readonly Vector3 WorldOrigin;      // sample (0,0,0) world position
+
+        public ChunkKind Kind { get; private set; }
+
+        // Governor accounting: only Full chunks carry the ~83KB arrays (and a
+        // mesh/collider once built); uniform chunks are effectively free.
+        public bool HoldsArrays => Kind == ChunkKind.Full;
 
         // _seed = the ground-derived baseline; _density = seed + edits. The
         // mesher only emits cells whose corners DIFFER from seed, so unedited
         // ground never grows a duplicate skin over the vanilla terrain (no
         // z-fighting), and restoring everything makes the chunk disappear.
-        private readonly sbyte[] _density = new sbyte[SAMPLES * SAMPLES * SAMPLES];
-        private readonly sbyte[] _seed = new sbyte[SAMPLES * SAMPLES * SAMPLES];
+        // NULL on uniform chunks — every read path is Kind-gated first.
+        private sbyte[] _density;
+        private sbyte[] _seed;
         // Per-COLUMN biome blend color (34×34, sampled from WorldGenerator at
         // seed time) so voxel surfaces auto-match the surrounding biome —
         // plains grass in Plains, meadows in Meadows — instead of a fixed
         // Meadows mask. Same encoding the tiles use (Heightmap.GetBiomeColor).
-        private readonly Color32[] _biome = new Color32[SAMPLES * SAMPLES];
+        private Color32[] _biome;
         private readonly object _lock = new object();
 
         // Bumped on every mutation; stale mesh/bake results are dropped by
@@ -162,11 +180,43 @@ namespace VerdantsAscent.Terrain.Voxel
         // Main-thread only (reads neighbour arrays without their locks — all
         // mutation paths for generated chunks are main-thread serialized or
         // pending-gated). Returns null when no generated neighbour is loaded.
+        // Allocating variant — used by the PERSIST callers (SetBorderOverrides
+        // → _genOverrides holds the set across frames, so it must own its lists).
         public static BorderOverrideSet CaptureBorderOverrides(Vector3Int key)
         {
-            BorderOverrideSet set = null;
-            var cache = new VoxelChunk[27];
-            var seen = new bool[27];
+            var set = new BorderOverrideSet
+            {
+                Dens = new List<KeyValuePair<int, sbyte>>(1024),
+                Seed = new List<sbyte>(1024),
+                Biome = new List<KeyValuePair<int, Color32>>(256),
+            };
+            return FillBorderOverrides(key, set) ? set : null;
+        }
+
+        // Reused per-tick heal buffer (main-thread; MirrorBordersNow consumes it
+        // synchronously and never stores it). The rolling auto-heal ran the
+        // allocating capture every streamer tick — three fresh Lists per healed
+        // chunk — and mono grows its heap under that churn and never hands it
+        // back, inflating to a full-world OutOfMemory over a play session (the
+        // border-mirror OOM stack). Refilling one buffer removes that churn.
+        [System.ThreadStatic] private static BorderOverrideSet t_healBuf;
+
+        // The 26-neighbour owner cache, reused per thread. FillBorderOverrides
+        // runs on every mirror (heal drain, EnqueueRemesh, PokeStaleNeighbours)
+        // — allocating a fresh VoxelChunk[27]+bool[27] each call was the second
+        // border-mirror heap-churn source the t_healBuf List pooling missed.
+        [System.ThreadStatic] private static VoxelChunk[] t_ownerCache;
+        [System.ThreadStatic] private static bool[] t_ownerSeen;
+
+        // Core capture: fill `set` (already allocated, caller-cleared) from the
+        // loaded generated neighbours. Returns true if any neighbour contributed.
+        private static bool FillBorderOverrides(Vector3Int key, BorderOverrideSet set)
+        {
+            bool any = false;
+            var cache = t_ownerCache ?? (t_ownerCache = new VoxelChunk[27]);
+            var seen = t_ownerSeen ?? (t_ownerSeen = new bool[27]);
+            System.Array.Clear(cache, 0, 27);
+            System.Array.Clear(seen, 0, 27);
             for (int z = -1; z <= CELLS; z++)
             {
                 bool zEdge = z == -1 || z == CELLS;
@@ -188,15 +238,17 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                         var owner = cache[slot];
                         if (owner == null) continue;
-                        if (set == null) set = new BorderOverrideSet
+                        any = true;
+                        sbyte od, os;
+                        if (owner.Kind == ChunkKind.Full)
                         {
-                            Dens = new List<KeyValuePair<int, sbyte>>(1024),
-                            Seed = new List<sbyte>(1024),
-                            Biome = new List<KeyValuePair<int, Color32>>(256),
-                        };
-                        int ownerIdx = Idx(x - ox * CELLS, y - oy * CELLS, z - oz * CELLS);
-                        set.Dens.Add(new KeyValuePair<int, sbyte>(Idx(x, y, z), owner._density[ownerIdx]));
-                        set.Seed.Add(owner._seed[ownerIdx]);
+                            int ownerIdx = Idx(x - ox * CELLS, y - oy * CELLS, z - oz * CELLS);
+                            od = owner._density[ownerIdx];
+                            os = owner._seed[ownerIdx];
+                        }
+                        else od = os = owner.Kind == ChunkKind.UniformSolid ? UniformSolidDensity : UniformAirDensity;
+                        set.Dens.Add(new KeyValuePair<int, sbyte>(Idx(x, y, z), od));
+                        set.Seed.Add(os);
                     }
                 }
             }
@@ -213,18 +265,18 @@ namespace VerdantsAscent.Terrain.Voxel
                     int oz = z == -1 ? -1 : (z == CELLS ? 1 : 0);
                     if (!VoxelWorld.TryGetChunk(new Vector3Int(key.x + ox, key.y, key.z + oz), out var colOwner)
                         || colOwner == null || colOwner.PendingGenerate) continue;
-                    if (set == null) set = new BorderOverrideSet
-                    {
-                        Dens = new List<KeyValuePair<int, sbyte>>(0),
-                        Seed = new List<sbyte>(0),
-                        Biome = new List<KeyValuePair<int, Color32>>(256),
-                    };
+                    any = true;
                     int colIdx = (x + 1) + SAMPLES * (z + 1);
-                    int ownerCol = ((x - ox * CELLS) + 1) + SAMPLES * ((z - oz * CELLS) + 1);
-                    set.Biome.Add(new KeyValuePair<int, Color32>(colIdx, colOwner._biome[ownerCol]));
+                    int ownerLocalX = x - ox * CELLS, ownerLocalZ = z - oz * CELLS;
+                    Color32 ob;
+                    if (colOwner.Kind == ChunkKind.Full)
+                        ob = colOwner._biome[(ownerLocalX + 1) + SAMPLES * (ownerLocalZ + 1)];
+                    else
+                        ob = BiomeCornerBlend.Sample(colOwner.WorldOrigin.x + ownerLocalX, colOwner.WorldOrigin.z + ownerLocalZ);
+                    set.Biome.Add(new KeyValuePair<int, Color32>(colIdx, ob));
                 }
             }
-            return set;
+            return any;
         }
 
         // Diagnostic probe: density at a world position (-128 = outside).
@@ -235,15 +287,30 @@ namespace VerdantsAscent.Terrain.Voxel
             int lz = Mathf.FloorToInt(w.z) - Key.z * CELLS;
             if (lx < -1 || lx > CELLS || ly < -1 || ly > CELLS || lz < -1 || lz > CELLS)
                 return sbyte.MinValue;
+            if (Kind != ChunkKind.Full)
+                return Kind == ChunkKind.UniformSolid ? UniformSolidDensity : UniformAirDensity;
             return _density[Idx(lx, ly, lz)];
         }
 
         // Re-mirror this chunk's border rings from loaded owners RIGHT NOW.
         // apply=false audits only. Returns the number of mismatched samples
-        // (density + biome columns).
+        // (density + biome columns). Uniform chunks have no ring to receive —
+        // they SERVE their constant to neighbours instead (FillBorderOverrides).
         public int MirrorBordersNow(bool apply)
         {
-            var overrides = CaptureBorderOverrides(Key);
+            if (Kind != ChunkKind.Full) return 0;
+            // Reuse one buffer per thread instead of allocating three Lists each
+            // heal tick — this is consumed synchronously below and never stored.
+            var buf = t_healBuf;
+            if (buf == null)
+                buf = t_healBuf = new BorderOverrideSet
+                {
+                    Dens = new List<KeyValuePair<int, sbyte>>(1024),
+                    Seed = new List<sbyte>(1024),
+                    Biome = new List<KeyValuePair<int, Color32>>(256),
+                };
+            else { buf.Dens.Clear(); buf.Seed.Clear(); buf.Biome.Clear(); }
+            var overrides = FillBorderOverrides(Key, buf) ? buf : null;
             if (overrides == null) return 0;
             int changed = 0;
             lock (_lock)
@@ -293,6 +360,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 bool rivers = FiresVoxelConfig.HydrologyEnabled != null
                     && FiresVoxelConfig.HydrologyEnabled.Value && VoxelHydrology.Ready
                     && !FiresWorldGenBase.Active;
+                // BED RE-CARVE (Fires worlds). Generated water seats its surface
+                // just under the LOWER bank; where that level drops to meet a low
+                // bank the bed has to follow, or the channel becomes too shallow
+                // to hold the flow and the run thins out or goes dry. Deepen the
+                // bed so at least MinChannelDepth of water stands over it.
+                // Worker-safe: the gen water field is immutable load-time arrays.
+                float channelDepth = FiresWorldGenBase.Active
+                    && FiresVoxelConfig.WaterMinChannelDepth != null
+                    ? FiresVoxelConfig.WaterMinChannelDepth.Value : 0f;
                 for (int z = -1; z <= CELLS; z++)
                 {
                     for (int x = -1; x <= CELLS; x++)
@@ -312,6 +388,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         {
                             float bed = VoxelHydrology.SampleBedY(wx, wz);
                             if (bed < g) { bankCarve = g - bed; g = bed; }
+                        }
+                        else if (channelDepth > 0f
+                            && FiresWorldGenBase.TryGetGenWaterSmooth(wx, wz, out float wlvl, out float wdep)
+                            && wdep >= 0.25f && wlvl > 30.25f)
+                        {
+                            float wantBed = wlvl - channelDepth;
+                            if (g > wantBed) { bankCarve = g - wantBed; g = wantBed; }
                         }
                         for (int y = -1; y <= CELLS; y++)
                         {
@@ -371,11 +454,72 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // Full chunk (brush/restore + streamer surface band) — arrays live.
         public VoxelChunk(Vector3Int key)
         {
             Key = key;
             WorldOrigin = new Vector3(key.x * CELLS, key.y * CELLS, key.z * CELLS);
+            Kind = ChunkKind.Full;
+            AllocateArrays();
         }
+
+        // Uniform chunk — no arrays, no view. The streamer builds these for the
+        // deep-solid and high-air stack so they cost almost nothing.
+        private VoxelChunk(Vector3Int key, ChunkKind kind)
+        {
+            Key = key;
+            WorldOrigin = new Vector3(key.x * CELLS, key.y * CELLS, key.z * CELLS);
+            Kind = kind;
+        }
+
+        internal static VoxelChunk NewUniform(Vector3Int key, ChunkKind kind) => new VoxelChunk(key, kind);
+
+        private void AllocateArrays()
+        {
+            _density = new sbyte[SAMPLES * SAMPLES * SAMPLES];
+            _seed = new sbyte[SAMPLES * SAMPLES * SAMPLES];
+            _biome = new Color32[SAMPLES * SAMPLES];
+        }
+
+        // Uniform → Full: materialize the saturated density/seed + per-column
+        // biome the uniform state stood for, so brush carves and terraform edits
+        // land on a real array. Caller (VoxelWorld.PromoteToFull) owns the
+        // governor counter bump.
+        internal void MakeFull()
+        {
+            if (Kind == ChunkKind.Full) return;
+            sbyte fill = Kind == ChunkKind.UniformSolid ? UniformSolidDensity : UniformAirDensity;
+            var wg = WorldGenerator.instance;
+            lock (_lock)
+            {
+                AllocateArrays();
+                for (int i = 0; i < _density.Length; i++) { _density[i] = fill; _seed[i] = fill; }
+                for (int z = -1; z <= CELLS; z++)
+                    for (int x = -1; x <= CELLS; x++)
+                        _biome[(x + 1) + SAMPLES * (z + 1)] = wg != null
+                            ? BiomeCornerBlend.Sample(WorldOrigin.x + x, WorldOrigin.z + z)
+                            : new Color32(0, 0, 0, 0);
+                Kind = ChunkKind.Full;
+                Version++;
+            }
+        }
+
+        // Full → Uniform: a no-edit chunk that terraform reclassified out of the
+        // surface band drops its arrays. Never called on a brush-edited chunk
+        // (those stay Full and frozen). Caller owns the counter + view drop.
+        internal void MakeUniform(ChunkKind kind)
+        {
+            lock (_lock)
+            {
+                Kind = kind;
+                _density = null; _seed = null; _biome = null;
+                _genGround = null; _genBiome = null; _genOverrides = null;
+                PendingGenerate = false;
+                Version++;
+            }
+        }
+
+        internal void RetuneUniform(ChunkKind kind) { if (Kind != ChunkKind.Full) Kind = kind; }
 
         private static int Idx(int x, int y, int z)
             => (x + 1) + SAMPLES * ((y + 1) + SAMPLES * (z + 1));
@@ -566,12 +710,25 @@ namespace VerdantsAscent.Terrain.Voxel
             int lz = Mathf.RoundToInt(wz - WorldOrigin.z);
             if (lx < -1 || lx > CELLS || lz < -1 || lz > CELLS) return false;
 
+            // Uniform chunks carry no crossing: solid = a wall spanning the whole
+            // probe range, air = nothing.
+            if (Kind != ChunkKind.Full)
+            {
+                solidAtTop = Kind == ChunkKind.UniformSolid;
+                return false;
+            }
+
             int yTop = Mathf.Min(CELLS, Mathf.FloorToInt(topY - WorldOrigin.y));
             int yBot = Mathf.Max(-1, Mathf.CeilToInt(botY - WorldOrigin.y) - 1);
             if (yTop <= yBot) return false;
 
             lock (_lock)
             {
+                // Atomic re-check: this method is reachable off the main thread
+                // (the liquid bridge), and the Kind fast-path above is not atomic
+                // with the deref — a main-thread MakeUniform could have nulled the
+                // arrays in the gap. Both Kind and _density flip under this lock.
+                if (_density == null) { solidAtTop = Kind == ChunkKind.UniformSolid; return false; }
                 if (_density[Idx(lx, yTop, lz)] > 0) { solidAtTop = true; return false; }
                 for (int y = yTop; y > yBot; y--)
                 {
@@ -600,6 +757,11 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // Sentinel: the chunk reclassified to uniform (arrays nulled) after it
+        // was queued but before the worker snapshotted it. The worker drops the
+        // job; the view was already torn down by the downgrade.
+        public const int SnapshotUniform = int.MinValue;
+
         // Copy density + seed + column biome for the worker-thread mesher
         // (edited-cell gate needs seed; vertex colors need biome). Returns
         // the version the snapshot represents.
@@ -607,6 +769,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             lock (_lock)
             {
+                if (_density == null) return SnapshotUniform;
                 System.Array.Copy(_density, intoDensity, _density.Length);
                 System.Array.Copy(_seed, intoSeed, _seed.Length);
                 System.Array.Copy(_biome, intoBiome, _biome.Length);

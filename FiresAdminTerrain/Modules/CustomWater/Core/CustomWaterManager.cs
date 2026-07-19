@@ -126,6 +126,17 @@ namespace VerdantsAscent.Water.Core
                     highestLevel = level;
             }
 
+            // GENERATED river/lake water. It reports here like every other custom
+            // water source, so vanilla's swim path (the Character.InWater /
+            // InLiquid / IsSwimming / GetLiquidLevel patches) treats it EXACTLY
+            // as it treats the ocean. It used to drive swimming through its own
+            // trigger calling SetLiquidLevel, which fought vanilla's own
+            // per-frame level writes and bounced the player between swim and
+            // walk every few frames.
+            float gen = VerdantsAscent.Terrain.Voxel.VoxelGenWaterMesh.SurfaceAt(worldPos);
+            if (gen > highestLevel)
+                highestLevel = gen;
+
             return highestLevel;
         }
 

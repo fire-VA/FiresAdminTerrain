@@ -218,10 +218,11 @@ namespace VerdantsAscent.Terrain.Persistence
                 return;
             }
 
-            // Skip if cursor is over a UI element.
-            if (UnityEngine.EventSystems.EventSystem.current != null
-                && UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject())
-                return;
+            // A tool selection is never also a tool use: the click that picks the
+            // tool out of the hammer menu is still HELD on the next frame, and
+            // this is a level read, so without the gate it painted immediately.
+            // Also covers the pointer sitting over any UI element.
+            if (!FiresCore.Input.FiresPlaceGate.ReadyToAct()) return;
 
             // Round-40 — prefer Infinity Hammer's ruler position when its
             // ruler is currently active. IH does its own raycast for the

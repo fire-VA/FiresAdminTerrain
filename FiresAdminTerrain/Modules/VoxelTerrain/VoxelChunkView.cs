@@ -51,6 +51,22 @@ namespace VerdantsAscent.Terrain.Voxel
         public int MaterialInstanceId()
             => _renderer != null && _renderer.sharedMaterial != null ? _renderer.sharedMaterial.GetInstanceID() : 0;
 
+        // Each chunk that casts shadows is submitted to the shadow pass a second
+        // time; with several hundred chunks live that is a large share of the
+        // frame's draw calls. Config-driven and applied live so the trade can be
+        // judged in place rather than guessed at.
+        internal static void ApplyShadowMode(MeshRenderer r)
+        {
+            if (r == null) return;
+            bool cast = FiresVoxelConfig.TerrainCastShadows == null
+                || FiresVoxelConfig.TerrainCastShadows.Value;
+            r.shadowCastingMode = cast
+                ? UnityEngine.Rendering.ShadowCastingMode.On
+                : UnityEngine.Rendering.ShadowCastingMode.Off;
+        }
+
+        internal void RefreshShadowMode() => ApplyShadowMode(_renderer);
+
         public void Init()
         {
             // TERRAIN layer, same as the tile meshes (TileMeshRenderer): vanilla
@@ -73,7 +89,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 _renderer = gameObject.AddComponent<MeshRenderer>();
                 _renderer.sharedMaterial = TerrainMaterialCache.GetCurrentMaterial();
-                _renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                ApplyShadowMode(_renderer);
             }
 
             _collider = gameObject.AddComponent<MeshCollider>();
@@ -107,18 +123,21 @@ namespace VerdantsAscent.Terrain.Voxel
 
             _mesh.Clear(false);
             _mesh.SetVertices(buf.Verts);
-            _mesh.SetNormals(buf.Normals);
-            // Analytic world-anchored tangents from the mesher — per-mesh
-            // RecalculateTangents gave coincident border vertices different
-            // tangents (each mesh averages only its own triangles) and drew
-            // the groove lines along every 32m border.
-            _mesh.SetTangents(buf.Tangents);
-            _mesh.SetUVs(0, buf.Uvs);
-            _mesh.SetColors(buf.Colors);
+            // Headless dedi: the mesher fills only Verts+Tris (CollidersOnly), so
+            // the render attributes are empty — a MeshCollider needs neither.
+            // Setting them would be waste at best, count-mismatched at worst.
+            if (_renderer != null)
+            {
+                _mesh.SetNormals(buf.Normals);
+                // Analytic world-anchored tangents from the mesher — per-mesh
+                // RecalculateTangents gave coincident border vertices different
+                // tangents (each mesh averages only its own triangles) and drew
+                // the groove lines along every 32m border.
+                _mesh.SetTangents(buf.Tangents);
+                _mesh.SetUVs(0, buf.Uvs);
+                _mesh.SetColors(buf.Colors);
+            }
             _mesh.SetTriangles(buf.Tris, 0, calculateBounds: true);
-            // Headless dedi: colliders are the product — no renderer exists,
-            // and dereferencing it here NRE'd every apply, so colliders never
-            // baked and zone swaps never completed on the server.
             if (_renderer != null)
             {
                 _renderer.enabled = !RenderSuppressed;

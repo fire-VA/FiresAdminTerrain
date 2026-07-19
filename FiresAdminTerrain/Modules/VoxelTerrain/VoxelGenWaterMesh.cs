@@ -20,16 +20,73 @@ namespace VerdantsAscent.Terrain.Voxel
     {
         private const float STEP = 1f;
         private const int INTERIOR = 64;           // 64m zone, 65 verts
-        private const int APRON = 8;               // covers EDGE_PASSES so border zones agree
+        // Must cover the widest neighbourhood any pass reads (EDGE_PASSES and
+        // the bank scan) so two zones computing a shared cell see the same
+        // window and agree on its level — otherwise the surface steps at zone
+        // borders. Widened from 8 when bank-referenced leveling landed: the
+        // scan has to reach clear across a channel to find both banks.
+        private const int APRON = 20;
         private const int G = INTERIOR + 1 + APRON * 2;
         private const int EDGE_PASSES = 8;         // bank-erosion reach (m)
         private const float EDGE_DROP = 0.6f;      // water edge may stand ≤ this over dry ground
         private const float SEA_GATE = 30.25f;     // ≤ this: the ocean owns it — river mouths settle to ~30 and BLEND into the sea surface. Mouth verts ride the tide in-shader (Custom/FiresLiquid weights _FiresTideOffset by vert height: full ≤30.55, 0 ≥31.5).
         private const float MIN_DEPTH = 0.25f;     // smoothed-field depth to count as water
         private const float MIN_CLEAR = 0.05f;     // level must stand above real ground
-        private const int EXT_RINGS = 2;           // flat shoreline overshoot: the sheet holds channel level INTO the bank (clips through) — flooded-bed look, no tucked seam
+        // Flat shoreline overshoot — the sheet holds channel level INTO the bank
+        // and clips through it. Widened from 2: at 2m a low camera angle could
+        // still catch the rim where the bank rises gently, which reads as the
+        // water stopping short of its bank. The bank-only gate below means this
+        // only ever extends into RISING ground, so more rings cost nothing but
+        // a little buried geometry.
+        private const int EXT_RINGS = 4;
+
+        // STAND GATE — a water surface may not stand higher above the REAL
+        // ground than the generator field claims the water is DEEP (plus slack
+        // for bed detail the 2m grid can't see).
+        //
+        // The gen grid stores a FILLED field: on dry upland its "water" value is
+        // the basin spill elevation, not "no water". Wherever the live heightmap
+        // sits below that grid's own ground — carved channels, erosion, terrain
+        // edits — the old `lvl >= gnd + MIN_CLEAR` test passed with a level
+        // metres over the real bed, which is exactly what shipped: floats=1190,
+        // worst Δ12.1m, and a swim surface reading 44.0 three metres from dry
+        // ground (every zone logged the same 44.0 plateau). Measuring the stand
+        // against the REAL ground is what ties the sheet to its bank.
+        private const float STAND_SLACK = 0.75f;
+
+        // CROSS-CHANNEL LEVELING — real water is level ACROSS its channel and
+        // falls only ALONG it. Sampling the gen field per vertex tilts the sheet
+        // across the width (each bank pulls its own side down), which is what
+        // read as the water hugging one bank and standing proud of the other.
+        // Each wet vertex is averaged with its wet neighbours PERPENDICULAR to
+        // the local surface gradient — i.e. across the channel — leaving the
+        // along-flow fall untouched, so it still runs downhill but a line drawn
+        // bank-to-bank is level. Reach (CROSS_R × CROSS_PASSES) is held ≤ APRON
+        // so neighbouring zones still agree on shared border values.
+        private const int CROSS_R = 4;
+        private const int CROSS_PASSES = 2;
+        private const int BANK_R = 18;             // how far across a channel the bank scan reaches (≤ APRON)
+        // Deepest a cell may stand over its OWN bed when no bank is reachable.
+        // This is the backstop for over-wide flood regions the bank scan can't
+        // resolve; a real channel or pool is always banked within BANK_R.
+        private const float UNBANKED_MAX_DEPTH = 2.5f;
+        // How far UNDER the lower bank edge the surface is seated. This must
+        // exceed the shader's WAVE AMPLITUDE: the mesh is displaced at render
+        // time, so a level seated flush with the bank has its crests break over
+        // it and the water visibly climbs the bank. Freeboard is the crest
+        // budget, not a cosmetic offset. Config-driven so it can track the wave
+        // settings without a rebuild.
+        private static float BankFreeboard =>
+            FiresVoxelConfig.WaterBankFreeboard != null
+                ? FiresVoxelConfig.WaterBankFreeboard.Value : 0.45f;
+        private const int ALONG_PASSES = 3;         // along-flow smoothing so the level bends, never steps
 
         private static readonly Dictionary<Vector2i, GameObject> s_zones = new Dictionary<Vector2i, GameObject>();
+        // The BUILT level field per zone (0 = dry), in the same G×G lattice the
+        // mesh is generated from. The swim query reads THIS — not a re-derived
+        // sample — so the surface a swimmer gets is literally the surface that
+        // was meshed, leveling included.
+        private static readonly Dictionary<Vector2i, float[]> s_fields = new Dictionary<Vector2i, float[]>();
         private static readonly HashSet<Vector2i> s_pending = new HashSet<Vector2i>();
         private static readonly List<Vector2i> s_retryScratch = new List<Vector2i>();
         private static Transform s_root;
@@ -41,6 +98,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly bool[] s_preWet = new bool[G * G];
         private static readonly bool[] s_kill = new bool[G * G];
         private static readonly byte[] s_ring = new byte[G * G];
+        private static readonly float[] s_lvl2 = new float[G * G];
 
         // THE function. Wet + surface level at a world position, or dry.
         // Everything — mesh verts, swim level, future FX — must go through
@@ -52,6 +110,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (depth < MIN_DEPTH || lvl <= SEA_GATE) return false;
             if (!Heightmap.GetHeight(new Vector3(wx + 0.013f, 0f, wz + 0.013f), out float gnd)) return false;
             if (lvl < gnd + MIN_CLEAR) return false;
+            if (lvl - gnd > depth + STAND_SLACK) return false;   // stand gate — see STAND_SLACK
             surface = lvl;
             return true;
         }
@@ -61,9 +120,36 @@ namespace VerdantsAscent.Terrain.Voxel
         // below the real terrain surface are caves UNDER the river: dry.
         public static float SurfaceAt(Vector3 pos)
         {
-            if (!WetAt(pos.x, pos.z, out float surface)) return -10000f;
-            if (Heightmap.GetHeight(new Vector3(pos.x + 0.013f, 0f, pos.z + 0.013f), out float gnd)
-                && pos.y < gnd - 1f) return -10000f;
+            // Read the BUILT field, not a fresh sample: the mesh is levelled
+            // across the channel, so re-deriving here would hand swimmers a
+            // different surface than the one they can see (the class invariant).
+            var zone = ZoneSystem.GetZone(pos);
+            if (!s_fields.TryGetValue(zone, out var f) || f == null) return -10000f;
+            float ox = zone.x * 64f - 32f - APRON * STEP;
+            float oz = zone.y * 64f - 32f - APRON * STEP;
+            int gx = Mathf.RoundToInt((pos.x - ox) / STEP);
+            int gz = Mathf.RoundToInt((pos.z - oz) / STEP);
+            if (gx < 0 || gx >= G || gz < 0 || gz >= G) return -10000f;
+            // Tolerant 3×3 lookup: at a 1m lattice a swimmer straddles wet/dry
+            // cells constantly, and a strict single-cell read dropped them out of
+            // the water mid-stroke. Take the highest wet neighbour instead.
+            float surface = 0f;
+            for (int dz = -1; dz <= 1; dz++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int sx = gx + dx, sz = gz + dz;
+                    if (sx < 0 || sx >= G || sz < 0 || sz >= G) continue;
+                    float s = f[sz * G + sx];
+                    if (s > surface) surface = s;
+                }
+            if (surface <= 0f) return -10000f;
+
+            // Pure surface query — NO under-terrain special case. The ocean does
+            // not ask whether you are in a cave beneath it, and every attempt to
+            // make river water smarter than that is what kept ejecting swimmers
+            // mid-stroke. The surface is the surface; vanilla's own swim logic
+            // (via the CustomWaterManager level patches) decides the rest,
+            // identically to ocean water.
             return surface;
         }
 
@@ -77,6 +163,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void DropZone(Vector2i zone)
         {
             s_pending.Remove(zone);
+            s_fields.Remove(zone);
             if (!s_zones.TryGetValue(zone, out var go)) return;
             s_zones.Remove(zone);
             if (go != null) Object.Destroy(go);
@@ -116,6 +203,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (depth < MIN_DEPTH || lvl <= SEA_GATE) continue;
                     if (s_gnd[i] == float.MaxValue) { groundMissing = true; continue; }
                     if (lvl < s_gnd[i] + MIN_CLEAR) continue;
+                    if (lvl - s_gnd[i] > depth + STAND_SLACK) continue;   // stand gate — must match WetAt exactly
                     wet[i] = true;
                     outY[i] = lvl;
                     any = true;
@@ -125,7 +213,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
             if (groundMissing) return false;             // heightmap not in — retry from Tick
-            if (!any) { s_zones[zone] = null; return true; }
+            if (!any) { s_fields.Remove(zone); s_zones[zone] = null; return true; }
 
             // SLOPE GATE — a water SURFACE steeper than ~20° is the bilinear
             // ramp between two pools draped on a hillside (screenshot-proven
@@ -184,7 +272,97 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             any = false;
             for (int i = 0; i < G * G && !any; i++) if (wet[i]) any = true;
-            if (!any) { s_zones[zone] = null; return true; }
+            if (!any) { s_fields.Remove(zone); s_zones[zone] = null; return true; }
+
+            // BANK-REFERENCED LEVELING. For each wet cell, scan ACROSS the
+            // channel (perpendicular to the surface gradient, i.e. the flow) to
+            // the first dry ground each way — those are the two bank edges — and
+            // seat the surface just under the LOWER of them. Water can't stand
+            // higher than the bank that would spill it, and because both sides of
+            // a cross-section resolve to the same bank pair, a line drawn
+            // bank-to-bank comes out level. Each section solves independently, so
+            // the level still climbs and falls with the bed and banks.
+            for (int i = 0; i < G * G; i++) s_lvl2[i] = outY[i];
+            for (int z = 1; z < G - 1; z++)
+            {
+                for (int x = 1; x < G - 1; x++)
+                {
+                    int i = z * G + x;
+                    if (!wet[i]) continue;
+                    float gx = 0f, gz = 0f;
+                    if (wet[i - 1] && wet[i + 1]) gx = (outY[i + 1] - outY[i - 1]) * 0.5f;
+                    if (wet[i - G] && wet[i + G]) gz = (outY[i + G] - outY[i - G]) * 0.5f;
+                    float m = Mathf.Sqrt(gx * gx + gz * gz);
+                    // No usable gradient (still pool): fall back to the across-X
+                    // axis so a flat pond still gets banked rather than skipped.
+                    float px, pz;
+                    if (m < 1e-5f) { px = 1f; pz = 0f; }
+                    else { px = -gz / m; pz = gx / m; }
+
+                    float bank = float.MaxValue;
+                    for (int sgn = -1; sgn <= 1; sgn += 2)
+                    {
+                        for (int s = 1; s <= BANK_R; s++)
+                        {
+                            int sx = x + Mathf.RoundToInt(px * s * sgn);
+                            int sz = z + Mathf.RoundToInt(pz * s * sgn);
+                            if (sx < 0 || sx >= G || sz < 0 || sz >= G) break;
+                            int j = sz * G + sx;
+                            if (wet[j]) continue;                       // still mid-channel
+                            if (s_gnd[j] == float.MaxValue) break;      // no ground data that way
+                            if (s_gnd[j] < bank) bank = s_gnd[j];       // first dry ground = this bank edge
+                            break;
+                        }
+                    }
+                    if (bank < float.MaxValue)
+                        s_lvl2[i] = Mathf.Min(outY[i], bank - BankFreeboard);
+                    else
+                        // No bank within BANK_R. Proven by va_water_scan: the wet
+                        // field can flood a 320m-wide region, and every cell in
+                        // its interior is further than the scan reaches, so the
+                        // bank rule never applied and the raw field level stood
+                        // 6m over the surrounding ground. Unbanked water is
+                        // seated relative to its OWN bed instead, which bounds
+                        // the stand everywhere the bank rule can't see.
+                        s_lvl2[i] = Mathf.Min(outY[i], s_gnd[i] + UNBANKED_MAX_DEPTH);
+                }
+            }
+            for (int i = 0; i < G * G; i++) if (wet[i]) outY[i] = s_lvl2[i];
+
+            // Seating the level to the bank can drop it to/below the bed — that
+            // cell simply isn't underwater any more.
+            for (int i = 0; i < G * G; i++)
+                if (wet[i] && outY[i] < s_gnd[i] + MIN_CLEAR) { wet[i] = false; outY[i] = 0f; }
+
+            // ALONG-FLOW SMOOTHING. Neighbouring cross-sections can pick banks a
+            // step apart; average along the flow direction so the surface bends
+            // smoothly downhill instead of terracing. Across-channel levelness is
+            // preserved because neighbours along the flow already share a level.
+            for (int pass = 0; pass < ALONG_PASSES; pass++)
+            {
+                for (int i = 0; i < G * G; i++) s_lvl2[i] = outY[i];
+                for (int z = 1; z < G - 1; z++)
+                {
+                    for (int x = 1; x < G - 1; x++)
+                    {
+                        int i = z * G + x;
+                        if (!wet[i]) continue;
+                        float sum = outY[i];
+                        int n = 1;
+                        for (int dz = -1; dz <= 1; dz++)
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                if (dx == 0 && dz == 0) continue;
+                                int j = (z + dz) * G + (x + dx);
+                                if (!wet[j]) continue;
+                                sum += outY[j];
+                                n++;
+                            }
+                        s_lvl2[i] = sum / n;
+                    }
+                }
+                for (int i = 0; i < G * G; i++) if (wet[i]) outY[i] = s_lvl2[i];
+            }
 
             // Shoreline: FLAT overshoot. Dry verts near wet hold the neighbor
             // water LEVEL and the sheet clips straight through the rising
@@ -211,12 +389,25 @@ namespace VerdantsAscent.Terrain.Voxel
                                 bool src = pass == 1 ? wet[j] : s_ring[j] == pass - 1;
                                 if (src && outY[j] > lvl) lvl = outY[j];
                             }
-                        if (lvl > 0f) { s_kill[i] = true; outY[i] = lvl; }
+                        // Overshoot INTO a bank only — ground standing at or above
+                        // the water line, which the sheet clips through. Extending
+                        // over ground that FALLS AWAY leaves the sheet hanging in
+                        // mid-air past the channel edge (the visible float).
+                        if (lvl > 0f && s_gnd[i] != float.MaxValue && s_gnd[i] >= lvl - EDGE_DROP)
+                        { s_kill[i] = true; outY[i] = lvl; }
                     }
                 }
                 for (int i = 0; i < G * G; i++)
                     if (s_kill[i]) { s_ring[i] = (byte)pass; s_kill[i] = false; }
             }
+
+            // Publish the FINAL levelled field — this is what the swim query
+            // reads, so a swimmer's surface is the meshed surface by definition.
+            // Wet cells only: the shoreline overshoot below is visual clip-into-
+            // bank, not swimmable water.
+            var field = new float[G * G];
+            for (int i = 0; i < G * G; i++) field[i] = wet[i] ? outY[i] : 0f;
+            s_fields[zone] = field;
 
             var go = new GameObject($"FiresGenWater_{zone.x}_{zone.y}");
             if (s_root == null)
@@ -288,7 +479,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     wetCells++;
                 }
             }
-            if (tris.Count == 0) { Object.Destroy(go); s_zones[zone] = null; return true; }
+            if (tris.Count == 0) { Object.Destroy(go); s_fields.Remove(zone); s_zones[zone] = null; return true; }
 
             var mesh = new Mesh { name = go.name };
             mesh.SetVertices(verts);
@@ -304,19 +495,13 @@ namespace VerdantsAscent.Terrain.Voxel
             var mat = Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
             if (mat != null) mr.sharedMaterial = mat;
 
-            // Swim: one trigger spanning the zone's wet band; the level each
-            // swimmer receives comes from SurfaceAt — the mesh function.
-            var sv = new GameObject("surface");
-            sv.transform.SetParent(go.transform, false);
-            sv.transform.position = new Vector3(zone.x * 64f, lvMax, zone.y * 64f);
-            int waterLayer = LayerMask.NameToLayer("Water");
-            sv.layer = waterLayer >= 0 ? waterLayer : 4;
-            var box = sv.AddComponent<BoxCollider>();
-            box.isTrigger = true;
-            float below = Mathf.Max(6f, lvMax - gndMin + 2f);
-            box.size = new Vector3(64f, below + 2f, 64f);
-            box.center = new Vector3(0f, 1f - (below + 2f) * 0.5f, 0f);
-            sv.AddComponent<FiresGenWaterSurface>();
+            // NO swim trigger. Swimming comes from CustomWaterManager.
+            // GetWaterLevelAt reporting this water's surface into vanilla's own
+            // liquid-level path — the same route the ocean and every other
+            // custom water source take. The old per-zone trigger drove swim by
+            // calling SetLiquidLevel each FixedUpdate, which competed with
+            // vanilla's own writes and flip-flopped the player between swim and
+            // walk. One writer, one source of truth.
 
             s_zones[zone] = go;
             Debug.Log($"[FiresVoxel] zone ({zone.x},{zone.y}) gen water: {wetCells} cells @1m, " +
@@ -408,7 +593,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 // proves swim==mesh (or names the exact spot where it lied).
                 if (Player.m_localPlayer != null && t == Player.m_localPlayer.transform)
                 {
-                    bool inWater = surface > -9999f && surface > t.position.y - 2f;
+                    // Feet-relative and honest: the old −2f tolerance logged
+                    // ENTER while the surface was still two metres BELOW the
+                    // player, which made the receipt contradict itself.
+                    bool inWater = surface > -9999f && surface > t.position.y;
                     if (inWater != m_playerWasInMeshWater)
                     {
                         m_playerWasInMeshWater = inWater;

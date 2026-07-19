@@ -33,7 +33,21 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float CELL = 8f;
         private const int BAKE_RES = 256;
         private const int BATCH = 1023;      // DrawMeshInstanced hard cap
-        private const int TILE_CAP = 6000;   // LRU ceiling (~roaming safety)
+        private const int TILE_CAP_MIN = 1024;
+        private const int TILE_CAP_MAX = 24000;  // memory backstop (~roaming safety)
+
+        // The LRU ceiling must be able to HOLD what the radius asks for, or the
+        // slider silently stops working: the draw disk alone needs π·r²/TILE²
+        // tiles — at the 6000m slider max that's ~6900 against the old fixed
+        // 6000 — so the far ring was evicted as fast as it was built and the
+        // view distance never grew no matter how far the slider went.
+        private static int TileCapFor(float radius, float fwdRadius)
+        {
+            float disk = Mathf.PI * radius * radius;
+            float cone = Mathf.PI * fwdRadius * fwdRadius * 0.25f;   // forward cone ≈ quarter disk
+            int need = Mathf.CeilToInt((disk + cone) / (TILE * TILE)) + 256;   // slack for roaming
+            return Mathf.Clamp(need, TILE_CAP_MIN, TILE_CAP_MAX);
+        }
 
         private sealed class Species
         {
@@ -168,7 +182,8 @@ namespace VerdantsAscent.Terrain.Voxel
             DrainDone();
 
             // LRU: over the cap, drop the tiles farthest from the player.
-            if (s_tiles.Count > TILE_CAP) EvictFarTiles(ptx, ptz);
+            int tileCap = TileCapFor(radius, fwdRadius);
+            if (s_tiles.Count > tileCap) EvictFarTiles(ptx, ptz, tileCap);
 
             // Rebuild the draw batches on a tile crossing OR when the camera has
             // turned enough that the forward cone points somewhere new (~12°).
@@ -250,10 +265,10 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private static readonly List<Vector2Int> s_evict = new List<Vector2Int>();
-        private static void EvictFarTiles(int ptx, int ptz)
+        private static void EvictFarTiles(int ptx, int ptz, int tileCap)
         {
             s_evict.Clear();
-            int overflow = s_tiles.Count - TILE_CAP;
+            int overflow = s_tiles.Count - tileCap;
             float fwdRadius = Mathf.Max(FiresVoxelConfig.ImpostorRadius?.Value ?? RadiusMeters,
                                         FiresVoxelConfig.ImpostorForwardRadius?.Value ?? RadiusMeters);
             int keepRing = Mathf.CeilToInt(fwdRadius / TILE) + 2;

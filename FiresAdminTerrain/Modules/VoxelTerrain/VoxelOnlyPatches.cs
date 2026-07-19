@@ -380,6 +380,24 @@ namespace VerdantsAscent.Terrain.Voxel
     [HarmonyPatch(typeof(ZoneSystem), nameof(ZoneSystem.GetGroundData))]
     internal static class Patch_ZoneSystem_GetGroundData_VoxelOnly
     {
+        // What the voxel surface WILL be at (x,z) once the chunks generate,
+        // derived from the same inputs the generator uses. Only the gen-water
+        // bed re-carve moves the surface — caves carve strictly below it — so
+        // predicting that is enough to place flora at its final height before
+        // the voxel data exists. Must stay in step with the bed carve in
+        // VoxelChunk.RunPendingGenerate; if they disagree, veg jumps again.
+        internal static float PredictedSurface(float wx, float wz, float heightmapY)
+        {
+            if (!FiresWorldGenBase.Active) return heightmapY;
+            float channelDepth = FiresVoxelConfig.WaterMinChannelDepth != null
+                ? FiresVoxelConfig.WaterMinChannelDepth.Value : 0f;
+            if (channelDepth <= 0f) return heightmapY;
+            if (!FiresWorldGenBase.TryGetGenWaterSmooth(wx, wz, out float lvl, out float depth)) return heightmapY;
+            if (depth < 0.25f || lvl <= 30.25f) return heightmapY;
+            float wantBed = lvl - channelDepth;
+            return heightmapY > wantBed ? wantBed : heightmapY;
+        }
+
         private static bool Prefix(ref Vector3 p, ref Vector3 normal, ref Heightmap.Biome biome,
             ref Heightmap.BiomeArea biomeArea, ref Heightmap hmap)
         {
@@ -395,7 +413,14 @@ namespace VerdantsAscent.Terrain.Voxel
             // The voxel top surface is the ground where voxel data exists;
             // heightmap data stays the fallback for unwrapped zones.
             bool voxel = VoxelWorld.TrySampleSurfaceY(p.x, p.z, h + 64f, h - 200f, out float vs, out _);
-            p.y = voxel ? vs : h;
+            // Voxel data not in for this column yet (the zone's heightmap is
+            // created BEFORE the streamer wraps it, and vegetation places right
+            // then). Handing back the raw heightmap here puts flora on the
+            // UN-carved surface, and it visibly jumps the moment the real voxel
+            // terrain arrives underneath — the bouncing veg. The voxel surface
+            // is the heightmap minus the gen-water bed carve, so predict that
+            // and place on the height the terrain is ABOUT to have.
+            p.y = voxel ? vs : PredictedSurface(p.x, p.z, h);
 
             float hx0, hx1, hz0, hz1;
             if (voxel)

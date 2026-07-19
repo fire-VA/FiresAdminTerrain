@@ -13,6 +13,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public readonly int[] CellIndex = new int[34 * 34 * 34];   // cells [-1..32]³ (+plane row for orphan faces)
         public readonly byte[] EditedMemo = new byte[34 * 34 * 34]; // 0 unknown, 1 edited, 2 clean
         public bool MeshAll;   // streamed zone-wrap chunk: mesh the whole surface (no edited gate)
+        public bool CollidersOnly; // headless dedi: only Verts+Tris are filled (no renderer consumes normals/tangents/uv/colors)
         public int MeshYLo = -1, MeshYHi = 33;   // crossing Y-band (uniform layers skipped); full range by default
         public bool EmitLips;  // legacy config: lips on ALL 64m zone-edge faces
         public bool FrontierLips; // config: lips on frontier-mask faces (default OFF — bright ribbon artifacts)
@@ -141,6 +142,15 @@ namespace VerdantsAscent.Terrain.Voxel
                     origin.y + cy + py * inv,
                     origin.z + cz + pz * inv);
 
+                int idx = buf.Verts.Count;
+                cellIndex[ci] = idx;
+                buf.Verts.Add(world);
+
+                // Headless colliders need position + triangles only; the render
+                // attributes below are pure waste on the dedi (no camera reads
+                // them, and they'd sit resident in every retained mesh).
+                if (buf.CollidersOnly) return idx;
+
                 // Outward normal = −density gradient (solid-positive).
                 float gx = (cd[1] + cd[3] + cd[5] + cd[7]) - (cd[0] + cd[2] + cd[4] + cd[6]);
                 float gy = (cd[2] + cd[3] + cd[6] + cd[7]) - (cd[0] + cd[1] + cd[4] + cd[5]);
@@ -148,9 +158,6 @@ namespace VerdantsAscent.Terrain.Voxel
                 var n = new Vector3(-gx, -gy, -gz);
                 n = n.sqrMagnitude > 1e-10f ? n.normalized : Vector3.up;
 
-                int idx = buf.Verts.Count;
-                cellIndex[ci] = idx;
-                buf.Verts.Add(world);
                 buf.Normals.Add(n);
                 // ANALYTIC world-anchored tangent — a pure function of the
                 // (bit-identical) normal, so coincident border vertices get
@@ -326,16 +333,15 @@ namespace VerdantsAscent.Terrain.Voxel
             Vector3 shift = outward * LIP_OUT + Vector3.down * LIP_DOWN;
             int iaO = buf.Verts.Count;
             buf.Verts.Add(buf.Verts[ia] + shift);
-            buf.Normals.Add(buf.Normals[ia]);
-            buf.Tangents.Add(buf.Tangents[ia]);
-            buf.Uvs.Add(buf.Uvs[ia]);
-            buf.Colors.Add(buf.Colors[ia]);
             int ibO = buf.Verts.Count;
             buf.Verts.Add(buf.Verts[ib] + shift);
-            buf.Normals.Add(buf.Normals[ib]);
-            buf.Tangents.Add(buf.Tangents[ib]);
-            buf.Uvs.Add(buf.Uvs[ib]);
-            buf.Colors.Add(buf.Colors[ib]);
+            if (!buf.CollidersOnly)
+            {
+                buf.Normals.Add(buf.Normals[ia]); buf.Tangents.Add(buf.Tangents[ia]);
+                buf.Uvs.Add(buf.Uvs[ia]); buf.Colors.Add(buf.Colors[ia]);
+                buf.Normals.Add(buf.Normals[ib]); buf.Tangents.Add(buf.Tangents[ib]);
+                buf.Uvs.Add(buf.Uvs[ib]); buf.Colors.Add(buf.Colors[ib]);
+            }
 
             // Double-sided sliver of overlap — chirality-proof.
             buf.Tris.Add(ia); buf.Tris.Add(ib); buf.Tris.Add(ibO);

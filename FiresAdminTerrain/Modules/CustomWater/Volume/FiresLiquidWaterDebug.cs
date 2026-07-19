@@ -57,87 +57,16 @@ namespace VerdantsAscent.Water.Core
             Debug.LogWarning($"[LiquidWaterDebug] '{name}' DESTROYED at T+{_age:F2}s | {Describe(gameObject, "FINAL")}");
         }
 
-        // ── Round-66: destroy TRACERS ────────────────────────────────────
-        //
-        // Nothing in the log named the killer, so these prefixes tap every
-        // path that can destroy a ZNetView'd object and print the caller's
-        // stack when the victim is a FiresLiquidWater pour:
-        //   * ZNetScene.OnZDODestroyed — ZDO died (server order via
-        //     RPC_DestroyZDO, or a local ZDOMan.DestroyZDO caller)
-        //   * ZNetView.ResetZDO       — called by BOTH ZNetScene kill
-        //     paths (OnZDODestroyed + RemoveObjects lifecycle sweep);
-        //     the stack tells them apart
-        //   * ZNetScene.Destroy       — the public API other systems call
-        //   * ZDOMan.DestroyZDO       — the local destroy REQUEST itself
-        private static readonly int s_pourPrefabHash =
-            FiresLiquidWaterPrefab.PrefabName.GetStableHashCode();
-
-        private static string ShortStack()
-        {
-            string s = System.Environment.StackTrace ?? "";
-            return s.Length > 1400 ? s.Substring(0, 1400) + " …" : s;
-        }
-
-        [HarmonyPatch(typeof(ZNetScene), "OnZDODestroyed")]
-        private static class ZNetScene_OnZDODestroyed_TracePour
-        {
-            private static void Prefix(ZDO zdo)
-            {
-                try
-                {
-                    if (!On) return;
-                    if (zdo == null || zdo.GetPrefab() != s_pourPrefabHash) return;
-                    Debug.LogWarning($"[LiquidWaterDebug] TRACE pour ZDO destroyed (OnZDODestroyed) uid={zdo.m_uid} owner={zdo.GetOwner()} pos={zdo.GetPosition()}\n{ShortStack()}");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(ZNetView), nameof(ZNetView.ResetZDO))]
-        private static class ZNetView_ResetZDO_TracePour
-        {
-            private static void Prefix(ZNetView __instance)
-            {
-                try
-                {
-                    if (!On) return;
-                    var zdo = __instance != null ? __instance.GetZDO() : null;
-                    if (zdo == null || zdo.GetPrefab() != s_pourPrefabHash) return;
-                    Debug.LogWarning($"[LiquidWaterDebug] TRACE pour ResetZDO '{__instance.name}' uid={zdo.m_uid} owner={zdo.GetOwner()} pos={zdo.GetPosition()}\n{ShortStack()}");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Destroy))]
-        private static class ZNetScene_Destroy_TracePour
-        {
-            private static void Prefix(GameObject go)
-            {
-                try
-                {
-                    if (!On) return;
-                    if (go == null || !go.name.StartsWith(FiresLiquidWaterPrefab.PrefabName)) return;
-                    Debug.LogWarning($"[LiquidWaterDebug] TRACE ZNetScene.Destroy('{go.name}') pos={go.transform.position}\n{ShortStack()}");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(ZDOMan), nameof(ZDOMan.DestroyZDO))]
-        private static class ZDOMan_DestroyZDO_TracePour
-        {
-            private static void Prefix(ZDO zdo)
-            {
-                try
-                {
-                    if (!On) return;
-                    if (zdo == null || zdo.GetPrefab() != s_pourPrefabHash) return;
-                    Debug.LogWarning($"[LiquidWaterDebug] TRACE ZDOMan.DestroyZDO pour uid={zdo.m_uid} owner={zdo.GetOwner()} pos={zdo.GetPosition()}\n{ShortStack()}");
-                }
-                catch { }
-            }
-        }
+        // ── Round-66 destroy TRACERS: REMOVED (Round-87) ─────────────────
+        // These were Harmony prefixes on ZNetScene.OnZDODestroyed / ZNetView.ResetZDO / ZNetScene.Destroy /
+        // ZDOMan.DestroyZDO that dumped a stack trace when a FiresLiquidWater pour died. The origin-destroy
+        // bug they hunted is long fixed, and — being on the hottest object-lifecycle paths — they ran (and
+        // captured Environment.StackTrace) on EVERY object destroy on the server, spamming the log and adding
+        // real overhead during bulk removals (Upgrade World zone/location resets remove every ZDO in a zone).
+        // Deleted outright rather than gated: the config gate still executed the prefix per-destroy, and a
+        // process that cached the toggle at launch kept tracing after the file was set to false. The pour
+        // lifecycle can still be inspected via the opt-in dump command + the water GO's own Update/OnDestroy
+        // Describe logging below, neither of which touches the global destroy paths.
 
         public static string Describe(GameObject go, string tag)
         {

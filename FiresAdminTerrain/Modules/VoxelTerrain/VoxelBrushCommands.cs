@@ -32,6 +32,30 @@ namespace VerdantsAscent.Terrain.Voxel
                 "[va_voxel_sphere] Stamp a voxel SPHERE at the 3D gizmo (Ctrl+Scroll = size, hold LeftAlt = carve, drag to paint — dragged spheres make smooth tubes).",
                 args => ApplyGizmo(args, VoxelBrushShape.Sphere));
 
+            // Water survey — walk a radius around the player, classify every
+            // generated water body by size/shape, and report each one's level
+            // range and how it sits against its banks. This is the tool for
+            // giving per-body feedback ("that pond is 0.4m proud on its east
+            // bank") instead of eyeballing screenshots.
+            new Terminal.ConsoleCommand("va_water_scan",
+                "[va_water_scan radius=256 step=2] Survey generated water near you: streams, rivers, ponds and lakes, each with its level range, depth, and worst stand-above-bank. Use it to check leveling per body.",
+                args =>
+                {
+                    float radius = 256f, step = 2f;
+                    for (int i = 1; i < args.Length; i++)
+                    {
+                        var a = args[i];
+                        int eq = a.IndexOf('=');
+                        if (eq <= 0) continue;
+                        string k = a.Substring(0, eq).ToLowerInvariant();
+                        float.TryParse(a.Substring(eq + 1), out float v);
+                        if (k == "radius" && v > 0f) radius = Mathf.Clamp(v, 32f, 1024f);
+                        else if (k == "step" && v > 0f) step = Mathf.Clamp(v, 1f, 16f);
+                    }
+                    foreach (var line in VoxelWaterSurvey.Run(radius, step))
+                        args.Context.AddString(line);
+                });
+
             new Terminal.ConsoleCommand("va_voxel_wrapall",
                 "[va_voxel_wrapall] Burst-wrap every currently loaded zone to voxel terrain (VoxelWrap mode).",
                 args =>

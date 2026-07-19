@@ -160,9 +160,10 @@ namespace VerdantsAscent.Water.Tools
                 return;
             }
 
-            if (UnityEngine.EventSystems.EventSystem.current != null
-                && UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject())
-                return;
+            // A tool selection is never also a tool use — the hammer-menu click
+            // is still held on the next frame and this is a level read. Also
+            // covers the pointer sitting over any UI element.
+            if (!FiresCore.Input.FiresPlaceGate.ReadyToAct()) return;
 
             // Prefer the IH ruler position over our own raycast so the
             // water brush stays exactly where the user sees the ring

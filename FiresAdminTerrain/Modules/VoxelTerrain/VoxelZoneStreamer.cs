@@ -91,6 +91,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static bool ModeActive =>
             FiresVoxelConfig.Enabled != null && FiresVoxelConfig.Enabled.Value
+            && (FiresVoxelConfig.CustomGeneration == null || FiresVoxelConfig.CustomGeneration.Value)  // master off = vanilla
             && FiresVoxelConfig.WorldMode != null
             && FiresVoxelConfig.WorldMode.Value != VoxelWorldMode.Vanilla;
 
@@ -236,28 +237,43 @@ namespace VerdantsAscent.Terrain.Voxel
             float radius = FiresVoxelConfig.WrapRadius.Value;
             bool wrapAll = headless
                 || (FiresVoxelConfig.WrapAllLoaded != null && FiresVoxelConfig.WrapAllLoaded.Value);
+            // Active centers the footprint is bounded around: the local player on
+            // a client; every connected peer's ref position on a headless dedi.
+            s_centers.Clear();
+            if (player != null) s_centers.Add(player.transform.position);
+            else if (ZNet.instance != null)
+            {
+                var peers = ZNet.instance.GetPeers();
+                for (int pi = 0; pi < peers.Count; pi++)
+                    if (peers[pi] != null && peers[pi].m_refPos != Vector3.zero) s_centers.Add(peers[pi].m_refPos);
+            }
+            if (s_centers.Count == 0 && pp != Vector3.zero) s_centers.Add(pp);
 
-            // ROLLING AUTO-HEAL — the ZERO-seams guarantee. Canonical border
-            // mirroring runs at every generate/edit/restore, and this sweep
-            // re-verifies a small slice of live chunks each tick (full pass
-            // ~30s at 444 chunks), re-mirroring + remeshing anything that
-            // diverged for ANY reason. No divergence survives a minute.
+            // RAM ceiling — ease the shared wrap radius down/up so the live
+            // Full-chunk count tracks MaxLoadedChunks. Both bounds below read it.
+            UpdateGovernorRadius();
+
+            // AUTO-HEAL — the zero-seams guarantee is EVENT-DRIVEN now (mirror-
+            // before-mesh + neighbour pokes on apply). This drains the priority
+            // queue those events feed and runs one paced background re-verify.
             AutoHealTick();
             VoxelGenWaterMesh.Tick();
             PaintTick();
             GhostBurst(pp);
 
-            // Unwrap: dead heightmaps (zone unloaded); in radius mode also
-            // zones beyond radius+hysteresis.
+            // Unwrap: dead heightmaps (zone unloaded); also zones beyond the
+            // governor radius + hysteresis (the far ring the governor shed).
             s_scratchDrop.Clear();
+            float dropBound = GovernorBound(wrapAll ? WRAP_HARD_CAP : radius) + 48f;
             foreach (var kv in s_zones)
             {
                 var w = kv.Value;
                 if (w.Hm == null) { s_scratchDrop.Add(kv.Key); continue; }
-                if (wrapAll) continue;
-                Vector3 c = w.Hm.transform.position;
-                float dx = Mathf.Abs(pp.x - c.x), dz = Mathf.Abs(pp.z - c.z);
-                if (Mathf.Max(dx, dz) > radius + 48f) s_scratchDrop.Add(kv.Key);
+                // Drop zones outside the bound of EVERY active center — frees
+                // their chunks/views/water. In wrapAll mode this is the hard cap
+                // (far ZDO-only ring); in radius mode the player's WrapRadius.
+                if (s_centers.Count > 0 && !NearAnyCenter(w.Hm.transform.position, dropBound))
+                    s_scratchDrop.Add(kv.Key);
             }
             foreach (var z in s_scratchDrop) Unwrap(z);
 
@@ -308,14 +324,14 @@ namespace VerdantsAscent.Terrain.Voxel
 
             // Periodic streamer state summary (LogTimings) — the ground truth
             // for diagnosing wrap behaviour from logs alone.
-            if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value
-                && Time.time >= s_nextSummary)
+            if (Time.time >= s_nextSummary)
             {
                 s_nextSummary = Time.time + 10f;
                 int swapped = 0;
                 foreach (var kv in s_zones) if (kv.Value.Swapped) swapped++;
                 Debug.Log($"[FiresVoxel] streamer: zones={s_zones.Count} swapped={swapped} " +
-                    $"pendingSwap={s_zones.Count - swapped} dirty={s_dirty.Count} chunks={VoxelWorld.ChunkCount}");
+                    $"pendingSwap={s_zones.Count - swapped} dirty={s_dirty.Count} chunks={VoxelWorld.ChunkCount} " +
+                    $"full={VoxelWorld.BudgetedChunkCount}/{FiresVoxelConfig.MaxLoadedChunks.Value} centers={s_centers.Count}");
             }
 
             // Wrap candidates + completion checks. ≤1 NEW zone per tick keeps
@@ -325,11 +341,8 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (hm == null || s_isDistantLod(hm)) continue;
                 Vector3 c = hm.transform.position;
-                if (!wrapAll)
-                {
-                    float dx = Mathf.Abs(pp.x - c.x), dz = Mathf.Abs(pp.z - c.z);
-                    if (Mathf.Max(dx, dz) > radius) continue;
-                }
+                float wrapBound = GovernorBound(wrapAll ? WRAP_HARD_CAP : radius);
+                if (s_centers.Count > 0 && !NearAnyCenter(c, wrapBound)) continue;
 
                 var zone = ZoneSystem.GetZone(c);
                 if (s_zones.TryGetValue(zone, out var wrap))
@@ -392,12 +405,15 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        private static readonly List<VoxelChunk> s_healScratch = new List<VoxelChunk>();
-        private static int s_healCursor;
+        // Background re-verify cursor: walks the wrapped-zone set once per full
+        // cycle (list refilled only when the cursor exhausts, NOT every tick) —
+        // the safety net that replaced the old full-world AllChunks copy+Sort.
+        private static readonly List<Vector2i> s_verifyZones = new List<Vector2i>();
+        private static int s_verifyCursor;
 
         // Event-driven heal: chunk keys queued at zone swap (the zone + its
-        // neighbour ring) get their borders re-mirrored ahead of the rolling
-        // sweep, so a rewrap converges in ticks instead of ~30s.
+        // neighbour ring) get their borders re-mirrored ahead of the background
+        // re-verify, so a rewrap converges in ticks.
         private static readonly Queue<Vector3Int> s_priorityHeal = new Queue<Vector3Int>();
         private static readonly HashSet<Vector3Int> s_priorityHealSet = new HashSet<Vector3Int>();
 
@@ -416,26 +432,32 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        private const int HealPerTick = 4;
+
+        // Convergence is EVENT-DRIVEN: EnqueueRemesh re-mirrors a chunk's ring
+        // before every mesh, and each apply pokes any neighbour whose ring
+        // diverged (VoxelMeshPipeline.PokeStale/PokeOrphanNeighbours) — a data
+        // change propagates as a self-terminating wave. This tick only (a) drains
+        // the priority queue those events + zone swaps/unwraps feed, and (b) runs
+        // a slow background re-verify as a belt-and-braces net. The old per-tick
+        // full-world AllChunks copy+Sort is GONE — it re-ranked thousands of
+        // chunks four times a second to catch the rare straggler PokeStale now
+        // handles at its source.
         private static void AutoHealTick()
         {
-            const int PER_TICK = 4;
-            int budget = PER_TICK;
-
-            // Bounded scan: entries for chunks that are mid-regen go BACK on
-            // the queue (they used to be silently dropped — the one-shot heal
-            // for a chunk that happened to be regenerating was lost forever).
+            int budget = HealPerTick;
             int scan = s_priorityHeal.Count;
             while (budget > 0 && scan-- > 0 && s_priorityHeal.Count > 0)
             {
                 var key = s_priorityHeal.Dequeue();
                 if (!VoxelWorld.TryGetChunk(key, out var pc) || pc == null)
                 { s_priorityHealSet.Remove(key); continue; }
+                // Uniform chunks have no border ring to heal and no mesh to
+                // rebuild — drop them instead of firing a no-op EnqueueRemesh
+                // (their AppliedVersion is stale forever after a downgrade).
+                if (pc.Kind != ChunkKind.Full) { s_priorityHealSet.Remove(key); continue; }
                 if (pc.PendingGenerate) { s_priorityHeal.Enqueue(key); continue; }
                 s_priorityHealSet.Remove(key);
-                // Remesh when ANY heal class applies: ring data diff, a mesh
-                // that never applied the current data version, or a frontier
-                // mask change (neighbour arrived/left). Skipping converged
-                // chunks halves the mesh+bake bill of every wrap heal.
                 if (pc.MirrorBordersNow(true) > 0
                     || pc.Version != pc.AppliedVersion
                     || VoxelMeshPipeline.ComputeFrontierMask(pc) != pc.FrontierMask
@@ -444,39 +466,27 @@ namespace VerdantsAscent.Terrain.Voxel
                 budget--;
             }
 
-            // The fallback sweep gets its OWN budget. Sharing one pot starved
-            // it whenever the priority queue stayed fed (constant zone churn
-            // while exploring) — a chunk that went stale outside a wrap event
-            // never healed (audit: dataDiff=122 persisting across sweeps).
-            s_healScratch.Clear();
-            foreach (var c in VoxelWorld.AllChunks) s_healScratch.Add(c);
-            if (s_healScratch.Count == 0) return;
-            // Deterministic order — Dictionary enumeration reshuffles under
-            // wrap/unwrap churn and let chunks slide past the modulo cursor
-            // unvisited for minutes while the player moved.
-            s_healScratch.Sort(s_chunkKeyOrder);
-            for (int k = 0; k < PER_TICK; k++)
-            {
-                s_healCursor = (s_healCursor + 1) % s_healScratch.Count;
-                var c = s_healScratch[s_healCursor];
-                if (c == null || c.PendingGenerate) continue;
-                // Data diff OR a mesh that never applied the current data
-                // version — the second class was invisible to the sweep
-                // (converged data, stale mesh) and persisted until the manual
-                // console heal.
-                if (c.MirrorBordersNow(true) > 0 || c.Version != c.AppliedVersion)
-                    VoxelMeshPipeline.EnqueueRemesh(c);
-            }
+            ReverifyNextZone();
         }
 
-        private static readonly System.Comparison<VoxelChunk> s_chunkKeyOrder = (a, b) =>
+        // Feed ONE wrapped zone's ring into the priority queue per cycle-step,
+        // and only when the queue has drained — so it never outruns the bounded
+        // drain above and never scans/sorts the whole chunk set. Over a full
+        // cycle it re-checks every wrapped zone; the per-chunk diff test inside
+        // the drain no-ops on converged chunks, so a steady world costs nothing
+        // but dictionary walks.
+        private static void ReverifyNextZone()
         {
-            if (a == null || b == null) return (a == null ? 0 : 1) - (b == null ? 0 : 1);
-            int c = a.Key.x.CompareTo(b.Key.x);
-            if (c != 0) return c;
-            c = a.Key.z.CompareTo(b.Key.z);
-            return c != 0 ? c : a.Key.y.CompareTo(b.Key.y);
-        };
+            if (s_priorityHeal.Count > 0 || s_zones.Count == 0) return;
+            if (s_verifyCursor >= s_verifyZones.Count)
+            {
+                s_verifyZones.Clear();
+                foreach (var k in s_zones.Keys) s_verifyZones.Add(k);
+                s_verifyCursor = 0;
+            }
+            var zone = s_verifyZones[s_verifyCursor++];
+            if (s_zones.TryGetValue(zone, out var wrap)) QueuePriorityHeal(wrap);
+        }
 
         // FNV-1a over the generate inputs (ground bits, biome, caves flag,
         // hydrology readiness — rivers carve once Ready flips, so that first
@@ -517,6 +527,25 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // Stay Full within this margin of any possible surface/cave so the
+        // surface band is generous — a boundary chunk meshing empty wastes one
+        // 83KB alloc (negligible); a wrongly-uniform surface chunk is a hole.
+        private const float UniformClassifyMargin = 4f;
+
+        // A chunk whose highest sample is more than carveReach below the LOWEST
+        // ground over its column is solid rock nothing carves; one whose lowest
+        // sample is above the HIGHEST ground is air. minG/maxG come from the
+        // apron-inclusive GatherColumns, so a uniform verdict provably means the
+        // chunk's shared faces hold no surface (the see-through guarantee).
+        private static ChunkKind ClassifyChunkKind(int ky, float minG, float maxG, float carveReach)
+        {
+            float top = ky * VoxelChunk.CELLS + VoxelChunk.CELLS;
+            float bot = ky * VoxelChunk.CELLS - 1f;
+            if (top <= minG - carveReach - UniformClassifyMargin) return ChunkKind.UniformSolid;
+            if (bot >= maxG + UniformClassifyMargin) return ChunkKind.UniformAir;
+            return ChunkKind.Full;
+        }
+
         // Generate (or REgenerate, in place) the zone's chunk stack. On a
         // swapped zone this never touches the vanilla heightmap — existing
         // chunks get a fresh generate payload and remesh seamlessly, so a
@@ -528,6 +557,27 @@ namespace VerdantsAscent.Terrain.Voxel
             int kz0 = FloorDiv(Mathf.RoundToInt(zone.y * 64f - 32f), 32);
             bool caves = FiresVoxelConfig.GenerateCaves.Value;
             int caveDepth = Mathf.CeilToInt(FiresVoxelConfig.CaveMaxDepth.Value);
+            // How far below the surface anything can CARVE — the depth beyond
+            // which a column is guaranteed solid rock. Caves reach CaveMaxDepth;
+            // voxel-side river beds (vanilla-wrap worlds only — Fires worlds
+            // carve rivers into the base heightfield) reach RiverMaxDepth.
+            bool voxelRivers = FiresVoxelConfig.HydrologyEnabled != null && FiresVoxelConfig.HydrologyEnabled.Value
+                && VoxelHydrology.Ready && !FiresWorldGenBase.Active;
+            // Sinkholes are part of the cave carve and can reach DEEPER than
+            // CaveMaxDepth, so the guaranteed-solid depth is the max of the two.
+            // Understating it would let a chunk a sinkhole punches through be
+            // classified UniformSolid — i.e. a hole with no mesh.
+            float caveReach = caves
+                ? Mathf.Max(caveDepth, FiresVoxelConfig.SinkholeDepth != null
+                    ? FiresVoxelConfig.SinkholeDepth.Value : 0f)
+                : 0f;
+            // The gen-water bed re-carve also lowers ground (Fires worlds), so it
+            // counts toward the depth below which a column is guaranteed solid.
+            float bedCarve = FiresWorldGenBase.Active && FiresVoxelConfig.WaterMinChannelDepth != null
+                ? FiresVoxelConfig.WaterMinChannelDepth.Value : 0f;
+            float carveReach = caveReach
+                + (voxelRivers ? FiresVoxelConfig.RiverMaxDepth.Value : 0f)
+                + bedCarve;
 
             var newKeys = new List<Vector3Int>(12);
             var armed = new List<VoxelChunk>(12);
@@ -566,7 +616,19 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         var key = new Vector3Int(kx, ky, kz);
                         newKeys.Add(key);
-                        if (VoxelWorld.TryGetChunk(key, out var existing))
+
+                        // The RLE win: a chunk fully below cave/river reach is
+                        // solid rock, one fully above the surface is air. Neither
+                        // needs arrays, a mesh, or a collider — but it stays
+                        // registered so the Y-range union + border ownership hold.
+                        var kind = ClassifyChunkKind(ky, minG, maxG, carveReach);
+                        if (kind != ChunkKind.Full)
+                        {
+                            VoxelWorld.EnsureUniformChunk(key, kind);
+                            continue;
+                        }
+
+                        if (VoxelWorld.TryGetChunk(key, out var existing) && existing.Kind == ChunkKind.Full)
                         {
                             // Change-gate: identical inputs → identical chunk.
                             // Skipping the no-op regen keeps the collider under
@@ -581,6 +643,8 @@ namespace VerdantsAscent.Terrain.Voxel
                             armed.Add(existing);
                             continue;
                         }
+                        // New, or promoting a uniform chunk the surface now
+                        // crosses (terraform raised ground into old air).
                         var chunk = VoxelWorld.CreateStreamed(key);
                         chunk.MeshAll = true;
                         // Hidden until the swap flips voxel-on/vanilla-off in
@@ -631,16 +695,24 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (neighboured && VoxelWorld.TryGetChunk(old, out var keep) && keep != null && !keep.HasBrushEdits)
                     {
                         // Re-arm on the column's fresh gather so its data
-                        // stays canonical with the new terrain.
+                        // stays canonical with the new terrain — as a uniform
+                        // face-owner if the new ground put it out of the band.
                         int lcx = old.x - kx0, lcz = old.z - kz0;
                         if (lcx >= 0 && lcx < 2 && lcz >= 0 && lcz < 2)
                         {
-                            GatherColumns(old.x, old.z, out var kg, out var kb, out _, out _, ref usedFallback);
-                            keep.MeshAll = true;
-                            keep.LastGenHash = HashColumns(kg, kb, caves);
-                            keep.PrepareGenerate(kg, kb, caves);
-                            keep.SetBorderOverrides(VoxelChunk.CaptureBorderOverrides(old));
-                            VoxelMeshPipeline.EnqueueRemesh(keep);
+                            GatherColumns(old.x, old.z, out var kg, out var kb, out float kMin, out float kMax, ref usedFallback);
+                            var keepKind = ClassifyChunkKind(old.y, kMin, kMax, carveReach);
+                            if (keepKind != ChunkKind.Full)
+                                VoxelWorld.EnsureUniformChunk(old, keepKind);
+                            else
+                            {
+                                VoxelWorld.PromoteToFull(keep);
+                                keep.MeshAll = true;
+                                keep.LastGenHash = HashColumns(kg, kb, caves);
+                                keep.PrepareGenerate(kg, kb, caves);
+                                keep.SetBorderOverrides(VoxelChunk.CaptureBorderOverrides(old));
+                                VoxelMeshPipeline.EnqueueRemesh(keep);
+                            }
                         }
                         newKeys.Add(old);
                         continue;
@@ -761,8 +833,16 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly HashSet<Vector2i> s_paintPending = new HashSet<Vector2i>();
         private static readonly List<Vector2i> s_paintScratch = new List<Vector2i>();
         private static readonly List<ZDO> s_paintZdoScratch = new List<ZDO>();
+        // Water depth (m) over which the bed paint ramps from dry to full. The
+        // feather is what keeps the wet/dry transition off the zone seam.
+        private const float PAINT_WET_FEATHER = 1.25f;
+        private const float SEA_LEVEL_GATE = 30.25f;
+
         private static int s_tcPrefabHash;
         private static float s_nextPaintRetry;
+        // Set while OUR bed paint pokes the heightmap, so the Regenerate postfix
+        // can tell a paint-only refresh from a real terraform.
+        private static bool s_ownPaintPoke;
 
         private static void PaintRiverBed(Heightmap hm)
         {
@@ -835,8 +915,23 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     int i = vz * w + vx;
                     if (i >= paint.Length || mod[i]) continue;
-                    if (!FiresWorldGenBase.IsWetAt(zc.x - 32f + vx, zc.z - 32f + vz)) continue;
-                    paint[i] = new Color(1f, 0f, 0f, 1f);   // dirt + cleared vegetation
+                    float pwx = zc.x - 32f + vx, pwz = zc.z - 32f + vz;
+                    // FEATHERED bed paint. A binary wet test paints a hard dirt
+                    // edge; because each zone paints its OWN TerrainComp that
+                    // edge lands on the zone seam, which is the straight-line
+                    // border showing in the terrain. Ramping the paint weight
+                    // with the smoothed water depth fades the bed out into the
+                    // bank instead, and because the ramp is a pure function of
+                    // world position two zones compute the same value at a
+                    // shared vertex — so the seam cannot show.
+                    float wet01 = 0f;
+                    if (FiresWorldGenBase.TryGetGenWaterSmooth(pwx, pwz, out float plvl, out float pdep)
+                        && plvl > SEA_LEVEL_GATE)
+                        wet01 = Mathf.Clamp01(pdep / PAINT_WET_FEATHER);
+                    else if (FiresWorldGenBase.IsWetAt(pwx, pwz))
+                        wet01 = 1f;
+                    if (wet01 <= 0.03f) continue;
+                    paint[i] = new Color(wet01, 0f, 0f, wet01);   // dirt + cleared vegetation, weighted
                     mod[i] = true;
                     changed = true;
                 }
@@ -844,7 +939,14 @@ namespace VerdantsAscent.Terrain.Voxel
             if (changed)
             {
                 AccessTools.Method(typeof(TerrainComp), "Save")?.Invoke(tc, null);
-                hm.Poke(false);
+                // Our own bed paint moves NO heights — only the paint mask. The
+                // Regenerate this Poke raises must refresh the mask but must NOT
+                // mark the zone + its ring geometry-dirty: that queued a full
+                // 4×1156-sample re-gather per zone purely to hash-compare and
+                // skip, once per zone swap (the bulk of the load-time dirty churn).
+                s_ownPaintPoke = true;
+                try { hm.Poke(false); }
+                finally { s_ownPaintPoke = false; }
                 // Grass already instanced over the bed rebuilds against the
                 // fresh cleared paint (vanilla paint ops do the same).
                 if (ClutterSystem.instance != null)
@@ -861,9 +963,23 @@ namespace VerdantsAscent.Terrain.Voxel
             foreach (var key in wrap.Keys)
             {
                 if (!VoxelWorld.TryGetChunk(key, out var chunk)) continue;
+                // Uniform chunks are all-solid/all-air — no surface, no collider
+                // to wait on. They're ready by definition; the surface band holds
+                // the walkable ground.
+                if (chunk.Kind != ChunkKind.Full) continue;
                 if (chunk.PendingGenerate) pendingGen++;
                 else if (chunk.Queued) queued++;
-                else if (!VoxelWorld.TryGetView(key, out var view) || view == null) noView++;
+                else if (!VoxelWorld.TryGetView(key, out var view) || view == null)
+                {
+                    noView++;
+                    // Self-heal the headless SPAWN DEADLOCK: a meshed chunk whose
+                    // apply was stale-dropped (the driver's IsLive/Version race)
+                    // is left viewless AND unqueued — nothing ever re-meshes it,
+                    // so the zone swap blocks forever, the dedi never loads the
+                    // spawn area, and every client times out at "connecting".
+                    // Re-arm it; EnqueueRemesh dedupes (no-op once it lands).
+                    VoxelMeshPipeline.EnqueueRemesh(chunk);
+                }
                 else if (!view.ColliderReady) noCollider++;
             }
             if (pendingGen + queued + noView + noCollider > 0)
@@ -907,6 +1023,13 @@ namespace VerdantsAscent.Terrain.Voxel
             // waiting for the rolling sweep to come around (~30s).
             QueuePriorityHeal(wrap);
 
+            // Phase 2 — dress the zone's caves. Runs at the swap because that is
+            // the first moment the voxel density (which the void scan reads) is
+            // final. Server-only and idempotent against restarts; a no-op on
+            // clients and on zones with no caves.
+            try { VoxelCaveContent.PlaceForZone(wrap.Zone); }
+            catch (System.Exception ex) { Debug.LogWarning($"[FiresVoxel] cave content threw for ({wrap.Zone.x},{wrap.Zone.y}): {ex.Message}"); }
+
             // W3.3 — paint that loaded from TerrainComp ZDOs before the zone
             // wrapped gets its masks on the freshly visible chunks.
             MarkZonePaintDirty(wrap.Zone);
@@ -932,6 +1055,62 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── Unwrap: vanilla back FIRST, then drop chunks ─────────────────────
+        // Hard cap on the wrapped radius even in wrapAll mode (metres from an
+        // active center). Valheim keeps heightmaps loaded over a much wider ZDO
+        // radius than it renders; holding voxel meshes+colliders for ALL of them
+        // ran the memory away with a co-located client+dedi. The cap stays well
+        // beyond Valheim's active area (~135m corner), so nothing the player can
+        // reach ever loses its collider — it only sheds the far ZDO-only ring.
+        private const float WRAP_HARD_CAP = 256f;
+        private static readonly List<Vector3> s_centers = new List<Vector3>(8);
+        private static bool NearAnyCenter(Vector3 c, float r)
+        {
+            for (int i = 0; i < s_centers.Count; i++)
+                if (Mathf.Abs(s_centers[i].x - c.x) <= r && Mathf.Abs(s_centers[i].z - c.z) <= r) return true;
+            return false;
+        }
+
+        // ── Memory governor ──────────────────────────────────────────────────
+        // WRAP_HARD_CAP bounds the wrapped RADIUS per center; it does NOT bound
+        // the TOTAL across spread-out peers (a busy dedi wraps every peer's ring
+        // and OOMs). The governor is the RAM ceiling: it eases ONE shared wrap
+        // radius down under memory pressure and back up when there's headroom,
+        // until the live Full-chunk count fits MaxLoadedChunks. The wrap AND drop
+        // bounds both read this radius, so shrinking simply stops wrapping (and
+        // sheds) the far ring — no zone is wrapped one tick and evicted the next
+        // (the churn a farthest-first eviction pass would cause). It never falls
+        // below SolidKeepRadius: in VoxelOnly the voxel collider is the only
+        // ground, so a peer's own footprint must always stay wrapped.
+        private const float SolidKeepRadius = 128f;   // 2 zones — a peer's active-area floor
+        private const float GovernorRadiusStep = 8f;  // metres/tick the radius eases in/out
+        private static float s_governorRadius = WRAP_HARD_CAP;
+        private static float s_nextBudgetWarn;
+
+        private static float GovernorBound(float baseBound)
+        {
+            float b = Mathf.Min(baseBound, s_governorRadius);
+            return b < SolidKeepRadius ? SolidKeepRadius : b;
+        }
+
+        private static void UpdateGovernorRadius()
+        {
+            int budget = FiresVoxelConfig.MaxLoadedChunks.Value;
+            int live = VoxelWorld.BudgetedChunkCount;
+            if (live > budget)
+                s_governorRadius = Mathf.Max(SolidKeepRadius, s_governorRadius - GovernorRadiusStep);
+            else if (live < budget - (budget >> 3))   // < budget·0.875 — hysteresis before re-growing
+                s_governorRadius = Mathf.Min(WRAP_HARD_CAP, s_governorRadius + GovernorRadiusStep);
+
+            if (live > budget && s_governorRadius <= SolidKeepRadius + 0.5f && Time.time >= s_nextBudgetWarn)
+            {
+                s_nextBudgetWarn = Time.time + 30f;
+                Debug.LogWarning($"[FiresVoxel] chunk budget {budget} exceeded ({live} live) with the wrap radius " +
+                    $"already at the {SolidKeepRadius:F0}m floor around {s_centers.Count} peer(s) — the guaranteed-" +
+                    $"solid set alone is over budget. Raise 'Max loaded chunks' or reduce Cave Max Depth; the governor " +
+                    $"will NOT shrink further (fall-through risk).");
+            }
+        }
+
         private static void Unwrap(Vector2i zone)
         {
             if (!s_zones.TryGetValue(zone, out var wrap)) return;
@@ -955,6 +1134,9 @@ namespace VerdantsAscent.Terrain.Voxel
             QueuePriorityHeal(wrap);
             s_zones.Remove(zone);
             VoxelGenWaterMesh.DropZone(zone);
+            // Let the zone be re-dressed if it comes back; the ZDO check keeps
+            // that from doubling up on content that already persisted.
+            VoxelCaveContent.ForgetZone(zone);
         }
 
         private static void UnwrapAll()
@@ -985,6 +1167,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     // exist in Vanilla world mode too, and MarkPaintDirty
                     // no-ops for columns without voxel chunks.
                     MarkZonePaintDirty(zone);
+                    // Paint-only Poke from our own bed painter: the mask refresh
+                    // above is the whole job — heights are untouched, so a
+                    // geometry rewrap of this zone and its ring would re-gather
+                    // thousands of samples to conclude nothing changed.
+                    if (s_ownPaintPoke) return;
                     if (s_zones.Count == 0) return;
                     for (int dz = -1; dz <= 1; dz++)
                         for (int dx = -1; dx <= 1; dx++)

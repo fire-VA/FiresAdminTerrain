@@ -271,6 +271,8 @@
     <Compile Include="Modules\VoxelTerrain\VoxelOnlyPatches.cs" />
     <Compile Include="Modules\VoxelTerrain\FarQuilt.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveNoise.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveContent.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelWaterSurvey.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelZoneStreamer.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelBrushDrag.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelClutterBridge.cs" />
@@ -379,10 +381,19 @@
        managed mod folder; other files there (bundles, configs) are left untouched. -->
   <PropertyGroup>
     <BlueHillsPluginDir>C:\Users\travi\AppData\Roaming\r2modmanPlus-local\Valheim\profiles\BlueHills\BepInEx\plugins\FiresAdminTerrain\</BlueHillsPluginDir>
+    <BlueHillsDediDir>C:\Program Files (x86)\Steam\steamapps\common\Valheim dedicated server - BlueHills\BepInEx\plugins\FiresAdminTerrain\</BlueHillsDediDir>
   </PropertyGroup>
   <Target Name="DeployToBlueHills" AfterTargets="Build" Condition="Exists('$(BlueHillsPluginDir)')">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BlueHillsPluginDir)" OverwriteReadOnlyFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(BlueHillsPluginDir)" OverwriteReadOnlyFiles="true" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
     <Message Importance="high" Text="Deployed $(TargetFileName) (+pdb) -> $(BlueHillsPluginDir)" />
+  </Target>
+  <!-- The dedi is a SEPARATE install ("Valheim dedicated server - BlueHills", not the
+       plain "Valheim dedicated server" folder). Without this target the dedi silently
+       kept running a stale DLL while the client had the new one. Mirrors FAP's csproj. -->
+  <Target Name="DeployToBlueHillsDedi" AfterTargets="Build" Condition="Exists('$(BlueHillsDediDir)')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BlueHillsDediDir)" OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(BlueHillsDediDir)" OverwriteReadOnlyFiles="true" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    <Message Importance="high" Text="Deployed $(TargetFileName) (+pdb) -> $(BlueHillsDediDir)" />
   </Target>
 </Project>

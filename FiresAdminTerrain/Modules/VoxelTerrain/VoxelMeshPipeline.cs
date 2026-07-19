@@ -38,6 +38,62 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly ConcurrentQueue<AssignJob> s_assignQueue = new ConcurrentQueue<AssignJob>();
         private static readonly ConcurrentBag<MeshBuffers> s_bufferPool = new ConcurrentBag<MeshBuffers>();
         private static readonly AutoResetEvent s_signal = new AutoResetEvent(false);
+
+        // Hard cap on concurrently-live mesh buffers (~0.6MB each) — the mesh
+        // pipeline's memory ceiling. At login the streamer queues hundreds of
+        // chunks and N workers mesh them far faster than the main thread applies
+        // them; an uncapped `new MeshBuffers()` ballooned the pool into a
+        // process-wide OOM (the voxel workers AND unrelated mods both threw on
+        // their next allocation). Capped, a worker that can't get a buffer
+        // re-queues its chunk and waits for apply to free one, so pipeline RAM
+        // can never run away.
+        //
+        // Config-driven (Mesh buffer budget) and refreshed on the main thread:
+        // too tight starves throughput — the first fixed value of 12 left zones
+        // at pendingGen=8-12 for 8-24s — and too loose just costs RAM.
+        private static int s_maxBuffers = 16;
+        private static int s_buffersAllocated;
+
+        // Main-thread work per apply is a Mesh upload (SetVertices/SetTriangles)
+        // and per assign a collider swap. A client shares that frame with
+        // rendering; a headless dedi does not render at all, so it gets 4x.
+        private static int ApplyPerFrame
+        {
+            get
+            {
+                int n = FiresVoxelConfig.MeshAppliesPerFrame != null
+                    ? FiresVoxelConfig.MeshAppliesPerFrame.Value : 2;
+                return Headless ? n * 4 : n;
+            }
+        }
+
+        // Refreshed from config on the MAIN thread each driver tick so the
+        // setting hot-reloads without a worker ever reading a ConfigEntry.
+        private static void RefreshBufferBudget()
+        {
+            int b = FiresVoxelConfig.MeshBufferBudget != null
+                ? FiresVoxelConfig.MeshBufferBudget.Value : 16;
+            s_maxBuffers = Headless ? b * 2 : b;
+        }
+
+        private static MeshBuffers RentBuffer()
+        {
+            if (s_bufferPool.TryTake(out var b)) return b;
+            if (Interlocked.Increment(ref s_buffersAllocated) <= s_maxBuffers)
+            {
+                try { return new MeshBuffers(); }
+                catch { Interlocked.Decrement(ref s_buffersAllocated); return null; }
+            }
+            Interlocked.Decrement(ref s_buffersAllocated);
+            return null;
+        }
+
+        private static void ReturnBuffer(MeshBuffers buf)
+        {
+            if (buf == null) return;
+            s_bufferPool.Add(buf);
+            s_signal.Set();   // wake a worker blocked on backpressure
+        }
         // POOL of mesher workers (was a single thread — the world-wide
         // meshing/streaming bottleneck). Each pulls from the SAME concurrent
         // queues + buffer pool; a chunk is dequeued by exactly one worker and
@@ -46,6 +102,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // so parallelism cannot change the mesh or introduce a seam.
         private static Thread[] s_workers;
         private static GameObject s_driverGO;
+
+        // Cached on the main thread (EnsureDriver) — the worker must not touch
+        // SystemInfo. On a headless dedi the mesh feeds only a MeshCollider, so
+        // the worker skips normals/tangents/uv/colors entirely.
+        internal static bool Headless;
 
         public static Transform Root => EnsureDriver().transform;
 
@@ -57,6 +118,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // full-zone re-mesh would then have to shed.
         public static void EnqueueRemesh(VoxelChunk chunk, HashSet<Vector3Int> batchAlsoCovers)
         {
+            // Uniform (all-solid/all-air) chunks have no surface — nothing to
+            // mesh, and their arrays are null. This early-out is what makes every
+            // scattered EnqueueRemesh call site (heal drain, neighbour pokes,
+            // keep-block) safe to fire without a per-caller Kind check.
+            if (chunk.Kind != ChunkKind.Full) { chunk.Queued = false; return; }
             EnsureDriver();
             // Convergence by construction: a mesh is never built from an
             // un-mirrored border ring. The audit caught chunks sitting at
@@ -150,8 +216,14 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var k = new Vector3Int(x, y, z);
                 if (batch != null && batch.Contains(k)) return true;
-                if (VoxelWorld.TryGetChunk(k, out var n)
-                    && n != null && n.MeshAll && !n.PendingGenerate) return true;
+                if (VoxelWorld.TryGetChunk(k, out var n) && n != null)
+                {
+                    // A uniform neighbour covers by definition: its faces hold no
+                    // surface (classified from apron-inclusive ground), so there
+                    // is no gap for a frontier lip to seal.
+                    if (n.Kind != ChunkKind.Full) return true;
+                    if (n.MeshAll && !n.PendingGenerate) return true;
+                }
                 // No chunk at THIS Y is not a frontier when the neighbour
                 // column's zone is voxel-solid — per-column Y-ranges diverge
                 // on every hillside and the old chunk-at-Y test grew lip
@@ -173,6 +245,8 @@ namespace VerdantsAscent.Terrain.Voxel
             // Ensure the whole pool is alive (any dead worker is respawned so a
             // single crash can't silently halve throughput). Size = cores − 2,
             // clamped [2..6] (leave the main + render threads a core each).
+            Headless = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
+            RefreshBufferBudget();
             int desired = System.Environment.ProcessorCount - 2;
             if (desired < 2) desired = 2; else if (desired > 6) desired = 6;
             if (s_workers == null) s_workers = new Thread[desired];
@@ -181,8 +255,22 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (s_workers[i] != null && s_workers[i].IsAlive) continue;
                 if (s_workers[i] != null)
                     Debug.LogError($"[FiresVoxel] mesher worker {i} was DEAD — restarting it.");
-                s_workers[i] = new Thread(WorkerLoop) { IsBackground = true, Name = $"FiresVoxelMesher{i}" };
-                s_workers[i].Start();
+                try
+                {
+                    s_workers[i] = new Thread(WorkerLoop) { IsBackground = true, Name = $"FiresVoxelMesher{i}" };
+                    s_workers[i].Start();
+                }
+                catch (System.Exception ex)
+                {
+                    // Thread creation ITSELF OOMs on a memory-starved dedi
+                    // ("can't create thread"). Don't let it propagate up through
+                    // EnqueueRemesh → AutoHeal → the streamer tick and cascade;
+                    // leave the slot null and retry on a later EnsureDriver once
+                    // memory frees. With the workers that DID start still alive,
+                    // meshing continues at reduced throughput instead of halting.
+                    s_workers[i] = null;
+                    Debug.LogWarning($"[FiresVoxel] mesher worker {i} failed to start ({ex.GetType().Name}) — retrying when memory frees.");
+                }
             }
             if (s_driverGO != null) return s_driverGO;
             s_driverGO = new GameObject("FiresVoxelTerrain");
@@ -215,15 +303,30 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     didWork = true;
                     chunk.Queued = false;
-                    if (!s_bufferPool.TryTake(out var buf)) buf = new MeshBuffers();
-                    // One unhandled exception here used to kill the thread —
-                    // and with it ALL meshing until relog. Contain it to the
-                    // chunk, name it loudly, keep the loop alive.
+                    // Reclassified to uniform (no surface) while it sat queued —
+                    // nothing to mesh; its view was already dropped by the downgrade.
+                    if (chunk.Kind != ChunkKind.Full) continue;
+                    // RentBuffer applies the memory backpressure: null = every
+                    // buffer is in flight (apply hasn't returned one yet), so
+                    // re-queue this chunk and wait rather than allocating past the
+                    // cap — an uncapped burst was the process-wide OOM. It also
+                    // absorbs an allocation OOM internally, so the rent can't kill
+                    // the worker (which used to cascade the whole pipeline dead).
+                    MeshBuffers buf = RentBuffer();
+                    if (buf == null)
+                    {
+                        if (!chunk.Queued) { chunk.Queued = true; s_remeshQueue.Enqueue(chunk); }
+                        s_signal.WaitOne(10);
+                        continue;
+                    }
+                    // Contain any per-chunk throw so one bad chunk can't kill the
+                    // worker (and all meshing until relog).
                     try
                     {
                         sw.Restart();
                         chunk.RunPendingGenerate();   // W1 streamed chunks: fill + cave-carve first (no-op otherwise)
                         int version = chunk.Snapshot(buf.Density, buf.Seed, buf.Biome);
+                        if (version == VoxelChunk.SnapshotUniform) { ReturnBuffer(buf); continue; }
                         buf.MeshAll = chunk.MeshAll;
                         // Crossing Y-band over the SNAPSHOTTED density (NOT the
                         // gen-time density) — brush edits like vcarve dig tunnels
@@ -252,6 +355,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         buf.OrphanMask = chunk.OrphanMask;
                         buf.KeyX = chunk.Key.x;
                         buf.KeyZ = chunk.Key.z;
+                        buf.CollidersOnly = Headless;
                         VoxelMesherSurfaceNets.Build(buf, chunk.WorldOrigin);
                         sw.Stop();
                         s_applyQueue.Enqueue(new ApplyResult
@@ -262,8 +366,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     catch (System.Exception ex)
                     {
-                        s_bufferPool.Add(buf);
+                        ReturnBuffer(buf);
                         Debug.LogError($"[FiresVoxel] mesher worker threw on chunk {chunk.Key}: {ex}");
+                        // Back off on OOM so the worker doesn't spin-retry the
+                        // allocation instantly and deepen the memory pressure —
+                        // give the GC / the sharing process a moment to free.
+                        if (ex is System.OutOfMemoryException) s_signal.WaitOne(50);
                         // A pending chunk that threw would otherwise strand
                         // PendingGenerate=true forever (zone swap blocked,
                         // priority heals cycling). Bounded retry — the gather
@@ -298,6 +406,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             private void Update()
             {
+                RefreshBufferBudget();     // config hot-reload (main thread only)
                 VoxelWorld.FlushSaves();   // P1 — debounced anchor persistence
 
                 // W3.3 — the driver exists whenever chunks do (brush chunks in
@@ -313,13 +422,35 @@ namespace VerdantsAscent.Terrain.Voxel
                 VoxelSeamAudit.AutoTick();
 
                 // Apply built meshes (≤2/frame).
-                for (int n = 0; n < 2 && s_applyQueue.TryDequeue(out var r);)
+                for (int n = 0; n < ApplyPerFrame && s_applyQueue.TryDequeue(out var r);)
                 {
-                    if (!VoxelWorld.IsLive(r.Chunk) || r.Version != r.Chunk.Version)
+                    if (!VoxelWorld.IsLive(r.Chunk))
                     {
-                        s_bufferPool.Add(r.Buffers);   // stale/dead — newer job queued or world cleared
+                        ReturnBuffer(r.Buffers);   // world cleared / chunk dropped
                         continue;
                     }
+                    // Downgraded to uniform after this mesh was built (terraform
+                    // reclassified it mid-flight). Uniform chunks stay registered,
+                    // so IsLive passes — but applying would RESURRECT a view+mesh+
+                    // collider onto a chunk the governor accounts as free (the leak
+                    // that defeats the RAM ceiling). EnsureUniformChunk already
+                    // dropped the view; just recycle and skip.
+                    if (r.Chunk.Kind != ChunkKind.Full)
+                    {
+                        ReturnBuffer(r.Buffers);
+                        continue;
+                    }
+                    // DO NOT drop a version-stale mesh. Dropping it left the chunk
+                    // VIEWLESS while a neighbour's border-mirror kept bumping the
+                    // version, so the view NEVER landed and the zone swap
+                    // deadlocked at noView for minutes (log: noView=12 queued=0,
+                    // both idle) — a HOLE in the world (vanilla render+collider are
+                    // suppressed in voxel mode). Apply the slightly-stale mesh so
+                    // the chunk gets a collider NOW and the zone swaps; if the data
+                    // genuinely advanced, re-queue ONE refresh so the border seam
+                    // corrects on the next pass. A brief seam beats a permanent
+                    // hole, and it self-converges once the borders settle.
+                    bool stale = r.Version != r.Chunk.Version;
                     var view = VoxelWorld.GetOrCreateView(r.Chunk);
                     if (view.BakeInFlight)
                     {
@@ -332,6 +463,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     _sw.Stop();
                     s_bufferPool.Add(r.Buffers);
                     r.Chunk.AppliedVersion = r.Version;   // sweep's stale-mesh test
+                    if (stale && !r.Chunk.Queued && !r.Chunk.PendingGenerate) EnqueueRemesh(r.Chunk);
                     // ORPHAN HANDOFF: a lateral neighbour that was meshing a
                     // shared plane as an orphan face (this chunk didn't exist
                     // or hadn't meshed) must drop its stand-in NOW — the
@@ -364,11 +496,17 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
 
                 // Assign baked colliders (≤2/frame).
-                for (int n = 0; n < 2 && s_assignQueue.TryDequeue(out var a); n++)
+                for (int n = 0; n < ApplyPerFrame && s_assignQueue.TryDequeue(out var a); n++)
                 {
                     if (a.View == null) continue;
                     a.View.BakeInFlight = false;
-                    if (!VoxelWorld.IsLive(a.Chunk) || a.Version != a.Chunk.Version) continue;   // newer bake coming
+                    // Match the VIEW's applied mesh (AppliedVersion), not the
+                    // chunk's data Version — a border-mirror bumps Version without
+                    // re-applying the mesh, and gating on it left the view with a
+                    // mesh but no collider (colliderNotReady) forever. If this bake
+                    // is for the mesh the view is actually showing, assign it; a
+                    // later re-mesh carries its own bake.
+                    if (!VoxelWorld.IsLive(a.Chunk) || a.Version != a.Chunk.AppliedVersion) continue;
                     a.View.AssignCollider();
 
                     if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value)

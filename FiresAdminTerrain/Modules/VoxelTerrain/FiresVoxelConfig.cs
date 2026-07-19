@@ -33,6 +33,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // VoxelWrap while we build/test; flips to Vanilla as the safe default
         // before any public release. The admin BRUSH tools work in BOTH modes
         // (they are sparse, additive and independent of the streamer).
+        public static ConfigEntry<bool> CustomGeneration;   // master: OFF forces 100% vanilla terrain (brush still works)
         public static ConfigEntry<VoxelWorldMode> WorldMode;
         public static ConfigEntry<bool> WrapAllLoaded;
         public static ConfigEntry<float> WrapRadius;
@@ -43,6 +44,28 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> CaveFrequency;
         public static ConfigEntry<float> CaveFrequencyY;
         public static ConfigEntry<float> CaveSurfacePinch;
+        public static ConfigEntry<float> CavernScale;
+        public static ConfigEntry<float> CavernRarity;
+        public static ConfigEntry<float> CavernBoost;
+        public static ConfigEntry<float> EntranceRarity;
+        public static ConfigEntry<float> SinkholeRarity;
+        public static ConfigEntry<float> SinkholeRadius;
+        public static ConfigEntry<float> SinkholeDepth;
+        public static ConfigEntry<float> WaterBankFreeboard;
+        public static ConfigEntry<float> WaterMinChannelDepth;
+        public static ConfigEntry<bool> CaveContentEnabled;
+        public static ConfigEntry<float> CaveContentDensity;
+        public static ConfigEntry<string> CaveMushroomPrefabs;
+        public static ConfigEntry<string> CaveCeilingPrefabs;
+        public static ConfigEntry<string> CaveRockPrefabs;
+        public static ConfigEntry<float> CaveRockScale;
+        public static ConfigEntry<string> CaveBonePrefabs;
+        public static ConfigEntry<float> CaveMushroomChance;
+        public static ConfigEntry<float> CaveBoneChance;
+        public static ConfigEntry<bool> CaveWaterEnabled;
+        public static ConfigEntry<float> CaveWaterChance;
+        public static ConfigEntry<float> CaveWaterMinHeadroom;
+        public static ConfigEntry<float> CaveWaterRadius;
         public static ConfigEntry<bool> CaveEnvEnabled;
         public static ConfigEntry<string> CaveEnvironment;
         public static ConfigEntry<bool> SeamLips;
@@ -71,6 +94,9 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> ImpostorForwardRadius;
         public static ConfigEntry<float> ImpostorNearSkip;
         public static ConfigEntry<float> ImpostorDensity;
+        public static ConfigEntry<bool> TerrainCastShadows;
+        public static ConfigEntry<int> MeshAppliesPerFrame;
+        public static ConfigEntry<int> MeshBufferBudget;
 
         private static bool _bound;
 
@@ -100,11 +126,35 @@ namespace VerdantsAscent.Terrain.Voxel
             ImpostorDensity = cfg.Bind(PERF, "Impostor density", 0.85f,
                 new ConfigDescription("Scales how many billboards get placed. Lower = a thinner, scattered distant-forest feel (and cheaper); higher = continuous distant treeline coverage (distant mountains/forests read as covered, not sparse).",
                     new AcceptableValueRange<float>(0.1f, 1.5f)));
+            TerrainCastShadows = cfg.Bind(PERF, "Terrain casts shadows", true,
+                new ConfigDescription("Whether voxel terrain chunks cast shadows. Every live chunk is submitted to the shadow pass a SECOND time, so with several hundred chunks loaded this is a large share of draw calls and shadow submissions. Turning it OFF is one of the biggest single frame wins available; the cost is that cliffs/overhangs stop casting onto the ground below (terrain still RECEIVES shadows from trees, buildings and everything else). Applies live."));
+
+            TerrainCastShadows.SettingChanged += (_, __) =>
+            {
+                try { VerdantsAscent.Terrain.Voxel.VoxelWorld.RefreshAllViewShadows(); }
+                catch (System.Exception ex)
+                { UnityEngine.Debug.LogWarning($"[FiresVoxel] terrain shadow refresh failed: {ex.Message}"); }
+            };
+
+            MeshAppliesPerFrame = cfg.Bind(PERF, "Mesh applies per frame", 2,
+                new ConfigDescription("How many finished chunk meshes the MAIN THREAD uploads (and colliders it assigns) each frame. Higher = terrain streams in faster, but each apply is a mesh upload on the frame — too high and streaming-in hitches. A headless server renders nothing, so it uses 4x this automatically.",
+                    new AcceptableValueRange<int>(1, 16)));
+            MeshBufferBudget = cfg.Bind(PERF, "Mesh buffer budget", 16,
+                new ConfigDescription("Hard ceiling on concurrently-live mesh buffers (~0.6MB each) — the mesh pipeline's memory cap. A worker that can't get one waits for the main thread to return a buffer instead of allocating, so pipeline RAM can never run away (this is what stopped the out-of-memory crashes). Raise it if zones are slow to swap in and you have RAM to spare; a headless server uses 2x this automatically.",
+                    new AcceptableValueRange<int>(4, 64)));
+
             LogTimings = cfg.Bind(S, "Log timings", false,
                 "Log per-chunk seed/mesh/bake/apply milliseconds (measurement runs only — thousands of lines per session, and the logging itself costs frames).");
             MaxLoadedChunks = cfg.Bind(S, "Max loaded chunks", 2048,
                 new ConfigDescription("Safety cap on live voxel chunks (32m cubes, ~83KB each). A capped-out brush would skip chunks and leave holes, so brushes warn loudly when the cap bites.",
                     new AcceptableValueRange<int>(16, 8192)));
+
+            CustomGeneration = cfg.Bind(SW, "Fires Custom Generation", true,
+                "MASTER SWITCH for all whole-world terrain replacement. ON = the World Terrain Mode + World " +
+                "Generation settings below apply (voxel wrap/only + Fires worldgen). OFF = terrain runs 100% " +
+                "VANILLA regardless of those two settings — no height/biome/river/mesh overrides at all — so " +
+                "the mod behaves as a plain add-on whose voxel BRUSH tools still work for drawing meshes. Flip " +
+                "this one toggle instead of setting both World Terrain Mode=Vanilla AND World Generation=Off.");
 
             WorldMode = cfg.Bind(SW, "World Terrain Mode", VoxelWorldMode.VoxelWrap,
                 "Whole-world terrain system. Vanilla = untouched vanilla zones. VoxelWrap = zones near the " +
@@ -139,6 +189,71 @@ namespace VerdantsAscent.Terrain.Voxel
             CaveSurfacePinch = cfg.Bind(SW, "Cave Surface Pinch", 6f,
                 new ConfigDescription("Tunnels pinch shut within this many metres of the surface; occasional breakthroughs become natural entrances.",
                     new AcceptableValueRange<float>(1f, 24f)));
+            CavernScale = cfg.Bind(SW, "Cavern Scale", 0.22f,
+                new ConfigDescription("Size of the cavern octave relative to tunnel noise. SMALLER = larger, rarer chambers; larger = more frequent small rooms. This is what makes passages open out into caverns instead of running at one width forever.",
+                    new AcceptableValueRange<float>(0.05f, 1f)));
+            CavernRarity = cfg.Bind(SW, "Cavern Rarity", 0.62f,
+                new ConfigDescription("How high the cavern octave must run before a spot becomes a chamber. HIGHER = rarer caverns. 0.62 gives an occasional room off the tunnel network.",
+                    new AcceptableValueRange<float>(0.4f, 0.9f)));
+            CavernBoost = cfg.Bind(SW, "Cavern Boost", 0.11f,
+                new ConfigDescription("Extra tunnel width inside a chamber (same units as Cave Width). This is the difference between a corridor and a cavern you can look up in.",
+                    new AcceptableValueRange<float>(0f, 0.3f)));
+            EntranceRarity = cfg.Bind(SW, "Cave Entrance Rarity", 0.58f,
+                new ConfigDescription("Tunnels normally pinch shut near the surface (Cave Surface Pinch) so they stay buried. Where this sparse mask runs high the pinch is released and the tunnel breaks through as a natural entrance. LOWER = more entrances.",
+                    new AcceptableValueRange<float>(0.3f, 0.95f)));
+            SinkholeRarity = cfg.Bind(SW, "Sinkhole Rarity", 0.88f,
+                new ConfigDescription("How high the sinkhole mask must run to punch an open vertical drop from the surface into the cave layer. HIGHER = rarer. These are the big open shafts you can fall into.",
+                    new AcceptableValueRange<float>(0.5f, 0.98f)));
+            SinkholeRadius = cfg.Bind(SW, "Sinkhole Radius", 6.5f,
+                new ConfigDescription("Widest carve radius at a sinkhole's centre (metres). Tapers to nothing at its rim.",
+                    new AcceptableValueRange<float>(3f, 25f)));
+            SinkholeDepth = cfg.Bind(SW, "Sinkhole Depth", 26f,
+                new ConfigDescription("How far below the surface a sinkhole shaft reaches (metres). It must reach the tunnel layer to open into a cave system rather than being a pit.",
+                    new AcceptableValueRange<float>(8f, 60f)));
+
+            WaterBankFreeboard = cfg.Bind(SW, "Water Bank Freeboard", 0.45f,
+                new ConfigDescription("How far BELOW the lower bank edge a river/lake surface is seated. This is the WAVE CREST BUDGET, not a cosmetic offset: the mesh is wave-displaced at render time, so a surface seated flush with the bank has its crests break over it and the water climbs the bank. Raise it if you raise wave amplitude; lower it if the water sits visibly too deep in its channel.",
+                    new AcceptableValueRange<float>(0f, 2f)));
+            WaterMinChannelDepth = cfg.Bind(SW, "Water Min Channel Depth", 1.1f,
+                new ConfigDescription("Minimum depth of channel carved under generated water. The bank-referenced level drops to meet a low bank, and without deepening the bed to match, that stretch thins out or goes dry and the flow breaks. The voxel bed is re-carved to keep at least this much water over it.",
+                    new AcceptableValueRange<float>(0f, 4f)));
+
+            CaveContentEnabled = cfg.Bind(SW, "Cave Content Enabled", true,
+                "Populate generated caves: mushrooms on floors, hanging roots on ceilings, boulders in the larger caverns. Server-authoritative and placed once per zone (existing spawns are detected, so it never doubles up on a restart).");
+            CaveContentDensity = cfg.Bind(SW, "Cave Content Density", 1f,
+                new ConfigDescription("Scales how much of everything gets placed in caves. 0 = bare caves.",
+                    new AcceptableValueRange<float>(0f, 3f)));
+            CaveMushroomPrefabs = cfg.Bind(SW, "Cave Floor Prefabs", "Pickable_Mushroom_yellow",
+                "Comma-separated prefab names scattered on cave FLOORS, in clumps of 1-3. Unknown names are skipped with a warning, so it is safe to list prefabs a given modlist may not have.");
+            CaveCeilingPrefabs = cfg.Bind(SW, "Cave Ceiling Prefabs", "Greydwarf_Root",
+                "Comma-separated prefab names hung from cave CEILINGS and walls. Only placed where the void is tall enough that the player can still pass underneath.");
+            CaveRockPrefabs = cfg.Bind(SW, "Cave Cavern Prefabs", "rock4_forest",
+                "Comma-separated prefab names placed on the floors of the LARGER caverns only (needs real headroom and floor clearance).");
+
+            CaveRockScale = cfg.Bind(SW, "Cave Rock Scale", 0.45f,
+                new ConfigDescription("Uniform scale applied to cave boulders. Surface rock prefabs are sized for open terrain and read far too large underground, so they are shrunk to rubble proportions.",
+                    new AcceptableValueRange<float>(0.15f, 1.5f)));
+            CaveBonePrefabs = cfg.Bind(SW, "Cave Bone Prefabs", "Pickable_ForestCryptRemains01,Pickable_ForestCryptRemains02,Pickable_ForestCryptRandom",
+                "Comma-separated skeletal-remains prefabs scattered sparsely on cave floors for flavour. Unknown names are skipped with a warning.");
+            CaveMushroomChance = cfg.Bind(SW, "Cave Mushroom Chance", 0.10f,
+                new ConfigDescription("Per-candidate chance of a mushroom clump on a cave floor (clumps are 1-3). Lowered from the first pass — they were carpeting the caves.",
+                    new AcceptableValueRange<float>(0f, 1f)));
+            CaveBoneChance = cfg.Bind(SW, "Cave Bone Chance", 0.05f,
+                new ConfigDescription("Per-candidate chance of skeletal remains on a cave floor. Meant to be a rare find, not decoration.",
+                    new AcceptableValueRange<float>(0f, 1f)));
+
+            CaveWaterEnabled = cfg.Bind(SW, "Cave Water Enabled", true,
+                "Pool water in the lowest point of large caverns. Uses the normal FiresLiquid pour, so it drapes the carved floor, spreads to the bank, and you swim in it exactly as you do in any other water. Where a passage runs below the pool level it floods naturally, which is what produces submerged routes through to dry cave beyond.");
+            CaveWaterChance = cfg.Bind(SW, "Cave Water Chance", 0.35f,
+                new ConfigDescription("Chance that a qualifying cavern in a zone gets a pool. At most one pool is seeded per zone (the deepest cavern floor found), so this is really 'how many of the big caverns are flooded'.",
+                    new AcceptableValueRange<float>(0f, 1f)));
+            CaveWaterMinHeadroom = cfg.Bind(SW, "Cave Water Min Headroom", 5.5f,
+                new ConfigDescription("A cavern must have at least this much floor-to-ceiling clearance before it is considered for a pool — keeps water out of crawl-height passages.",
+                    new AcceptableValueRange<float>(2.5f, 20f)));
+            CaveWaterRadius = cfg.Bind(SW, "Cave Water Radius", 8f,
+                new ConfigDescription("Pour radius seeded at the cavern's low point. The settle engine spreads it to the surrounding rock, so this is a starting size, not the final pool shape.",
+                    new AcceptableValueRange<float>(3f, 24f)));
+
             CaveEnvEnabled = cfg.Bind(SW, "Cave Environment Enabled", true,
                 "Force a cave environment (dark/fog) while the player stands under a VOXEL ceiling (honest up-raycast; replaces the old underside-mesh trick). Underwater env wins while swimming.");
             CaveEnvironment = cfg.Bind(SW, "Cave Environment", "Crypt",

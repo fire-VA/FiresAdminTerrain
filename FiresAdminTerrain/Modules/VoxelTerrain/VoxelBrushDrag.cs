@@ -121,11 +121,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 return;
             }
             // Still holding the button that selected the tool: show the ghost but
-            // don't carve until it's released and pressed again.
+            // don't carve until it's released and pressed again. The local flag
+            // only catches a tool CHANGE; the Core gate also covers re-picking
+            // the tool you already had and the click that closes the hammer menu
+            // (both of which used to carve on the spot).
             if (_armAfterRelease) return;
-            if (UnityEngine.EventSystems.EventSystem.current != null
-                && UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject())
-                return;
+            if (!FiresCore.Input.FiresPlaceGate.ReadyToAct()) return;
 
             float dabSize = tool == Tool.Cylinder ? s_cylRadius : EffectiveGizmoRadius();
             if (dabSize < 0.05f) return;
