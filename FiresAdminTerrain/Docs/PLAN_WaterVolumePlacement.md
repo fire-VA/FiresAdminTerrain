@@ -400,7 +400,6 @@ Three distinct bugs behind "spills onto flats / delete won't remove / persists a
   existing FlowPass (vanilla-like) — endpoint is the sloped fill.
 
 ### Round-82 — FiresLiquidRiver: sloped spring on the vanilla liquid engine (2026-07-11, 0.2.22)
-Plan: C:\Users\travi\.claude\plans\abundant-cuddling-origami.md (user-approved).
 - Vanilla liquid = material (Custom/Tar, replaceable w/ FiresWater) + C# class
   (LiquidVolume: sim + threaded mesh builder = the look). We keep the class,
   replace ONLY its per-tick sim.
