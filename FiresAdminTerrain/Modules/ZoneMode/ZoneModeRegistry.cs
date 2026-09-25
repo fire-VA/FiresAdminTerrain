@@ -301,7 +301,9 @@ namespace VerdantsAscent.Terrain.Zones
 
         // m_needsDB alone is not proof: worlds older than the NeedsDB format read it as false even
         // though they have saves. So the world must also have no save data on disk at all.
-        private static bool IsNeverSaved(World world)
+        // Also the one authority for "is this world being created" - FiresWorldProfile asks it before letting a config
+        // decide a world's generator, because only a world with no save data has no ground to contradict.
+        internal static bool IsNeverSaved(World world)
         {
             if (world.m_needsDB || File.Exists(world.GetDBPath())) return false;
             try
@@ -314,8 +316,9 @@ namespace VerdantsAscent.Terrain.Zones
             }
             catch (Exception ex)
             {
-                FiresLogger.LogWarning($"[FiresZones] could not inspect '{world.m_name}''s save folder ({ex.Message}); "
-                    + $"{LaunchFlag} is ignored for it.");
+                FiresLogger.LogWarning($"[FiresZones] could not inspect '{world.m_name}''s save folder ({ex.Message}); it is "
+                    + $"treated as a world that HAS been saved, so {LaunchFlag} is ignored for it and no config may choose "
+                    + "its generator.");
                 return false;
             }
         }

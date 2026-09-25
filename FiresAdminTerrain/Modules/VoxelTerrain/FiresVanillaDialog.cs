@@ -29,6 +29,7 @@ namespace VerdantsAscent.Terrain.Voxel
     internal static class FiresVanillaDialog
     {
         private const float RowsTopGap = 18f;
+        private const float ButtonsGap = 18f;
         private const float RowInset = 24f;
         private const float ErrorHeight = 26f;
         private const int ErrorFontSize = 14;
@@ -108,12 +109,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 rows.anchoredPosition = new Vector2(0f, -top);
                 rows.sizeDelta = new Vector2(-RowInset * 2f, MenuDialog.RowsHeightFor(fields != null ? fields.Count : 0));
                 MenuDialog.BuildRowsIn(rows, fields);
+                Readable(rows, titleText);
 
                 s_error = UIBuilderHelper.CreateLabel(host, "Error", "", ErrorFontSize, ErrorInk,
                     new Vector2(0f, 1f), new Vector2(1f, 1f), TMPro.TextAlignmentOptions.MidlineLeft);
                 s_error.rectTransform.pivot = new Vector2(0.5f, 1f);
                 s_error.rectTransform.sizeDelta = new Vector2(-RowInset * 2f, ErrorHeight);
                 s_error.rectTransform.anchoredPosition = new Vector2(0f, -(top + rows.sizeDelta.y));
+
+                PlaceButtonsBelow(host, buttons, top + rows.sizeDelta.y + ErrorHeight);
 
                 clone.SetActive(true);
                 s_panel = clone;
@@ -196,6 +200,60 @@ namespace VerdantsAscent.Terrain.Voxel
             return Mathf.Max(0f, hostTop - local.y);
         }
 
+        // Vanilla's New World panel has exactly two rows and puts its buttons at a fixed height. Six rows run
+        // straight through them, which is what the Clone dialog looked like. The buttons are moved below whatever
+        // was actually built, and the frame grows if they no longer fit inside it.
+        private static void PlaceButtonsBelow(RectTransform host, Button[] buttons, float contentHeight)
+        {
+            if (host == null || buttons == null || buttons.Length < MinButtons) return;
+
+            var first = buttons[0].transform as RectTransform;
+            var second = buttons[1].transform as RectTransform;
+            if (first == null || second == null) return;
+
+            float buttonHeight = Mathf.Max(first.rect.height, second.rect.height);
+            float needed = contentHeight + ButtonsGap + buttonHeight + ButtonsGap;
+            float grow = needed - host.rect.height;
+            if (grow > 0f)
+            {
+                host.sizeDelta = new Vector2(host.sizeDelta.x, host.sizeDelta.y + grow);
+                var frame = host.parent as RectTransform;
+                if (frame != null && frame != host)
+                    frame.sizeDelta = new Vector2(frame.sizeDelta.x, frame.sizeDelta.y + grow);
+            }
+
+            float y = -(contentHeight + ButtonsGap);
+            Seat(first, -(first.rect.width * 0.5f + ButtonsGap * 0.5f), y);
+            Seat(second, second.rect.width * 0.5f + ButtonsGap * 0.5f, y);
+        }
+
+        private static void Seat(RectTransform rect, float x, float y)
+        {
+            rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 1f);
+            rect.pivot = new Vector2(0.5f, 1f);
+            rect.anchoredPosition = new Vector2(x, y);
+        }
+
+        // Core paints every row label and value with UIFontConfig.Colors.ParchmentInk - near-black ink meant for a
+        // light parchment field, which on this wooden panel cannot be read. The rows are repainted with the text
+        // colour the game itself is using on this screen, so they follow vanilla instead of a Fires palette.
+        private static void Readable(RectTransform rows, TMPro.TextMeshProUGUI template)
+        {
+            if (rows == null) return;
+            var fejd = FejdStartup.instance;
+            TMPro.TMP_Text source = fejd != null && fejd.m_worldSourceInfo != null
+                ? (TMPro.TMP_Text)fejd.m_worldSourceInfo
+                : template;
+            if (source == null) return;
+
+            foreach (var text in rows.GetComponentsInChildren<TMPro.TMP_Text>(true))
+            {
+                if (text == null) continue;
+                text.color = source.color;
+                if (source.font != null) text.font = source.font;
+            }
+        }
+
         private static void Relabel(Button button, string label)
         {
             if (button == null || string.IsNullOrEmpty(label)) return;
@@ -220,9 +278,20 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void Cancel() => Close(restore: true);
 
+        // RestoreFields must never be able to keep the panel open. It ran BEFORE the destroy with nothing catching
+        // it, so anything it threw left Cancel looking dead - the click arrived, the handler died, the dialog
+        // stayed. The panel is torn down whatever happens.
         private static void Close(bool restore)
         {
-            if (restore) MenuDialog.RestoreFields(s_fields);
+            if (restore)
+            {
+                try { MenuDialog.RestoreFields(s_fields); }
+                catch (Exception ex)
+                {
+                    FiresLogger.LogWarning($"[FiresWorldGen] the dialog's fields could not be restored on cancel "
+                        + $"({ex.GetType().Name}: {ex.Message}); it is closed anyway.");
+                }
+            }
             if (s_panel != null) UnityEngine.Object.Destroy(s_panel);
             s_panel = null;
             s_fields = null;

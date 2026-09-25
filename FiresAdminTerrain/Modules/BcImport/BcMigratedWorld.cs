@@ -65,6 +65,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 }
 
                 _generator = new BcWorldGen(settings, maps, world.m_seed);
+                BcMapReport.Log(worldName, settings, maps, _generator);
                 FiresLogger.LogInfo($"[BcImport] '{worldName}' generates as a BetterContinents world: settings v{settings.Version}, "
                     + $"{BcWorldGen.VariantFor(settings)} base height, world {settings.WorldSize} + edge {settings.EdgeSize}, "
                     + $"seed {world.m_seed}.");

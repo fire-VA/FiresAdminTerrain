@@ -25,12 +25,46 @@ namespace VerdantsAscent.Terrain.Voxel
     // The guard substitutes the nearest populated biome rather than throwing,
     // so placement degrades to "this location spawned somewhere sensible"
     // instead of "no locations exist at all", and says so once per biome.
+    //
+    // Expand World Data and Expand World Size prefix GetRandomPointByBiome too
+    // (missing/empty -> warn, no point). HarmonyX runs every prefix, so each guard
+    // below does nothing once an earlier prefix has answered (__runOriginal false).
     [HarmonyPatch]
     internal static class AltBiomePointGuard
     {
         private static readonly HashSet<Heightmap.Biome> s_warned = new HashSet<Heightmap.Biome>();
+        private static bool s_seededLogged;
 
         internal static void Reset() { lock (s_warned) s_warned.Clear(); }
+
+        // The constructor seeds Biomes from Enum.GetValues — vanilla's members only.
+        // Expand World Data 1.73+ gives every custom biome its own BiomeIndex, and
+        // GenerateSectors -> new BiomeSector(this, index.ToBiome()) then reads
+        // Biomes[customBiome] with no guard: KeyNotFoundException inside ZNet.Start,
+        // the same silent dead server as the ToBiomeIndex throw. One empty
+        // BiomeTypeInfo per single-bit value makes the table complete for anything
+        // ToBiome can return; the cache file stores points only, so the extra keys
+        // never reach disk.
+        [HarmonyPatch(typeof(AltBiomeWorldData), MethodType.Constructor, new[] { typeof(int) })]
+        [HarmonyPostfix]
+        private static void SeedAllBiomeKeys(AltBiomeWorldData __instance)
+        {
+            if (__instance == null || __instance.Biomes == null) return;
+            int added = 0;
+            for (int bit = 0; bit < 32; bit++)
+            {
+                var biome = (Heightmap.Biome)(1u << bit);
+                if (__instance.Biomes.ContainsKey(biome)) continue;
+                __instance.Biomes[biome] = new BiomeTypeInfo(biome);
+                added++;
+            }
+            if (added > 0 && !s_seededLogged)
+            {
+                s_seededLogged = true;
+                FiresLogger.LogInfo($"[FiresBiomeGuard] seeded {added} non-vanilla biome key(s) into the alt-biome table so a custom "
+                    + "biome (Expand World Data) cannot throw KeyNotFoundException in sector generation or location placement.");
+            }
+        }
 
         // NOT sufficient on its own: GetRandomPointByBiomeAboveSeaLevel and
         // GetRandomSectorByBiome index this.Biomes[biome] DIRECTLY, so a biome
@@ -39,8 +73,9 @@ namespace VerdantsAscent.Terrain.Voxel
         [HarmonyPatch(typeof(AltBiomeWorldData), "GetRandomPointByBiome")]
         [HarmonyPrefix]
         private static bool Prefix(AltBiomeWorldData __instance, Heightmap.Biome biome,
-                                   ref BiomePointCoordinate __result)
+                                   ref BiomePointCoordinate __result, bool __runOriginal)
         {
+            if (!__runOriginal) return true;
             if (__instance == null || __instance.Biomes == null) return true;
             if (__instance.Biomes.TryGetValue(biome, out var info)
                 && info != null && info.AllPoints != null && info.AllPoints.Count > 0)
@@ -84,8 +119,9 @@ namespace VerdantsAscent.Terrain.Voxel
         [HarmonyPatch(typeof(AltBiomeWorldData), "GetRandomPointByBiomeAboveSeaLevel")]
         [HarmonyPrefix]
         private static bool PrefixAboveSeaLevel(AltBiomeWorldData __instance, Heightmap.Biome biome,
-                                                ref BiomePointCoordinate __result)
+                                                ref BiomePointCoordinate __result, bool __runOriginal)
         {
+            if (!__runOriginal) return true;
             if (__instance == null || __instance.Biomes == null) return true;
             if (__instance.Biomes.ContainsKey(biome)) return true;
 
@@ -107,8 +143,9 @@ namespace VerdantsAscent.Terrain.Voxel
         [HarmonyPatch(typeof(AltBiomeWorldData), "GetRandomSectorByBiome")]
         [HarmonyPrefix]
         private static bool PrefixSector(AltBiomeWorldData __instance, Heightmap.Biome biome,
-                                         ref BiomeSector __result)
+                                         ref BiomeSector __result, bool __runOriginal)
         {
+            if (!__runOriginal) return true;
             if (__instance == null || __instance.Biomes == null) return true;
             if (__instance.Biomes.TryGetValue(biome, out BiomeTypeInfo info)
                 && info != null && info.Sectors != null && info.Sectors.Count > 0)

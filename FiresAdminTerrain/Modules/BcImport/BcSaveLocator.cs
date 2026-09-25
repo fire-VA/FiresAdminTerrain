@@ -5,9 +5,11 @@ namespace VerdantsAscent.Terrain.BcImport
     internal enum BcSaveKind
     {
         InsideWorldFolder,
+        InsideWorldFolderNamed,
         BesideWorld,
         BesideWorldMeta,
         KeptByPortUpgrade,
+        FatRecordsFolder,
     }
 
     internal struct BcSaveLocation
@@ -27,6 +29,10 @@ namespace VerdantsAscent.Terrain.BcImport
     internal static class BcSaveLocator
     {
         private const string InsideWorldFolderFileName = "BetterContinents";
+        // The layout every chunked world on this machine actually uses: the file sits INSIDE the world folder
+        // and keeps the world-name prefix - `worlds_local\CratersAshlands\CratersAshlands.BetterContinents`.
+        // Probing only the bare in-folder name missed it, which is why a converted-to-chunked BC world reported
+        // "nothing to convert" while its 147 MB of map data sat right there (2026-09-24).
         private const string BesideWorldExtension = ".BetterContinents";
         private const string BesideWorldMetaExtension = ".fwl.BetterContinents";
         private const string KeptByPortUpgradeExtension = ".BetterContinents.pre10";
@@ -61,6 +67,7 @@ namespace VerdantsAscent.Terrain.BcImport
             {
                 string root = SaveSystem.GetWorldsSaveRootPath(source);
                 AddIfPresent(found, $"{root}/{worldName}/{InsideWorldFolderFileName}", source, BcSaveKind.InsideWorldFolder);
+                AddIfPresent(found, $"{root}/{worldName}/{worldName}{BesideWorldExtension}", source, BcSaveKind.InsideWorldFolderNamed);
                 AddIfPresent(found, $"{root}/{worldName}{BesideWorldExtension}", source, BcSaveKind.BesideWorld);
                 AddIfPresent(found, $"{root}/{worldName}{BesideWorldMetaExtension}", source, BcSaveKind.BesideWorldMeta);
                 AddIfPresent(found, $"{root}/{worldName}{KeptByPortUpgradeExtension}", source, BcSaveKind.KeptByPortUpgrade);

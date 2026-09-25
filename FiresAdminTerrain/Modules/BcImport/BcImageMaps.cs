@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using UnityEngine;
 using VerdantsAscent.Terrain.Voxel;
 
@@ -20,6 +21,11 @@ namespace VerdantsAscent.Terrain.BcImport
         private const int EightBit = 8;
         private const int SixteenBit = 16;
         private const int MaxBiomeIndices = 32;
+        private const int SentinelDistance = 900;      // RGB distance 30 around the black "use what is underneath" marker
+        private const int SnapReportDistance = 4096;   // RGB distance 64 - past this a colour is not a near miss
+        private const int FarColoursListed = 6;
+        private const float FarWarnPercent = 1f;
+        private const float PercentScale = 100f;
         private const string DefaultBiomeColors =
             "None: 000000|Meadows: 00FF00|BlackForest: 007F00|Swamp: 7F7F00|Mountain: FFFFFF"
             + "|Plains: FFFF00|Mistlands: 7F7F7F|AshLands: FF0000|DeepNorth: 00FFFF|Ocean: 0000FF";
@@ -127,6 +133,9 @@ namespace VerdantsAscent.Terrain.BcImport
 
             var biomes = new Heightmap.Biome[width * height];
             var seen = new Dictionary<int, Heightmap.Biome>();
+            var exact = new Dictionary<int, bool>();
+            var far = new Dictionary<int, long>();
+            long snapped = 0;
             int stride = channels * (bitDepth / EightBit);
             for (int row = 0; row < height; row++)
             {
@@ -138,27 +147,99 @@ namespace VerdantsAscent.Terrain.BcImport
                     int key = (pixel.r << EightBit * 2) | (pixel.g << EightBit) | pixel.b;
                     if (!seen.TryGetValue(key, out Heightmap.Biome biome))
                     {
-                        biome = NearestBiome(palette, pixel);
+                        biome = NearestBiome(palette, pixel, out int distance);
                         seen[key] = biome;
+                        exact[key] = distance == 0;
+                        if (distance > SnapReportDistance) far[key] = 0L;
                     }
+                    if (!exact[key]) snapped++;
+                    long farSeen;
+                    if (far.TryGetValue(key, out farSeen)) far[key] = farSeen + 1L;
                     biomes[targetRow + column] = biome;
                 }
             }
+
+            // Worth saying out loud, because NearestBiome has no distance cutoff: a colour that is nowhere near any
+            // palette entry still becomes SOME biome rather than an error. A map saved through a lossy editor comes
+            // back with thousands of near-miss colours - Craters' own map is 744 colours, about half of its pixels
+            // not an exact match - and those all resolve correctly. A high figure here with biomes landing WRONG is
+            // the signal that the palette and the image disagree about what a biome's colour is.
+            long total = (long)width * height;
+            FiresLogger.LogInfo($"[BcImport] biome image {width}x{height}: {seen.Count} distinct colour(s), "
+                + $"{snapped * PercentScale / total:0.0}% of pixels not an exact palette colour and snapped to the "
+                + "nearest. Black means 'leave the biome here to whatever is underneath' and is not a miss.");
+            ReportFarColours(far, seen, total);
             return new BcBiomeMap { Biomes = biomes, Size = width };
         }
 
-        private static Heightmap.Biome NearestBiome(List<KeyValuePair<Heightmap.Biome, Color32>> palette, Color32 pixel)
+        // The black entry is a SENTINEL, not a colour to compete on distance. It means "leave the biome here to
+        // whatever is underneath", which is how an Expand World biome such as RedThicket shows through a
+        // BetterContinents map, and it is the one palette entry where being near-miss is meaningful rather than
+        // sloppy. Letting it into the nearest-colour pool turns an anti-aliased dark edge - a BlackForest border
+        // pixel like 013000 sits closer to 000000 than to 007F00 - into a one-pixel hole in the biome map, which
+        // reads in game as a speck of the wrong biome and in a census as fall-through the author never asked for.
+        // So black wins only inside a tight radius of itself; everything else picks among the real biomes.
+        private static Heightmap.Biome NearestBiome(List<KeyValuePair<Heightmap.Biome, Color32>> palette, Color32 pixel,
+            out int distance)
         {
             Heightmap.Biome nearest = Heightmap.Biome.None;
             int nearestDistance = int.MaxValue;
+            bool sawSentinel = false;
+            int sentinelDistance = int.MaxValue;
+
             foreach (KeyValuePair<Heightmap.Biome, Color32> candidate in palette)
             {
-                int distance = SquaredRgbDistance(pixel, candidate.Value);
-                if (distance >= nearestDistance) continue;
-                nearestDistance = distance;
+                int candidateDistance = SquaredRgbDistance(pixel, candidate.Value);
+                if (candidate.Key == Heightmap.Biome.None)
+                {
+                    sawSentinel = true;
+                    sentinelDistance = candidateDistance;
+                    continue;
+                }
+                if (candidateDistance >= nearestDistance) continue;
+                nearestDistance = candidateDistance;
                 nearest = candidate.Key;
             }
-            return nearest;
+
+            if (sawSentinel && sentinelDistance <= SentinelDistance)
+            {
+                distance = sentinelDistance;
+                return Heightmap.Biome.None;
+            }
+            distance = nearestDistance == int.MaxValue ? sentinelDistance : nearestDistance;
+            return nearestDistance == int.MaxValue ? Heightmap.Biome.None : nearest;
+        }
+
+        /// <summary>Names the colours that were nowhere near a palette entry, worst first. A map painted with the
+        /// right colours produces none of these; a long list is the thing to correct in the source image.</summary>
+        private static void ReportFarColours(Dictionary<int, long> far, Dictionary<int, Heightmap.Biome> seen, long total)
+        {
+            if (far.Count == 0) return;
+            var ordered = new List<KeyValuePair<int, long>>(far);
+            ordered.Sort((left, right) => right.Value.CompareTo(left.Value));
+
+            var text = new StringBuilder();
+            long carried = 0L;
+            for (int index = 0; index < ordered.Count; index++)
+            {
+                carried += ordered[index].Value;
+                if (index >= FarColoursListed) continue;
+                if (text.Length > 0) text.Append(", ");
+                text.Append($"#{ordered[index].Key:X6}->{seen[ordered[index].Key]} {ordered[index].Value * PercentScale / total:0.00}%");
+            }
+            // Anti-aliased edges alone produce hundreds of these - Craters' map has 566 of them across 0.22% of its
+            // pixels, every one a blend between two neighbouring biomes. That is not worth a warning on every load.
+            // A map whose colours genuinely disagree with the palette shows up as a large fraction, not a long list.
+            float fraction = carried * PercentScale / total;
+            string report = $"[BcImport] {far.Count} colour(s) in the biome image are not close to ANY palette entry "
+                + $"({fraction:0.00}% of pixels) and were snapped to the nearest anyway. Worst: {text}.";
+            if (fraction < FarWarnPercent)
+            {
+                FiresLogger.LogInfo(report + " That is edge blending, not a palette mismatch.");
+                return;
+            }
+            FiresLogger.LogWarning(report + " That is too much of the map to be edge blending - check that the image "
+                + "was painted with the palette's own colours, and repaint any whose biome landed wrong.");
         }
 
         private static int SquaredRgbDistance(Color32 first, Color32 second)

@@ -41,7 +41,7 @@ namespace VerdantsAscent
     {
         public const string PluginGUID = "com.Fire.FiresAdminTerrain";
         public const string PluginName = "FiresAdminTerrain";
-        public const string PluginVersion = "0.2.527";
+        public const string PluginVersion = "0.2.550";
 
         public static readonly Harmony harmony = new Harmony(PluginGUID);
         public static FiresAdminTerrain Instance { get; private set; }
@@ -210,6 +210,7 @@ namespace VerdantsAscent
             bool isDedicatedServer = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
             FiresCore.Logging.StatusBanner.Register("FAT", VerdantsAscent.Terrain.FatStatus.Line);
             if (!isDedicatedServer) VerdantsAscent.Terrain.Voxel.FiresWorldMenu.Register();
+            if (!isDedicatedServer) VerdantsAscent.Terrain.BcImport.BcWorldListMenu.Register();
 
             try
             {

@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using FiresCore.UI;
 using FiresCore.UI.ContextMenu;
+using VerdantsAscent.Async;
 using VerdantsAscent.Terrain.Zones;
 
 namespace VerdantsAscent.Terrain.Voxel
@@ -36,10 +37,11 @@ namespace VerdantsAscent.Terrain.Voxel
             string fullVoxelRefusal = refusal ?? (FiresWorldClone.OriginalProfile(world.m_name).Generator == ProfileGenerator.Vanilla
                 ? "Full voxel terrain comes from the Fires generator. Stock Valheim made this world: clone it as voxel wrap."
                 : null);
-            yield return Row("Clone as one zone at a time...", refusal, () => ShowCloneDialog(world, "-Chunks", KeepOriginal, true));
-            yield return Row("Clone as full voxel...", fullVoxelRefusal, () => ShowCloneDialog(world, "-Voxel", FullVoxelChoice, false));
-            yield return Row("Clone as voxel wrap...", refusal, () => ShowCloneDialog(world, "-VoxelWrap", VoxelWrapChoice, false));
-            yield return Row("Clone as heightmap...", refusal, () => ShowCloneDialog(world, "-Heightmap", HeightmapChoice, false));
+            // ONE row, not four. The four were presets into this same dialog - each one pre-picked a terrain and
+            // then hid the other three choices behind a different right-click, so whichever you took you lost the
+            // rest. The dialog already offers all of them, so the preset is "as the original" and every choice is
+            // made in one place. fullVoxelRefusal still applies there, shown on the Terrain row.
+            yield return Row("Clone...", refusal, () => ShowCloneDialog(world, "-Copy", KeepOriginal, false));
         }
 
         private static ContextMenuItem Row(string label, string refusal, System.Action onPick)
@@ -77,12 +79,26 @@ namespace VerdantsAscent.Terrain.Voxel
                 okLabel: "Clone");
         }
 
+        // Run, not block. A 451 MB world copied synchronously froze the game for the length of the copy; the
+        // coroutine yields between chunks and the popup shows how far it has got, so a long copy looks like a long
+        // copy instead of a hang.
         private static void Clone(string saveName, string cloneName, WorldCloneOptions options)
         {
-            bool cloned = FiresWorldClone.TryClone(saveName, cloneName, options, out string report);
-            FiresLogger.LogInfo("[FiresWorldGen] " + report);
-            WorldListContextMenu.RefreshWorldList();
-            UnifiedPopup.Push(new WarningPopup(cloned ? "World cloned" : "Not cloned", report, UnifiedPopup.Pop, localizeText: false));
+            // CancelableTaskPopup is vanilla's own long-task popup: it re-reads these every frame, so the progress
+            // line updates itself. WarningPopup's text is readonly and cannot.
+            string status = $"Copying '{saveName}' as '{cloneName}'...";
+            bool finished = false;
+            UnifiedPopup.Push(new CancelableTaskPopup(() => "Cloning world", () => status, () => finished, () => { }));
+
+            MainThreadDispatcher.StartRoutine(FiresWorldClone.CloneAsync(saveName, cloneName, options,
+                text => status = text,
+                (cloned, report) =>
+                {
+                    finished = true;
+                    FiresLogger.LogInfo("[FiresWorldGen] " + report);
+                    WorldListContextMenu.RefreshWorldList();
+                    UnifiedPopup.Push(new WarningPopup(cloned ? "World cloned" : "Not cloned", report, UnifiedPopup.Pop, localizeText: false));
+                }));
         }
 
         private static bool? Switch(int choice) => choice == SwitchOn ? true : choice == SwitchOff ? false : (bool?)null;

@@ -33,8 +33,17 @@ namespace VerdantsAscent.Terrain.BcImport
             LegacyBiomeImage = 9,
         }
 
+        /// <summary>The suffix FAT's own records folder uses for a world with no world folder of its own.</summary>
+        public const string RecordsFolderSuffix = ".bcdata";
+
         public static string PathFor(string worldName, FileHelpers.FileSource source) =>
             $"{SaveSystem.GetWorldsSaveRootPath(source)}/{worldName}/{FileName}";
+
+        /// <summary>FiresWorldGen\firesgen_&lt;world&gt;.bcdata - where the data goes when the world is still a flat
+        /// pre-1.0 save and has no folder to put it in. FAT's own records folder always exists, is never touched by
+        /// Valheim's save plumbing, and needs no save-format conversion to appear.</summary>
+        public static string RecordsFolderPathFor(string worldName) =>
+            Voxel.FiresWorldRecords.PathFor(worldName, RecordsFolderSuffix);
 
         public static bool Exists(string worldName, out BcSaveLocation location)
         {
@@ -45,33 +54,57 @@ namespace VerdantsAscent.Terrain.BcImport
                 location = new BcSaveLocation { Path = path, Source = source, Kind = BcSaveKind.InsideWorldFolder };
                 return true;
             }
+
+            string records = RecordsFolderPathFor(worldName);
+            if (File.Exists(records))
+            {
+                location = new BcSaveLocation
+                {
+                    Path = records, Source = FileHelpers.FileSource.Local, Kind = BcSaveKind.FatRecordsFolder,
+                };
+                return true;
+            }
+
             location = default(BcSaveLocation);
             return false;
         }
 
-        /// <summary>Writes FAT's copy beside the world it belongs to. Always into the world folder - never
-        /// branching on World.IsChunkedSave(), which reports how the world was READ and orphaned a real world's
-        /// maps in the BetterContinents 1.0 port.</summary>
+        /// <summary>Writes FAT's copy beside the world it belongs to. Into the world folder when there is one -
+        /// never branching on World.IsChunkedSave(), which reports how the world was READ and orphaned a real
+        /// world's maps in the BetterContinents 1.0 port - and into FAT's own records folder when there is not.
+        ///
+        /// A pre-1.0 world is still flat files beside the root and has no folder. Creating one here would leave a
+        /// directory with no .fwl2 in it, which SaveSystem reads as a world with a missing meta file. This used to
+        /// give up at that point and wait for Valheim to convert the save, on the theory that BetterContinents'
+        /// own file would carry the terrain until then. It does not: the whole point of converting is that
+        /// BetterContinents is NOT installed, and nothing else ever reads that file. A converted world with no
+        /// record generated as plain vanilla and FAT warned that the world it had just converted was
+        /// unconverted.</summary>
         public static bool TryWrite(string worldName, FileHelpers.FileSource source, BcWorldSettings settings, out string failure)
         {
             failure = null;
             try
             {
-                string folder = $"{SaveSystem.GetWorldsSaveRootPath(source)}/{worldName}";
-                if (source.IsLocal() && !Directory.Exists(folder))
-                {
-                    // A pre-1.0 world is still flat files beside the root and has no folder yet. Creating one
-                    // here would leave a directory with no .fwl2 in it, which SaveSystem reads as a world with a
-                    // missing meta file - so FAT waits for Valheim to convert the save and owns the data on the
-                    // next load. Terrain still generates from BetterContinents' own file until then.
-                    failure = $"'{worldName}' is still in the pre-1.0 flat save format, so there is no world folder "
-                        + "to own the data in yet";
-                    return false;
-                }
-
                 var package = new ZPackage();
                 Write(package, settings);
                 byte[] bytes = package.GetArray();
+
+                string folder = $"{SaveSystem.GetWorldsSaveRootPath(source)}/{worldName}";
+                if (source.IsLocal() && !Directory.Exists(folder))
+                {
+                    string records = RecordsFolderPathFor(worldName);
+                    Directory.CreateDirectory(Path.GetDirectoryName(records));
+                    using (var stream = new FileStream(records, FileMode.Create, FileAccess.Write))
+                    using (var binary = new BinaryWriter(stream))
+                    {
+                        binary.Write(bytes.Length);
+                        binary.Write(bytes);
+                    }
+                    FiresLogger.LogInfo($"[BcImport] '{worldName}' is a flat pre-1.0 save with no world folder, so its "
+                        + $"{bytes.Length} byte(s) of migrated BetterContinents data went to {records} instead. FAT owns "
+                        + "the data from now on either way.");
+                    return true;
+                }
 
                 string path = PathFor(worldName, source);
                 var writer = new FileWriter(path, Splatform.CloudStorageFileGrouping.Individual, fileSource: source);

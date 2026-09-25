@@ -51,16 +51,32 @@ namespace VerdantsAscent.Terrain.Voxel
             return null;
         }
 
-        // What a world without a profile is built as today, by the older rules and this installation's config. A stock world
-        // configured as full voxel builds no voxel at all (the streamer stands down without the Fires generator), so it
-        // reads as heightmap with no voxel features: exactly what it has.
-        internal static FiresWorldProfile Infer(string worldName)
+        internal const string InferredSource = "inferred";
+        internal const string FromRecordsSource = "from the world's own records";
+
+        // What a world without a profile is built as, by the older rules and a config. A stock world configured as full
+        // voxel builds no voxel at all (the streamer stands down without the Fires generator), so it reads as heightmap
+        // with no voxel features: exactly what it has.
+        //
+        // `configMayChooseTheGenerator` is the whole difference between a world being created and a world that already
+        // exists. For a NEW world the config is the only thing that can speak, and "make my worlds voxel" is exactly
+        // what it is for. For an EXISTING world the land is already in the save, so only the world's own records may
+        // name its generator - a config that says FullVoxel must never turn a stock world's ground into Fires ground
+        // underneath the buildings already standing on it. Every other field still comes from the config, because the
+        // machine reading it is the server: the profile is pinned and sent to every client, which is what makes the
+        // server authoritative instead of each client's own settings.
+        internal static FiresWorldProfile Infer(string worldName, bool configMayChooseTheGenerator)
         {
             var terrainMode = FiresVoxelConfig.TerrainMode?.Value ?? FiresTerrainMode.Off;
             bool fullVoxel = terrainMode == FiresTerrainMode.FullVoxel;
             var genMode = FiresVoxelConfig.WorldGenMode?.Value ?? FiresWorldGenMode.Auto;
+            bool chosen = configMayChooseTheGenerator
+                ? FiresWorldGenBase.UnprofiledChoosesFires(worldName, genMode, out _, out _, out _)
+                : FiresWorldGenBase.RecordsChooseFires(worldName, out _, out _, out _);
+            // The master switches stay a veto in both cases: with the generator switched off at this machine nothing
+            // can turn it on, and Generator must fall back to Vanilla or the profile would conflict with itself.
             bool fires = fullVoxel && (FiresVoxelConfig.CustomGeneration?.Value ?? true) && genMode != FiresWorldGenMode.Off
-                && FiresWorldGenBase.UnprofiledChoosesFires(worldName, genMode, out _, out _, out _);
+                && chosen;
             bool voxelOnly = (FiresVoxelConfig.WorldMode?.Value ?? VoxelWorldMode.VoxelWrap) == VoxelWorldMode.VoxelOnly;
             bool noVoxel = fullVoxel && voxelOnly && !fires;
             string image = FiresVoxelConfig.WorldGenImageBase?.Value ?? "";
@@ -74,11 +90,23 @@ namespace VerdantsAscent.Terrain.Voxel
                 ImageBase = image,
                 BiomeImage = FiresVoxelConfig.WorldGenBiomeImage?.Value ?? "",
                 VahcBase = FiresVoxelConfig.WorldGenVahcBase?.Value ?? "",
-                Source = "inferred",
+                Source = InferredSource,
             };
         }
 
+        /// <summary>A world that already has save data. Its generator comes from its own records and nothing else.</summary>
+        internal static FiresWorldProfile FromWorldRecords(string worldName)
+        {
+            var profile = Infer(worldName, configMayChooseTheGenerator: false);
+            profile.Source = FromRecordsSource;
+            return profile;
+        }
+
         // Server: the world's file, read as its generator initialises. Clients take theirs from the handshake.
+        //
+        // This ALWAYS ends with a profile, and that is the point. A null one is what let every machine answer from its
+        // own config - the client's included, on a world it had only joined - so a world with no file of its own gets
+        // one derived here and written beside it, and from then on the world speaks for itself everywhere.
         internal static void OnWorldInitialize(World world)
         {
             s_current = null;
@@ -86,7 +114,22 @@ namespace VerdantsAscent.Terrain.Voxel
             var net = ZNet.instance;
             if (net == null || !net.IsServer()) return;
             s_current = Read(world.m_name);
-            if (s_current != null) FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' profile: {s_current.Describe()}.");
+            if (s_current != null)
+            {
+                FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' profile: {s_current.Describe()}.");
+                return;
+            }
+
+            bool neverSaved = Zones.ZoneModeRegistry.IsNeverSaved(world);
+            s_current = neverSaved ? Infer(world.m_name, configMayChooseTheGenerator: true) : FromWorldRecords(world.m_name);
+            FiresLogger.LogInfo(neverSaved
+                ? $"[FiresWorldGen] world '{world.m_name}' has no profile and no save data, so it is being created: this "
+                    + $"machine's config decides it, once - {s_current.Describe()}."
+                : $"[FiresWorldGen] world '{world.m_name}' has no profile but DOES have save data, so its generator comes "
+                    + $"from its own records and not from any config - {s_current.Describe()}.");
+            if (s_current.Write(world.m_name))
+                FiresLogger.LogInfo($"[FiresWorldGen] pinned that profile beside '{world.m_name}'. Every client is sent it, "
+                    + "so the world is built the same way everywhere from now on.");
         }
 
         // The terrain mode this world runs under, given the configured one.

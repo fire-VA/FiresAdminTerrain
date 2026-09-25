@@ -16,6 +16,12 @@ namespace VerdantsAscent.Terrain.Voxel
     // server never listens, which reads as a network fault.
     // Diagnosis and the three-day repro: MODSTACK_COORDINATION.md under [c68b48].
     // Sibling of AltBiomePointGuard, which guards the same 1.0 location system.
+    //
+    // Expand World Data 1.73+ prefixes this method itself and gives every bit its
+    // own BiomeIndex. HarmonyX runs every prefix, so this one must never write over
+    // that answer: when an earlier prefix has already decided (__runOriginal is
+    // false) it does nothing. It only maps when the vanilla switch would otherwise
+    // throw with nobody else answering.
     [HarmonyPatch]
     internal static class BiomeIndexGuard
     {
@@ -32,8 +38,10 @@ namespace VerdantsAscent.Terrain.Voxel
 
         [HarmonyPatch(typeof(BiomeHelpers), nameof(BiomeHelpers.ToBiomeIndex))]
         [HarmonyPrefix]
-        private static bool Prefix(Heightmap.Biome b, ref Heightmap.BiomeIndex __result)
+        private static bool Prefix(Heightmap.Biome b, ref Heightmap.BiomeIndex __result, bool __runOriginal)
         {
+            if (!__runOriginal) return true;
+
             switch (b)
             {
                 case Heightmap.Biome.None:
@@ -84,8 +92,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             else
             {
-                FiresLogger.LogInfo($"[FiresBiomeIndexGuard] biome value {(int)b} is not one of vanilla's ten; mapped to "
-                    + $"{baseBiome} via {how}. Vanilla would have thrown NotImplementedException here.");
+                FiresLogger.LogInfo($"[FiresBiomeIndexGuard] biome value {(int)b} is not one of vanilla's ten and no other mod "
+                    + $"mapped it; mapped to {baseBiome} via {how}. Vanilla would have thrown NotImplementedException here.");
             }
             return index;
         }

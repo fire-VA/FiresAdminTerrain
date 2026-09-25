@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections;
 using System.Globalization;
 using System.IO;
 using Splatform;
@@ -10,6 +11,11 @@ namespace VerdantsAscent.Terrain.Voxel
     internal sealed class WorldCloneOptions
     {
         internal bool ChunkByChunk;
+        // Null means "keep whatever the source world was built as". A caller that must not inherit this
+        // installation's config - a BetterContinents conversion, whose whole promise is the same map on vanilla
+        // terrain - sets Generator AND Terrain explicitly, because a source world with no profile falls through to
+        // FiresWorldProfile.Infer, and Infer reads the local FiresVoxelConfig.
+        internal ProfileGenerator? Generator;
         internal ProfileTerrain? Terrain;
         internal bool? SkyIslands, Hydrology, Caves;
     }
@@ -35,9 +41,17 @@ namespace VerdantsAscent.Terrain.Voxel
         private const string OnWord = "on";
         private const string OffWord = "off";
         private const double BytesPerMegabyte = 1024d * 1024d;
+        private const int CopyChunkBytes = 4 * 1024 * 1024;
+        private const float PercentScale = 100f;
 
-        private static readonly string[] CarriedRecordSuffixes = { "_baked.bin", "_baked.flow", "_caves.txt", "_islands.bin", "_skylands.txt" };
-        private static readonly string[] BakeSuffixes = { "_baked.bin", "_baked.flow" };
+        private const string BakeSuffix = "_baked.bin";
+        private const string BakeFlowSuffix = "_baked.flow";
+        private const string CavesSuffix = "_caves.txt";
+        private const string IslandsSuffix = "_islands.bin";
+        private const string SkylandsSuffix = "_skylands.txt";
+
+        private static readonly string[] CarriedRecordSuffixes =
+            { BakeSuffix, BakeFlowSuffix, CavesSuffix, IslandsSuffix, SkylandsSuffix, BcImport.BcWorldData.RecordsFolderSuffix };
 
         private static bool s_registered;
 
@@ -109,54 +123,110 @@ namespace VerdantsAscent.Terrain.Voxel
             => value == OnWord ? true : value == OffWord ? false : (bool?)null;
 
         // `saveName` is the world's save file name; the console also takes the name inside a renamed world.
+        /// <summary>Blocking clone, for the console command and anything else with no frame to give. Drains the
+        /// same coroutine the menus use, so there is one implementation.</summary>
         internal static bool TryClone(string saveName, string cloneName, WorldCloneOptions options, out string report)
+        {
+            bool done = false;
+            string message = null;
+            var run = CloneAsync(saveName, cloneName, options, null, (ok, text) => { done = ok; message = text; });
+            while (run.MoveNext()) { }
+            report = message;
+            return done;
+        }
+
+        // Copying a world used to be one blocking FileHelpers.Copy per file on the main thread. A 451 MB .db froze
+        // the game for as long as the disk took, every time, which is indistinguishable from a hang. The copy is
+        // now chunked and yields between chunks, and every step says where it is.
+        internal static IEnumerator CloneAsync(string saveName, string cloneName, WorldCloneOptions options,
+            Action<string> progress, Action<bool, string> done)
         {
             if (ZNet.instance != null)
             {
-                report = "Leave the world first: worlds are cloned from the main menu.";
-                return false;
+                done(false, "Leave the world first: worlds are cloned from the main menu.");
+                yield break;
             }
-            if (!TryLoadSource(saveName, out var save, out var source, out report)) return false;
-            if (!IsUsableName(cloneName, out report)) return false;
+            SaveWithBackups save;
+            World source;
+            string problem;
+            if (!TryLoadSource(saveName, out save, out source, out problem)) { done(false, problem); yield break; }
+            if (!IsUsableName(cloneName, out problem)) { done(false, problem); yield break; }
             if (File.Exists(ZoneModeRegistry.RegistryPath(source.m_name)))
             {
-                report = $"'{source.m_name}' is already played one zone at a time; cloning such a world is not supported yet.";
-                return false;
+                done(false, $"'{source.m_name}' is already played one zone at a time; cloning such a world is not supported yet.");
+                yield break;
             }
             var profile = ProfileFor(source.m_name, options);
-            report = profile.Conflict();
-            if (report != null) return false;
+            string conflict = profile.Conflict();
+            if (conflict != null) { done(false, conflict); yield break; }
 
             long cloneUid = (long)cloneName.GetStableHashCode() + Utils.GenerateUID();
             string root = SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local);
             string staging = Path.Combine(FiresWorldRecords.Folder, StagingFolderPrefix + FiresWorldRecords.SafeName(cloneName));
             var file = save.PrimaryFile;
-            int saveFiles;
-            long saveBytes;
+            var staged = new StageCounts();
+
             try
             {
                 if (Directory.Exists(staging)) Directory.Delete(staging, true);
                 Directory.CreateDirectory(staging);
-                StageSave(file, source, staging, cloneName, cloneUid, out saveFiles, out saveBytes);
+            }
+            catch (Exception ex)
+            {
+                done(false, $"Could not prepare a staging folder for '{cloneName}' ({ex.GetType().Name}: {ex.Message}).");
+                yield break;
+            }
+
+            // MoveNext inside the try, yield OUTSIDE it: C# forbids `yield return` in a try that has a catch.
+            var copy = StageSaveAsync(file, source, staging, cloneName, cloneUid, progress, staged);
+            while (true)
+            {
+                bool moving;
+                try
+                {
+                    moving = copy.MoveNext();
+                }
+                catch (Exception ex)
+                {
+                    Discard(staging);
+                    done(false, $"Could not copy '{source.m_name}' ({ex.GetType().Name}: {ex.Message}). Nothing was "
+                        + "made; the original is untouched.");
+                    yield break;
+                }
+                if (!moving) break;
+                yield return null;
+            }
+
+            try
+            {
                 if (file.IsChunked) Directory.Move(staging, Path.Combine(root, cloneName));
                 else
                 {
-                    foreach (string staged in Directory.GetFiles(staging)) File.Move(staged, Path.Combine(root, Path.GetFileName(staged)));
+                    foreach (string path in Directory.GetFiles(staging)) File.Move(path, Path.Combine(root, Path.GetFileName(path)));
                     Directory.Delete(staging, true);
                 }
             }
             catch (Exception ex)
             {
-                report = $"Could not copy '{source.m_name}' ({ex.GetType().Name}: {ex.Message}). Nothing was made; the original is untouched.";
-                return false;
+                Discard(staging);
+                done(false, $"Could not put '{cloneName}' in place ({ex.GetType().Name}: {ex.Message}). Nothing was "
+                    + "made; the original is untouched.");
+                yield break;
             }
             SaveSystem.InvalidateCache(SaveDataType.World);
 
+            int saveFiles = staged.Files;
+            long saveBytes = staged.Bytes;
             int carried;
+            string report;
             try
             {
                 FiresWorldRecords.ClearLeftovers(cloneName);
-                carried = CarryRecords(source, cloneName);
+                carried = CarryRecords(source, cloneName, profile);
+                if (!BcImport.BcConvert.TryCarryTerrainToClone(source.m_name, cloneName, out string terrain))
+                    FiresLogger.LogWarning($"[FiresWorldGen] {terrain}");
+                else if (terrain != null)
+                    FiresLogger.LogInfo($"[FiresWorldGen] {terrain}");
                 profile.CreatedUtc = DateTime.UtcNow;
                 profile.Write(cloneName);
                 if (options.ChunkByChunk)
@@ -169,9 +239,9 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             catch (Exception ex)
             {
-                report = $"Copied '{source.m_name}' as '{cloneName}', but its records could not be written ({ex.GetType().Name}: {ex.Message}), "
-                    + "so it loads as a plain copy. Delete it and clone again.";
-                return false;
+                done(false, $"Copied '{source.m_name}' as '{cloneName}', but its records could not be written "
+                    + $"({ex.GetType().Name}: {ex.Message}), so it loads as a plain copy. Delete it and clone again.");
+                yield break;
             }
 
             report = $"Cloned '{source.m_name}' as '{cloneName}': {saveFiles} save file(s), {saveBytes / BytesPerMegabyte:0.#} MB"
@@ -180,7 +250,19 @@ namespace VerdantsAscent.Terrain.Voxel
                 + (options.ChunkByChunk
                     ? $" The first time '{cloneName}' loads, everything it has explored is set aside zone by zone and returns as it was when each zone is opened."
                     : "");
-            return true;
+            done(true, report);
+        }
+
+        private sealed class StageCounts
+        {
+            internal int Files;
+            internal long Bytes;
+        }
+
+        private static void Discard(string staging)
+        {
+            try { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
+            catch (Exception ex) { FiresLogger.LogWarning($"[FiresWorldGen] staging {staging} could not be cleared ({ex.Message})."); }
         }
 
         private static bool TryLoadSource(string name, out SaveWithBackups save, out World source, out string problem)
@@ -197,28 +279,63 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // By save file name first; otherwise the one world whose own name it is.
+        // A world is named twice - m_name is what is inside the .fwl and m_worldName is the save file - and the two
+        // differ on any renamed world. The old code matched only on m_name and then looked the save up by
+        // m_worldName, so a world whose m_worldName is empty (a pre-1.0 flat save carries no 1.0 file name) failed
+        // the second lookup and reported "there is no world called X" about a world sitting in the list.
+        // Matching on EITHER name and falling back to m_name fixes that; when it still fails the message now says
+        // what was actually in the list, because "no world called X" is not something anyone can act on.
         private static bool TryFindSave(string name, out SaveWithBackups save, out string problem)
         {
             problem = null;
             if (SaveSystem.TryGetSaveByName(name, SaveDataType.World, out save) && !save.IsDeleted) return true;
+
             save = null;
-            string fileName = null;
+            var matches = new List<World>();
+            var listed = new List<string>();
             foreach (var world in SaveSystem.GetWorldList())
             {
-                if (world == null || !string.Equals(world.m_name, name, StringComparison.OrdinalIgnoreCase)) continue;
-                if (fileName != null)
-                {
-                    problem = $"More than one world is called '{name}'; name the one to clone by its file name ('{fileName}' or "
-                        + $"'{world.m_worldName}').";
-                    return false;
-                }
-                fileName = world.m_worldName;
+                if (world == null) continue;
+                listed.Add(DescribeWorld(world));
+                if (string.Equals(world.m_name, name, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(world.m_worldName, name, StringComparison.OrdinalIgnoreCase))
+                    matches.Add(world);
             }
-            if (fileName != null && SaveSystem.TryGetSaveByName(fileName, SaveDataType.World, out save) && !save.IsDeleted) return true;
-            save = null;
-            problem = $"There is no world called '{name}'.";
+
+            if (matches.Count > 1)
+            {
+                var names = new List<string>();
+                foreach (var world in matches) names.Add($"'{SaveNameOf(world)}'");
+                problem = $"More than one world is called '{name}'; name the one to clone by its file name "
+                    + $"({string.Join(" or ", names.ToArray())}).";
+                return false;
+            }
+
+            if (matches.Count == 1)
+            {
+                string fileName = SaveNameOf(matches[0]);
+                if (SaveSystem.TryGetSaveByName(fileName, SaveDataType.World, out save) && !save.IsDeleted) return true;
+                bool deleted = save != null && save.IsDeleted;
+                save = null;
+                problem = $"'{name}' is in the world list as {DescribeWorld(matches[0])}, but its save could not be "
+                    + $"opened under '{fileName}' ({(deleted ? "the save system reports it as deleted" : "no save by that name")}).";
+                return false;
+            }
+
+            problem = $"There is no world called '{name}'. The world list holds {listed.Count}: "
+                + string.Join(", ", listed.ToArray()) + ".";
             return false;
         }
+
+        /// <summary>The name the save system files a world under: its save file name, or the name inside the world
+        /// file when there is no separate save name (every pre-1.0 flat save).</summary>
+        private static string SaveNameOf(World world)
+            => string.IsNullOrEmpty(world.m_worldName) ? world.m_name : world.m_worldName;
+
+        private static string DescribeWorld(World world)
+            => string.Equals(world.m_name, world.m_worldName, StringComparison.Ordinal)
+                ? $"'{world.m_name}'"
+                : $"'{world.m_name}' (file '{world.m_worldName}')";
 
         internal static bool IsUsableName(string cloneName, out string problem)
         {
@@ -234,12 +351,12 @@ namespace VerdantsAscent.Terrain.Voxel
                      || File.Exists(Path.Combine(root, cloneName + OldMetaExtension)))
                 problem = $"worlds_local already holds files called '{cloneName}' from an earlier world; delete them or choose another name.";
             else
-                foreach (string suffix in BakeSuffixes)
+                foreach (string suffix in CarriedRecordSuffixes)
                 {
-                    string bake = FiresWorldRecords.PathFor(cloneName, suffix);
-                    if (!File.Exists(bake)) continue;
-                    problem = $"A baked terrain cache {Path.GetFileName(bake)} already exists and would replace the copied land; "
-                        + "delete it or choose another name.";
+                    string leftover = FiresWorldRecords.PathFor(cloneName, suffix);
+                    if (!File.Exists(leftover)) continue;
+                    problem = $"{Path.GetFileName(leftover)} is already there from an earlier world called '{cloneName}' and "
+                        + "would be used instead of the copied land; delete it or choose another name.";
                     break;
                 }
             return problem == null;
@@ -248,14 +365,20 @@ namespace VerdantsAscent.Terrain.Voxel
         // The save's own files, out of whichever storage holds them, into local staging: a chunked save's _main.<n>.* and
         // chunk files keep their names, an old save's .db and .fwl take the clone's. The world file is then rewritten
         // with the clone's name and id.
-        private static void StageSave(SaveFile file, World source, string staging, string cloneName, long cloneUid, out int files, out long bytes)
+        // `yield return` is legal inside a try that has only a FINALLY, which is why the mount can still be
+        // released the moment anything throws.
+        private static IEnumerator StageSaveAsync(SaveFile file, World source, string staging, string cloneName,
+            long cloneUid, Action<string> progress, StageCounts counts)
         {
-            files = 0;
-            bytes = 0;
             string mainPrefix = MainFilePrefix + source.SaveNumber().ToString(CultureInfo.InvariantCulture) + ".";
             string meta = file.IsChunked ? mainPrefix + ChunkedMetaExtension.TrimStart('.') : cloneName + OldMetaExtension;
             var grouping = file.IsChunked ? CloudStorageFileGrouping.SameFolder : CloudStorageFileGrouping.SameFileEnding;
-            if (!FileHelpers.Mount(SaveDataAccess.ReadWrite)) throw new IOException($"{file.m_source} save storage could not be opened");
+            bool local = !file.m_source.IsCloud();
+            long total = local ? TotalBytes(file) : 0L;
+            long copied = 0L;
+
+            if (!FileHelpers.Mount(SaveDataAccess.ReadWrite))
+                throw new IOException($"{file.m_source} save storage could not be opened");
             try
             {
                 foreach (string path in file.AllPaths)
@@ -274,19 +397,70 @@ namespace VerdantsAscent.Terrain.Voxel
                         staged = cloneName + name.Substring(source.m_worldName.Length);
                     }
                     string target = Path.Combine(staging, staged);
-                    if (!FileHelpers.Copy(path, file.m_source, target, grouping, FileHelpers.FileSource.Local))
-                        throw new IOException($"{name} could not be copied out of {file.m_source} storage");
-                    files++;
-                    bytes += new FileInfo(target).Length;
+
+                    if (!local)
+                    {
+                        // Cloud storage has no stream to chunk: one call, and it blocks for as long as it blocks.
+                        if (progress != null) progress($"Copying {name} out of {file.m_source} storage...");
+                        if (!FileHelpers.Copy(path, file.m_source, target, grouping, FileHelpers.FileSource.Local))
+                            throw new IOException($"{name} could not be copied out of {file.m_source} storage");
+                    }
+                    else
+                    {
+                        var chunks = CopyChunked(path, target, advanced =>
+                        {
+                            copied += advanced;
+                            if (progress == null) return;
+                            progress(total > 0L
+                                ? $"Copying '{source.m_name}': {copied / BytesPerMegabyte:0.#} of {total / BytesPerMegabyte:0.#} MB "
+                                    + $"({copied * PercentScale / total:0}%)"
+                                : $"Copying '{source.m_name}': {copied / BytesPerMegabyte:0.#} MB");
+                        });
+                        while (chunks.MoveNext()) yield return null;
+                    }
+
+                    counts.Files++;
+                    counts.Bytes += new FileInfo(target).Length;
                 }
             }
             finally
             {
                 FileHelpers.Unmount();
             }
+
             string metaPath = Path.Combine(staging, meta);
             if (!File.Exists(metaPath)) throw new FileNotFoundException($"the world file of '{source.m_worldName}' is missing from its save");
             File.WriteAllBytes(metaPath, RenamedWorldMeta(File.ReadAllBytes(metaPath), cloneName, cloneUid));
+        }
+
+        private static long TotalBytes(SaveFile file)
+        {
+            long total = 0L;
+            foreach (string path in file.AllPaths)
+            {
+                try { if (File.Exists(path)) total += new FileInfo(path).Length; }
+                catch { }
+            }
+            return total;
+        }
+
+        /// <summary>A local file copied a chunk at a time, handing a frame back between chunks. `using` compiles to
+        /// try/finally, which is the one form of try a `yield return` may sit inside.</summary>
+        private static IEnumerator CopyChunked(string from, string to, Action<long> advanced)
+        {
+            var buffer = new byte[CopyChunkBytes];
+            using (var input = new FileStream(from, FileMode.Open, FileAccess.Read, FileShare.Read, CopyChunkBytes))
+            using (var output = new FileStream(to, FileMode.Create, FileAccess.Write, FileShare.None, CopyChunkBytes))
+            {
+                while (true)
+                {
+                    int read = input.Read(buffer, 0, buffer.Length);
+                    if (read <= 0) break;
+                    output.Write(buffer, 0, read);
+                    if (advanced != null) advanced(read);
+                    yield return null;
+                }
+            }
         }
 
         // A world's meta file is an int32 length and a ZPackage: version, name, seed name, seed, world uid, then the rest
@@ -319,13 +493,23 @@ namespace VerdantsAscent.Terrain.Voxel
             return renamed;
         }
 
-        private static int CarryRecords(World source, string cloneName)
+        // Only the records the copy's own profile can use. A copy asked for stock heightmap terrain must NOT inherit
+        // the source's bake: a bake IS voxel terrain, and the generator prefers it over the land in the save, so
+        // carrying it turns a plain copy of a map into whatever voxel world the source happened to be. Cave, sky
+        // island and seed-grid records go the same way - they belong to features the copy was not asked for.
+        private static int CarryRecords(World source, string cloneName, FiresWorldProfile profile)
         {
             int carried = 0;
             foreach (string suffix in CarriedRecordSuffixes)
             {
                 string from = FiresWorldRecords.PathFor(source.m_name, suffix);
                 if (!File.Exists(from)) continue;
+                if (!ProfileWants(profile, suffix))
+                {
+                    FiresLogger.LogInfo($"[FiresWorldGen] '{cloneName}' was not given {Path.GetFileName(from)}: the copy was "
+                        + "asked for terrain that has no use for it.");
+                    continue;
+                }
                 File.Copy(from, FiresWorldRecords.PathFor(cloneName, suffix));
                 carried++;
             }
@@ -337,12 +521,23 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             string sourcePrefix = FiresWorldRecords.FilePrefix + FiresWorldRecords.SafeName(source.m_name) + "_";
             string clonePrefix = FiresWorldRecords.FilePrefix + FiresWorldRecords.SafeName(cloneName) + "_";
-            foreach (string from in SeedCaches(source.m_name, source.m_seed))
-            {
-                File.Copy(from, Path.Combine(FiresWorldRecords.Folder, clonePrefix + Path.GetFileName(from).Substring(sourcePrefix.Length)), true);
-                carried++;
-            }
+            if (profile.Generator != ProfileGenerator.Vanilla)
+                foreach (string from in SeedCaches(source.m_name, source.m_seed))
+                {
+                    File.Copy(from, Path.Combine(FiresWorldRecords.Folder, clonePrefix + Path.GetFileName(from).Substring(sourcePrefix.Length)), true);
+                    carried++;
+                }
             return carried;
+        }
+
+        /// <summary>Which of a world's records a copy with this profile has any use for. Null means the option was
+        /// never stated, which is the console's old behaviour: carry it.</summary>
+        private static bool ProfileWants(FiresWorldProfile profile, string suffix)
+        {
+            if (suffix == BakeSuffix || suffix == BakeFlowSuffix) return profile.Terrain != ProfileTerrain.Heightmap;
+            if (suffix == CavesSuffix) return profile.Caves ?? true;
+            if (suffix == IslandsSuffix || suffix == SkylandsSuffix) return profile.SkyIslands ?? true;
+            return true;
         }
 
         // firesgen_<world>_<seed>_r<res>[_vahc].bin: the generator's seed grid, minutes of work to rebuild and the same for
@@ -361,14 +556,17 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // A world being copied already exists, so FromWorldRecords, never the plain config read: the copy's ground must be
+        // the ground the original had.
         internal static FiresWorldProfile OriginalProfile(string sourceName)
-            => FiresWorldProfile.Read(sourceName) ?? FiresWorldProfile.Infer(sourceName);
+            => FiresWorldProfile.Read(sourceName) ?? FiresWorldProfile.FromWorldRecords(sourceName);
 
         // The profile a clone of `sourceName` gets: the original's, with the options laid over it.
         internal static FiresWorldProfile ProfileFor(string sourceName, WorldCloneOptions options)
         {
             var profile = OriginalProfile(sourceName).Copy();
             profile.ZoneMode = options.ChunkByChunk;
+            if (options.Generator.HasValue) profile.Generator = options.Generator.Value;
             if (options.Terrain.HasValue) profile.Terrain = options.Terrain.Value;
             if (options.SkyIslands.HasValue) profile.SkyIslands = options.SkyIslands;
             if (options.Hydrology.HasValue) profile.Hydrology = options.Hydrology;

@@ -32,6 +32,16 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float TILE = 128f;
         private const float CELL = 8f;
         private const int BAKE_RES = 256;
+        private const int DefaultDrawLayer = 0;
+        private const string BakeLightName = "FiresImpostorBakeLight";
+        // Direct light plus ambient fill sum to exactly 1.0 on purpose: a diffuse
+        // surface cannot then exceed the ARGB32 bake target and clamp towards white,
+        // whatever its albedo.
+        private const float BakeLightIntensity = 0.8f;
+        private const float BakeAmbient = 0.2f;
+        private const float BakeCutoff = 0.35f;
+        private const byte BakeOpaqueAlpha = 90;     // BakeCutoff in bytes (0.35 * 255 = 89.25)
+        private const int BakeBleedPasses = 6;
         private const int BATCH = 1023;      // DrawMeshInstanced hard cap
         private const int TILE_CAP_MIN = 1024;
         private const int TILE_CAP_MAX = 24000;  // memory backstop (~roaming safety)
@@ -193,6 +203,13 @@ namespace VerdantsAscent.Terrain.Voxel
         private static int s_bandNear, s_bandMid, s_bandFar;
         private static string s_shaderName = "?";
         private static bool s_baked;
+        private static long s_bakeOpaquePixels, s_bakeRedSum, s_bakeGreenSum, s_bakeBlueSum;
+
+        // Config hook: Tick already honours Enabled and drops its tiles when it goes false, but
+        // nothing ever set the flag, so far billboards could not be turned off at all. The other
+        // four settings are re-read every tick; marking the batches dirty makes a change show up
+        // on the next frame instead of waiting for the player to move or turn.
+        public static void MarkDirty() => s_batchesDirty = true;
 
         public static void Tick()
         {
@@ -287,8 +304,14 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (n <= 0) continue;
                     try
                     {
+                        // LightProbeUsage.Off. The lighting is already IN the baked
+                        // sheet, so the default (BlendProbes) re-lights the quad a
+                        // second time from whatever ambient probe state the instanced
+                        // path is carrying - which Unity does not define for
+                        // DrawMeshInstanced without a probe provider.
                         Graphics.DrawMeshInstanced(sp.Quad, 0, sp.Mat, chunks[c], n, null,
-                            UnityEngine.Rendering.ShadowCastingMode.Off, false);
+                            UnityEngine.Rendering.ShadowCastingMode.Off, false, DefaultDrawLayer, null,
+                            UnityEngine.Rendering.LightProbeUsage.Off);
                     }
                     catch (System.Exception ex)
                     {
@@ -582,11 +605,13 @@ namespace VerdantsAscent.Terrain.Voxel
             cam.backgroundColor = new Color(0f, 0f, 0f, 0f);
             cam.cullingMask = 1 << BAKE_LAYER;
             cam.nearClipPlane = 0.1f;
+            cam.allowHDR = false;
+            cam.allowMSAA = false;
 
-            var lightGO = new GameObject("FiresImpostorBakeLight");
+            var lightGO = new GameObject(BakeLightName);
             var light = lightGO.AddComponent<Light>();
             light.type = LightType.Directional;
-            light.intensity = 1.15f;
+            light.intensity = BakeLightIntensity;
             light.color = Color.white;
             light.cullingMask = 1 << BAKE_LAYER;
             light.transform.rotation = Quaternion.Euler(40f, 205f, 0f);
@@ -594,91 +619,243 @@ namespace VerdantsAscent.Terrain.Voxel
             var rt = new RenderTexture(BAKE_RES, BAKE_RES, 24, RenderTextureFormat.ARGB32);
             int ok = 0;
             int baked = 0;
-            using (BakeMarker().Auto())
-            for (; s_bakeCursor < s_species.Length && baked < BakePerTick; s_bakeCursor++)
+
+            // A billboard carries its lighting BAKED IN, so it has to be lit the same
+            // way whatever the sky happened to be doing when the bake ran - otherwise
+            // a world baked at noon and the same world baked at dusk disagree, and a
+            // bright enough moment pushes foliage past 1.0 on an ARGB32 target that has
+            // no headroom to absorb it. RGB clamps towards white while the cutout alpha,
+            // untouched by lighting, stays perfect - it fails as a WHITE SILHOUETTE.
+            //
+            // cullingMask above is NOT enough on its own: per-light culling masks are
+            // only honoured on the FORWARD path, and this camera inherits whatever path
+            // the player settings resolve to. Forcing the path is the wrong fix - a
+            // vanilla foliage shader with no forward pass would then bake nothing at
+            // all - so BakeEnvironment switches the scene's own directionals off for the
+            // render instead, which is correct on either path.
+            BakeEnvironment env = null;
+            try
             {
-                var sp = s_species[s_bakeCursor];
-                if (sp.Broken || sp.Quad != null) continue;
-                baked++;
-                var prefab = zns.GetPrefab(sp.Prefab);
-                if (prefab == null) { sp.Broken = true; continue; }
-                GameObject inst = null, bakeRoot = null;
-                try
+                env = BakeEnvironment.Capture();
+                env.Apply();
+                using (BakeMarker().Auto())
+                for (; s_bakeCursor < s_species.Length && baked < BakePerTick; s_bakeCursor++)
                 {
-                    // Instantiate under an INACTIVE root so no Awake runs — a
-                    // live ZNetView registers in ZNetScene.m_instances and our
-                    // Destroy would orphan the entry (stale-instance diagnostic
-                    // spam for every species). Strip all MonoBehaviours before
-                    // activating; renderers aren't MonoBehaviours, so the mesh
-                    // still bakes.
-                    bakeRoot = new GameObject("FiresImpostorBakeRoot");
-                    bakeRoot.transform.position = new Vector3(0f, -6000f, 0f);
-                    bakeRoot.SetActive(false);
-                    inst = UnityEngine.Object.Instantiate(prefab, bakeRoot.transform);
-                    inst.transform.localPosition = Vector3.zero;
-                    foreach (var mb in inst.GetComponentsInChildren<MonoBehaviour>(true))
-                        try { UnityEngine.Object.DestroyImmediate(mb); } catch { }
-                    foreach (var t in inst.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = BAKE_LAYER;
-                    bakeRoot.SetActive(true);
-
-                    var bounds = new Bounds(inst.transform.position, Vector3.zero);
-                    bool got = false;
-                    foreach (var r in inst.GetComponentsInChildren<Renderer>())
+                    var sp = s_species[s_bakeCursor];
+                    if (sp.Broken || sp.Quad != null) continue;
+                    baked++;
+                    var prefab = zns.GetPrefab(sp.Prefab);
+                    if (prefab == null) { sp.Broken = true; continue; }
+                    GameObject inst = null, bakeRoot = null;
+                    try
                     {
-                        if (r is ParticleSystemRenderer) continue;
-                        if (!got) { bounds = r.bounds; got = true; } else bounds.Encapsulate(r.bounds);
+                        // Instantiate under an INACTIVE root so no Awake runs - a
+                        // live ZNetView registers in ZNetScene.m_instances and our
+                        // Destroy would orphan the entry (stale-instance diagnostic
+                        // spam for every species). Strip all MonoBehaviours before
+                        // activating; renderers are not MonoBehaviours, so the mesh
+                        // still bakes.
+                        bakeRoot = new GameObject("FiresImpostorBakeRoot");
+                        bakeRoot.transform.position = new Vector3(0f, -6000f, 0f);
+                        bakeRoot.SetActive(false);
+                        inst = UnityEngine.Object.Instantiate(prefab, bakeRoot.transform);
+                        inst.transform.localPosition = Vector3.zero;
+                        foreach (var mb in inst.GetComponentsInChildren<MonoBehaviour>(true))
+                            try { UnityEngine.Object.DestroyImmediate(mb); } catch { }
+                        foreach (var t in inst.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = BAKE_LAYER;
+                        bakeRoot.SetActive(true);
+
+                        var bounds = new Bounds(inst.transform.position, Vector3.zero);
+                        bool got = false;
+                        foreach (var r in inst.GetComponentsInChildren<Renderer>())
+                        {
+                            if (r is ParticleSystemRenderer) continue;
+                            if (!got) { bounds = r.bounds; got = true; } else bounds.Encapsulate(r.bounds);
+                        }
+                        if (!got) { sp.Broken = true; continue; }
+
+                        float w = Mathf.Max(bounds.size.x, bounds.size.z);
+                        float hgt = bounds.size.y;
+                        float half = Mathf.Max(w, hgt) * 0.5f * 1.05f;
+                        cam.orthographicSize = half;
+                        cam.farClipPlane = w * 4f + 50f;
+                        cam.transform.position = bounds.center - new Vector3(0f, 0f, w * 2f + 10f);
+                        cam.transform.rotation = Quaternion.identity;
+                        cam.targetTexture = rt;
+                        cam.Render();
+
+                        RenderTexture.active = rt;
+                        var tex = new Texture2D(BAKE_RES, BAKE_RES, TextureFormat.RGBA32, true);
+                        tex.ReadPixels(new Rect(0, 0, BAKE_RES, BAKE_RES), 0, 0);
+                        RenderTexture.active = null;
+
+                        var pixels = tex.GetPixels32();
+                        Measure(pixels);
+                        BleedIntoSurround(pixels);
+                        tex.SetPixels32(pixels);
+                        tex.Apply(true, false);
+                        tex.wrapMode = TextureWrapMode.Clamp;
+
+                        sp.Mat = new Material(shader) { mainTexture = tex };
+                        if (sp.Mat.HasProperty("_Cutoff")) sp.Mat.SetFloat("_Cutoff", BakeCutoff);
+                        sp.Mat.enableInstancing = true;
+
+                        // Crossed quads sized to the baked frame (square, side =
+                        // 2*half), pivot at the prefab's base so y sits on ground.
+                        float baseY = bounds.min.y - inst.transform.position.y;
+                        float side = half * 2f;
+                        float y0 = baseY + (bounds.center.y - inst.transform.position.y) - half;
+                        sp.Quad = BuildCrossedQuads(side, y0);
+                        ok++;
                     }
-                    if (!got) { sp.Broken = true; continue; }
-
-                    float w = Mathf.Max(bounds.size.x, bounds.size.z);
-                    float hgt = bounds.size.y;
-                    float half = Mathf.Max(w, hgt) * 0.5f * 1.05f;
-                    cam.orthographicSize = half;
-                    cam.farClipPlane = w * 4f + 50f;
-                    cam.transform.position = bounds.center - new Vector3(0f, 0f, w * 2f + 10f);
-                    cam.transform.rotation = Quaternion.identity;
-                    cam.targetTexture = rt;
-                    cam.Render();
-
-                    RenderTexture.active = rt;
-                    var tex = new Texture2D(BAKE_RES, BAKE_RES, TextureFormat.RGBA32, true);
-                    tex.ReadPixels(new Rect(0, 0, BAKE_RES, BAKE_RES), 0, 0);
-                    tex.Apply(true, false);
-                    RenderTexture.active = null;
-                    tex.wrapMode = TextureWrapMode.Clamp;
-
-                    sp.Mat = new Material(shader) { mainTexture = tex };
-                    if (sp.Mat.HasProperty("_Cutoff")) sp.Mat.SetFloat("_Cutoff", 0.35f);
-                    sp.Mat.enableInstancing = true;
-
-                    // Crossed quads sized to the baked frame (square, side =
-                    // 2*half), pivot at the prefab's base so y sits on ground.
-                    float baseY = bounds.min.y - inst.transform.position.y;
-                    float side = half * 2f;
-                    float y0 = baseY + (bounds.center.y - inst.transform.position.y) - half;
-                    sp.Quad = BuildCrossedQuads(side, y0);
-                    ok++;
-                }
-                catch (System.Exception ex)
-                {
-                    sp.Broken = true;
-                    FiresLogger.LogWarning($"[FiresVoxel] billboard bake failed for '{sp.Prefab}': {ex.Message}");
-                }
-                finally
-                {
-                    if (bakeRoot != null) UnityEngine.Object.Destroy(bakeRoot);
+                    catch (System.Exception ex)
+                    {
+                        sp.Broken = true;
+                        FiresLogger.LogWarning($"[FiresVoxel] billboard bake failed for '{sp.Prefab}': {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (bakeRoot != null) UnityEngine.Object.Destroy(bakeRoot);
+                    }
                 }
             }
-            cam.targetTexture = null;
-            UnityEngine.Object.Destroy(rt);
-            UnityEngine.Object.Destroy(camGO);
-            UnityEngine.Object.Destroy(lightGO);
+            finally
+            {
+                if (env != null) env.Restore();
+                cam.targetTexture = null;
+                UnityEngine.Object.Destroy(rt);
+                UnityEngine.Object.Destroy(camGO);
+                UnityEngine.Object.Destroy(lightGO);
+            }
             s_bakedCount += ok;
             if (ok > 0) s_baked = true;
             if (s_bakeCursor >= s_species.Length)
                 FiresLogger.LogInfo($"[FiresVoxel] far billboards baked: {s_bakedCount} of {s_species.Length} species "
-                    + $"(16 tris each, {BakePerTick} a tick), shader={s_shaderName}.");
+                    + $"(16 tris each, {BakePerTick} a tick), shader={s_shaderName}{ColourSummary()}.");
             return s_baked;
+        }
+
+        // The scene lighting a bake must NOT inherit. Ambient and fog are global, and
+        // EnvMan's sun reaches the subject regardless of culling mask on the deferred
+        // path, so all of it is captured, overridden for the render, and put back.
+        // EVERY scene directional is taken, not just EnvMan.m_dirLight, because our own
+        // sky mods add their own. Point lights are ignored on purpose: the subject sits
+        // 6000m down, far outside any torch's range.
+        private sealed class BakeEnvironment
+        {
+            private bool m_fog;
+            private UnityEngine.Rendering.AmbientMode m_ambientMode;
+            private Color m_ambientLight;
+            private float m_ambientIntensity;
+            private readonly List<Light> m_switchedOff = new List<Light>();
+
+            internal static BakeEnvironment Capture()
+            {
+                return new BakeEnvironment
+                {
+                    m_fog = RenderSettings.fog,
+                    m_ambientMode = RenderSettings.ambientMode,
+                    m_ambientLight = RenderSettings.ambientLight,
+                    m_ambientIntensity = RenderSettings.ambientIntensity,
+                };
+            }
+
+            internal void Apply()
+            {
+                RenderSettings.fog = false;
+                RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+                RenderSettings.ambientLight = new Color(BakeAmbient, BakeAmbient, BakeAmbient, 1f);
+                RenderSettings.ambientIntensity = 1f;
+
+                foreach (Light other in UnityEngine.Object.FindObjectsByType<Light>(FindObjectsSortMode.None))
+                {
+                    if (other == null || !other.enabled) continue;
+                    if (other.type != LightType.Directional) continue;
+                    if (other.gameObject.name == BakeLightName) continue;
+                    other.enabled = false;
+                    m_switchedOff.Add(other);
+                }
+            }
+
+            internal void Restore()
+            {
+                foreach (Light other in m_switchedOff)
+                    if (other != null) other.enabled = true;
+                m_switchedOff.Clear();
+                RenderSettings.fog = m_fog;
+                RenderSettings.ambientMode = m_ambientMode;
+                RenderSettings.ambientLight = m_ambientLight;
+                RenderSettings.ambientIntensity = m_ambientIntensity;
+            }
+        }
+
+        // Pushes opaque colour outwards into the transparent surround, leaving alpha
+        // alone. The bake clears to transparent BLACK and Apply builds the mip chain by
+        // averaging RGB across every pixel regardless of alpha - so a billboard, which
+        // at a kilometre is nearly always sampled from a high mip, faded towards black
+        // around its edges. Filling the surround with the colour beside it makes those
+        // mips average foliage with foliage instead of foliage with black.
+        private static void BleedIntoSurround(Color32[] pixels)
+        {
+            var filled = new bool[pixels.Length];
+            for (int i = 0; i < pixels.Length; i++) filled[i] = pixels[i].a >= BakeOpaqueAlpha;
+
+            var spread = new List<int>();
+            for (int pass = 0; pass < BakeBleedPasses; pass++)
+            {
+                spread.Clear();
+                for (int y = 0; y < BAKE_RES; y++)
+                    for (int x = 0; x < BAKE_RES; x++)
+                    {
+                        int i = y * BAKE_RES + x;
+                        if (filled[i]) continue;
+                        int r = 0, g = 0, b = 0, n = 0;
+                        AddNeighbour(pixels, filled, x - 1, y, ref r, ref g, ref b, ref n);
+                        AddNeighbour(pixels, filled, x + 1, y, ref r, ref g, ref b, ref n);
+                        AddNeighbour(pixels, filled, x, y - 1, ref r, ref g, ref b, ref n);
+                        AddNeighbour(pixels, filled, x, y + 1, ref r, ref g, ref b, ref n);
+                        if (n == 0) continue;
+                        pixels[i] = new Color32((byte)(r / n), (byte)(g / n), (byte)(b / n), pixels[i].a);
+                        spread.Add(i);
+                    }
+                // Marked only AFTER the pass, so colour advances one ring at a time
+                // instead of smearing across the sheet in scan order.
+                if (spread.Count == 0) break;
+                for (int k = 0; k < spread.Count; k++) filled[spread[k]] = true;
+            }
+        }
+
+        private static void AddNeighbour(Color32[] pixels, bool[] filled, int x, int y,
+                                        ref int r, ref int g, ref int b, ref int n)
+        {
+            if (x < 0 || y < 0 || x >= BAKE_RES || y >= BAKE_RES) return;
+            int i = y * BAKE_RES + x;
+            if (!filled[i]) return;
+            r += pixels[i].r; g += pixels[i].g; b += pixels[i].b; n++;
+        }
+
+        // What the bake camera actually produced, counting only the pixels the cutout
+        // keeps so the transparent surround cannot drag the average. Reported once on
+        // the bake summary line: foliage reads as greens and browns well short of 255,
+        // and a mean near white is the signature of a bake that clamped.
+        private static void Measure(Color32[] pixels)
+        {
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                Color32 p = pixels[i];
+                if (p.a < BakeOpaqueAlpha) continue;
+                s_bakeOpaquePixels++;
+                s_bakeRedSum += p.r;
+                s_bakeGreenSum += p.g;
+                s_bakeBlueSum += p.b;
+            }
+        }
+
+        private static string ColourSummary()
+        {
+            if (s_bakeOpaquePixels <= 0) return ", no opaque pixels sampled";
+            long n = s_bakeOpaquePixels;
+            return $", mean baked RGB ({s_bakeRedSum / n},{s_bakeGreenSum / n},{s_bakeBlueSum / n})";
         }
 
         // Two perpendicular quads, both windings (visible from every side):

@@ -53,6 +53,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<FiresTerrainMode> TerrainMode;   // THE server-owner selector (Off/PlacedOnly/ZoneReplace/FullVoxel)
         public static ConfigEntry<bool> CustomGeneration;   // legacy master: OFF forces 100% vanilla (== TerrainMode.Off; kept for back-compat)
         public static ConfigEntry<VoxelWorldMode> WorldMode;
+        public static ConfigEntry<BcImport.FiresOceanGap> OceanGap;
 
         // ── Derived gates (the whole mod reads these, not the raw entries) ──
         // The world's profile speaks first, the configuration second (FiresWorldProfile).
@@ -171,6 +172,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> VegetationDensityScale;
         public static ConfigEntry<float> ClutterDensityScale;
         public static ConfigEntry<float> GrassRenderDistance;
+        public static ConfigEntry<bool> ImpostorsEnabled;
         public static ConfigEntry<float> ImpostorRadius;
         public static ConfigEntry<float> ImpostorForwardRadius;
         public static ConfigEntry<float> ImpostorNearSkip;
@@ -203,7 +205,7 @@ namespace VerdantsAscent.Terrain.Voxel
             int n = 0;
             void Own<T>(ConfigEntry<T> entry) { if (entry == null) return; sync.AddConfigEntry(entry); n++; }
 
-            Own(Enabled); Own(TerrainMode); Own(CustomGeneration); Own(WorldMode); Own(WorldGenMode);
+            Own(Enabled); Own(TerrainMode); Own(CustomGeneration); Own(WorldMode); Own(WorldGenMode); Own(OceanGap);
 
             Own(GenerateCaves); Own(CaveMinY); Own(CaveMaxDepth); Own(CaveWidth);
             Own(CaveFrequency); Own(CaveFrequencyY); Own(CaveSurfacePinch);
@@ -291,6 +293,15 @@ namespace VerdantsAscent.Terrain.Voxel
             };
             ClutterDensityScale.SettingChanged += clutterRetune;
             GrassRenderDistance.SettingChanged += clutterRetune;
+            ImpostorsEnabled = cfg.Bind(PERF, "Impostors enabled", true,
+                new ConfigDescription("Draw far billboard trees and rocks at all. Turning this OFF removes every distant billboard and the cost of baking and drawing them; the distance past where real trees render is simply empty. Applies live."));
+            FarVegImpostors.Enabled = ImpostorsEnabled.Value;
+            ImpostorsEnabled.SettingChanged += (_, __) =>
+            {
+                FarVegImpostors.Enabled = ImpostorsEnabled.Value;
+                FarVegImpostors.MarkDirty();
+            };
+
             ImpostorRadius = cfg.Bind(PERF, "Impostor radius", 2400f,
                 new ConfigDescription("Far billboard trees/rocks draw radius (metres) around the player, all directions.",
                     new AcceptableValueRange<float>(600f, 6000f)));
@@ -303,6 +314,14 @@ namespace VerdantsAscent.Terrain.Voxel
             ImpostorDensity = cfg.Bind(PERF, "Impostor density", 0.85f,
                 new ConfigDescription("Scales how many billboards get placed. Lower = a thinner, scattered distant-forest feel (and cheaper); higher = continuous distant treeline coverage (distant mountains/forests read as covered, not sparse).",
                     new AcceptableValueRange<float>(0.1f, 1.5f)));
+
+            // All four are re-read every tick, but the placed tile set is only rebuilt when the
+            // player moves or turns, so a change could sit invisible until then.
+            ImpostorRadius.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
+            ImpostorForwardRadius.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
+            ImpostorNearSkip.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
+            ImpostorDensity.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
+
             TerrainCastShadows = cfg.Bind(PERF, "Terrain casts shadows", true,
                 new ConfigDescription("Whether voxel terrain chunks cast shadows. Every live chunk is submitted to the shadow pass a SECOND time, so with several hundred chunks loaded this is a large share of draw calls and shadow submissions. Turning it OFF is one of the biggest single frame wins available; the cost is that cliffs/overhangs stop casting onto the ground below (terrain still RECEIVES shadows from trees, buildings and everything else). Applies live."));
 
@@ -325,6 +344,18 @@ namespace VerdantsAscent.Terrain.Voxel
             MaxLoadedChunks = cfg.Bind(S, "Max loaded chunks", 2048,
                 new ConfigDescription("Safety cap on live voxel chunks (32m cubes, ~83KB each). A capped-out brush would skip chunks and leave holes, so brushes warn loudly when the cap bites.",
                     new AcceptableValueRange<int>(16, 8192)));
+
+            OceanGap = cfg.Bind(SW, "Ashlands and Deep North ocean gap", BcImport.FiresOceanGap.Auto,
+                "The Ocean ring 1.0 carves between the main landmass and Ashlands (south) and Deep North (north), "
+                + "at 12,000m.\n"
+                + "• Auto — removed on a world migrated from BetterContinents, kept on every other world. "
+                + "A BC map drew its own coastline out to the edge and never asked for a ring of Ocean through it, "
+                + "which is why a converted world shows a band of sea across the top and bottom.\n"
+                + "• Keep — never removed here. ExpandWorldData's own 'Ashlands gap' / 'Deep North gap' "
+                + "settings still decide.\n"
+                + "• Remove — removed on every world.\n"
+                + "Works alongside ExpandWorldData rather than against it: this only ever writes 'no gap', so if "
+                + "either mod removes it, it is gone, and neither unpatches the other.");
 
             TerrainMode = cfg.Bind(SW, "Terrain Mode", FiresTerrainMode.Off,
                 "THE top-level switch for how much of the world becomes voxel — set this and ignore the " +

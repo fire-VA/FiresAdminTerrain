@@ -163,6 +163,13 @@
     <Compile Include="Modules\BcImport\BcConvert.cs" />
     <Compile Include="Modules\BcImport\BcWorldListMenu.cs" />
     <Compile Include="Modules\BcImport\BcForestFactorPatch.cs" />
+    <Compile Include="Modules\BcImport\BcOceanGapPatches.cs" />
+    <Compile Include="Modules\BcImport\BcAltBiomeCensus.cs" />
+    <Compile Include="Modules\BcImport\BcMapReport.cs" />
+    <Compile Include="Modules\BcImport\BcSaveDeleteWatch.cs" />
+    <Compile Include="Modules\Utilities\ZoneLoadingGuard.cs" />
+    <Compile Include="Modules\Utilities\ArmorStandEffectFix.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldBake.cs" />
     <Compile Include="Modules\BcImport\BcMigratedWorld.cs" />
     <Compile Include="Modules\BcImport\BcWorldData.cs" />
     <Compile Include="Modules\BcImport\BcImportCommands.cs" />

@@ -99,6 +99,7 @@ namespace VerdantsAscent.Terrain
                 ZoneModeChunkMachines.OnZNetSceneAwake();
                 TreeSaplingPrefabs.OnZNetSceneAwake();
                 TreeSeedDrops.OnZNetSceneAwake();
+                Utilities.ArmorStandEffectFix.OnZNetSceneAwake();
             }
 
             [HarmonyPostfix]

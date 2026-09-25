@@ -13,7 +13,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // exists, and a seed grid is the same for every world with that seed.
         private static readonly string[] PlayRecordSuffixes =
         {
-            ".profile", ".mode", ".convert", "_zones.bin", "_zones.bin.rejected", "_hammer.txt", "_caves.txt", "_islands.bin", "_skylands.txt",
+            ".profile", ".mode", ".convert", "_zones.bin", "_zones.bin.rejected", "_hammer.txt", "_caves.txt", "_islands.bin", "_skylands.txt", BcImport.BcWorldData.RecordsFolderSuffix,
             FiresWaterGuards.FileSuffix,
         };
 

@@ -3644,12 +3644,23 @@ namespace VerdantsAscent.Terrain.Voxel
         // WorldGenMode forces the generator on. WorldGenMode Off is the caller's to check first.
         internal static bool UnprofiledChoosesFires(string worldName, FiresWorldGenMode mode, out bool? chose, out bool nameHit, out bool bakedHit)
         {
+            bool records = RecordsChooseFires(worldName, out chose, out nameHit, out bakedHit);
+            if (chose.HasValue) return chose.Value;
+            return mode != FiresWorldGenMode.Auto || records;
+        }
+
+        // The same question with the config's vote taken away: only what the WORLD says about itself. The recorded answer,
+        // then a baked cache under its exact name, then the Fires name prefix - all three are properties of the world, not
+        // of the machine it is opened on. WorldGenMode is deliberately absent: `mode != Auto` is a config forcing the
+        // generator on, and an existing world's ground is not the config's to change.
+        internal static bool RecordsChooseFires(string worldName, out bool? chose, out bool nameHit, out bool bakedHit)
+        {
             chose = GetWorldGenChoice(worldName);
             nameHit = (worldName ?? "").StartsWith("Fires", StringComparison.OrdinalIgnoreCase);
             bakedHit = false;
             try { bakedHit = File.Exists(BakedCachePath(worldName)); } catch { }
             if (chose.HasValue) return chose.Value;
-            return mode != FiresWorldGenMode.Auto || nameHit || bakedHit;
+            return nameHit || bakedHit;
         }
 
         // A baked cache IS the terrain: a client without it generates different
