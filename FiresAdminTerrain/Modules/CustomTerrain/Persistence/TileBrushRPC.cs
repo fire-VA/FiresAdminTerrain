@@ -38,6 +38,7 @@ namespace VerdantsAscent.Terrain.Persistence
         private const string RPC_GRAB       = "VATileBrushGrab";   // round-37 B-6
         private const string RPC_NOISE      = "VATileBrushNoise";  // round-37 B-7
         private const string RPC_HOLE_PATCH = "VATileBrushHolePatch";
+        private const string RPC_SLOPE      = "VATileBrushSlope";
 
         private static bool _registered;
 
@@ -56,19 +57,20 @@ namespace VerdantsAscent.Terrain.Persistence
             // Each handler is admin-gated via RecvWithAdminGate; non-admin
             // peers get logged + rejected. sender==0 (local-server self-call
             // loopback) is auto-trusted by AdminCheck.
-            rpc.Register<ZPackage>(RPC_FLAT,       (sender, pkg) => RecvWithAdminGate(sender, "Flat",      pkg, Recv_Flat));
-            rpc.Register<ZPackage>(RPC_RAISE,      (sender, pkg) => RecvWithAdminGate(sender, "Raise",     pkg, Recv_Raise));
-            rpc.Register<ZPackage>(RPC_PAINT,      (sender, pkg) => RecvWithAdminGate(sender, "Paint",     pkg, Recv_Paint));
-            rpc.Register<ZPackage>(RPC_CLEAR,      (sender, pkg) => RecvWithAdminGate(sender, "Clear",     pkg, Recv_Clear));
-            rpc.Register<ZPackage>(RPC_BIOME,      (sender, pkg) => RecvWithAdminGate(sender, "Biome",     pkg, Recv_Biome));
-            rpc.Register<ZPackage>(RPC_HOLE_PUNCH, (sender, pkg) => RecvWithAdminGate(sender, "HolePunch", pkg, Recv_HolePunch));
-            rpc.Register<ZPackage>(RPC_HOLE_PATCH, (sender, pkg) => RecvWithAdminGate(sender, "HolePatch", pkg, Recv_HolePatch));
-            rpc.Register<ZPackage>(RPC_SMOOTH,     (sender, pkg) => RecvWithAdminGate(sender, "Smooth",    pkg, Recv_Smooth));
-            rpc.Register<ZPackage>(RPC_GRAB,       (sender, pkg) => RecvWithAdminGate(sender, "Grab",      pkg, Recv_Grab));
-            rpc.Register<ZPackage>(RPC_NOISE,      (sender, pkg) => RecvWithAdminGate(sender, "Noise",     pkg, Recv_Noise));
+            rpc.Register<ZPackage>(RPC_FLAT,       (sender, pkg) => RecvWithAdminGate(sender, TileOp.Level,     pkg, Recv_Flat));
+            rpc.Register<ZPackage>(RPC_RAISE,      (sender, pkg) => RecvWithAdminGate(sender, TileOp.Raise,     pkg, Recv_Raise));
+            rpc.Register<ZPackage>(RPC_PAINT,      (sender, pkg) => RecvWithAdminGate(sender, TileOp.Paint,     pkg, Recv_Paint));
+            rpc.Register<ZPackage>(RPC_CLEAR,      (sender, pkg) => RecvWithAdminGate(sender, TileOp.Clear,     pkg, Recv_Clear));
+            rpc.Register<ZPackage>(RPC_BIOME,      (sender, pkg) => RecvWithAdminGate(sender, TileOp.Biome,     pkg, Recv_Biome));
+            rpc.Register<ZPackage>(RPC_HOLE_PUNCH, (sender, pkg) => RecvWithAdminGate(sender, TileOp.HolePunch, pkg, Recv_HolePunch));
+            rpc.Register<ZPackage>(RPC_HOLE_PATCH, (sender, pkg) => RecvWithAdminGate(sender, TileOp.HolePatch, pkg, Recv_HolePatch));
+            rpc.Register<ZPackage>(RPC_SMOOTH,     (sender, pkg) => RecvWithAdminGate(sender, TileOp.Smooth,    pkg, Recv_Smooth));
+            rpc.Register<ZPackage>(RPC_GRAB,       (sender, pkg) => RecvWithAdminGate(sender, TileOp.Grab,      pkg, Recv_Grab));
+            rpc.Register<ZPackage>(RPC_NOISE,      (sender, pkg) => RecvWithAdminGate(sender, TileOp.Noise,     pkg, Recv_Noise));
+            rpc.Register<ZPackage>(RPC_SLOPE,      (sender, pkg) => RecvWithAdminGate(sender, TileOp.Slope,     pkg, Recv_Slope));
 
-            RegisteredHandlers = 10;
-            FiresLogger.LogVerbose("[TileBrushRPC] Registered 10 RPC handlers (flat / raise / paint / clear / biome / hole_punch / hole_patch / smooth / grab / noise) — admin-gated.");
+            RegisteredHandlers = 11;
+            FiresLogger.LogVerbose($"[TileBrushRPC] Registered {RegisteredHandlers} RPC handlers (flat / raise / paint / clear / biome / hole_punch / hole_patch / smooth / grab / noise / slope) - admin-gated.");
         }
 
         // Resets the registration flag so the next ZRoutedRpc instance gets
@@ -80,18 +82,68 @@ namespace VerdantsAscent.Terrain.Persistence
             _registered = false;
         }
 
-        // Shared admin-guard wrapper — single point for the check + reject log.
-        private static void RecvWithAdminGate(long sender, string opName, ZPackage pkg, System.Action<ZPackage> apply)
+        // Which tile op an RPC carries. The gate keys its permission rule on this, so a
+        // new op is a new enum member that no allow-list names, and is therefore denied.
+        public enum TileOp
         {
-            if (!VerdantsAscent.Terrain.Lifecycle.AdminCheck.IsAdmin(sender))
+            Level,
+            Raise,
+            Paint,
+            Clear,
+            Biome,
+            HolePunch,
+            HolePatch,
+            Smooth,
+            Grab,
+            Noise,
+            Slope,
+        }
+
+        // The ONLY ops a non-admin peer may send: the ones that finish a surface a player
+        // already has, never the ones that change the shape of the world. An allow-list,
+        // not a deny-list - anything absent here is refused, including every op added later.
+        private static readonly System.Collections.Generic.HashSet<TileOp> NonAdminOps =
+            new System.Collections.Generic.HashSet<TileOp> { TileOp.Level, TileOp.Paint, TileOp.Smooth };
+
+        // Shared admin-guard wrapper - THE authority for tile edits, and the single point
+        // for the check and the reject log. A client-side check is only a hint.
+        private static void RecvWithAdminGate(long sender, TileOp op, ZPackage pkg, System.Action<ZPackage> apply)
+        {
+            if (!VerdantsAscent.Terrain.Lifecycle.AdminCheck.IsAdmin(sender) && !NonAdminOps.Contains(op))
             {
-                FiresLogger.LogWarning($"[TileBrushRPC] Non-admin peer {sender} attempted {opName} — rejected.");
+                FiresLogger.LogWarning($"[TileBrushRPC] Non-admin peer {sender} attempted {op} - rejected.");
                 return;
             }
             apply(pkg);
         }
 
+        // The client's own early-out, so a refusal is visible before the op is destroyed.
+        // RecvWithAdminGate still decides; this only has to agree with it.
+        public static bool LocalPeerMayEdit(TileOp op)
+            => ZNet.instance == null || ZNet.instance.IsServer()
+               || FiresCore.Sync.AdminSyncing.IsLocalAdmin()
+               || NonAdminOps.Contains(op);
+
         // ── SEND helpers — fall back to local-only when no ZRoutedRpc ────
+
+        public static void SendSlope(Vector3 center, float radius, float angle, float altitude, float amount, float smooth, bool square)
+        {
+            var rpc = ZRoutedRpc.instance;
+            if (rpc == null || ZNet.instance == null)
+            {
+                TileBrush.BrushSlope(center, radius, angle, altitude, amount, smooth, square);
+                return;
+            }
+            var pkg = new ZPackage();
+            pkg.Write(center);
+            pkg.Write(radius);
+            pkg.Write(angle);
+            pkg.Write(altitude);
+            pkg.Write(amount);
+            pkg.Write(smooth);
+            pkg.Write(square);
+            rpc.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_SLOPE, pkg);
+        }
 
         public static void SendFlat(Vector3 center, float radius, float height, bool square, bool islandMode = false)
         {
@@ -260,6 +312,18 @@ namespace VerdantsAscent.Terrain.Persistence
         // ── RECV handlers — runs local op; ApplyOpAndSave's owner check
         //                    + no-op-skip make this safe under loopback ──
 
+        private static void Recv_Slope(ZPackage pkg)
+        {
+            var center = pkg.ReadVector3();
+            float radius = pkg.ReadSingle();
+            float angle = pkg.ReadSingle();
+            float altitude = pkg.ReadSingle();
+            float amount = pkg.ReadSingle();
+            float smooth = pkg.ReadSingle();
+            bool square = pkg.ReadBool();
+            TileBrush.BrushSlope(center, radius, angle, altitude, amount, smooth, square);
+        }
+
         private static void Recv_Flat(ZPackage pkg)
         {
             var center = pkg.ReadVector3();
@@ -354,19 +418,9 @@ namespace VerdantsAscent.Terrain.Persistence
             TileBrush.BrushBiome(center, radius, biome);
         }
 
-        // Register on ZNet.Awake — that's when ZRoutedRpc.instance becomes
-        // available. ResetInitialized first so we wire fresh handlers on
-        // the new ZRoutedRpc instance after logout/reconnect (without it,
-        // _registered=true sticks across sessions and the new RPC bus has
-        // no handlers → silent MP-sync break).
-        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Awake))]
-        private static class ZNet_Awake_RegisterTileBrushRPC
-        {
-            private static void Postfix()
-            {
-                ResetInitialized();
-                Register();
-            }
-        }
+        // FAT's one ZNet.Awake hook (FatVanillaHooks) calls ResetInitialized
+        // then Register, when ZRoutedRpc.instance exists, so the handlers wire
+        // onto the new RPC bus after logout/reconnect (a sticky _registered
+        // would leave the new bus with no handlers: a silent MP-sync break).
     }
 }

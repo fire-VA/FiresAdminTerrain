@@ -54,33 +54,112 @@ namespace VerdantsAscent.Terrain.Voxel
             public string Prefab;
             public Heightmap.Biome Biomes;
             public float Density;      // chance per 8m cell (pre-DensityMul)
-            public float AltMin, AltMax;
-            public float SlopeMax;     // max Δy over the 8.5m slope probe
-            public float OpenMul;      // density multiplier outside forest patches
+            public float AltMin, AltMax;      // absolute metres (vanilla stores them against sea level)
+            public float NormalYMin, NormalYMax;   // cos(m_maxTilt) .. cos(m_minTilt), vanilla's own tilt gate
+            public bool Forest;               // m_inForest: the forest factor has to fall in the band below
+            public float ForestMin, ForestMax;
+            public float Height;              // how tall it stands, for picking which species are worth drawing
             public Mesh Quad;          // crossed quads sized to the prefab (main thread)
             public Material Mat;       // baked billboard, instancing on (main thread)
             public volatile bool Broken;
         }
 
-        // OpenMul is a SOFT forest gate — the old hard ForestOnly gate left
-        // every open meadow/plain bald to the horizon, which read as "no
-        // impostors at all". Rocks get a high SlopeMax so mountainsides
-        // (which fail the tree gate) still show cover; fir climbs to the
-        // 260m treeline, mountain rock all the way to the 620m summits.
-        private static readonly Species[] s_species =
+        // ── THE SPECIES COME FROM THE GAME, NOT FROM A LIST HERE ────────────
+        // `ZoneSystem.ZoneVegetation` already carries every rule this needs — the prefab, the biome mask, min/max
+        // altitude against sea level, min/max tilt, how many go in a zone, and the forest band — so the species are
+        // DERIVED from it at load instead of hand-copied. That covers the Ashlands trees, the Deep North snow firs and
+        // the Mistlands shoots without naming any of them, tracks a patch that retunes vanilla's own numbers, and picks
+        // up vegetation other mods add. A hand-written table was eight entries, five biomes and already stale.
+        private const float SeaLevel = 30f;
+        private const float MinImpostorHeight = 4f;   // a fern is knee high; at a kilometre only the big things read
+        private const int MaxSpeciesPerBiome = 6;     // the dominant few — every species costs a bake and a draw call
+        private const float CellsPerZone = 64f;       // a 64m zone over 8m cells
+        private const float SlopeProbe = 8.485f;      // the (+6,+6) probe BuildTile walks
+
+        private static Species[] s_species = new Species[0];
+
+        // Every vegetation entry the game will actually place, tall enough to read at a kilometre, kept to the dominant
+        // few per biome. Runs once, on the main thread, before the bake.
+        private static bool BuildSpecies()
         {
-            new Species { Prefab = "Beech1",         Biomes = Heightmap.Biome.Meadows,     Density = 0.34f, AltMin = 31f, AltMax = 95f,  SlopeMax = 5.5f, OpenMul = 0.15f },
-            new Species { Prefab = "Oak1",           Biomes = Heightmap.Biome.Meadows,     Density = 0.05f, AltMin = 31f, AltMax = 80f,  SlopeMax = 5.5f, OpenMul = 1f },
-            new Species { Prefab = "Pinetree_01",    Biomes = Heightmap.Biome.BlackForest, Density = 0.38f, AltMin = 31f, AltMax = 170f, SlopeMax = 6.5f, OpenMul = 1f },
-            new Species { Prefab = "FirTree",        Biomes = Heightmap.Biome.BlackForest | Heightmap.Biome.Mountain, Density = 0.34f, AltMin = 31f, AltMax = 300f, SlopeMax = 15f, OpenMul = 1f },
-            new Species { Prefab = "SwampTree1",     Biomes = Heightmap.Biome.Swamp,       Density = 0.22f, AltMin = 29f, AltMax = 60f,  SlopeMax = 5.5f, OpenMul = 1f },
-            new Species { Prefab = "Birch1",         Biomes = Heightmap.Biome.Plains,      Density = 0.08f, AltMin = 31f, AltMax = 90f,  SlopeMax = 5.5f, OpenMul = 1f },
-            new Species { Prefab = "rock4_forest",   Biomes = Heightmap.Biome.BlackForest | Heightmap.Biome.Meadows, Density = 0.03f, AltMin = 31f, AltMax = 200f, SlopeMax = 12f, OpenMul = 1f },
-            // Mountains are CRAGGY — rocks belong on the steep faces + snow caps
-            // above the tree line, so a high SlopeMax and heavier density fill
-            // the peak the trees (tree-line 285m) can't reach.
-            new Species { Prefab = "rock1_mountain", Biomes = Heightmap.Biome.Mountain | Heightmap.Biome.Plains, Density = 0.34f, AltMin = 40f, AltMax = 620f, SlopeMax = 30f, OpenMul = 1f },
+            var zs = ZoneSystem.instance;
+            if (zs == null || zs.m_vegetation == null || zs.m_vegetation.Count == 0) return false;
+
+            var tall = new List<Species>();
+            foreach (var veg in zs.m_vegetation)
+            {
+                if (veg == null || !veg.m_enable || veg.m_prefab == null || veg.m_biome == Heightmap.Biome.None) continue;
+                float height = PrefabHeight(veg.m_prefab);
+                if (height < MinImpostorHeight) continue;
+                float group = Mathf.Max(1f, (veg.m_groupSizeMin + veg.m_groupSizeMax) * 0.5f);
+                float perZone = (veg.m_max < 1f ? veg.m_max : (veg.m_min + veg.m_max) * 0.5f) * group;
+                float chance = Mathf.Clamp01(perZone / CellsPerZone);
+                if (chance <= 0.002f) continue;
+                tall.Add(new Species
+                {
+                    Prefab = veg.m_prefab.name,
+                    Biomes = veg.m_biome,
+                    Density = chance,
+                    AltMin = veg.m_minAltitude + SeaLevel,
+                    AltMax = veg.m_maxAltitude + SeaLevel,
+                    NormalYMin = Mathf.Cos(Mathf.Deg2Rad * veg.m_maxTilt),
+                    NormalYMax = Mathf.Cos(Mathf.Deg2Rad * veg.m_minTilt),
+                    Forest = veg.m_inForest,
+                    ForestMin = veg.m_forestTresholdMin,
+                    ForestMax = veg.m_forestTresholdMax,
+                    Height = height,
+                });
+            }
+
+            var kept = new List<Species>();
+            foreach (var biome in s_biomes)
+            {
+                s_perBiome.Clear();
+                foreach (var sp in tall) if ((sp.Biomes & biome) != 0) s_perBiome.Add(sp);
+                // The ones that fill a horizon: tall and common beat tall and rare.
+                s_perBiome.Sort((a, b) => (b.Height * b.Density).CompareTo(a.Height * a.Density));
+                for (int i = 0; i < s_perBiome.Count && i < MaxSpeciesPerBiome; i++)
+                    if (!kept.Contains(s_perBiome[i])) kept.Add(s_perBiome[i]);
+            }
+            if (kept.Count == 0) return false;
+
+            s_species = kept.ToArray();
+            s_chunks = new List<Matrix4x4[]>[s_species.Length];
+            s_chunkCounts = new List<int>[s_species.Length];
+            s_flat = new List<Matrix4x4>[s_species.Length];
+            s_byBiome.Clear();
+            foreach (var biome in s_biomes)
+            {
+                var list = new List<int>();
+                for (int i = 0; i < s_species.Length; i++) if ((s_species[i].Biomes & biome) != 0) list.Add(i);
+                if (list.Count > 0) s_byBiome[biome] = list.ToArray();
+            }
+            FiresLogger.LogInfo($"[FiresVoxel] far billboards: {s_species.Length} species taken from the game's own "
+                + $"{zs.m_vegetation.Count} vegetation entries ({tall.Count} stand over {MinImpostorHeight:0} m).");
+            return true;
+        }
+
+        private static readonly Heightmap.Biome[] s_biomes =
+        {
+            Heightmap.Biome.Meadows, Heightmap.Biome.BlackForest, Heightmap.Biome.Swamp, Heightmap.Biome.Mountain,
+            Heightmap.Biome.Plains, Heightmap.Biome.Mistlands, Heightmap.Biome.AshLands, Heightmap.Biome.DeepNorth,
         };
+
+        private static readonly List<Species> s_perBiome = new List<Species>();
+        private static readonly Dictionary<Heightmap.Biome, int[]> s_byBiome = new Dictionary<Heightmap.Biome, int[]>();
+
+        private static float PrefabHeight(GameObject prefab)
+        {
+            float low = float.MaxValue, high = float.MinValue;
+            foreach (var renderer in prefab.GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer is ParticleSystemRenderer) continue;
+                var bounds = renderer.bounds;
+                low = Mathf.Min(low, bounds.min.y);
+                high = Mathf.Max(high, bounds.max.y);
+            }
+            return high > low ? high - low : 0f;
+        }
 
         private sealed class Tile
         {
@@ -104,21 +183,21 @@ namespace VerdantsAscent.Terrain.Voxel
         // s_chunkCounts holds the live instance count per chunk. Rebuilding no
         // longer allocates (the old `new Matrix4x4[n]` per rebuild churned GC
         // on every camera turn — a real stutter source).
-        private static readonly List<Matrix4x4[]>[] s_chunks = new List<Matrix4x4[]>[s_species.Length];
-        private static readonly List<int>[] s_chunkCounts = new List<int>[s_species.Length];
-        private static readonly List<Matrix4x4>[] s_flat = new List<Matrix4x4>[s_species.Length];
+        private static List<Matrix4x4[]>[] s_chunks = new List<Matrix4x4[]>[0];
+        private static List<int>[] s_chunkCounts = new List<int>[0];
+        private static List<Matrix4x4>[] s_flat = new List<Matrix4x4>[0];
         private static bool s_batchesDirty;
         private static Vector2Int s_lastBatchTile = new Vector2Int(int.MinValue, int.MinValue);
         private static Vector2 s_lastBatchFwd = Vector2.up;
         private static int s_drawnInst;
         private static int s_bandNear, s_bandMid, s_bandFar;
-        private static float s_nextStatLog;
         private static string s_shaderName = "?";
         private static bool s_baked;
 
         public static void Tick()
         {
-            if (!Enabled || !FiresWorldGenBase.Active || ZNetScene.instance == null)
+            s_gen = WorldGenerator.instance;
+            if (!Enabled || ZNetScene.instance == null || (!FiresWorldGenBase.Active && s_gen == null))
             {
                 if (s_tiles.Count > 0) { s_tiles.Clear(); s_batchesDirty = true; }
                 return;
@@ -127,7 +206,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var player = Player.m_localPlayer;
             if (cam == null || player == null) return;
 
-            if (!s_baked && !BakeBillboards()) { DrainDone(); return; }
+            if (!BakeBillboards()) { DrainDone(); return; }
             EnsureWorker();
 
             Vector3 pp = player.transform.position;
@@ -149,7 +228,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // 5000+ tiles, blew the LRU cap, and churned). The prebuild cone is
             // a bit wider than the draw cone so tiles are ready before a turn
             // sweeps them into view.
-            if (FiresWorldGenBase.GridReady)
+            if (WorldReady)
             {
                 float rad2 = radius * radius, fwd2 = fwdRadius * fwdRadius;
                 const float PREBUILD_COS = CONE_COS - 0.15f;
@@ -214,36 +293,16 @@ namespace VerdantsAscent.Terrain.Voxel
                     catch (System.Exception ex)
                     {
                         sp.Broken = true;
-                        Debug.LogWarning($"[FiresVoxel] far billboard species '{sp.Prefab}' disabled: {ex.Message}");
+                        FiresLogger.LogWarning($"[FiresVoxel] far billboard species '{sp.Prefab}' disabled: {ex.Message}");
                         break;
                     }
                 }
             }
 
-            if (Time.time >= s_nextStatLog)
-            {
-                s_nextStatLog = Time.time + 30f;
-                Debug.Log($"[FiresVoxel] impostors: tiles={s_tiles.Count} inFlight={s_inFlight.Count} " +
-                          $"drawn={s_drawnInst} inst (0-1km {s_bandNear} / 1-2km {s_bandMid} / 2km+ {s_bandFar}), " +
-                          $"shader={s_shaderName}.");
-                // Forward-terrain probe: sample the analytic gen along the view
-                // line so we can see WHY distant terrain is bare — biome / alt /
-                // slope / wet at each range decide whether a species places.
-                var sb = new System.Text.StringBuilder("[FiresVoxel] fwd probe:");
-                foreach (float d in s_probeDist)
-                {
-                    float px = pp.x + fwd.x * d, pz = pp.z + fwd.y * d;
-                    var bi = FiresWorldGenBase.SampleBiome(px, pz);
-                    float al = FiresWorldGenBase.SampleFinalMeters(px, pz);
-                    float al2 = FiresWorldGenBase.SampleFinalMeters(px + 6f, pz + 6f);
-                    bool wet = FiresWorldGenBase.IsWetAt(px, pz);
-                    sb.Append($" {d/1000f:0.0}km[{bi} y{al:0} d{Mathf.Abs(al2 - al):0}{(wet ? " WET" : "")}]");
-                }
-                Debug.Log(sb.ToString());
-            }
+            // (30s impostor stats + fwd-probe retired — they solved the
+            // bare-distant-terrain investigation; re-add from git history if
+            // the treeline coverage regresses)
         }
-
-        private static readonly float[] s_probeDist = { 500f, 1000f, 1500f, 2000f, 2500f, 3000f, 4000f };
 
         // Terrain edit → the overlapping tile's placement is stale. Drop it;
         // it rebuilds off-thread on the next Tick. (Impostors live far past
@@ -295,7 +354,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var zs = ZoneSystem.instance;
             // Start past where the real trees render, else the near billboards
             // just hide behind the real forest and waste frames.
-            float nearSkip = Mathf.Max(zs != null ? (zs.m_activeArea + 1) * 64f : 192f,
+            float nearSkip = Mathf.Max((FiresCore.Bridge.SimulationDistanceAccess.ZoneLoadingNear + 1) * 64f,
                                        FiresVoxelConfig.ImpostorNearSkip?.Value ?? 300f);
             float nearEdge = Mathf.Max(0f, nearSkip - TILE);   // one-tile skirt
             float near2 = nearEdge * nearEdge;
@@ -383,6 +442,28 @@ namespace VerdantsAscent.Terrain.Voxel
         private static Vector3 TileCenter(Vector2Int key)
             => new Vector3(key.x * TILE + TILE * 0.5f, 0f, key.y * TILE + TILE * 0.5f);
 
+        // The ground under a tile cell, off the main thread. A Fires-generated world answers from its own grid; every
+        // other world — vanilla, and every converted chunk world — answers from `WorldGenerator`, which is what made
+        // this whole system dead weight before: it stood behind `FiresWorldGenBase.Active` and never ran anywhere else.
+        private static volatile WorldGenerator s_gen;
+
+        private static bool SampleGround(float wx, float wz, out Heightmap.Biome biome, out float y)
+        {
+            if (FiresWorldGenBase.Active)
+            {
+                biome = FiresWorldGenBase.SampleBiome(wx, wz);
+                y = FiresWorldGenBase.SampleFinalMeters(wx, wz);
+                return !FiresWorldGenBase.IsWetAt(wx, wz);
+            }
+            var gen = s_gen;
+            if (gen == null) { biome = Heightmap.Biome.None; y = 0f; return false; }
+            biome = gen.GetBiome(wx, wz);
+            y = gen.GetHeight(wx, wz);
+            return biome != Heightmap.Biome.Ocean && biome != Heightmap.Biome.None;
+        }
+
+        private static bool WorldReady => FiresWorldGenBase.Active ? FiresWorldGenBase.GridReady : s_gen != null;
+
         [ThreadStatic] private static List<Matrix4x4>[] t_build;
 
         private static Tile BuildTile(Vector2Int key)
@@ -407,23 +488,27 @@ namespace VerdantsAscent.Terrain.Voxel
                     uint h = Hash((int)wx, (int)wz);
                     float r01 = (h & 0xFFFF) / 65536f;
 
-                    var biome = FiresWorldGenBase.SampleBiome(wx, wz);
-                    float y = FiresWorldGenBase.SampleFinalMeters(wx, wz);
+                    if (!SampleGround(wx, wz, out var biome, out float y)) continue;
                     if (y < 28f) continue;
-                    if (FiresWorldGenBase.IsWetAt(wx, wz)) continue;
-                    float y2 = FiresWorldGenBase.SampleFinalMeters(wx + 6f, wz + 6f);
+                    if (!s_byBiome.TryGetValue(biome, out var here)) continue;
+                    SampleGround(wx + 6f, wz + 6f, out _, out float y2);
                     float dy = Mathf.Abs(y2 - y);
-                    if (dy > 32f) continue;   // per-species SlopeMax gates below; rocks tolerate steep mountain faces
+                    // Vanilla gates on the ground NORMAL, so the probe's rise over its run becomes one: a flat cell
+                    // reads 1, a cliff reads towards 0, and each species keeps its own cos(m_maxTilt) band.
+                    float normalY = SlopeProbe / Mathf.Sqrt(SlopeProbe * SlopeProbe + dy * dy);
 
-                    bool forest = WorldGenerator.GetForestFactor(new Vector3(wx, 0f, wz)) < 1.15f;
+                    float forestFactor = WorldGenerator.GetForestFactor(new Vector3(wx, 0f, wz));
                     float biomeCov = BiomeCoverage(biome);
                     float pickR = ((h >> 16) & 0xFFFF) / 65536f;
-                    for (int si = 0; si < s_species.Length; si++)
+                    for (int hi = 0; hi < here.Length; hi++)
                     {
+                        int si = here[hi];
                         var sp = s_species[si];
-                        if (sp.Broken || (sp.Biomes & biome) == 0) continue;
-                        if (y < sp.AltMin || y > sp.AltMax || dy > sp.SlopeMax) continue;
-                        float density = sp.Density * DensityMul * biomeCov * (forest ? 1f : sp.OpenMul);
+                        if (sp.Broken) continue;
+                        if (y < sp.AltMin || y > sp.AltMax) continue;
+                        if (normalY < sp.NormalYMin || normalY > sp.NormalYMax) continue;
+                        if (sp.Forest && (forestFactor < sp.ForestMin || forestFactor > sp.ForestMax)) continue;
+                        float density = sp.Density * DensityMul * biomeCov;
                         if (r01 >= density) continue;
                         float jx = (((h >> 8) & 0xFF) / 255f - 0.5f) * CELL;
                         float jz = (((h >> 20) & 0xFF) / 255f - 0.5f) * CELL;
@@ -444,10 +529,36 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── one-time billboard bake: prefab → ortho render → cutout quad ──
+        // A FEW SPECIES A TICK, never the whole list at once. Deriving the species from the game turned a fixed eight
+        // into as many as forty, and forty ortho renders plus their readbacks in one frame is a hitch at exactly the
+        // moment a join is already expensive. Drawing starts as soon as the first one is baked; the rest arrive over
+        // the next couple of seconds ([perf], 2026-09-22).
+        private const int BakePerTick = 3;
+
+        private static int s_bakeCursor;
+        private static int s_bakedCount;
+
+        // Made on first use, never in a field initializer: a marker built before the profiler subsystem is up is a
+        // handle to nothing ([perf], who hit it in EBM).
+        private static bool s_markerMade;
+        private static Unity.Profiling.ProfilerMarker s_bakeMarkerStorage;
+
+        private static Unity.Profiling.ProfilerMarker BakeMarker()
+        {
+            if (!s_markerMade)
+            {
+                s_bakeMarkerStorage = new Unity.Profiling.ProfilerMarker("FAT impostor bake");
+                s_markerMade = true;
+            }
+            return s_bakeMarkerStorage;
+        }
+
         private static bool BakeBillboards()
         {
+            if (s_bakeCursor >= s_species.Length && s_species.Length > 0) return s_baked;
             var zns = ZNetScene.instance;
             if (zns == null) return false;
+            if (s_species.Length == 0 && !BuildSpecies()) return false;
 
             // Our own bundle shader first — it is the only one GUARANTEED to
             // carry instancing variants (stock legacy cutouts may not, and a
@@ -459,7 +570,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         ?? Shader.Find("Unlit/Transparent Cutout")
                         ?? Shader.Find("Legacy Shaders/Transparent/Cutout/Diffuse")
                         ?? Shader.Find("Sprites/Default");
-            if (shader == null) { Debug.LogWarning("[FiresVoxel] no billboard shader available"); return false; }
+            if (shader == null) { FiresLogger.LogWarning("[FiresVoxel] no billboard shader available"); return false; }
             s_shaderName = shader.name;
 
             const int BAKE_LAYER = 30;
@@ -482,9 +593,13 @@ namespace VerdantsAscent.Terrain.Voxel
 
             var rt = new RenderTexture(BAKE_RES, BAKE_RES, 24, RenderTextureFormat.ARGB32);
             int ok = 0;
-            foreach (var sp in s_species)
+            int baked = 0;
+            using (BakeMarker().Auto())
+            for (; s_bakeCursor < s_species.Length && baked < BakePerTick; s_bakeCursor++)
             {
+                var sp = s_species[s_bakeCursor];
                 if (sp.Broken || sp.Quad != null) continue;
+                baked++;
                 var prefab = zns.GetPrefab(sp.Prefab);
                 if (prefab == null) { sp.Broken = true; continue; }
                 GameObject inst = null, bakeRoot = null;
@@ -547,7 +662,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 catch (System.Exception ex)
                 {
                     sp.Broken = true;
-                    Debug.LogWarning($"[FiresVoxel] billboard bake failed for '{sp.Prefab}': {ex.Message}");
+                    FiresLogger.LogWarning($"[FiresVoxel] billboard bake failed for '{sp.Prefab}': {ex.Message}");
                 }
                 finally
                 {
@@ -558,8 +673,11 @@ namespace VerdantsAscent.Terrain.Voxel
             UnityEngine.Object.Destroy(rt);
             UnityEngine.Object.Destroy(camGO);
             UnityEngine.Object.Destroy(lightGO);
-            s_baked = ok > 0;
-            if (s_baked) Debug.Log($"[FiresVoxel] far billboards baked: {ok} species (16 tris each), shader={s_shaderName}.");
+            s_bakedCount += ok;
+            if (ok > 0) s_baked = true;
+            if (s_bakeCursor >= s_species.Length)
+                FiresLogger.LogInfo($"[FiresVoxel] far billboards baked: {s_bakedCount} of {s_species.Length} species "
+                    + $"(16 tris each, {BakePerTick} a tick), shader={s_shaderName}.");
             return s_baked;
         }
 

@@ -26,6 +26,38 @@ namespace VerdantsAscent.Managers
         private static ConfigManager _instance;
         public static ConfigManager Instance => _instance ??= new ConfigManager();
 
+        // ===== 00 - Presets =====
+        public const string PresetModName = "FiresAdminTerrain";
+        public const string NoPresetOption = "(none)";
+
+        public ConfigEntry<string> configPresetToLoad;
+        public ConfigEntry<string> configPresetSaveName;
+        public ConfigEntry<bool> configPresetSaveNow;
+        public ConfigEntry<string> configServerPreset;
+        public ConfigEntry<bool> configAdminOnlyTuning;
+
+        // FAT's shader-look sections. Terrain / Water Engine / VoxelTerrain are gameplay and engine settings,
+        // not shader sliders, so they stay out of the Advanced filter and out of the admin lock.
+        private static readonly string[] ShaderLookSectionPrefixes = { "FiresLiquid", "FiresInlandWater" };
+
+        /// <summary>True for FAT's liquid-look sliders — everything in those sections bar the on/off toggles.</summary>
+        public static bool IsAdvancedTuning(ConfigDefinition definition)
+        {
+            bool inShaderSection = false;
+            foreach (string prefix in ShaderLookSectionPrefixes)
+                if (definition.Section.StartsWith(prefix, StringComparison.Ordinal)) { inShaderSection = true; break; }
+
+            if (!inShaderSection) return false;
+            return definition.Key.IndexOf("Enabled", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
+        private static string[] BuildPresetOptions()
+        {
+            var options = new System.Collections.Generic.List<string> { NoPresetOption };
+            options.AddRange(FiresCore.Config.FiresConfigPresets.ListPresetNames(PresetModName));
+            return options.ToArray();
+        }
+
         // ===== 01 - General =====
         public ConfigEntry<bool> configVerboseLogging;
         public ConfigEntry<bool> configServerAuthority;
@@ -42,6 +74,36 @@ namespace VerdantsAscent.Managers
         public void Initialize(ConfigFile config)
         {
             if (config == null) return;
+
+            // ===================================================================
+            // 00 - Presets
+            // ===================================================================
+            configPresetToLoad = config.Bind(
+                "00 - Presets", "01 Preset", NoPresetOption,
+                new ConfigDescription(
+                    "Pick a saved look and it applies immediately. Presets are plain .cfg files in "
+                    + "BepInEx/config/FiresRPGmaker/Presets/FiresAdminTerrain/ — share one by copying the file. "
+                    + "Files added while the game is running show up in this list after a restart.",
+                    new AcceptableValueList<string>(BuildPresetOptions())));
+
+            configPresetSaveName = config.Bind(
+                "00 - Presets", "02 SaveAsName", "MyLook",
+                "Name to save the CURRENT settings under when you tick '03 SavePreset' below.");
+
+            configPresetSaveNow = config.Bind(
+                "00 - Presets", "03 SavePreset", false,
+                "Tick to write every current setting to a preset named by '02 SaveAsName'. Unticks itself "
+                + "once the file is written.");
+
+            configServerPreset = config.Bind(
+                "00 - Presets", "04 ServerPreset", "",
+                "SERVER-SET. When the server names a preset here, every connecting client applies it. Clients "
+                + "need that preset file present locally. Empty = clients keep their own settings.");
+
+            configAdminOnlyTuning = config.Bind(
+                "00 - Presets", "05 AdminOnlyShaderTuning", false,
+                "SERVER-SET. When on, only admins can move the liquid-look sliders. Everyone still sees them, "
+                + "shown as locked.");
 
             // ===================================================================
             // 01 - General

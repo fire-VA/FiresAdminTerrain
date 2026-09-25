@@ -45,7 +45,7 @@ namespace VerdantsAscent.Water.Core
             m_nview = GetComponent<ZNetView>();
             if (m_nview == null)
             {
-                Debug.LogError("[LandSnowAnchor] No ZNetView on anchor GO!");
+                FiresLogger.LogError("[LandSnowAnchor] No ZNetView on anchor GO!");
                 Destroy(this);
                 return;
             }
@@ -144,7 +144,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[LandSnowAnchor] WriteData failed: {ex.Message}");
+                FiresLogger.LogError($"[LandSnowAnchor] WriteData failed: {ex.Message}");
             }
         }
 
@@ -170,7 +170,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[LandSnowAnchor] ReadData failed: {ex.Message}");
+                FiresLogger.LogError($"[LandSnowAnchor] ReadData failed: {ex.Message}");
                 return false;
             }
         }
@@ -198,7 +198,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[LandSnowAnchor] ZNetScene.Destroy failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[LandSnowAnchor] ZNetScene.Destroy failed: {ex.Message}");
                 }
             }
 
@@ -214,7 +214,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNetScene.instance == null)
             {
-                Debug.LogError("[LandSnowAnchor] SpawnNew: ZNetScene null.");
+                FiresLogger.LogError("[LandSnowAnchor] SpawnNew: ZNetScene null.");
                 return null;
             }
 
@@ -222,7 +222,7 @@ namespace VerdantsAscent.Water.Core
             var prefab = LandSnowAnchorPrefab.Prefab;
             if (prefab == null)
             {
-                Debug.LogError("[LandSnowAnchor] SpawnNew: VALandSnow prefab not available.");
+                FiresLogger.LogError("[LandSnowAnchor] SpawnNew: VALandSnow prefab not available.");
                 return null;
             }
 

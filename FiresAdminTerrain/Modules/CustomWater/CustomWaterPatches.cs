@@ -36,7 +36,7 @@ namespace VerdantsAscent.Water.Core
         /// 
         /// Uses THREE checks to prevent cave swimmers from being pulled up:
         /// 1. TerrainCaveDetector: If the LOCAL PLAYER is under custom terrain ceiling, block water above.
-        ///    ONLY used for the local player � NPCs skip this check because the detector
+        ///    ONLY used for the local player - NPCs skip this check because the detector
         ///    tracks the player's position, not the NPC's. Using it for NPCs would
         ///    incorrectly block their water detection whenever the player is in a cave.
         /// 2. Wading threshold: Water within 1.5m above is always allowed (normal wading).
@@ -105,7 +105,7 @@ namespace VerdantsAscent.Water.Core
 
             if (Physics.Raycast(rayStart, Vector3.up, out RaycastHit hit, rayDistance, s_terrainBlockingLayerMask))
             {
-                // Something solid is between us and the water � we're in a cave or under terrain
+                // Something solid is between us and the water - we're in a cave or under terrain
                 return true;
             }
 
@@ -170,7 +170,7 @@ namespace VerdantsAscent.Water.Core
             // them, so reporting there did nothing and generated water stayed
             // unswimmable. Reported here it behaves exactly like a pour: the
             // same blocked-by-geometry test, the same swim thresholds.
-            float genLevel = VerdantsAscent.Terrain.Voxel.VoxelGenWaterMesh.SurfaceAt(pos);
+            float genLevel = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
             if (genLevel > -9999f && !IsWaterBlockedFromCharacter(pos, genLevel, isLocalPlayer))
             {
                 if (genLevel > bestWaterLevel)
@@ -232,8 +232,7 @@ namespace VerdantsAscent.Water.Core
         private static bool Character_SetLiquidLevel_CaveGate(Character __instance, float level, LiquidType type)
         {
             if (type != LiquidType.Water || __instance == null) return true;
-            var mode = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.WorldMode;
-            if (mode == null || mode.Value == VerdantsAscent.Terrain.Voxel.VoxelWorldMode.Vanilla) return true;
+            if (VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.WorldKind == VerdantsAscent.Terrain.Voxel.VoxelWorldMode.Vanilla) return true;
             Vector3 pos = __instance.transform.position;
             if (level - pos.y < 1.5f) return true;
             if (!IsTerrainBlockingVertically(pos, level)) return true;
@@ -359,9 +358,7 @@ namespace VerdantsAscent.Water.Core
         /// below-ground for dry cells, so no far-water false positives (unlike
         /// the old bounding-box WaterVolume patch that had to be disabled).
         /// </summary>
-        [HarmonyPatch(typeof(Floating), nameof(Floating.GetWaterLevel))]
-        [HarmonyPostfix]
-        private static void Floating_GetWaterLevel_Postfix(Vector3 p, ref float __result)
+        internal static void RaiseToPourSurface(Vector3 p, ref float __result)
         {
             float pour = FiresLiquidWaterPrefab.GetSurfaceAt(p);
             if (pour > float.MinValue && pour > __result)
@@ -372,7 +369,7 @@ namespace VerdantsAscent.Water.Core
 
         #region WaterVolume Integration
 
-        // DISABLED: WaterVolume.GetWaterSurface patch commented out � bounding box
+        // DISABLED: WaterVolume.GetWaterSurface patch commented out - bounding box
         // detection causes vanilla to think the player is in water from far away.
         //
         // [HarmonyPatch(typeof(WaterVolume), nameof(WaterVolume.GetWaterSurface), typeof(Vector3), typeof(float))]
@@ -402,7 +399,7 @@ namespace VerdantsAscent.Water.Core
 
         #region Status Effects
 
-        // DISABLED: UpdateWater postfix removed � it was redundantly pushing water levels
+        // DISABLED: UpdateWater postfix removed - it was redundantly pushing water levels
         // onto characters every frame using bounding-box detection, which caused false
         // swimming triggers in caves. The WaterCombinerTrigger (OnTriggerEnter/Stay/Exit)
         // already handles swim detection properly with its own terrain-blocking raycasts.
@@ -420,15 +417,13 @@ namespace VerdantsAscent.Water.Core
         /// When a player spawns, anchors will restore automatically as zones load.
         /// v5: No RPC sync needed - anchors are the source of truth.
         /// </summary>
-        [HarmonyPatch(typeof(Player), "OnSpawned")]
-        [HarmonyPostfix]
-        private static void Player_OnSpawned_Postfix(Player __instance)
+        internal static void OnPlayerSpawned(Player __instance)
         {
             // Only trigger for the local player
             if (__instance != Player.m_localPlayer) return;
 
             // DIAG (login-freeze)
-            Debug.Log("[LoginFreeze][DIAG] ENTER CustomWaterPatches.Player_OnSpawned_Postfix");
+            FiresLogger.LogInfo("[LoginFreeze][DIAG] ENTER CustomWaterPatches.Player_OnSpawned_Postfix");
 
             // Ensure water cache is initialized. On client reconnect, ZNet.Start()
             // fires before world data is received, so the cache may not have been
@@ -444,7 +439,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to init water cache on spawn: {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to init water cache on spawn: {ex.Message}");
             }
 
             // v6: After ensuring cache is initialized, proactively restore from
@@ -456,19 +451,17 @@ namespace VerdantsAscent.Water.Core
             }
             else
             {
-                Debug.Log($"[CustomWaterPatches] Player spawned - {WaterMeshCombiner.AllCombiners.Count} water combiners already present");
+                FiresLogger.LogInfo($"[CustomWaterPatches] Player spawned - {WaterMeshCombiner.AllCombiners.Count} water combiners already present");
             }
 
             // DIAG (login-freeze)
-            Debug.Log("[LoginFreeze][DIAG] EXIT CustomWaterPatches.Player_OnSpawned_Postfix");
+            FiresLogger.LogInfo("[LoginFreeze][DIAG] EXIT CustomWaterPatches.Player_OnSpawned_Postfix");
         }
 
         /// <summary>
         /// Clear water operation caches on world unload to prevent stale data.
         /// </summary>
-        [HarmonyPatch(typeof(Game), "Logout")]
-        [HarmonyPostfix]
-        private static void Game_Logout_Postfix()
+        internal static void OnLogout()
         {
             try
             {
@@ -489,11 +482,11 @@ namespace VerdantsAscent.Water.Core
                 WaterOperationRPC.ClearCaches();
                 WaterPersistence.ResetInitialized();
 
-                Debug.Log("[CustomWaterPatches] Cleared water combiners and caches on logout");
+                FiresLogger.LogInfo("[CustomWaterPatches] Cleared water combiners and caches on logout");
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to clear water caches: {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to clear water caches: {ex.Message}");
             }
         }
 
@@ -523,7 +516,7 @@ namespace VerdantsAscent.Water.Core
             var waterAnchor = __instance.GetComponent<WaterMeshCombinerAnchor>();
             if (waterAnchor != null)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Blocked removal of water anchor at {__instance.transform.position}. Use va_clear_auto_water command instead.");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Blocked removal of water anchor at {__instance.transform.position}. Use va_clear_auto_water command instead.");
                 return false; // Skip WearNTear.Remove entirely
             }
 
@@ -542,7 +535,7 @@ namespace VerdantsAscent.Water.Core
                 if (isWaterAnchor || isTerrainAnchor)
                 {
                     string type = isWaterAnchor ? "water" : "terrain";
-                    Debug.LogWarning($"[CustomWaterPatches] Blocked removal of {type} anchor ZDO at {__instance.transform.position}.");
+                    FiresLogger.LogWarning($"[CustomWaterPatches] Blocked removal of {type} anchor ZDO at {__instance.transform.position}.");
                     return false;
                 }
             }
@@ -559,6 +552,9 @@ namespace VerdantsAscent.Water.Core
         private static bool WearNTear_Destroy_Prefix(WearNTear __instance)
         {
             if (__instance == null) return true;
+            // A chunk world's starter generator and first-hammer chest survive every path that ends here: wear, damage
+            // and removal.
+            if (VerdantsAscent.Terrain.Zones.ZoneModeChunkMachines.IsProtected(__instance)) return false;
 
             var nview = __instance.GetComponent<ZNetView>();
             if (nview != null && nview.GetZDO() != null)
@@ -570,7 +566,7 @@ namespace VerdantsAscent.Water.Core
                 if (isWaterAnchor || isTerrainAnchor)
                 {
                     string type = isWaterAnchor ? "water" : "terrain";
-                    Debug.LogWarning($"[CustomWaterPatches] Blocked destruction of {type} anchor at {__instance.transform.position}.");
+                    FiresLogger.LogWarning($"[CustomWaterPatches] Blocked destruction of {type} anchor at {__instance.transform.position}.");
                     return false;
                 }
             }
@@ -587,9 +583,7 @@ namespace VerdantsAscent.Water.Core
         /// v5: Anchors restore automatically - no file loading needed.
         /// v6: File-based WaterCombinerCache for reliable client-side restoration.
         /// </summary>
-        [HarmonyPatch(typeof(ZNet), "Start")]
-        [HarmonyPostfix]
-        private static void ZNet_Start_Postfix(ZNet __instance)
+        internal static void OnZNetStart(ZNet __instance)
         {
             // CRITICAL: Don't run during main menu
             if (Game.instance == null)
@@ -623,17 +617,17 @@ namespace VerdantsAscent.Water.Core
                 if (!string.IsNullOrEmpty(worldName))
                 {
                     WaterCombinerCache.InitializeForWorld(worldName, worldSeed);
-                    Debug.Log("[CustomWaterPatches] Water RPC, persistence, and cache initialized");
+                    FiresLogger.LogInfo("[CustomWaterPatches] Water RPC, persistence, and cache initialized");
                 }
                 else
                 {
-                    Debug.Log("[CustomWaterPatches] Water RPC and persistence initialized. " +
-                        "Cache deferred � world name not available yet (client connecting)");
+                    FiresLogger.LogInfo("[CustomWaterPatches] Water RPC and persistence initialized. " +
+                        "Cache deferred - world name not available yet (client connecting)");
                 }
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to initialize water systems: {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to initialize water systems: {ex.Message}");
             }
         }
 
@@ -641,9 +635,7 @@ namespace VerdantsAscent.Water.Core
         /// Initialize water cache and load persisted water data when ZoneSystem starts.
         /// Mirrors DirtFloorPatches.ZoneSystem_Start_Postfix which loads terrain data.
         /// </summary>
-        [HarmonyPatch(typeof(ZoneSystem), "Start")]
-        [HarmonyPostfix]
-        private static void ZoneSystem_Start_Postfix_Water(ZoneSystem __instance)
+        internal static void OnZoneSystemStart(ZoneSystem __instance)
         {
             // CRITICAL: Don't run during main menu
             if (Game.instance == null)
@@ -662,7 +654,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to ensure water RPC init: {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to ensure water RPC init: {ex.Message}");
             }
 
             // Ensure cache is initialized (backup in case ZNet.Start didn't have world name)
@@ -670,20 +662,7 @@ namespace VerdantsAscent.Water.Core
             long worldSeed = 0;
             try
             {
-                if (WorldGenerator.instance != null)
-                {
-                    var worldField = typeof(WorldGenerator).GetField("m_world", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (worldField != null)
-                    {
-                        var world = worldField.GetValue(WorldGenerator.instance) as World;
-                        if (world != null)
-                        {
-                            worldName = world.m_name;
-                            worldSeed = world.m_seed;
-                        }
-                    }
-                }
-                if (string.IsNullOrEmpty(worldName) && ZNet.instance != null)
+                if (ZNet.instance != null)
                 {
                     worldName = ZNet.instance.GetWorldName();
                     worldSeed = ZNet.instance.GetWorldUID();
@@ -696,7 +675,7 @@ namespace VerdantsAscent.Water.Core
                 WaterCombinerCache.InitializeForWorld(worldName, worldSeed);
             }
 
-            // Delayed load � wait for world to be fully ready before restoring water from cache
+            // Delayed load - wait for world to be fully ready before restoring water from cache
             __instance.StartCoroutine(LoadWaterDataDelayed());
         }
 
@@ -721,7 +700,7 @@ namespace VerdantsAscent.Water.Core
 
             if (ZNet.instance == null || WorldGenerator.instance == null)
             {
-                Debug.Log("[CustomWaterPatches] World not ready for water data load � will load when zones spawn");
+                FiresLogger.LogInfo("[CustomWaterPatches] World not ready for water data load - will load when zones spawn");
                 yield break;
             }
 
@@ -749,7 +728,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to load water data (isServer={isServer}): {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to load water data (isServer={isServer}): {ex.Message}");
             }
         }
 
@@ -764,7 +743,7 @@ namespace VerdantsAscent.Water.Core
             var cache = WaterCombinerCache.GetCurrentCache();
             if (cache == null || cache.Groups == null || cache.Groups.Count == 0)
             {
-                Debug.Log("[CustomWaterPatches] Client: no local water cache to restore");
+                FiresLogger.LogInfo("[CustomWaterPatches] Client: no local water cache to restore");
                 return;
             }
 
@@ -785,14 +764,14 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[CustomWaterPatches] Client: failed to restore water group at {group.CenterPosition}: {ex.Message}");
+                    FiresLogger.LogWarning($"[CustomWaterPatches] Client: failed to restore water group at {group.CenterPosition}: {ex.Message}");
                 }
             }
 
             if (restoredCount > 0)
-                Debug.Log($"[CustomWaterPatches] Client: restored {restoredCount} water combiners from local cache");
+                FiresLogger.LogInfo($"[CustomWaterPatches] Client: restored {restoredCount} water combiners from local cache");
             else
-                Debug.Log("[CustomWaterPatches] Client: no water combiners to restore from cache");
+                FiresLogger.LogInfo("[CustomWaterPatches] Client: no water combiners to restore from cache");
         }
 
         /// <summary>
@@ -800,24 +779,22 @@ namespace VerdantsAscent.Water.Core
         /// This ensures the cache is saved even if the server process is stopped without
         /// going through Game.Logout (e.g., dedicated server restart).
         /// </summary>
-        [HarmonyPatch(typeof(ZNet), "Shutdown")]
-        [HarmonyPrefix]
-        private static void ZNet_Shutdown_Prefix_Water()
+        internal static void SaveOnShutdown()
         {
             try
             {
                 // Force save all water combiners to their anchors
                 WaterPersistence.SaveWaterData();
 
-                // Save file cache synchronously (not async � we're shutting down)
+                // Save file cache synchronously (not async - we're shutting down)
                 WaterCombinerCache.SaveCache();
                 WaterCombinerCache.OnWorldUnload();
 
-                Debug.Log("[CustomWaterPatches] Saved water cache on world shutdown");
+                FiresLogger.LogInfo("[CustomWaterPatches] Saved water cache on world shutdown");
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to save water cache on shutdown: {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to save water cache on shutdown: {ex.Message}");
             }
         }
 
@@ -837,7 +814,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[CustomWaterPatches] Failed to save water data: {ex.Message}");
+                FiresLogger.LogWarning($"[CustomWaterPatches] Failed to save water data: {ex.Message}");
             }
         }
 

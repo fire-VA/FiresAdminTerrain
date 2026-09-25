@@ -45,7 +45,7 @@ namespace VerdantsAscent.Water.Core
             if (_age < SCHEDULE[_next]) return;
             _next++;
 
-            Debug.Log(Describe(gameObject, $"T+{_age:F1}s"));
+            FiresLogger.LogInfo(Describe(gameObject, $"T+{_age:F1}s"));
         }
 
         // Round-66 — the 07-10 test showed every pour destroyed in <0.5s
@@ -54,7 +54,7 @@ namespace VerdantsAscent.Water.Core
         private void OnDestroy()
         {
             if (!On) return;
-            Debug.LogWarning($"[LiquidWaterDebug] '{name}' DESTROYED at T+{_age:F2}s | {Describe(gameObject, "FINAL")}");
+            FiresLogger.LogWarning($"[LiquidWaterDebug] '{name}' DESTROYED at T+{_age:F2}s | {Describe(gameObject, "FINAL")}");
         }
 
         // ── Round-66 destroy TRACERS: REMOVED (Round-87) ─────────────────
@@ -211,18 +211,18 @@ namespace VerdantsAscent.Water.Core
                     var combiners = WaterMeshCombiner.AllCombiners;
                     args.Context.AddString($"va_water_liquid_debug: {all.Length} LiquidVolume + {combiners.Count} combiner instance(s) — details in log.");
 
-                    Debug.Log($"[LiquidWaterDebug] ===== scene dump: {all.Length} LiquidVolume instance(s) =====");
+                    FiresLogger.LogInfo($"[LiquidWaterDebug] ===== scene dump: {all.Length} LiquidVolume instance(s) =====");
                     foreach (var lv in all)
                     {
                         if (lv == null) continue;
-                        Debug.Log(Describe(lv.transform.root.gameObject, "DUMP"));
+                        FiresLogger.LogInfo(Describe(lv.transform.root.gameObject, "DUMP"));
                     }
 
-                    Debug.Log($"[LiquidWaterDebug] ===== combiner dump: {combiners.Count} WaterMeshCombiner instance(s) (mat debug mode={WaterMeshCombiner.DebugMaterialMode}) =====");
+                    FiresLogger.LogInfo($"[LiquidWaterDebug] ===== combiner dump: {combiners.Count} WaterMeshCombiner instance(s) (mat debug mode={WaterMeshCombiner.DebugMaterialMode}) =====");
                     foreach (var c in combiners)
                     {
                         if (c == null) continue;
-                        Debug.Log(DescribeCombiner(c, "DUMP"));
+                        FiresLogger.LogInfo(DescribeCombiner(c, "DUMP"));
                     }
                 }, isCheat: true);
         }

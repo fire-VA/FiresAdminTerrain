@@ -64,12 +64,12 @@ namespace VerdantsAscent.Water.Core
             LiquidType = LiquidType.Water;
 
             // Double-check the integer value
-            Debug.Log($"[CustomPond] Awake - Forcing LiquidType to Water. Current value: {LiquidType} (int={(int)LiquidType})");
+            FiresLogger.LogInfo($"[CustomPond] Awake - Forcing LiquidType to Water. Current value: {LiquidType} (int={(int)LiquidType})");
 
             // Safety: If somehow still not 0, force it
             if ((int)LiquidType != 0)
             {
-                Debug.LogError($"[CustomPond] LiquidType was not 0! Forcing enum value directly.");
+                FiresLogger.LogError($"[CustomPond] LiquidType was not 0! Forcing enum value directly.");
                 LiquidType = (LiquidType)0;  // Force to Water's integer value
             }
 
@@ -77,7 +77,7 @@ namespace VerdantsAscent.Water.Core
             var nview = GetComponent<ZNetView>();
             m_isGhostMode = nview == null || nview.GetZDO() == null;
 
-            Debug.Log($"[CustomPond] Awake - isGhostMode={m_isGhostMode}");
+            FiresLogger.LogInfo($"[CustomPond] Awake - isGhostMode={m_isGhostMode}");
 
             base.Awake();
 
@@ -98,7 +98,7 @@ namespace VerdantsAscent.Water.Core
                 HideBoundsBox();
             }
 
-            Debug.Log($"[CustomPond] Started at {transform.position}, BoundsSize={BoundsSize}, WaterLevel={WaterLevel}, SurfaceY={_cachedWaterSurfaceY}, isGhost={m_isGhostMode}");
+            FiresLogger.LogInfo($"[CustomPond] Started at {transform.position}, BoundsSize={BoundsSize}, WaterLevel={WaterLevel}, SurfaceY={_cachedWaterSurfaceY}, isGhost={m_isGhostMode}");
         }
 
         protected override void OnDestroy()
@@ -125,7 +125,7 @@ namespace VerdantsAscent.Water.Core
                     // Transitioned to placed - hide bounds box
                     m_isGhostMode = false;
                     HideBoundsBox();
-                    Debug.Log("[CustomPond] Transitioned from ghost to placed - hiding bounds box");
+                    FiresLogger.LogInfo("[CustomPond] Transitioned from ghost to placed - hiding bounds box");
                 }
             }
 
@@ -143,7 +143,7 @@ namespace VerdantsAscent.Water.Core
         {
             m_isGhostMode = false;
             HideBoundsBox();
-            Debug.Log($"[CustomPond] OnPlaced called - hiding bounds box");
+            FiresLogger.LogInfo($"[CustomPond] OnPlaced called - hiding bounds box");
         }
 
         #endregion
@@ -178,7 +178,7 @@ namespace VerdantsAscent.Water.Core
             m_boundsBoxGO.SetActive(m_isGhostMode);
             m_boundsBoxHidden = !m_isGhostMode;
 
-            Debug.Log($"[CustomPond] Created bounds box visualization, visible={m_isGhostMode}");
+            FiresLogger.LogInfo($"[CustomPond] Created bounds box visualization, visible={m_isGhostMode}");
         }
 
         /// <summary>
@@ -263,7 +263,7 @@ namespace VerdantsAscent.Water.Core
 
             if (shader == null)
             {
-                Debug.LogWarning("[CustomPond] Could not find shader for bounds box material!");
+                FiresLogger.LogWarning("[CustomPond] Could not find shader for bounds box material!");
                 return null;
             }
 
@@ -286,7 +286,7 @@ namespace VerdantsAscent.Water.Core
             {
                 m_boundsBoxGO.SetActive(false);
                 m_boundsBoxHidden = true;
-                Debug.Log("[CustomPond] Bounds box hidden");
+                FiresLogger.LogInfo("[CustomPond] Bounds box hidden");
             }
         }
 
@@ -299,7 +299,7 @@ namespace VerdantsAscent.Water.Core
             {
                 m_boundsBoxGO.SetActive(true);
                 m_boundsBoxHidden = false;
-                Debug.Log("[CustomPond] Bounds box shown");
+                FiresLogger.LogInfo("[CustomPond] Bounds box shown");
             }
         }
 
@@ -364,7 +364,7 @@ namespace VerdantsAscent.Water.Core
             // Generate simple surface mesh at the local water level
             GenerateSimpleSurfaceMesh(localWaterY);
 
-            Debug.Log($"[CustomPond] Generated mesh: localY={localWaterY:F2}, worldSurfaceY={_cachedWaterSurfaceY:F2}");
+            FiresLogger.LogInfo($"[CustomPond] Generated mesh: localY={localWaterY:F2}, worldSurfaceY={_cachedWaterSurfaceY:F2}");
         }
 
         protected override void SetupSwimTrigger()
@@ -382,7 +382,7 @@ namespace VerdantsAscent.Water.Core
             if (layer == -1)
             {
                 layer = 0;
-                Debug.LogWarning("[CustomPond] Layer 'character_trigger' not found, using Default");
+                FiresLogger.LogWarning("[CustomPond] Layer 'character_trigger' not found, using Default");
             }
             m_swimTriggerGO.layer = layer;
 
@@ -405,7 +405,7 @@ namespace VerdantsAscent.Water.Core
             var triggerHandler = m_swimTriggerGO.AddComponent<CustomWaterTrigger>();
             triggerHandler.Initialize(this);
 
-            Debug.Log($"[CustomPond] SwimTrigger: size={m_swimCollider.size}, center={m_swimCollider.center}, layer={m_swimTriggerGO.layer}");
+            FiresLogger.LogInfo($"[CustomPond] SwimTrigger: size={m_swimCollider.size}, center={m_swimCollider.center}, layer={m_swimTriggerGO.layer}");
         }
 
         #endregion

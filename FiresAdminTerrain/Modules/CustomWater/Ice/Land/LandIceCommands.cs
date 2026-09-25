@@ -18,25 +18,25 @@ namespace VerdantsAscent.Water.Tools
 
             new Terminal.ConsoleCommand("ice_land_raise",
                 "[args] - Raises land ice height. raise=H for amount, circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => RaiseLandIce(args)));
+                (Terminal.ConsoleEventFailable)(args => RaiseLandIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("ice_land_lower",
                 "[args] - Lowers land ice height. lower=H for amount, circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => LowerLandIce(args)));
+                (Terminal.ConsoleEventFailable)(args => LowerLandIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("ice_land_level",
                 "[args] - Levels land ice to target height. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => LevelLandIce(args)));
+                (Terminal.ConsoleEventFailable)(args => LevelLandIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("ice_land_smooth",
                 "[args] - Smooths land ice surface. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => SmoothLandIce(args)));
+                (Terminal.ConsoleEventFailable)(args => SmoothLandIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("delete_ice_land",
                 "[args] - Removes land ice in radius. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => DeleteLandIce(args)));
+                (Terminal.ConsoleEventFailable)(args => DeleteLandIce(args)), isCheat: true);
 
-            Debug.Log("[LandIceCommands] Initialized - Land ice commands registered");
+            FiresLogger.LogInfo("[LandIceCommands] Initialized - Land ice commands registered");
         }
 
         private static bool RaiseLandIce(Terminal.ConsoleEventArgs args)

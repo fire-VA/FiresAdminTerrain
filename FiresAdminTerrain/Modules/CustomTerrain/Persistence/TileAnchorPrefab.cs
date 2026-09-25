@@ -115,6 +115,8 @@ namespace VerdantsAscent.Terrain.Persistence
                     // Re-run TileHammerCompat in case IH was reloaded too.
                     try { TileHammerCompat.Initialize(); }
                     catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileHammerCompat.Initialize threw — {ex}"); }
+                    try { WecTerrainBridge.Initialize(); }
+                    catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] WecTerrainBridge.Initialize threw - {ex}"); }
                     FiresLogger.LogVerbose("[TileAnchorPrefab] Ensure: SUCCESS via session-change reinsert.");
                     EmitRegistrationSummary();
                     return true;
@@ -185,6 +187,11 @@ namespace VerdantsAscent.Terrain.Persistence
             // plugin has loaded, so IH detection works.
             try { TileHammerCompat.Initialize(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileHammerCompat.Initialize threw — {ex}"); }
+
+            // Same load-order reason as TileHammerCompat: World Edit Commands sorts
+            // after FiresAdminTerrain, so its assembly only exists by ZNetScene.Awake.
+            try { WecTerrainBridge.Initialize(); }
+            catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] WecTerrainBridge.Initialize threw - {ex}"); }
 
             try { TileBrushDrag.EnsureAttached(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileBrushDrag.EnsureAttached threw — {ex}"); }
@@ -302,11 +309,9 @@ namespace VerdantsAscent.Terrain.Persistence
             nview.m_syncInitialScale = false;
             // Prioritized so ZNetScene.CreateObjectsSorted services us BEFORE
             // Default-type ZDOs. Vanilla sorts by descending ObjectType, so
-            // Solid (2) > Prioritized (1) > Default (0). Combined with
-            // TileProactiveSpawner's bypass-the-queue hook, this drops the
-            // anchor's spawn delay from minutes to a frame or two. Crucial
-            // because no anchor = no mesh = no collision = player falls
-            // through the skyland.
+            // Solid (2) > Prioritized (1) > Default (0). Crucial because no
+            // anchor = no mesh = no collision = player falls through the
+            // skyland.
             nview.m_type = ZDO.ObjectType.Prioritized;
             FiresLogger.LogVerbose($"[TileAnchorPrefab] CloneAndPrepare: ZNetView configured (persistent={nview.m_persistent} distant={nview.m_distant} type={nview.m_type}).");
 
@@ -555,16 +560,12 @@ namespace VerdantsAscent.Terrain.Persistence
 
         // ─── Harmony patches ──────────────────────────────────────────────
 
-        // Postfix on ZNetScene.Awake: runs after vanilla builds m_namedPrefabs
-        // from m_prefabs. We register VATile here.
-        [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-        private static class ZNetScene_Awake_RegisterTilePrefab
-        {
-            private static void Postfix() => Ensure();
-        }
+        // FAT's one ZNetScene.Awake hook (FatVanillaHooks) calls Ensure after
+        // vanilla builds m_namedPrefabs from m_prefabs, registering VATile.
 
-        // Prefix on PieceTable.UpdateAvailable: scrubs fake-nulls right before
-        // IH's UpdateAvailable.Postfix runs CustomMenu.AddTools → Tool.get_Icon
+        // From the prefix of FAT's one PieceTable.UpdateAvailable hook
+        // (FatVanillaHooks): scrubs fake-nulls right before IH's
+        // UpdateAvailable.Postfix runs CustomMenu.AddTools → Tool.get_Icon
         // → SpriteHelper.FindSprite (which iterates m_namedPrefabs). Catches
         // late prefab churn between ZNetScene.Awake and the player equipping
         // a hammer. Cheap: O(n) over the dict (~2000 entries) per call;
@@ -572,18 +573,14 @@ namespace VerdantsAscent.Terrain.Persistence
         //
         // Also clears IH's PrefabNames cache if we scrubbed anything, so IH
         // doesn't keep stale state captured from a previous polluted iteration.
-        [HarmonyPatch(typeof(PieceTable), nameof(PieceTable.UpdateAvailable))]
-        private static class PieceTable_UpdateAvailable_ScrubPatch
+        internal static void ScrubBeforeUpdateAvailable()
         {
-            private static void Prefix()
+            int scrubbed = ScrubFakeNulls("pre-PieceTable.UpdateAvailable");
+            if (scrubbed > 0)
             {
-                int scrubbed = ScrubFakeNulls("pre-PieceTable.UpdateAvailable");
-                if (scrubbed > 0)
-                {
-                    // Late pollution detected — IH may have already cached a
-                    // bad snapshot. Force it to rebuild.
-                    ClearInfinityHammerSpriteCache("late-scrub");
-                }
+                // Late pollution detected — IH may have already cached a
+                // bad snapshot. Force it to rebuild.
+                ClearInfinityHammerSpriteCache("late-scrub");
             }
         }
     }

@@ -59,7 +59,7 @@ namespace VerdantsAscent.Water.Core
             m_nview = GetComponent<ZNetView>();
             if (m_nview == null)
             {
-                Debug.LogError("[LandIceAnchor] No ZNetView on anchor GO!");
+                FiresLogger.LogError("[LandIceAnchor] No ZNetView on anchor GO!");
                 Destroy(this);
                 return;
             }
@@ -177,7 +177,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[LandIceAnchor] WriteData failed: {ex.Message}");
+                FiresLogger.LogError($"[LandIceAnchor] WriteData failed: {ex.Message}");
             }
         }
 
@@ -204,7 +204,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[LandIceAnchor] ReadData failed: {ex.Message}");
+                FiresLogger.LogError($"[LandIceAnchor] ReadData failed: {ex.Message}");
                 return false;
             }
         }
@@ -236,7 +236,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[LandIceAnchor] ZNetScene.Destroy failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[LandIceAnchor] ZNetScene.Destroy failed: {ex.Message}");
                 }
             }
 
@@ -259,7 +259,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNetScene.instance == null)
             {
-                Debug.LogError("[LandIceAnchor] SpawnNew: ZNetScene null.");
+                FiresLogger.LogError("[LandIceAnchor] SpawnNew: ZNetScene null.");
                 return null;
             }
 
@@ -269,7 +269,7 @@ namespace VerdantsAscent.Water.Core
             var prefab = LandIceAnchorPrefab.Prefab;
             if (prefab == null)
             {
-                Debug.LogError("[LandIceAnchor] SpawnNew: VALandIce prefab not available.");
+                FiresLogger.LogError("[LandIceAnchor] SpawnNew: VALandIce prefab not available.");
                 return null;
             }
 

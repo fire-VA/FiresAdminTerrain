@@ -104,14 +104,14 @@ namespace VerdantsAscent.Utilities
 
             if (_clutterCache.Count == 0)
             {
-                Debug.LogWarning("[EnvBoxClutter] No clutter prefabs cached");
+                FiresLogger.LogWarning("[EnvBoxClutter] No clutter prefabs cached");
                 return;
             }
 
             // Get clutter types for this biome
             if (!BiomeClutterTypes.TryGetValue(biome, out string[] clutterTypes))
             {
-                Debug.Log($"[EnvBoxClutter] No clutter defined for biome: {biome}");
+                FiresLogger.LogInfo($"[EnvBoxClutter] No clutter defined for biome: {biome}");
                 return;
             }
 
@@ -138,7 +138,7 @@ namespace VerdantsAscent.Utilities
 
                 if (clutterData == null || clutterData.m_prefab == null)
                 {
-                    Debug.LogWarning($"[EnvBoxClutter] Could not find clutter: {clutterName}");
+                    FiresLogger.LogWarning($"[EnvBoxClutter] Could not find clutter: {clutterName}");
                     continue;
                 }
 
@@ -149,7 +149,7 @@ namespace VerdantsAscent.Utilities
             _clutterSpawned = true;
             _spawnedForBiome = biome;
 
-            Debug.Log($"[EnvBoxClutter] Spawned {totalSpawned} clutter instances for biome {biome}");
+            FiresLogger.LogInfo($"[EnvBoxClutter] Spawned {totalSpawned} clutter instances for biome {biome}");
         }
 
         /// <summary>
@@ -220,7 +220,7 @@ namespace VerdantsAscent.Utilities
                 }
                 else
                 {
-                    Debug.LogWarning($"[EnvBoxClutter] NO InstanceRenderer on prefab: {clutterData.m_prefab.name}");
+                    FiresLogger.LogWarning($"[EnvBoxClutter] NO InstanceRenderer on prefab: {clutterData.m_prefab.name}");
                 }
 
                 _spawnedClutter.Add(container);
@@ -315,7 +315,7 @@ namespace VerdantsAscent.Utilities
                 int maxInstances = 1023;
                 if (count > maxInstances)
                 {
-                    Debug.LogWarning($"[EnvBoxClutter] Exceeded instance limit ({count}/{maxInstances}) for {clutterData.m_prefab.name}");
+                    FiresLogger.LogWarning($"[EnvBoxClutter] Exceeded instance limit ({count}/{maxInstances}) for {clutterData.m_prefab.name}");
                 }
             }
             else if (!clutterData.m_instanced && count > 0)
@@ -346,13 +346,13 @@ namespace VerdantsAscent.Utilities
 
             if (ClutterSystem.instance == null)
             {
-                Debug.LogWarning("[EnvBoxClutter] ClutterSystem.instance is null");
+                FiresLogger.LogWarning("[EnvBoxClutter] ClutterSystem.instance is null");
                 return;
             }
 
             if (ClutterSystem.instance.m_clutter == null || ClutterSystem.instance.m_clutter.Count == 0)
             {
-                Debug.LogWarning("[EnvBoxClutter] ClutterSystem has no clutter entries");
+                FiresLogger.LogWarning("[EnvBoxClutter] ClutterSystem has no clutter entries");
                 return;
             }
 
@@ -368,7 +368,7 @@ namespace VerdantsAscent.Utilities
             }
 
             _clutterCached = true;
-            Debug.Log($"[EnvBoxClutter] Cached {_clutterCache.Count} clutter prefabs");
+            FiresLogger.LogInfo($"[EnvBoxClutter] Cached {_clutterCache.Count} clutter prefabs");
         }
 
         /// <summary>
@@ -474,7 +474,7 @@ namespace VerdantsAscent.Utilities
                     SpawnClutterForBiome(biome);
                 }
 
-                Debug.Log($"[EnvBoxClutter] Painted at {worldPosition} with {paintType}");
+                FiresLogger.LogInfo($"[EnvBoxClutter] Painted at {worldPosition} with {paintType}");
             }
 
             return painted;
@@ -494,6 +494,8 @@ namespace VerdantsAscent.Utilities
                     return Heightmap.m_paintMaskCultivated;
                 case TerrainModifier.PaintType.Paved:
                     return Heightmap.m_paintMaskPaved;
+                case TerrainModifier.PaintType.DeepSnow:
+                    return Heightmap.m_paintMaskDeepSnow;
                 case TerrainModifier.PaintType.Reset:
                 case TerrainModifier.PaintType.ClearVegetation:
                 default:
@@ -547,6 +549,9 @@ namespace VerdantsAscent.Utilities
 
             Color pixel = _paintMask.GetPixel(px, pz);
 
+            // m_paintMaskDeepSnow is the only mask with every colour channel high, so it
+            // has to be tested before the single-channel cases or it reads as Dirt.
+            if (pixel.r > 0.5f && pixel.g > 0.5f && pixel.b > 0.5f) return TerrainModifier.PaintType.DeepSnow;
             if (pixel.r > 0.5f) return TerrainModifier.PaintType.Dirt;
             if (pixel.g > 0.5f) return TerrainModifier.PaintType.Cultivate;
             if (pixel.b > 0.5f) return TerrainModifier.PaintType.Paved;

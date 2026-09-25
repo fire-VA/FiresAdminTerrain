@@ -1,31 +1,43 @@
 using UnityEngine;
 using VerdantsAscent.Terrain.Lifecycle;
 using VerdantsAscent.Terrain.Persistence;
+using VerdantsAscent.Water.Tools;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
     // Round-88 — voxel brush DRAG + 3D GIZMO tools (WaterBrushDrag pattern).
     //
-    // Two tool families, gated by the selected hoe piece name (from
-    // infinity_tools.yaml):
-    //   * FLAT RULER tools (Vcarve/Vfill/Vdelete): flattened-cylinder brushes.
-    //     Drag is armed by the console command firing (RecordCylinder) and
-    //     pumps constant-arc-length dabs while LMB is held — same feel as the
-    //     water/terrain brushes.
+    // Tool families, gated by the selected piece name. There is no yaml and no
+    // console round-trip: the pieces are ours (VoxelToolPieces) and this pump
+    // owns every click.
+    //   * FLAT RULER tools (Vcarve/Vfill/Vdelete): flattened-cylinder brushes,
+    //     pumping constant-arc-length dabs while LMB is held.
     //   * 3D GIZMO tools (Vcube/Vsphere): a wireframe cube/sphere follows the
     //     aim point as a true 3D placement visual (cookie-style). Ctrl+Scroll
     //     resizes, LMB stamps + drags (3D spacing — strokes work up walls and
     //     through air, spheres dragged = smooth tubes), hold LeftAlt to CARVE
     //     instead of fill (gizmo turns red).
+    //   * WATER SHAPING tools (Vriver/Vpour/Vpool): scroll = width, PgUp/PgDn =
+    //     level offset. River and pour are strokes; Vpool is a CLICK tool whose
+    //     next click connects to the last pool, with a hint ray between them.
+    //     The world-changing work lives in WaterShapingTools.
     public sealed class VoxelBrushDrag : MonoBehaviour
     {
         private const float DRAG_FRESHNESS_SECONDS = 2f;
         private const float DAB_SPACING_RATIO = 0.3f;
         private const int MAX_DABS_PER_FRAME = 8;
+        private const float LEVEL_OFFSET_STEP = 0.5f;
+        private const float LEVEL_OFFSET_LIMIT = 64f;
+        private const float REFUSAL_WARN_SECONDS = 10f;
+
+        private static float _lastRefusalWarn = -100f;
+
+        private static bool IsWaterTool(Tool tool)
+            => tool == Tool.River || tool == Tool.Pour || tool == Tool.Pool;
 
         public static float GizmoSize = 4f;   // cube edge / sphere diameter (Ctrl+Scroll)
 
-        private enum Tool { None, Cylinder, Cube, Sphere }
+        private enum Tool { None, Cylinder, Cube, Sphere, River, Pour, Pool }
 
         // Cylinder-tool state, armed by the console command.
         private static VoxelBrushMode s_cylMode;
@@ -49,20 +61,40 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private GameObject _gizmoCube;
         private GameObject _gizmoSphere;
-        private Material _gizmoMat;
 
         private void Update()
         {
+            WaterShapingTools.Tick();
+
             var player = Player.m_localPlayer;
             Tool tool = player != null ? SelectedTool(player) : Tool.None;
             // Just selected/switched a V-tool (from the build menu) → require the
             // mouse to be released before the first carve, so the click that
             // picked the tool doesn't also dig. Cleared on the next LMB-up below.
             if (tool != Tool.None && tool != _prevTool) _armAfterRelease = true;
+            // Leaving Vpool ends the chain. Without this, a pool placed minutes
+            // later would connect itself to a stale anchor across the map and
+            // carve a channel the whole way there.
+            if (_prevTool == Tool.Pool && tool != Tool.Pool) WaterShapingTools.ClearAnchor();
             _prevTool = tool;
-            if (tool == Tool.None || (FiresVoxelConfig.Enabled != null && !FiresVoxelConfig.Enabled.Value))
+
+            // The build menu already hides these from non-admins, but menu
+            // visibility is not enforcement — a piece can still be reached by
+            // other means, and these strokes persist to everyone. Refuse at the
+            // point of action too.
+            bool refused = tool != Tool.None && !FiresCore.Sync.AdminSyncing.IsLocalAdmin();
+            if (refused && Time.realtimeSinceStartup - _lastRefusalWarn > REFUSAL_WARN_SECONDS)
+            {
+                _lastRefusalWarn = Time.realtimeSinceStartup;
+                FiresLogger.LogWarning(
+                    "[FiresVoxel] a terrain/water tool was selected by a non-admin — all strokes refused.");
+            }
+
+            if (tool == Tool.None || refused
+                || (FiresVoxelConfig.Enabled != null && !FiresVoxelConfig.Enabled.Value))
             {
                 SetGizmo(Tool.None, Vector3.zero, false);
+                UpdateHintRay(Tool.None, Vector3.zero);
                 SetRulerVisualHidden(false);
                 _strokeActive = false;
                 return;
@@ -99,13 +131,40 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (Input.GetKeyDown(KeyCode.PageUp)) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight + 1f, -24f, 24f);
                 if (Input.GetKeyDown(KeyCode.PageDown)) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight - 1f, -24f, 24f);
             }
+            else if (IsWaterTool(tool))
+            {
+                // Same direction for all three: PgUp raises, PgDn lowers. River
+                // reads it as bed depth, pour/pool as the surface level.
+                float before = WaterShapingTools.LevelOffset;
+                if (Input.GetKeyDown(KeyCode.PageUp))
+                    WaterShapingTools.LevelOffset = Mathf.Clamp(before + LEVEL_OFFSET_STEP, -LEVEL_OFFSET_LIMIT, LEVEL_OFFSET_LIMIT);
+                if (Input.GetKeyDown(KeyCode.PageDown))
+                    WaterShapingTools.LevelOffset = Mathf.Clamp(before - LEVEL_OFFSET_STEP, -LEVEL_OFFSET_LIMIT, LEVEL_OFFSET_LIMIT);
+                if (!Mathf.Approximately(before, WaterShapingTools.LevelOffset) && player != null)
+                    player.Message(MessageHud.MessageType.TopLeft,
+                        $"Level offset {WaterShapingTools.LevelOffset:+0.0;-0.0;0}m", 0, null, false);
+            }
 
             if (tool == Tool.Cube || tool == Tool.Sphere)
             {
                 SetGizmo(tool, cursor, carveMod);
+                UpdateHintRay(tool, cursor);
+            }
+            else if (IsWaterTool(tool))
+            {
+                // The ghost sits at the level the tool will actually work at, so
+                // the offset is visible BEFORE committing rather than after.
+                // River digs (red ghost); pour and pool lay surface (green).
+                var ghost = cursor;
+                if (tool != Tool.River) ghost.y += WaterShapingTools.LevelOffset;
+                s_cylRadius = VoxelToolPieces.ToolRadius;
+                s_cylSignedHeight = 0f;
+                SetGizmo(Tool.Cylinder, ghost, tool == Tool.River);
+                UpdateHintRay(tool, ghost);
             }
             else
             {
+                UpdateHintRay(tool, cursor);
                 // Vcarve/Vdelete = dig ghost (lines only), Vfill = fill ghost
                 // (terrain-shader solid). Always armed — no console freshness.
                 SetGizmo(Tool.Cylinder, cursor, !SelectedIsFill(player));
@@ -128,7 +187,9 @@ namespace VerdantsAscent.Terrain.Voxel
             if (_armAfterRelease) return;
             if (!FiresCore.Input.FiresPlaceGate.ReadyToAct()) return;
 
-            float dabSize = tool == Tool.Cylinder ? s_cylRadius : EffectiveGizmoRadius();
+            float dabSize =
+                tool == Tool.Cylinder ? s_cylRadius :
+                IsWaterTool(tool) ? VoxelToolPieces.ToolRadius : EffectiveGizmoRadius();
             if (dabSize < 0.05f) return;
             float spacing = Mathf.Max(dabSize * DAB_SPACING_RATIO, 0.25f);
 
@@ -142,6 +203,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 _strokeActive = true;
                 return;
             }
+
+            // Vpool is a CLICK tool, not a stroke: one pool per press, and the
+            // next press connects to it. Dragging must never chain a pool every
+            // few metres, which is what the dab pump below would do.
+            if (tool == Tool.Pool) return;
 
             _dabBudget = Mathf.Min(_dabBudget + TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME, MAX_DABS_PER_FRAME);
             while (_dabBudget >= 1f)
@@ -190,11 +256,20 @@ namespace VerdantsAscent.Terrain.Voxel
                         VoxelWorld.ApplyBrush(pos, EffectiveGizmoRadius(), 0f, VoxelBrushShape.Sphere,
                             carveMod ? VoxelBrushMode.Carve : VoxelBrushMode.Fill);
                         break;
+                    case Tool.River:
+                        WaterShapingTools.RiverDab(pos, VoxelToolPieces.ToolRadius);
+                        break;
+                    case Tool.Pour:
+                        WaterShapingTools.PourDab(pos, VoxelToolPieces.ToolRadius);
+                        break;
+                    case Tool.Pool:
+                        WaterShapingTools.PoolClick(pos, VoxelToolPieces.ToolRadius);
+                        break;
                 }
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[FiresVoxel] drag dispatch threw: {ex.Message}");
+                FiresLogger.LogWarning($"[FiresVoxel] drag dispatch threw: {ex.Message}");
             }
         }
 
@@ -228,6 +303,31 @@ namespace VerdantsAscent.Terrain.Voxel
             s_hiddenRuler = proj;
             foreach (var cp in proj.GetComponentsInChildren<CircleProjector>(true)) cp.enabled = false;
             foreach (var r in proj.GetComponentsInChildren<Renderer>(true)) r.enabled = false;
+        }
+
+        // Vpool's A->B hint: the line from the pool you last placed to where the
+        // next one would go, so the run can be judged before committing to it.
+        private GameObject _hintRay;
+        private LineRenderer _hintLine;
+
+        private void UpdateHintRay(Tool tool, Vector3 cursor)
+        {
+            Vector3 from = Vector3.zero;
+            bool want = tool == Tool.Pool && WaterShapingTools.TryGetAnchor(out from, out _);
+            if (!want)
+            {
+                if (_hintRay != null) _hintRay.SetActive(false);
+                return;
+            }
+
+            if (_hintRay == null)
+            {
+                _hintRay = new GameObject("fires_pool_hint");
+                _hintLine = NewLine(_hintRay, 2);
+            }
+            _hintRay.SetActive(true);
+            _hintLine.SetPosition(0, from);
+            _hintLine.SetPosition(1, cursor);
         }
 
         private static bool SelectedIsFill(Player player)
@@ -264,6 +364,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     return Tool.Cube;
                 case "Vsphere":
                     return Tool.Sphere;
+                case "Vriver":
+                    return Tool.River;
+                case "Vpour":
+                    return Tool.Pour;
+                case "Vpool":
+                    return Tool.Pool;
                 default:
                     return Tool.None;
             }
@@ -325,7 +431,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (showSolid)
                 {
                     var mr = solid.GetComponent<MeshRenderer>();
-                    var mat = Utilities.TerrainMaterialCache.GetCurrentMaterial();
+                    var mat = FiresCore.Materials.TerrainMaterialCache.GetCurrentMaterial();
                     if (mr != null && mat != null && mr.sharedMaterial != mat) mr.sharedMaterial = mat;
                 }
             }
@@ -493,7 +599,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (root == null) return;
             if (root.GetComponent<VoxelBrushDrag>() != null) return;
             root.AddComponent<VoxelBrushDrag>();
-            Debug.Log("[FiresVoxel] VoxelBrushDrag attached (drag + gizmo tools).");
+            FiresLogger.LogInfo("[FiresVoxel] VoxelBrushDrag attached (drag + gizmo tools).");
         }
     }
 }

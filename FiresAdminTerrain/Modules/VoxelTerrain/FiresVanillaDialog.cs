@@ -1,0 +1,241 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using FiresCore.UI;
+using GUIFramework;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace VerdantsAscent.Terrain.Voxel
+{
+    // ── THE MAIN MENU'S OWN PANEL, BORROWED ─────────────────────────────────
+    // Our world options used to open a parchment panel of our own beside menus that look nothing like it. This clones
+    // vanilla's New World panel instead - its frame, its buttons, its fonts - and lays the same Core MenuDialog field
+    // rows inside it, so a dialog raised from Select World looks like it belongs to the game.
+    //
+    // NOTHING about the panel's shape is assumed, because it is Iron Gate's and there is no prefab to read it from:
+    // m_createWorldPanel is a serialized scene reference. The first attempt parented the rows to the CLONE ROOT, which
+    // turned out to be a full-screen container with the wooden frame as a child - the rows stretched across the whole
+    // screen behind the panel. So the row host is now DERIVED: it is the transform vanilla's own input fields share as
+    // a parent, which is by definition the panel's body and carries the panel's scale.
+    //
+    // Vanilla's own contents are then switched off rather than left underneath: its Name and Seed rows, their labels
+    // and its "5 characters minimum" hint all survive a clone and were drawing on top of ours. Everything that draws
+    // text is switched off except the buttons and the title, and the title is RETARGETED to ours rather than adding a
+    // second one over it.
+    //
+    // Anything not found sends the whole call back to MenuDialog, so a wrong guess costs the vanilla look and nothing
+    // else.
+    internal static class FiresVanillaDialog
+    {
+        private const float RowsTopGap = 18f;
+        private const float RowInset = 24f;
+        private const float ErrorHeight = 26f;
+        private const int ErrorFontSize = 14;
+        private const int MinButtons = 2;
+        private const float MinTitleFont = 20f;
+
+        private static readonly Color ErrorInk = new Color(0.72f, 0.19f, 0.14f);
+
+        private static GameObject s_panel;
+        private static IList<MenuDialog.Field> s_fields;
+        private static Action s_onOk;
+        private static Func<string> s_validate;
+        private static TMPro.TextMeshProUGUI s_error;
+
+        internal static bool IsOpen => s_panel != null;
+
+        internal static void Show(string title, IList<MenuDialog.Field> fields, Action onOk,
+            Func<string> validate = null, string okLabel = "OK", string cancelLabel = "Cancel")
+        {
+            Close(restore: true);
+            if (!TryBuild(title, fields, okLabel, cancelLabel))
+            {
+                MenuDialog.Show(title, fields, onOk, null, validate, okLabel, cancelLabel);
+                return;
+            }
+            s_fields = fields;
+            s_onOk = onOk;
+            s_validate = validate;
+        }
+
+        private static bool TryBuild(string title, IList<MenuDialog.Field> fields, string okLabel, string cancelLabel)
+        {
+            var source = FejdStartup.instance != null ? FejdStartup.instance.m_createWorldPanel : null;
+            if (source == null || source.transform.parent == null) return false;
+
+            GameObject clone = null;
+            try
+            {
+                clone = UnityEngine.Object.Instantiate(source, source.transform.parent);
+                clone.name = "FiresWorldOptions";
+
+                var buttons = clone.GetComponentsInChildren<Button>(true);
+                if (buttons.Length < MinButtons) { UnityEngine.Object.Destroy(clone); return false; }
+
+                var host = RowHost(clone);
+                if (host == null) { UnityEngine.Object.Destroy(clone); return false; }
+
+                // A cloned Button keeps FejdStartup's SERIALIZED onClick entries, and RemoveAllListeners does not drop
+                // those - only replacing the event object does. Without this, OK would still start a new world.
+                foreach (var button in buttons)
+                {
+                    button.onClick = new Button.ButtonClickedEvent();
+                    button.gameObject.SetActive(true);
+                }
+                buttons[0].onClick.AddListener(Confirm);
+                buttons[1].onClick.AddListener(Cancel);
+                Relabel(buttons[0], okLabel);
+                Relabel(buttons[1], cancelLabel);
+                for (int i = MinButtons; i < buttons.Length; i++) buttons[i].gameObject.SetActive(false);
+
+                var kept = Kept(clone, buttons);
+                var titleText = TitleOf(clone, kept);
+                if (titleText != null)
+                {
+                    titleText.text = title ?? "";
+                    Keep(kept, titleText.transform, clone.transform);
+                }
+                SilenceVanillaContents(clone, kept);
+
+                float top = titleText != null ? TitleBottom(host, titleText) + RowsTopGap : RowsTopGap;
+                var rows = NewRect("FiresRows", host);
+                rows.anchorMin = new Vector2(0f, 1f);
+                rows.anchorMax = new Vector2(1f, 1f);
+                rows.pivot = new Vector2(0.5f, 1f);
+                rows.offsetMin = new Vector2(RowInset, rows.offsetMin.y);
+                rows.offsetMax = new Vector2(-RowInset, rows.offsetMax.y);
+                rows.anchoredPosition = new Vector2(0f, -top);
+                rows.sizeDelta = new Vector2(-RowInset * 2f, MenuDialog.RowsHeightFor(fields != null ? fields.Count : 0));
+                MenuDialog.BuildRowsIn(rows, fields);
+
+                s_error = UIBuilderHelper.CreateLabel(host, "Error", "", ErrorFontSize, ErrorInk,
+                    new Vector2(0f, 1f), new Vector2(1f, 1f), TMPro.TextAlignmentOptions.MidlineLeft);
+                s_error.rectTransform.pivot = new Vector2(0.5f, 1f);
+                s_error.rectTransform.sizeDelta = new Vector2(-RowInset * 2f, ErrorHeight);
+                s_error.rectTransform.anchoredPosition = new Vector2(0f, -(top + rows.sizeDelta.y));
+
+                clone.SetActive(true);
+                s_panel = clone;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresWorldGen] vanilla panel dialog could not be built ({ex.GetType().Name}: "
+                    + $"{ex.Message}); falling back to the Fires panel.");
+                if (clone != null) UnityEngine.Object.Destroy(clone);
+                return false;
+            }
+        }
+
+        // The panel's body: the transform vanilla's own inputs hang from. Their shared parent is inside the frame and
+        // carries its scale, where the clone ROOT is a full-screen container and stretches rows across the screen.
+        private static RectTransform RowHost(GameObject clone)
+        {
+            var inputs = clone.GetComponentsInChildren<GuiInputField>(true);
+            if (inputs.Length == 0) return clone.transform as RectTransform;
+
+            Transform shared = inputs[0].transform.parent;
+            for (int i = 1; i < inputs.Length && shared != null; i++)
+                shared = CommonAncestor(shared, inputs[i].transform.parent);
+            return (shared as RectTransform) ?? clone.transform as RectTransform;
+        }
+
+        private static Transform CommonAncestor(Transform a, Transform b)
+        {
+            for (var walk = a; walk != null; walk = walk.parent)
+                for (var other = b; other != null; other = other.parent)
+                    if (walk == other) return walk;
+            return a;
+        }
+
+        // Everything the buttons need, so switching off vanilla's contents cannot take a button's label with it.
+        private static HashSet<Transform> Kept(GameObject clone, Button[] buttons)
+        {
+            var kept = new HashSet<Transform>();
+            foreach (var button in buttons)
+            {
+                Keep(kept, button.transform, clone.transform);
+                foreach (var child in button.GetComponentsInChildren<Transform>(true)) kept.Add(child);
+            }
+            return kept;
+        }
+
+        private static void Keep(HashSet<Transform> kept, Transform node, Transform root)
+        {
+            for (var walk = node; walk != null && walk != root.parent; walk = walk.parent) kept.Add(walk);
+        }
+
+        // Vanilla's own title: the largest text that is not part of a button. Retargeted rather than hidden, so ours
+        // lands in the frame's own header with the game's font and colour.
+        private static TMPro.TextMeshProUGUI TitleOf(GameObject clone, HashSet<Transform> kept)
+            => clone.GetComponentsInChildren<TMPro.TextMeshProUGUI>(true)
+                .Where(text => text != null && !kept.Contains(text.transform) && text.fontSize >= MinTitleFont)
+                .OrderByDescending(text => text.fontSize)
+                .FirstOrDefault();
+
+        // The Name and Seed rows, their labels and the "5 characters minimum" hint all survive the clone and would draw
+        // over ours. Images are left alone: they are the frame itself.
+        private static void SilenceVanillaContents(GameObject clone, HashSet<Transform> kept)
+        {
+            foreach (var graphic in clone.GetComponentsInChildren<Graphic>(true))
+            {
+                if (graphic == null || graphic is Image || kept.Contains(graphic.transform)) continue;
+                graphic.gameObject.SetActive(false);
+            }
+            foreach (var input in clone.GetComponentsInChildren<GuiInputField>(true))
+                input.gameObject.SetActive(false);
+        }
+
+        private static float TitleBottom(RectTransform host, TMPro.TextMeshProUGUI title)
+        {
+            var corners = new Vector3[4];
+            title.rectTransform.GetWorldCorners(corners);
+            Vector3 local = host.InverseTransformPoint(corners[0]);
+            float hostTop = host.rect.yMax;
+            return Mathf.Max(0f, hostTop - local.y);
+        }
+
+        private static void Relabel(Button button, string label)
+        {
+            if (button == null || string.IsNullOrEmpty(label)) return;
+            var text = button.GetComponentInChildren<TMPro.TextMeshProUGUI>(true);
+            if (text != null) text.text = label;
+        }
+
+        private static void Confirm()
+        {
+            string problem = null;
+            try { problem = s_validate != null ? s_validate() : null; }
+            catch (Exception ex) { problem = ex.Message; }
+            if (!string.IsNullOrEmpty(problem))
+            {
+                if (s_error != null) s_error.text = problem;
+                return;
+            }
+            var ok = s_onOk;
+            Close(restore: false);
+            ok?.Invoke();
+        }
+
+        private static void Cancel() => Close(restore: true);
+
+        private static void Close(bool restore)
+        {
+            if (restore) MenuDialog.RestoreFields(s_fields);
+            if (s_panel != null) UnityEngine.Object.Destroy(s_panel);
+            s_panel = null;
+            s_fields = null;
+            s_onOk = null;
+            s_validate = null;
+            s_error = null;
+        }
+
+        private static RectTransform NewRect(string name, Transform parent)
+        {
+            var go = new GameObject(name, typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+            return (RectTransform)go.transform;
+        }
+    }
+}

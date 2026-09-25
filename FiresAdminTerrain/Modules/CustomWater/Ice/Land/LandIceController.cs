@@ -7,7 +7,7 @@ using VerdantsAscent.Water.Tools;
 namespace VerdantsAscent.Water.Core
 {
     /// <summary>
-    /// Land-based ice controller � terrain-conforming ice overlay.
+    /// Land-based ice controller - terrain-conforming ice overlay.
     /// 
     /// TERRAIN-CONFORMING BEHAVIOR:
     /// - At zero offset: Ice conforms exactly to terrain shape (like vertex paint)
@@ -110,7 +110,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Public API � Initialization
+        #region Public API - Initialization
 
         /// <summary>
         /// Initializes a terrain overlay ice surface with an initial disk footprint.
@@ -139,12 +139,12 @@ namespace VerdantsAscent.Water.Core
                 s_allLandIce.Add(this);
 
             SaveToZDO();
-            Debug.Log($"[LandIceController] Initialized: r={radius}, Y={IceSurfaceY:F2}");
+            FiresLogger.LogInfo($"[LandIceController] Initialized: r={radius}, Y={IceSurfaceY:F2}");
         }
 
         #endregion
 
-        #region Public API � Footprints
+        #region Public API - Footprints
 
         /// <summary>
         /// Adds a new circular footprint and rebuilds the mesh.
@@ -158,7 +158,7 @@ namespace VerdantsAscent.Water.Core
             RebuildMesh();
 
             SaveToZDO();
-            Debug.Log($"[LandIceController] Added footprint at {center}, r={radius}, total={_footprints.Count}");
+            FiresLogger.LogInfo($"[LandIceController] Added footprint at {center}, r={radius}, total={_footprints.Count}");
         }
 
         /// <summary>
@@ -179,7 +179,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Public API � Height Modification
+        #region Public API - Height Modification
 
         /// <summary>
         /// Modifies heights directly in the height grid.
@@ -323,7 +323,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Public API � Queries & Removal
+        #region Public API - Queries & Removal
 
         public static LandIceController GetLandIceAt(Vector3 worldPos)
         {
@@ -456,7 +456,7 @@ namespace VerdantsAscent.Water.Core
             if (!s_allLandIce.Contains(this))
                 s_allLandIce.Add(this);
 
-            Debug.Log($"[LandIceController] Restored from anchor at {transform.position} with {_footprints.Count} footprints");
+            FiresLogger.LogInfo($"[LandIceController] Restored from anchor at {transform.position} with {_footprints.Count} footprints");
         }
 
         private void OnDestroy()
@@ -656,7 +656,7 @@ namespace VerdantsAscent.Water.Core
                         }
                         else
                         {
-                            // This is a lower disk � track as potential slope target.
+                            // This is a lower disk - track as potential slope target.
                             secondBestHeight = Mathf.Max(secondBestHeight, desiredH);
                             hasSecondContribution = true;
                         }
@@ -713,7 +713,7 @@ namespace VerdantsAscent.Water.Core
                         }
                     }
 
-                    // Core vertex � full height.
+                    // Core vertex - full height.
                     _heights[idx] = bestHeight;
                 }
             }
@@ -812,7 +812,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Smooths height edges to create gentle slopes.
-        /// Matches DirtFloorMeshCombiner.SmoothHeightEdges exactly �
+        /// Matches DirtFloorMeshCombiner.SmoothHeightEdges exactly -
         /// the weighted average from SampleHeightsFromFootprints already
         /// handles blending between different-height disks, so this just
         /// needs a light 2-pass polish to remove any remaining jaggedness.
@@ -918,7 +918,7 @@ namespace VerdantsAscent.Water.Core
                 rb.useGravity = false;
             }
 
-            // Destroy ALL BoxColliders on the root � trigger or not.
+            // Destroy ALL BoxColliders on the root - trigger or not.
             // The vanilla ice1 prefab has a BoxCollider that blocks IH
             // placement raycast, preventing placing ice on top of ice.
             var boxes = gameObject.GetComponents<BoxCollider>();
@@ -928,7 +928,7 @@ namespace VerdantsAscent.Water.Core
                     Destroy(box);
             }
 
-            // Destroy Piece component if present � prevents IH from
+            // Destroy Piece component if present - prevents IH from
             // treating existing ice as a "piece" that blocks placement.
             var piece = gameObject.GetComponent<Piece>();
             if (piece != null)
@@ -969,7 +969,7 @@ namespace VerdantsAscent.Water.Core
             // --- Compute signed distance field per vertex ---
             // The SDF from IceMeshUtility.GetEdgeDistance is the SOLE authority
             // for where the mesh boundary is. The height grid only provides Y
-            // values � it does NOT determine the mesh shape. This prevents
+            // values - it does NOT determine the mesh shape. This prevents
             // blend/slope zone cells (which have valid heights but are outside
             // the noisy footprint boundary) from creating an oversized outer shape.
             int totalVerts = _gridWidth * _gridHeight;
@@ -1027,7 +1027,7 @@ namespace VerdantsAscent.Water.Core
 
                     if (caseIndex == 15)
                     {
-                        // Fully inside � apply edge displacement near boundary
+                        // Fully inside - apply edge displacement near boundary
                         float minD = Mathf.Min(d0, Mathf.Min(d1, Mathf.Min(d2, d3)));
                         if (minD < IceMeshUtility.EDGE_BEVEL_WIDTH)
                         {
@@ -1059,7 +1059,7 @@ namespace VerdantsAscent.Water.Core
                         continue;
                     }
 
-                    // Boundary quad � use marching squares with heights
+                    // Boundary quad - use marching squares with heights
                     EmitLandBoundaryTopFace(verts, tris, uvs, norms,
                         wx0, wz0, d0, h0, wx1, wz1, d1, h1,
                         wx2, wz2, d2, h2, wx3, wz3, d3, h3,
@@ -1244,7 +1244,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Emits vertical skirt quads along the marching-squares boundary of
         /// a boundary cell. Only emits quads between PAIRS of crossing points
-        /// on the cell edges � this is the same paired-crossing approach used
+        /// on the cell edges - this is the same paired-crossing approach used
         /// by <see cref="IceMeshUtility.EmitMarchingSquaresSideWalls"/>.
         ///
         /// The skirt bottom at each crossing is sampled from terrain height

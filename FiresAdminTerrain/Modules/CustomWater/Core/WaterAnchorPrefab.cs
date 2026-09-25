@@ -88,7 +88,7 @@ namespace VerdantsAscent.Water.Core
             var nview = clone.GetComponent<ZNetView>();
             if (nview == null)
             {
-                Debug.LogWarning("[WaterAnchorPrefab] Source prefab had no ZNetView; adding one.");
+                FiresLogger.LogWarning("[WaterAnchorPrefab] Source prefab had no ZNetView; adding one.");
                 nview = clone.AddComponent<ZNetView>();
             }
             nview.m_persistent = true;
@@ -133,7 +133,7 @@ namespace VerdantsAscent.Water.Core
             var fromScene = ZNetScene.instance.GetPrefab(SourcePrefabName);
             if (fromScene != null) return fromScene;
 
-            Debug.LogError($"[WaterAnchorPrefab] Source prefab '{SourcePrefabName}' not available; cannot register '{PrefabName}'.");
+            FiresLogger.LogError($"[WaterAnchorPrefab] Source prefab '{SourcePrefabName}' not available; cannot register '{PrefabName}'.");
             return null;
         }
 
@@ -157,16 +157,6 @@ namespace VerdantsAscent.Water.Core
             foreach (var p in go.GetComponentsInChildren<Piece>(true))   Object.DestroyImmediate(p);
             foreach (var w in go.GetComponentsInChildren<WearNTear>(true)) Object.DestroyImmediate(w);
             foreach (var tm in go.GetComponentsInChildren<TerrainModifier>(true)) Object.DestroyImmediate(tm);
-        }
-
-        // Register on ZNetScene.Awake. Same pattern TileAnchorPrefab uses.
-        // Idempotent so logout / reconnect re-inserts into the fresh dict.
-        [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-        private static class ZNetScene_Awake_EnsureWaterAnchorPrefab
-        {
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.Last)]
-            private static void Postfix() => Ensure();
         }
     }
 }

@@ -27,29 +27,29 @@ namespace VerdantsAscent.Water.Tools
 
             new Terminal.ConsoleCommand("place_land_snow",
                 "[args] - Places a snow overlay disk on terrain. circle=R for radius, offset=H for height.",
-                (Terminal.ConsoleEventFailable)(args => PlaceLandSnow(args)));
+                (Terminal.ConsoleEventFailable)(args => PlaceLandSnow(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("delete_land_snow",
                 "[args] - Removes land snow in radius. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => DeleteLandSnow(args)));
+                (Terminal.ConsoleEventFailable)(args => DeleteLandSnow(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("snow_land_raise",
                 "[args] - Raises land snow height. raise=H for amount, circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => RaiseLandSnow(args)));
+                (Terminal.ConsoleEventFailable)(args => RaiseLandSnow(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("snow_land_lower",
                 "[args] - Lowers land snow height. lower=H for amount, circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => LowerLandSnow(args)));
+                (Terminal.ConsoleEventFailable)(args => LowerLandSnow(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("snow_land_level",
                 "[args] - Levels land snow to target height. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => LevelLandSnow(args)));
+                (Terminal.ConsoleEventFailable)(args => LevelLandSnow(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("snow_land_smooth",
                 "[args] - Smooths land snow surface. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => SmoothLandSnow(args)));
+                (Terminal.ConsoleEventFailable)(args => SmoothLandSnow(args)), isCheat: true);
 
-            Debug.Log("[LandSnowCommands] Initialized - Land snow commands registered");
+            FiresLogger.LogInfo("[LandSnowCommands] Initialized - Land snow commands registered");
         }
 
         #region Place / Delete
@@ -89,7 +89,7 @@ namespace VerdantsAscent.Water.Tools
             // disks fighting at the boundary (mirrors LandIceCombiner).
             var surviving = LandSnowCombiner.TryCombineNearby(ctrl);
 
-            Debug.Log($"[LandSnowCommands] Placed land snow at {position}, r={radius}, surviving={(surviving != null ? surviving.Footprints.Count : 0)} footprint(s)");
+            FiresLogger.LogInfo($"[LandSnowCommands] Placed land snow at {position}, r={radius}, surviving={(surviving != null ? surviving.Footprints.Count : 0)} footprint(s)");
             return true;
         }
 
@@ -313,7 +313,7 @@ namespace VerdantsAscent.Water.Tools
             foreach (var c in existingColliders)
                 if (c != null) c.enabled = false;
 
-            Debug.Log($"[LandSnowCommands] Cloned ice1 prefab at {position} (ZNetView={go.GetComponent<ZNetView>() != null})");
+            FiresLogger.LogInfo($"[LandSnowCommands] Cloned ice1 prefab at {position} (ZNetView={go.GetComponent<ZNetView>() != null})");
             return go;
         }
 

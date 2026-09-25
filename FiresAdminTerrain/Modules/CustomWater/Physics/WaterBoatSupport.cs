@@ -60,9 +60,7 @@ namespace VerdantsAscent.Water.Core
         /// Patches Floating.GetWaterLevel (static method) to check custom water.
         /// This is used by ships and other floating objects to determine water level.
         /// </summary>
-        [HarmonyPatch(typeof(Floating), nameof(Floating.GetWaterLevel))]
-        [HarmonyPostfix]
-        private static void Floating_GetWaterLevel_Postfix(Vector3 p, ref float __result)
+        internal static void RaiseToCustomWater(Vector3 p, ref float __result)
         {
             // Check for custom water at this position
             float customLevel = CustomWaterManager.GetWaterLevelAt(p);

@@ -95,7 +95,7 @@ namespace VerdantsAscent.Water.Core
             bool isSegment = _nview.GetZDO().GetBool(s_isSegmentHash, false);
 
             // If this is a segment anchor spawning from ZDO, strip it to invisible.
-            // Segments don't create combiners — they only store grid row data.
+            // Segments don't create combiners - they only store grid row data.
             if (isSegment)
             {
                 SegmentIndex = _nview.GetZDO().GetInt(s_segmentIndexHash, -1);
@@ -105,7 +105,7 @@ namespace VerdantsAscent.Water.Core
 
         private void Start()
         {
-            // Segments are passive data containers — no Start logic needed.
+            // Segments are passive data containers - no Start logic needed.
             // The primary anchor's RestoreFromZDOAsync reads segment data directly
             // from ZDOMan by ZDOID, without needing the segment GameObject.
         }
@@ -125,7 +125,7 @@ namespace VerdantsAscent.Water.Core
 
             if (_nview == null || _nview.GetZDO() == null)
             {
-                Debug.LogError($"[WaterSegmentAnchor] Initialize: No ZDO available for segment {segmentIndex}!");
+                FiresLogger.LogError($"[WaterSegmentAnchor] Initialize: No ZDO available for segment {segmentIndex}!");
                 return;
             }
 
@@ -406,7 +406,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[WaterSegmentAnchor] ZNetScene.Destroy failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[WaterSegmentAnchor] ZNetScene.Destroy failed: {ex.Message}");
                 }
             }
 
@@ -438,14 +438,14 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNetScene.instance == null)
             {
-                Debug.LogError("[WaterSegmentAnchor] Cannot create segment - ZNetScene not available");
+                FiresLogger.LogError("[WaterSegmentAnchor] Cannot create segment - ZNetScene not available");
                 return null;
             }
 
             GameObject prefab = FindPrefab();
             if (prefab == null)
             {
-                Debug.LogError("[WaterSegmentAnchor] Cannot find prefab for segment anchor");
+                FiresLogger.LogError("[WaterSegmentAnchor] Cannot find prefab for segment anchor");
                 return null;
             }
 
@@ -478,7 +478,7 @@ namespace VerdantsAscent.Water.Core
 
             if (WaterMeshCombiner.s_verboseLogging)
             {
-                Debug.Log($"[WaterSegmentAnchor] Created segment {segmentIndex} at {spawnPos} for parent {parentZdoid}");
+                FiresLogger.LogInfo($"[WaterSegmentAnchor] Created segment {segmentIndex} at {spawnPos} for parent {parentZdoid}");
             }
 
             return segment;
@@ -500,7 +500,7 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            Debug.LogError("[WaterSegmentAnchor] FindPrefab: CustomRiver prefab NOT found!");
+            FiresLogger.LogError("[WaterSegmentAnchor] FindPrefab: CustomRiver prefab NOT found!");
             return null;
         }
 

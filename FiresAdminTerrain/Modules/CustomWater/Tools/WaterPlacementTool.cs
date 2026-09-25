@@ -125,7 +125,7 @@ namespace VerdantsAscent.Water.Tools
                 "Shows info about custom water at cursor position.",
                 (Terminal.ConsoleEventFailable)(args => WaterInfo(args)));
 
-            Debug.Log("[WaterPlacementTool] Initialized - Terrain-style water commands registered");
+            FiresLogger.LogInfo("[WaterPlacementTool] Initialized - Terrain-style water commands registered");
         }
 
         #region Place Water
@@ -151,7 +151,7 @@ namespace VerdantsAscent.Water.Tools
                 return false;
             }
 
-            Debug.Log($"[WaterPlacementTool] Raw args ({args.Length}): {string.Join(" | ", args.Args)}");
+            FiresLogger.LogInfo($"[WaterPlacementTool] Raw args ({args.Length}): {string.Join(" | ", args.Args)}");
 
             // Default values
             float radius = 5f;
@@ -186,7 +186,7 @@ namespace VerdantsAscent.Water.Tools
                             {
                                 radius = Mathf.Clamp(r, MIN_RADIUS, MAX_RADIUS);
                                 shape = WaterDiskShape.Circle;
-                                Debug.Log($"[WaterPlacementTool] Parsed circle={radius}");
+                                FiresLogger.LogInfo($"[WaterPlacementTool] Parsed circle={radius}");
                             }
                             break;
 
@@ -203,7 +203,7 @@ namespace VerdantsAscent.Water.Tools
                                 shape = Mathf.Approximately(shapeWidth, shapeLength)
                                     ? WaterDiskShape.Square
                                     : WaterDiskShape.Rectangle;
-                                Debug.Log($"[WaterPlacementTool] Parsed rect={shapeWidth},{shapeLength} -> {shape}");
+                                FiresLogger.LogInfo($"[WaterPlacementTool] Parsed rect={shapeWidth},{shapeLength} -> {shape}");
                             }
                             else if (rectParts.Length >= 1 && float.TryParse(rectParts[0], out float rs))
                             {
@@ -212,7 +212,7 @@ namespace VerdantsAscent.Water.Tools
                                 shapeLength = shapeWidth;
                                 hasRect = true;
                                 shape = WaterDiskShape.Square;
-                                Debug.Log($"[WaterPlacementTool] Parsed rect={shapeWidth} (square)");
+                                FiresLogger.LogInfo($"[WaterPlacementTool] Parsed rect={shapeWidth} (square)");
                             }
                             break;
 
@@ -220,7 +220,7 @@ namespace VerdantsAscent.Water.Tools
                             if (float.TryParse(value, out float d))
                             {
                                 maxDepth = Mathf.Clamp(d, MIN_DEPTH, MAX_DEPTH);
-                                Debug.Log($"[WaterPlacementTool] Parsed depth={maxDepth}");
+                                FiresLogger.LogInfo($"[WaterPlacementTool] Parsed depth={maxDepth}");
                             }
                             break;
 
@@ -228,7 +228,7 @@ namespace VerdantsAscent.Water.Tools
                             customLiquidType = ParseLiquidType(value);
                             hasCustomType = customLiquidType != CustomLiquidType.Water;
                             if (customLiquidType == CustomLiquidType.Tar) isTar = true;
-                            Debug.Log($"[WaterPlacementTool] Parsed type={customLiquidType}");
+                            FiresLogger.LogInfo($"[WaterPlacementTool] Parsed type={customLiquidType}");
                             break;
 
                         case "from":
@@ -245,7 +245,7 @@ namespace VerdantsAscent.Water.Tools
                                 }
                                 position = new Vector3(x, fromY, z);
                                 positionFromArgs = true;
-                                Debug.Log($"[WaterPlacementTool] Parsed from=({x}, {z}, {fromY}) -> position={position}");
+                                FiresLogger.LogInfo($"[WaterPlacementTool] Parsed from=({x}, {z}, {fromY}) -> position={position}");
                             }
                             break;
                     }
@@ -259,7 +259,7 @@ namespace VerdantsAscent.Water.Tools
                         isTar = true;
                         customLiquidType = CustomLiquidType.Tar;
                         hasCustomType = true;
-                        Debug.Log("[WaterPlacementTool] Using TAR liquid type");
+                        FiresLogger.LogInfo("[WaterPlacementTool] Using TAR liquid type");
                     }
                     // Check for "square" keyword
                     else if (lower == "square")
@@ -270,7 +270,7 @@ namespace VerdantsAscent.Water.Tools
                             shapeWidth = radius * 2f;
                             shapeLength = shapeWidth;
                             hasRect = true;
-                            Debug.Log($"[WaterPlacementTool] Square mode: {shapeWidth}x{shapeLength}");
+                            FiresLogger.LogInfo($"[WaterPlacementTool] Square mode: {shapeWidth}x{shapeLength}");
                         }
                     }
                     // Simple numeric arg - treat as radius (legacy support)
@@ -290,7 +290,7 @@ namespace VerdantsAscent.Water.Tools
                     Console.instance.Print("Could not determine placement position");
                     return false;
                 }
-                Debug.Log($"[WaterPlacementTool] Position from raycast: {position}");
+                FiresLogger.LogInfo($"[WaterPlacementTool] Position from raycast: {position}");
             }
 
             // Create water disk at this position
@@ -339,7 +339,7 @@ namespace VerdantsAscent.Water.Tools
                 string liquidName = hasCustomType ? customLiquidType.GetDisplayName() : (isTar ? "tar" : "water");
                 Console.instance.Print($"Placed {liquidName}: {sizeDesc}, depth={maxDepth:F1}m at Y={position.y:F2}m");
 
-                Debug.Log($"[WaterPlacementTool] SUCCESS: Created water disk at {position}, {sizeDesc}, depth={maxDepth}, type={liquidType}, customType={customLiquidType}, hash={stableHash}");
+                FiresLogger.LogInfo($"[WaterPlacementTool] SUCCESS: Created water disk at {position}, {sizeDesc}, depth={maxDepth}, type={liquidType}, customType={customLiquidType}, hash={stableHash}");
                 return true;
             }
             else
@@ -433,6 +433,14 @@ namespace VerdantsAscent.Water.Tools
                     anyMopped = true;
                 }
             }
+
+            // Generated carve+fill water mops too (persisted per column).
+            try
+            {
+                if (VerdantsAscent.Terrain.Voxel.VoxelWorld.MopGeneratedWater(position, radius) > 0)
+                    anyMopped = true;
+            }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[WaterPlacementTool] mop generated pass: {ex.Message}"); }
 
             if (anyMopped)
             {
@@ -577,11 +585,7 @@ namespace VerdantsAscent.Water.Tools
             // Also clear legacy water locally. ZoneSystem.GetZone returns
             // Vector2s on public test; convert back so CustomWaterManager's
             // Vector2i-keyed APIs stay unchanged.
-#if PUBLIC_TEST
             Vector2i zone = ZoneSystem.GetZone(playerPos).ToVector2i();
-#else
-            Vector2i zone = ZoneSystem.GetZone(playerPos);
-#endif
             CustomWaterManager.ClearZone(zone);
 
             Console.instance.Print($"Cleared all custom water in zone {zone}");
@@ -820,7 +824,7 @@ namespace VerdantsAscent.Water.Tools
             }
 
             combiner.SetCustomLiquidType(CustomLiquidType.Ice);
-            Console.instance.Print($"Froze water at {position:F1} � walk on it!");
+            Console.instance.Print($"Froze water at {position:F1} - walk on it!");
             return true;
         }
 
@@ -1362,7 +1366,7 @@ namespace VerdantsAscent.Water.Tools
             var existingCombiner = WaterMeshCombiner.GetCombinerAt(position);
             if (existingCombiner != null && existingCombiner.CustomLiquidType == liquidType)
             {
-                // Same type � just add the new disk without touching the liquid type
+                // Same type - just add the new disk without touching the liquid type
                 existingCombiner.AddWaterDisk(disk);
 
                 Console.instance.Print($"Extended {liquidType.GetDisplayName()}: {sizeDesc}, depth={maxDepth:F1}m at Y={position.y:F2}m");

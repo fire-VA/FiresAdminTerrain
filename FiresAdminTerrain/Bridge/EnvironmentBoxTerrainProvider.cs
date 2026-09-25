@@ -1,16 +1,15 @@
 using UnityEngine;
 using FiresCore.Bridge;
 using FiresCore.Utilities;
-using VerdantsAscent.Terrain.Utilities; // TerritorySnowManager
 
 namespace VerdantsAscent.Utilities
 {
     /// <summary>
     /// FAT-side implementation of the Core env-box terrain seam. The portable env-box ENGINE now lives in Core
     /// (FiresCore.Utilities.EnvironmentBoxController) and drives env/skybox/enclosure itself; everything that
-    /// depends on FAT's heightmap, clutter, and snow-on-pieces systems is wrapped here. Registered once in
+    /// depends on FAT's heightmap and clutter systems is wrapped here. Registered once in
     /// FiresAdminTerrain.Awake. The retained FAT pieces — EnvironmentBoxPatches (heightmap/clutter/biome
-    /// patches), EnvironmentBoxClutterSpawner (per-box biome clutter), TerritorySnowManager (snow-on-pieces) —
+    /// patches) and EnvironmentBoxClutterSpawner (per-box biome clutter)
     /// stay in FAT and are reached only through this provider.
     /// </summary>
     public sealed class EnvironmentBoxTerrainProvider : IEnvironmentBoxTerrainProvider
@@ -75,16 +74,6 @@ namespace VerdantsAscent.Utilities
             b.Expand(10f);
             EnvironmentBoxPatches.RefreshHeightmapsInBounds(b);
             EnvironmentBoxPatches.RefreshClutterInBounds(b);
-        }
-
-        public void ApplySnowToPieces(int boxId, Bounds b)
-        {
-            TerritorySnowManager.ApplySnowToRectangle(boxId, b.min, b.max, 0.5f);
-        }
-
-        public void RemoveSnowFromPieces(int boxId)
-        {
-            TerritorySnowManager.RemoveSnowFromTerritory(boxId);
         }
     }
 }

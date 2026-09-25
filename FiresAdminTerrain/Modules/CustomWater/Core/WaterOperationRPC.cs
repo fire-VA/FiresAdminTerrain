@@ -3,13 +3,14 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using VerdantsAscent.Modules.Utilities;
+using VerdantsAscent.Terrain.Lifecycle;
 
 namespace VerdantsAscent.Water.Core
 {
     /// <summary>
     /// Handles multiplayer RPC synchronization for ALL custom water operations.
     /// 
-    /// ARCHITECTURE (Server Authority � mirrors Valheim terrain):
+    /// ARCHITECTURE (Server Authority - mirrors Valheim terrain):
     /// 1. Client applies locally for instant visual feedback
     /// 2. Client sends _Request RPC to SERVER ONLY
     /// 3. Server validates, stores in cache, persists to ZDO anchor
@@ -26,13 +27,13 @@ namespace VerdantsAscent.Water.Core
     {
         private static bool _initialized = false;
 
-        // RPC names � Client ? Server (requests)
+        // RPC names - Client -> Server (requests)
         private const string RPC_CREATE_WATER = "FiresAdminTerrain_Water_Create";
         private const string RPC_REMOVE_WATER = "FiresAdminTerrain_Water_Remove";
         private const string RPC_MODIFY_WATER = "FiresAdminTerrain_Water_Modify";
         private const string RPC_CLEAR_ZONE_WATER = "FiresAdminTerrain_Water_ClearZone";
 
-        // RPC names � Server ? All Clients (confirmed broadcasts)
+        // RPC names - Server -> All Clients (confirmed broadcasts)
         private const string RPC_CREATE_CONFIRMED = "FiresAdminTerrain_Water_CreateOK";
         private const string RPC_REMOVE_CONFIRMED = "FiresAdminTerrain_Water_RemoveOK";
         private const string RPC_MODIFY_CONFIRMED = "FiresAdminTerrain_Water_ModifyOK";
@@ -61,13 +62,13 @@ namespace VerdantsAscent.Water.Core
 
             try
             {
-                // Client ? Server requests
+                // Client -> Server requests
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_CREATE_WATER, RPC_HandleCreateWater);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_REMOVE_WATER, RPC_HandleRemoveWater);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_MODIFY_WATER, RPC_HandleModifyWater);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_CLEAR_ZONE_WATER, RPC_HandleClearZoneWater);
 
-                // Server ? All Clients confirmed broadcasts
+                // Server -> All Clients confirmed broadcasts
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_CREATE_CONFIRMED, RPC_HandleCreateConfirmed);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_REMOVE_CONFIRMED, RPC_HandleRemoveConfirmed);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_MODIFY_CONFIRMED, RPC_HandleModifyConfirmed);
@@ -81,11 +82,11 @@ namespace VerdantsAscent.Water.Core
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_CLEAR_ALL_WATER, RPC_HandleClearAllWater);
 
                 _initialized = true;
-                Debug.Log("[WaterOperationRPC] Initialized all water operation RPCs");
+                FiresLogger.LogInfo("[WaterOperationRPC] Initialized all water operation RPCs");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Failed to register RPCs: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Failed to register RPCs: {ex.Message}");
             }
         }
 
@@ -142,7 +143,7 @@ namespace VerdantsAscent.Water.Core
 
             if (IsServer())
             {
-                // We ARE the server � handle directly and broadcast to clients
+                // We ARE the server - handle directly and broadcast to clients
                 ServerHandleCreateAndBroadcast(disk, GetLocalPlayerId());
             }
             else
@@ -157,7 +158,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Requests creation of a water disk with a custom liquid type already set.
         /// The custom type is applied to both the disk and the combiner BEFORE mesh generation,
-        /// so the correct material/behavior is used from the first frame � no "flash of water then swap".
+        /// so the correct material/behavior is used from the first frame - no "flash of water then swap".
         /// </summary>
         /// <returns>The stable hash of the created disk</returns>
         public static int RequestCreateWaterWithCustomType(Vector3 position, WaterDisk disk, CustomLiquidType customType)
@@ -172,7 +173,7 @@ namespace VerdantsAscent.Water.Core
             // Ensure the disk has the custom type set
             disk.CustomLiquidType = customType;
 
-            // Apply locally � GetOrCreateCombinerFor adds the disk to a combiner
+            // Apply locally - GetOrCreateCombinerFor adds the disk to a combiner
             var combiner = WaterMeshCombiner.GetOrCreateCombinerFor(disk);
 
             // Set the custom liquid type on the combiner IMMEDIATELY (before mesh regen)
@@ -325,12 +326,12 @@ namespace VerdantsAscent.Water.Core
             // DEPRECATED: Water anchors restore from ZDO automatically.
             // No need to request cache sync - this was causing duplicate combiner creation.
             // Anchors are the source of truth, not the server cache.
-            Debug.Log("[WaterOperationRPC] Cache sync disabled - anchors restore from ZDO directly");
+            FiresLogger.LogInfo("[WaterOperationRPC] Cache sync disabled - anchors restore from ZDO directly");
         }
 
         #endregion
 
-        #region RPC Handlers � Client ? Server (request handlers, server-only)
+        #region RPC Handlers - Client -> Server (request handlers, server-only)
 
         /// <summary>
         /// SERVER: Receives create request from a client, validates, caches, persists, broadcasts.
@@ -338,6 +339,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleCreateWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "create"); return; }
 
             try
             {
@@ -349,7 +351,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling create water request: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling create water request: {ex.Message}");
             }
         }
 
@@ -359,6 +361,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleRemoveWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "remove"); return; }
 
             try
             {
@@ -368,7 +371,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling remove water request: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling remove water request: {ex.Message}");
             }
         }
 
@@ -378,6 +381,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleModifyWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "modify"); return; }
 
             try
             {
@@ -394,7 +398,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling modify water request: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling modify water request: {ex.Message}");
             }
         }
 
@@ -404,6 +408,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleClearZoneWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "clear zone"); return; }
 
             try
             {
@@ -414,7 +419,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling clear zone water request: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling clear zone water request: {ex.Message}");
             }
         }
 
@@ -438,7 +443,7 @@ namespace VerdantsAscent.Water.Core
             _serverWaterCache[disk.StableHash] = disk;
             TriggerServerSave(disk.Position);
 
-            // Broadcast confirmed to every client EXCEPT the origin ? they already
+            // Broadcast confirmed to every client EXCEPT the origin - they already
             // applied the disk locally before sending the request (see _appliedDiskHashes
             // fast-path below, which is now only hit by late-arriving ZDO syncs).
             var pkg = new ZPackage();
@@ -446,7 +451,7 @@ namespace VerdantsAscent.Water.Core
             pkg.Write(originPlayerId);
             VerdantsAscent.Async.SafeRoutedRpc.InvokeSafeToAllExcept(originPlayerId, RPC_CREATE_CONFIRMED, pkg);
 
-            Debug.Log($"[WaterOperationRPC] Server confirmed create disk hash={disk.StableHash}, broadcasting to all");
+            FiresLogger.LogInfo($"[WaterOperationRPC] Server confirmed create disk hash={disk.StableHash}, broadcasting to all");
         }
 
         private static void ServerHandleRemoveAndBroadcast(int stableHash, long originPlayerId)
@@ -527,14 +532,15 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region RPC Handlers � Server ? Client (confirmed broadcasts)
+        #region RPC Handlers - Server -> Client (confirmed broadcasts)
 
         /// <summary>
-        /// CLIENT: Server confirmed a water create � apply if not already applied locally.
+        /// CLIENT: Server confirmed a water create - apply if not already applied locally.
         /// </summary>
         private static void RPC_HandleCreateConfirmed(long sender, ZPackage pkg)
         {
             if (pkg == null) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "create (confirmed)"); return; }
 
             try
             {
@@ -552,11 +558,11 @@ namespace VerdantsAscent.Water.Core
 
                 // Apply the confirmed disk
                 WaterMeshCombiner.GetOrCreateCombinerFor(disk);
-                Debug.Log($"[WaterOperationRPC] Applied confirmed create from server: hash={disk.StableHash}");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Applied confirmed create from server: hash={disk.StableHash}");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling create confirmed: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling create confirmed: {ex.Message}");
             }
         }
 
@@ -566,6 +572,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleRemoveConfirmed(long sender, ZPackage pkg)
         {
             if (pkg == null) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "remove (confirmed)"); return; }
 
             try
             {
@@ -582,7 +589,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling remove confirmed: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling remove confirmed: {ex.Message}");
             }
         }
 
@@ -592,6 +599,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleModifyConfirmed(long sender, ZPackage pkg)
         {
             if (pkg == null) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "modify (confirmed)"); return; }
 
             try
             {
@@ -614,7 +622,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling modify confirmed: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling modify confirmed: {ex.Message}");
             }
         }
 
@@ -624,6 +632,7 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleClearZoneConfirmed(long sender, ZPackage pkg)
         {
             if (pkg == null) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "clear zone (confirmed)"); return; }
 
             try
             {
@@ -631,14 +640,14 @@ namespace VerdantsAscent.Water.Core
                 float radius = pkg.ReadSingle();
                 long originPlayerId = pkg.ReadLong();
 
-                // Origin client already cleared locally � skip
+                // Origin client already cleared locally - skip
                 if (originPlayerId == GetLocalPlayerId()) return;
 
                 ClearWaterInRadius(center, radius);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling clear zone confirmed: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling clear zone confirmed: {ex.Message}");
             }
         }
 
@@ -649,12 +658,13 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private static void RPC_HandleClearAllWater(long sender, ZPackage pkg)
         {
-            // Server already handled this locally � only clients need to process
+            // Server already handled this locally - only clients need to process
             if (IsServer()) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "clear all"); return; }
 
             try
             {
-                Debug.Log("[WaterOperationRPC] Received global water clear from server � destroying all local water and cache");
+                FiresLogger.LogInfo("[WaterOperationRPC] Received global water clear from server - destroying all local water and cache");
 
                 // Destroy all local combiners
                 var allCombiners = new List<WaterMeshCombiner>(WaterMeshCombiner.AllCombiners);
@@ -693,11 +703,11 @@ namespace VerdantsAscent.Water.Core
                 _appliedDiskHashes.Clear();
                 _serverWaterCache.Clear();
 
-                Debug.Log($"[WaterOperationRPC] Global water clear complete � {allCombiners.Count} combiners, {allAnchors.Length} anchors destroyed, file cache cleared");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Global water clear complete - {allCombiners.Count} combiners, {allAnchors.Length} anchors destroyed, file cache cleared");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling global water clear: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling global water clear: {ex.Message}");
             }
         }
 
@@ -706,19 +716,20 @@ namespace VerdantsAscent.Water.Core
             // DEPRECATED: Water anchors restore from ZDO automatically.
             // No need for server cache sync - this was causing duplicate combiner creation.
             // Anchors are the source of truth, not the server cache.
-            Debug.Log("[WaterOperationRPC] Ignoring sync request - anchors restore from ZDO directly");
+            FiresLogger.LogInfo("[WaterOperationRPC] Ignoring sync request - anchors restore from ZDO directly");
         }
 
         private static void RPC_HandleSyncCache(long sender, ZPackage pkg)
         {
             if (pkg == null) return;
             if (IsServer()) return; // Server doesn't receive sync, only sends
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "cache sync"); return; }
 
             try
             {
                 int diskCount = pkg.ReadInt();
 
-                Debug.Log($"[WaterOperationRPC] Receiving water cache sync: {diskCount} disks");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Receiving water cache sync: {diskCount} disks");
 
                 // STEP 1: Deserialize all disks first
                 var allDisks = new List<WaterDisk>(diskCount);
@@ -746,11 +757,11 @@ namespace VerdantsAscent.Water.Core
                     }
                 }
 
-                Debug.Log($"[WaterOperationRPC] Received {allDisks.Count} new disks to process");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Received {allDisks.Count} new disks to process");
 
                 if (allDisks.Count == 0)
                 {
-                    Debug.Log($"[WaterOperationRPC] Water cache sync complete (all disks already exist)");
+                    FiresLogger.LogInfo($"[WaterOperationRPC] Water cache sync complete (all disks already exist)");
                     return;
                 }
 
@@ -758,7 +769,7 @@ namespace VerdantsAscent.Water.Core
                 // This ensures all overlapping disks end up in the same group
                 var diskGroups = GroupDisksByOverlap(allDisks);
 
-                Debug.Log($"[WaterOperationRPC] Grouped into {diskGroups.Count} water bodies");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Grouped into {diskGroups.Count} water bodies");
 
                 // STEP 3: Create combiners for each group with all disks at once
                 int combinerCount = 0;
@@ -812,11 +823,11 @@ namespace VerdantsAscent.Water.Core
                     }
                 }
 
-                Debug.Log($"[WaterOperationRPC] Water cache sync complete: created {combinerCount} new combiners from {allDisks.Count} disks");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Water cache sync complete: created {combinerCount} new combiners from {allDisks.Count} disks");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling cache sync: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling cache sync: {ex.Message}");
             }
         }
 
@@ -908,7 +919,7 @@ namespace VerdantsAscent.Water.Core
             pkg.Write(GetLocalPlayerId());
 
             ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_REQUEST_DISK_SYNC, pkg);
-            Debug.Log($"[WaterOperationRPC] Requested disk sync from server for position {position:F1}");
+            FiresLogger.LogInfo($"[WaterOperationRPC] Requested disk sync from server for position {position:F1}");
         }
 
         // Pending sync requests: maps position key to the waiting combiner
@@ -929,7 +940,7 @@ namespace VerdantsAscent.Water.Core
                 Vector3 position = pkg.ReadVector3();
                 long requesterId = pkg.ReadLong();
 
-                Debug.Log($"[WaterOperationRPC] Server received disk sync request from peer {requesterId} for position {position:F1}");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Server received disk sync request from peer {requesterId} for position {position:F1}");
 
                 // Find all disks near this position from loaded combiners
                 var nearbyCombiners = WaterMeshCombiner.GetCombinersInRadius(position, 100f);
@@ -975,7 +986,7 @@ namespace VerdantsAscent.Water.Core
 
                 if (allDisks.Count == 0)
                 {
-                    Debug.Log($"[WaterOperationRPC] No disks found near {position:F1} to sync");
+                    FiresLogger.LogInfo($"[WaterOperationRPC] No disks found near {position:F1} to sync");
                     return;
                 }
 
@@ -991,11 +1002,11 @@ namespace VerdantsAscent.Water.Core
 
                 // Send response to the requesting client only
                 ZRoutedRpc.instance.InvokeRoutedRPC(requesterId, RPC_DISK_SYNC_RESPONSE, responsePkg);
-                Debug.Log($"[WaterOperationRPC] Sent {allDisks.Count} disks to peer {requesterId} for position {position:F1}");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Sent {allDisks.Count} disks to peer {requesterId} for position {position:F1}");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling disk sync request: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling disk sync request: {ex.Message}");
             }
         }
 
@@ -1007,13 +1018,14 @@ namespace VerdantsAscent.Water.Core
         {
             if (pkg == null) return;
             if (IsServer()) return;
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "disk sync"); return; }
 
             try
             {
                 Vector3 position = pkg.ReadVector3();
                 int diskCount = pkg.ReadInt();
 
-                Debug.Log($"[WaterOperationRPC] Received disk sync response: {diskCount} disks for position {position:F1}");
+                FiresLogger.LogInfo($"[WaterOperationRPC] Received disk sync response: {diskCount} disks for position {position:F1}");
 
                 if (diskCount == 0) return;
 
@@ -1048,11 +1060,11 @@ namespace VerdantsAscent.Water.Core
                     // Cache the result for faster future loads
                     WaterCombinerCache.UpdateCombinerCache(targetCombiner);
 
-                    Debug.Log($"[WaterOperationRPC] Client restored {diskCount} disks at {position:F1} via RPC sync");
+                    FiresLogger.LogInfo($"[WaterOperationRPC] Client restored {diskCount} disks at {position:F1} via RPC sync");
                 }
                 else if (targetCombiner == null)
                 {
-                    // No pending combiner � create one from the received disks
+                    // No pending combiner - create one from the received disks
                     // Group disks and create combiners
                     var diskGroups = GroupDisksByOverlap(disks);
                     foreach (var group in diskGroups)
@@ -1065,16 +1077,16 @@ namespace VerdantsAscent.Water.Core
                             combiner.AddWaterDisksBatch(group.GetRange(1, group.Count - 1), skipRegeneration: false);
                         }
                     }
-                    Debug.Log($"[WaterOperationRPC] Client created combiners from {diskCount} RPC-synced disks at {position:F1}");
+                    FiresLogger.LogInfo($"[WaterOperationRPC] Client created combiners from {diskCount} RPC-synced disks at {position:F1}");
                 }
                 else
                 {
-                    Debug.Log($"[WaterOperationRPC] Target combiner at {position:F1} already has {targetCombiner.WaterDisks.Count} disks, skipping RPC sync");
+                    FiresLogger.LogInfo($"[WaterOperationRPC] Target combiner at {position:F1} already has {targetCombiner.WaterDisks.Count} disks, skipping RPC sync");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterOperationRPC] Error handling disk sync response: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling disk sync response: {ex.Message}");
             }
         }
 
@@ -1221,8 +1233,8 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Triggers server-side save for combiners near a position.
-        /// Updates both the ZDO anchor (via MarkDirty ? debounced save) and
-        /// the file cache (via UpdateCombinerCache ? periodic async save).
+        /// Updates both the ZDO anchor (via MarkDirty -> debounced save) and
+        /// the file cache (via UpdateCombinerCache -> periodic async save).
         /// </summary>
         private static void TriggerServerSave(Vector3 position)
         {
@@ -1259,6 +1271,9 @@ namespace VerdantsAscent.Water.Core
         /// In Valheim, the server is always peer ID 0 when using ZRoutedRpc on a client.
         /// ZRoutedRpc routes target=server via the m_server connection.
         /// </summary>
+        private static void RejectNonAdmin(long sender, string operation)
+            => FiresLogger.LogWarning($"[WaterOperationRPC] rejected water {operation} from non-admin peer {sender}.");
+
         private static long GetServerPeerId()
         {
             // In Valheim's ZRoutedRpc, sending to the server from a client
@@ -1294,7 +1309,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Clears all caches. Called on world unload.
         /// Also resets _initialized so RPCs re-register with the new ZRoutedRpc
-        /// instance on the next session (logout ? reconnect creates a new ZRoutedRpc).
+        /// instance on the next session (logout -> reconnect creates a new ZRoutedRpc).
         /// </summary>
         public static void ClearCaches()
         {
@@ -1319,7 +1334,7 @@ namespace VerdantsAscent.Water.Core
 
             var pkg = new ZPackage();
             ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_CLEAR_ALL_WATER, pkg);
-            Debug.Log("[WaterOperationRPC] Broadcast global water clear to all clients");
+            FiresLogger.LogInfo("[WaterOperationRPC] Broadcast global water clear to all clients");
         }
 
         /// <summary>

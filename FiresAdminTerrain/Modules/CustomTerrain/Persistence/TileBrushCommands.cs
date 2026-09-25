@@ -675,12 +675,5 @@ namespace VerdantsAscent.Terrain.Persistence
             if (args.Length <= idx) return def;
             return float.TryParse(args[idx], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : def;
         }
-
-        // Auto-register on Terminal init alongside TileDebugCommands.
-        [HarmonyPatch(typeof(Terminal), nameof(Terminal.InitTerminal))]
-        private static class Terminal_InitTerminal_RegisterTileBrushCommands
-        {
-            private static void Postfix() => Register();
-        }
     }
 }

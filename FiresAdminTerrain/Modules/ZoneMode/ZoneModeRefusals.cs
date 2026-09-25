@@ -1,0 +1,188 @@
+using System;
+using HarmonyLib;
+using UnityEngine;
+
+namespace VerdantsAscent.Terrain.Zones
+{
+    // ── NOTHING ENTERS A CLOSED ZONE ────────────────────────────────────────
+    // A closed zone must stay empty so that opening it later shows the world exactly as generated:
+    //   * building: the placement ghost goes red and placing is refused;
+    //   * terrain: any terrain op, hoe stroke or dig whose footprint touches a closed zone is refused
+    //     whole — a half-applied edit at the edge would split the shared border of two heightmaps;
+    //   * teleports into closed sea are refused, and a saved logout or bed point there is cleared;
+    //   * creature spawns (including raids) never pick a closed-zone point.
+    // Positions above SurfaceCeiling are dungeon interiors (5000 m up) and are never refused.
+    internal static class ZoneModeRefusals
+    {
+        private const float SurfaceCeiling = 1000f;
+        private const float MessageCooldownSeconds = 1.5f;
+        private const float NearbyOpMessageDistance = 12f;
+        private const string ClosedSquareMessage = "This square is still sea. It has to be opened first.";
+        private const string NearEdgeMessage = "Too close to the edge of the open land.";
+        private const string TeleportMessage = "That destination lies in unopened sea.";
+
+        private static readonly AccessTools.FieldRef<Player, GameObject> PlacementGhostRef =
+            AccessTools.FieldRefAccess<Player, GameObject>("m_placementGhost");
+        private static readonly AccessTools.FieldRef<Player, Player.PlacementStatus> PlacementStatusRef =
+            AccessTools.FieldRefAccess<Player, Player.PlacementStatus>("m_placementStatus");
+        private static readonly Action<Player, bool> SetPlacementGhostValid =
+            AccessTools.MethodDelegate<Action<Player, bool>>(AccessTools.Method(typeof(Player), "SetPlacementGhostValid"));
+        private static readonly AccessTools.FieldRef<Game, PlayerProfile> PlayerProfileRef =
+            AccessTools.FieldRefAccess<Game, PlayerProfile>("m_playerProfile");
+
+        private static float s_lastMessageTime = -100f;
+        private static TerrainOp s_lastCancelledOp;
+
+        internal static int BuildsRefused;
+        internal static int TerrainEditsRefused;
+        internal static int TeleportsRefused;
+        internal static int SpawnPointsCleared;
+        internal static int CreatureSpawnsRefused;
+
+        // A skyland over closed sea is land: building, digging, teleports and logout points on it are fine.
+        internal static bool IsClosedAt(Vector3 point)
+            => IsClosedGround(point) && !VerdantsAscent.Terrain.Voxel.FiresSkyIslands.IsOnIsland(point);
+
+        // The closed sea itself, islands or not — creature spawns go by this.
+        private static bool IsClosedGround(Vector3 point)
+            => point.y < SurfaceCeiling && ZoneModeGate.IsClosedForTerrain(point.x, point.z);
+
+        internal static bool TerrainEditTouchesClosed(Vector3 center, float radius)
+        {
+            var view = ZoneModeGate.Current;
+            if (view == null || center.y >= SurfaceCeiling) return false;
+            if (VerdantsAscent.Terrain.Voxel.FiresSkyIslands.IsOnIsland(center)) return false;
+            return !view.Open.IsRealAt(center.x, center.z) || view.Open.DiscTouchesClosed(center.x, center.z, radius);
+        }
+
+        internal static bool WasCancelled(TerrainOp op) => op != null && ReferenceEquals(op, s_lastCancelledOp);
+
+        private static float TerrainRadiusOf(GameObject pieceOrGhost)
+        {
+            var op = pieceOrGhost.GetComponentInChildren<TerrainOp>();
+            if (op != null) return op.GetRadius();
+            var modifier = pieceOrGhost.GetComponentInChildren<TerrainModifier>();
+            return modifier != null ? modifier.GetRadius() : 0f;
+        }
+
+        private static bool GhostRefused(GameObject ghost, out string message)
+        {
+            Vector3 position = ghost.transform.position;
+            if (IsClosedAt(position))
+            {
+                message = ClosedSquareMessage;
+                return true;
+            }
+            float radius = TerrainRadiusOf(ghost);
+            if (radius > 0f && TerrainEditTouchesClosed(position, radius))
+            {
+                message = NearEdgeMessage;
+                return true;
+            }
+            message = null;
+            return false;
+        }
+
+        internal static void TellLocalPlayer(string message)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null || Time.time - s_lastMessageTime < MessageCooldownSeconds) return;
+            s_lastMessageTime = Time.time;
+            player.Message(MessageHud.MessageType.Center, message);
+        }
+
+        [HarmonyPatch(typeof(Player), "UpdatePlacementGhost")]
+        private static class RedGhostOverClosedZone
+        {
+            private static void Postfix(Player __instance)
+            {
+                if (!ZoneModeGate.Active || __instance != Player.m_localPlayer) return;
+                var ghost = PlacementGhostRef(__instance);
+                if (ghost == null || !ghost.activeSelf || !GhostRefused(ghost, out _)) return;
+                PlacementStatusRef(__instance) = Player.PlacementStatus.NoBuildZone;
+                SetPlacementGhostValid(__instance, false);
+            }
+        }
+
+        // Called from FAT's one Player.TryPlacePiece hook (VoxelToolPieces).
+        internal static bool RefusesPlacement(Player player)
+        {
+            if (!ZoneModeGate.Active || player == null) return false;
+            var ghost = PlacementGhostRef(player);
+            if (ghost == null || !GhostRefused(ghost, out string message)) return false;
+            TellLocalPlayer(message);
+            BuildsRefused++;
+            return true;
+        }
+
+        // From the Priority.First prefix of FAT's one TerrainOp.Awake hook (FatVanillaHooks): false refuses and
+        // destroys an op whose footprint touches a closed zone, and marks it for WasCancelled.
+        internal static bool AllowTerrainOp(TerrainOp op)
+        {
+            if (!ZoneModeGate.Active || TerrainOp.m_forceDisableTerrainOps || op == null) return true;
+            Vector3 position = op.transform.position;
+            if (!TerrainEditTouchesClosed(position, op.GetRadius())) return true;
+
+            s_lastCancelledOp = op;
+            TerrainEditsRefused++;
+            var player = Player.m_localPlayer;
+            if (player != null && Vector3.Distance(player.transform.position, position) < NearbyOpMessageDistance)
+                TellLocalPlayer(NearEdgeMessage);
+            UnityEngine.Object.Destroy(op.gameObject);
+            return false;
+        }
+
+        [HarmonyPatch(typeof(Player), nameof(Player.TeleportTo))]
+        private static class RefuseTeleportIntoClosedZone
+        {
+            private static bool Prefix(Player __instance, Vector3 pos, ref bool __result)
+            {
+                if (!ZoneModeGate.Active || !IsClosedAt(pos)) return true;
+                TeleportsRefused++;
+                FiresLogger.LogInfo($"[FiresZones] refused a teleport to ({pos.x:0},{pos.z:0}) — zone "
+                    + $"({ZoneSystem.GetZone(pos).x},{ZoneSystem.GetZone(pos).y}) is closed.");
+                if (__instance == Player.m_localPlayer) TellLocalPlayer(TeleportMessage);
+                __result = false;
+                return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(Game), "FindSpawnPoint")]
+        private static class ClearSpawnPointsInClosedZones
+        {
+            private static void Prefix(Game __instance)
+            {
+                if (!ZoneModeGate.Active) return;
+                var profile = PlayerProfileRef(__instance);
+                if (profile == null) return;
+                if (profile.HaveLogoutPoint() && IsClosedAt(profile.GetLogoutPoint()))
+                {
+                    Vector3 point = profile.GetLogoutPoint();
+                    profile.ClearLoguoutPoint();
+                    SpawnPointsCleared++;
+                    FiresLogger.LogWarning($"[FiresZones] cleared a logout point at ({point.x:0},{point.z:0}) — it lies in a "
+                        + "closed zone. Spawning at the bed or the start location instead.");
+                }
+                if (profile.HaveCustomSpawnPoint() && IsClosedAt(profile.GetCustomSpawnPoint()))
+                {
+                    Vector3 point = profile.GetCustomSpawnPoint();
+                    profile.ClearCustomSpawnPoint();
+                    SpawnPointsCleared++;
+                    FiresLogger.LogWarning($"[FiresZones] cleared a bed spawn point at ({point.x:0},{point.z:0}) — it lies in "
+                        + "a closed zone.");
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(SpawnSystem), "IsSpawnPointGood")]
+        private static class NoCreatureSpawnsInClosedZones
+        {
+            private static void Postfix(ref Vector3 spawnPoint, ref bool __result)
+            {
+                if (!__result || !ZoneModeGate.Active || !IsClosedGround(spawnPoint)) return;
+                __result = false;
+                CreatureSpawnsRefused++;
+            }
+        }
+    }
+}

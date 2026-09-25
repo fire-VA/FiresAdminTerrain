@@ -15,13 +15,16 @@ namespace VerdantsAscent.Terrain.Voxel
     public static class VoxelAnchorPrefab
     {
         public const string PrefabName = "VAVoxel";
+        internal static readonly int PrefabHash = PrefabName.GetStableHashCode();
         private const string SourcePrefabName = "piece_dirtfloor_vad";
 
         internal const string ZDO_KX = "vv_kx";
         internal const string ZDO_KY = "vv_ky";
         internal const string ZDO_KZ = "vv_kz";
         internal const string ZDO_VER = "vv_ver";
-        internal const string ZDO_DENSITY = "vv_density";
+        internal const string ZDO_EDITS = "vv_edits";
+        // 2 = brush edit bounds over live ground (1 stored the frozen density).
+        internal const int EditsFormatVersion = 2;
 
         private static GameObject _prefab;
         private static GameObject _inactiveRoot;
@@ -39,7 +42,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     && inScene == _prefab)
                     return true;
                 ZNetScene.instance.m_namedPrefabs[hash] = _prefab;   // session re-insert
-                Debug.Log($"[FiresVoxel] re-inserted '{PrefabName}' into new ZNetScene dict.");
+                FiresLogger.LogInfo($"[FiresVoxel] re-inserted '{PrefabName}' into new ZNetScene dict.");
                 return true;
             }
 
@@ -52,7 +55,7 @@ namespace VerdantsAscent.Terrain.Voxel
             catch { }
             if (src == null)
             {
-                Debug.LogError($"[FiresVoxel] anchor source '{SourcePrefabName}' missing from FAT bundle — voxel persistence unavailable.");
+                FiresLogger.LogError($"[FiresVoxel] anchor source '{SourcePrefabName}' missing from FAT bundle — voxel persistence unavailable.");
                 return false;
             }
 
@@ -70,7 +73,7 @@ namespace VerdantsAscent.Terrain.Voxel
             try { _ = clone.name; }
             catch
             {
-                Debug.LogError("[FiresVoxel] anchor clone failed name validation — not registering.");
+                FiresLogger.LogError("[FiresVoxel] anchor clone failed name validation — not registering.");
                 return false;
             }
 
@@ -90,9 +93,35 @@ namespace VerdantsAscent.Terrain.Voxel
             ZNetScene.instance.m_namedPrefabs[hash] = clone;
             _prefab = clone;
             _registered = true;
-            Debug.Log($"[FiresVoxel] registered anchor prefab '{PrefabName}' (named-only, from {SourcePrefabName}).");
+            FiresLogger.LogInfo($"[FiresVoxel] registered anchor prefab '{PrefabName}' (named-only, from {SourcePrefabName}).");
             return true;
         }
+
+        // The anchor ZDO for a chunk, found without a live instance. A dedicated server holds no GameObjects where the
+        // players are (its reference position is parked off-world), so the component registry is empty there and every
+        // save would otherwise write a SECOND anchor for the same chunk. The newest one then loses to the established
+        // one on the clients, which is why a chunk stamped twice - a placement and its undo - kept the first land.
+        internal static ZDO FindZdo(Vector3Int key, Vector3 at)
+        {
+            var zdoMan = ZDOMan.instance;
+            if (zdoMan == null) return null;
+            var bySector = ObjectsBySectorRef(zdoMan);
+            if (bySector == null) return null;
+            uint sector = ZoneSystem.GetSectorIndex(at).Sector;
+            if (sector >= bySector.Length) return null;
+            var inSector = bySector[sector];
+            if (inSector == null) return null;
+            foreach (var zdo in inSector)
+                if (zdo != null && zdo.GetPrefab() == PrefabHash
+                    && zdo.GetInt(ZDO_KX, int.MinValue) == key.x
+                    && zdo.GetInt(ZDO_KY, int.MinValue) == key.y
+                    && zdo.GetInt(ZDO_KZ, int.MinValue) == key.z)
+                    return zdo;
+            return null;
+        }
+
+        private static readonly AccessTools.FieldRef<ZDOMan, System.Collections.Generic.List<ZDO>[]> ObjectsBySectorRef =
+            AccessTools.FieldRefAccess<ZDOMan, System.Collections.Generic.List<ZDO>[]>("m_objectsBySector");
 
         public static GameObject Spawn(Vector3 pos)
         {
@@ -108,14 +137,6 @@ namespace VerdantsAscent.Terrain.Voxel
             finally { _prefab.SetActive(wasActive); }
             go.SetActive(true);
             return go;
-        }
-
-        [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-        private static class ZNetScene_Awake_EnsureVoxelAnchor
-        {
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.Last)]
-            private static void Postfix() => Ensure();
         }
     }
 }

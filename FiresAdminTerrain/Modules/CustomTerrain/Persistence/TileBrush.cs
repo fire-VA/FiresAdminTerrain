@@ -88,6 +88,45 @@ namespace VerdantsAscent.Terrain.Persistence
             return touched;
         }
 
+        // Set every vertex in the footprint to `altitude` plus a tilt along
+        // `angle`, totalling `amount` across the footprint. `smooth` fades the
+        // tilt toward the edge. World Edit Commands' slope, on tiles.
+        public static int BrushSlope(Vector3 center, float radius, float angle, float altitude, float amount, float smooth, bool square)
+        {
+            if (radius <= 0f)
+            {
+                FiresLogger.LogWarning($"[TileBrush.BrushSlope] radius<=0 ({radius}); no-op");
+                return 0;
+            }
+
+            int touched = 0;
+            int verts = 0;
+
+            TileUndoLog.BeginOperation($"VATileSlope:alt={altitude:F1},amt={amount:F1}", center, radius);
+
+            foreach (var tileXZ in TileAnchorRegistry.TilesOverlappingCircle(center, radius))
+            {
+                var anchor = TileAnchor.Spawn(tileXZ);
+                if (anchor == null) continue;
+
+                int wroteThisTile = anchor.ApplyOpAndSave(tile =>
+                    ApplySlopeToTile(tile, center, radius, angle, altitude, amount, smooth, square));
+
+                if (wroteThisTile > 0)
+                {
+                    touched++;
+                    verts += wroteThisTile;
+                }
+            }
+
+            if (touched > 0) StitchTileBorders(center, radius);
+
+            TileUndoLog.EndOperation();
+
+            FiresLogger.LogVerbose($"[TileBrush.BrushSlope] center={center} r={radius} alt={altitude} amt={amount} angle={angle} sq={square} -> {touched} tiles, {verts} verts");
+            return touched;
+        }
+
         // Raise terrain inside the radius by `delta`. Falloff: 0=hard edge,
         // 1=linear, >1=power curve (sharper falloff at edge). Matches
         // vanilla RaiseTerrain semantics so behavior is intuitive to users
@@ -182,6 +221,23 @@ namespace VerdantsAscent.Terrain.Persistence
             }
 
             TileUndoLog.EndOperation();
+
+            // UNIFIED PAINT: mirror the stroke into the VANILLA terrain system when the
+            // colour maps to a canonical paint type — so a tool stroke crossing off our
+            // anchored tiles keeps painting on plain vanilla ground instead of stopping
+            // in a straight line at the tile border. Runs vanilla's own owner-RPC (exact
+            // math, MP-correct). Non-canonical colours stay tile-only (the vanilla mask
+            // RPC can only carry the 4 paint types). NOTE: the vanilla side has no undo.
+            if (!square)
+            {
+                var vt = VerdantsAscent.Terrain.Paint.FiresUnifiedPaint.ColorToPaintType(color);
+                if (vt.HasValue)
+                {
+                    int mirrored = VerdantsAscent.Terrain.Paint.FiresUnifiedPaint.MirrorPaint(center, radius, vt.Value, false);
+                    if (mirrored > 0)
+                        FiresLogger.LogVerbose($"[TileBrush.BrushPaint] mirrored to {mirrored} vanilla comp(s) as {vt.Value}.");
+                }
+            }
 
             FiresLogger.LogVerbose($"[TileBrush.BrushPaint] center={center} r={radius} color=#{color.r:X2}{color.g:X2}{color.b:X2}{color.a:X2} sq={square} → {touched} tiles, {verts} verts");
             return touched;
@@ -678,6 +734,44 @@ namespace VerdantsAscent.Terrain.Persistence
             }
             return wrote;
         }
+
+        // Normalised footprint edge and WEC's amount halving, spelled out.
+        private const float SlopeEdgeDistance = 1f;
+        private const float SlopeHalfAmount = 0.5f;
+
+        // Height is a pure function of world position here, so tiles sharing a
+        // border vertex agree without a neighbour-aware baseline.
+        private static int ApplySlopeToTile(TerrainTile tile, Vector3 center, float radius, float angle,
+                                            float altitude, float amount, float smooth, bool square)
+        {
+            ComputeVertexRange(tile, center, radius, out int iMin, out int iMax, out int jMin, out int jMax);
+
+            int wrote = 0;
+            float originX = tile.TileXZ.x * TerrainTile.TILE_SIZE;
+            float originZ = tile.TileXZ.y * TerrainTile.TILE_SIZE;
+            int gridSize = TerrainTileCodec.VERTEX_GRID_SIZE;
+
+            for (int j = jMin; j <= jMax; j++)
+            for (int i = iMin; i <= iMax; i++)
+            {
+                float nx = (originX + i * TerrainTile.VERTEX_SPACING - center.x) / radius;
+                float nz = (originZ + j * TerrainTile.VERTEX_SPACING - center.z) / radius;
+                float distance = square ? Mathf.Max(Mathf.Abs(nx), Mathf.Abs(nz)) : Mathf.Sqrt(nx * nx + nz * nz);
+                if (distance > SlopeEdgeDistance) continue;
+
+                int idx = j * gridSize + i;
+                tile.Heights[idx] = altitude
+                    + SlopeTilt(angle, nx, nz) * SlopeSmoothFactor(smooth, distance) * amount * SlopeHalfAmount;
+                tile.HeightModified[idx] = true;
+                wrote++;
+            }
+            return wrote;
+        }
+
+        private static float SlopeTilt(float angle, float nx, float nz) => Mathf.Sin(angle) * nx + Mathf.Cos(angle) * nz;
+
+        private static float SlopeSmoothFactor(float smooth, float distance)
+            => (SlopeEdgeDistance - distance) >= smooth ? 1f : (SlopeEdgeDistance - distance) / smooth;
 
         private static int ApplyRaiseToTile(TerrainTile tile, Vector3 center, float radius, float delta, float falloff)
         {
@@ -1677,15 +1771,36 @@ namespace VerdantsAscent.Terrain.Persistence
             {
                 float wx = originX + i * TerrainTile.VERTEX_SPACING;
                 float wz = originZ + j * TerrainTile.VERTEX_SPACING;
-                if (!square)
+                int idx = j * TerrainTileCodec.VERTEX_GRID_SIZE + i;
+
+                if (square)
                 {
-                    float dx = wx - center.x;
-                    float dz = wz - center.z;
-                    if (dx * dx + dz * dz > r2) continue;
+                    // Square fill stays a hard set (vanilla has no square paint).
+                    tile.Paint[idx] = color;
+                    tile.PaintModified[idx] = true;
+                    wrote++;
+                    continue;
                 }
 
-                int idx = j * TerrainTileCodec.VERTEX_GRID_SIZE + i;
-                tile.Paint[idx] = color;
+                float dx = wx - center.x;
+                float dz = wz - center.z;
+                float d2 = dx * dx + dz * dz;
+                if (d2 > r2) continue;
+
+                // VANILLA-EXACT falloff (TerrainComp.PaintCleared verbatim):
+                //   t = pow(1 - clamp01(d / r), 0.1), lerp toward the target colour,
+                //   ALPHA PRESERVED (alpha is the cleared-vegetation channel, managed
+                //   by its own ops). The old hard `Paint[idx] = color` fill made tile
+                //   strokes edge differently from vanilla strokes — the last visible
+                //   difference across a tile/vanilla boundary. One formula, no seam.
+                float t = Mathf.Pow(1f - Mathf.Clamp01(Mathf.Sqrt(d2) / radius), 0.1f);
+                Color cur = tile.Paint[idx];
+                Color blended = Color.Lerp(cur, color, t);
+                // Vanilla preserves alpha because its masks always carry meaningful
+                // worldgen alpha. A FRESH tile vert's alpha is just unset (0) — first
+                // touch stamps the tool's alpha (old behaviour), repaints preserve.
+                blended.a = tile.PaintModified[idx] ? cur.a : ((Color)color).a;
+                tile.Paint[idx] = blended;
                 tile.PaintModified[idx] = true;
                 wrote++;
             }

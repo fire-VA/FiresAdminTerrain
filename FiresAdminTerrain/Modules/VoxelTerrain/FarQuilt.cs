@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
-using VerdantsAscent.Terrain.Utilities;
+using FiresCore.Materials;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
@@ -31,6 +31,8 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             public GameObject Go;
             public Mesh Mesh;
+            public Texture2D Mask;      // per-tile paint mask (cache + wet band), pooled with the tile
+            public bool MaskDone;       // false = mask (re)build queued
         }
 
         private static readonly Dictionary<Vector3Int, Tile> s_tiles = new Dictionary<Vector3Int, Tile>();
@@ -41,6 +43,18 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float s_next;
         private static float s_nextStatus;
         private static bool s_gridWasUnready;
+
+        // Vanilla's overworld render group flipped (interior entered or left).
+        // The distant LOD it stands in for is a Heightmap, so it follows the
+        // same group. Tiles are render-only, so the renderer is the whole state.
+        internal static void RefreshVisibility()
+        {
+            foreach (var kv in s_tiles)
+            {
+                var go = kv.Value != null ? kv.Value.Go : null;
+                if (go != null) VoxelRenderGroup.Apply(go.GetComponent<MeshRenderer>());
+            }
+        }
 
         // Live (non-tombstone) tile count — the fail-open gate for the
         // vanilla distant-LOD handoff.
@@ -63,17 +77,21 @@ namespace VerdantsAscent.Terrain.Voxel
         // budget, per-build material rebind, analytic tangents, far-ring
         // waterline clamp. Same material and same height function as the
         // voxel skin — one look, one owner.
-        [HarmonyPatch(typeof(ZoneSystem), "Start")]
-        private static class ZoneSystem_Start_FiresLod
+        // From FAT's one ZoneSystem.Start hook (FatVanillaHooks).
+        internal static void OnZoneSystemStart()
         {
-            [HarmonyPostfix]
-            private static void Postfix()
-            {
-                if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
-                if (s_root != null) return;
-                s_root = new GameObject("FiresLod");
-                s_root.AddComponent<QuiltDriver>();
-            }
+            if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
+            if (s_root != null) return;
+            s_root = new GameObject("FiresLod");
+            s_root.AddComponent<QuiltDriver>();
+        }
+
+        // The far field plus a chunk world's start-cave hill, so the far mesh agrees with the near voxels there.
+        private static float FarHeight(float wx, float wz)
+        {
+            float h = FiresWorldGenBase.SampleFinalMeters(wx, wz);
+            Zones.ZoneModeStartCave.AddHill(wx, wz, ref h);
+            return h;
         }
 
         private sealed class QuiltDriver : MonoBehaviour
@@ -83,13 +101,21 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (Time.time < s_next) return;
                 s_next = Time.time + TICK;
                 try { Tick(); }
-                catch (System.Exception ex) { Debug.LogWarning($"[FiresVoxel] far quilt tick threw: {ex.Message}"); }
+                catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] far quilt tick threw: {ex.Message}"); }
             }
 
             private void OnDestroy()
             {
+                // GOs/meshes die with the scene, but HideAndDontSave mask
+                // textures do NOT — destroy them or they leak across logins.
+                foreach (var kv in s_tiles)
+                    if (kv.Value.Mask != null) Destroy(kv.Value.Mask);
+                while (s_pool.Count > 0)
+                {
+                    var t = s_pool.Pop();
+                    if (t.Mask != null) Destroy(t.Mask);
+                }
                 s_tiles.Clear();
-                s_pool.Clear();
                 s_root = null;
             }
         }
@@ -121,7 +147,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (s_tiles.Count > 0)
                 {
                     ClearAll();
-                    Debug.Log("[FiresVoxel] far quilt: worldgen grid became ready — rebuilt all tiles (pre-grid tiles were sea-floor garbage).");
+                    FiresLogger.LogInfo("[FiresVoxel] far quilt: worldgen grid became ready — rebuilt all tiles (pre-grid tiles were sea-floor garbage).");
                 }
             }
             var player = Player.m_localPlayer;
@@ -176,6 +202,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (BuildTile(key, c, near)) built++;
             }
 
+            DrainMasks();
+
             // Status heartbeat — the lod must never fail silently again.
             if (Time.time >= s_nextStatus)
             {
@@ -190,11 +218,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     // A VISIBLE near tile over SOLID voxel territory is the
                     // phantom analytic sheet (no carves, no collision) — the
                     // exact artifact the user screenshotted. Never silent.
-                    if (kv.Key.y == 0 && VoxelZoneStreamer.IsZoneSolid(new Vector2i(kv.Key.x, kv.Key.z)))
+                    if (kv.Key.y == 0 && VoxelZoneStreamer.IsZoneSolid(new Vector2s(kv.Key.x, kv.Key.z)))
                         phantom++;
                 }
                 if (phantom > 0)
-                    Debug.LogError($"[FiresVoxel] far quilt: {phantom} PHANTOM near tile(s) visible over voxel territory — analytic sheets are covering real carved ground!");
+                    FiresLogger.LogError($"[FiresVoxel] far quilt: {phantom} PHANTOM near tile(s) visible over voxel territory — analytic sheets are covering real carved ground!");
                 if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value)
                 {
                     // COVERAGE PROOF, not just counts: what material the lod
@@ -220,8 +248,9 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (kv.Key.y == 0) { if (dTile < nearestNear) nearestNear = dTile; }
                         else { if (dTile < nearestFar) nearestFar = dTile; }
                     }
-                    Debug.Log($"[FiresVoxel] far quilt: want={s_want.Count} live={live} visible={shown} tombstones={tomb} pool={s_pool.Count} builtThisTick={built} " +
-                        $"| mat='{matName}' nearestVisible near={(nearestNear < float.MaxValue ? $"{nearestNear:F0}m" : "NONE")} far={(nearestFar < float.MaxValue ? $"{nearestFar:F0}m" : "NONE")}");
+                    // (coverage-proof heartbeat retired — quilt is stable; the
+                    // PHANTOM error above still fires on real regressions)
+                    _ = matName; _ = nearestNear; _ = nearestFar;
                 }
             }
         }
@@ -239,6 +268,162 @@ namespace VerdantsAscent.Terrain.Voxel
                 var mr = go.GetComponent<MeshRenderer>();
                 if (mr != null && mr.sharedMaterial != mat) mr.sharedMaterial = mat;
             }
+        }
+
+        // ── W3-A4b: per-tile PAINT masks ─────────────────────────────────
+        // The quilt wears the shared captured material whose _ClearedMaskTex
+        // is a 1x1 "no paint" — the horizon rendered NO paint at all: no
+        // cached player paint, no worldgen river band, so painted river beds
+        // cut off at the loaded-zone edge. Each tile gets a 65x65 mask
+        // composed by DistantPaintCache.OverlayMask (visited-zone cache +
+        // PaintWet01 wet band) and bound per-renderer via
+        // MaterialPropertyBlock — the VoxelChunkView idiom, shared material
+        // untouched — plus the tile's local gen waterline so inland shores
+        // darken on the horizon exactly like the near field.
+        private const int MASK_RES = 65;
+        private static readonly int s_maskProp = Shader.PropertyToID("_ClearedMaskTex");
+        private static readonly int s_localWaterProp = Shader.PropertyToID("_FiresLocalWaterY");
+        private static Color32[] s_maskPx;
+        private static MaterialPropertyBlock s_mpb;
+        private static bool s_masksShutdown;
+
+        private static void DrainMasks()
+        {
+            if (!Paint.DistantPaintCache.MaskFeatureOn)
+            {
+                // Live-toggle heal: clear every bound mask once, re-mask on re-enable.
+                if (!s_masksShutdown)
+                {
+                    s_masksShutdown = true;
+                    foreach (var kv in s_tiles)
+                    {
+                        var t = kv.Value;
+                        if (t.Go == null) continue;
+                        var mr = t.Go.GetComponent<MeshRenderer>();
+                        if (mr != null) mr.SetPropertyBlock(null);
+                        if (t.Mask != null) { Object.Destroy(t.Mask); t.Mask = null; }
+                        t.MaskDone = false;
+                    }
+                }
+                return;
+            }
+            s_masksShutdown = false;
+            // Wet layer not queryable yet → every mask built now would need a
+            // rebuild the moment it is. Wait — near paint appears at the same
+            // readiness point, so the horizon stays consistent with the field.
+            if (FiresWorldGenBase.Active && !FiresWorldGenBase.WaterSurfaceReady) return;
+            int pending = 0;
+            foreach (var kv in s_tiles)
+                if (kv.Value.Go != null && !kv.Value.MaskDone) pending++;
+            if (pending == 0) return;
+            int budget = pending > 60 ? 12 : 4;
+            foreach (var kv in s_tiles)
+            {
+                if (budget <= 0) break;
+                var t = kv.Value;
+                if (t.Go == null || t.MaskDone) continue;
+                budget--;
+                BuildMask(kv.Key, t);
+            }
+        }
+
+        private static void BuildMask(Vector3Int key, Tile t)
+        {
+            t.MaskDone = true;
+            float size = key.y == 0 ? 64f : 256f;
+            float ox = key.y == 0 ? key.x * 64f - 32f : key.x * 256f;
+            float oz = key.y == 0 ? key.z * 64f - 32f : key.z * 256f;
+            float texel = size / (MASK_RES - 1);
+
+            if (s_maskPx == null) s_maskPx = new Color32[MASK_RES * MASK_RES];
+            var px = s_maskPx;
+            // In ASHLANDS the mask ALPHA is LAVA (vanilla GetVegetationMask
+            // semantics) — the old flat 255 default rendered every far tile
+            // in the crescent fully molten (user screenshot: all low-LOD
+            // Ashlands reads as lava). Ashlands texels take the WORLDGEN
+            // lava value (caldera pools, flows, flats fields); everywhere
+            // else keeps the 255 default the quilt shader expects.
+            for (int j = 0; j < MASK_RES; j++)
+                for (int i2 = 0; i2 < MASK_RES; i2++)
+                {
+                    float pxw = ox + i2 * texel, pzw = oz + j * texel;
+                    byte aDef = 255;
+                    if (FiresWorldGenBase.BiomeCodeAt(pxw, pzw) == 6)
+                        aDef = (byte)(Mathf.Clamp01(FiresWorldGenBase.SampleLavaMask(pxw, pzw).a) * 255f);
+                    px[j * MASK_RES + i2] = new Color32(0, 0, 0, aDef);
+                }
+            Paint.DistantPaintCache.OverlayMask(ox, oz, texel, MASK_RES, px,
+                out bool changed, out bool wetPending);
+            if (wetPending) { t.MaskDone = false; return; }
+
+            // Local gen waterline — coarse max over the footprint, the
+            // VoxelWorld.RefreshPaintMask recipe (0 = dry, shader collapses
+            // to vanilla).
+            float waterY = 0f;
+            if (FiresWorldGenBase.Active && FiresWorldGenBase.WaterSurfaceReady)
+            {
+                float stepC = size * 0.25f;
+                for (int j = 0; j <= 4; j++)
+                    for (int i = 0; i <= 4; i++)
+                    {
+                        float pxw = ox + i * stepC, pzw = oz + j * stepC;
+                        // Cold-biome water never feeds the sand band — snow
+                        // shores stay snow on the horizon too.
+                        byte pb = FiresWorldGenBase.BiomeCodeAt(pxw, pzw);
+                        if (pb == 3 || pb == 7) continue;
+                        if (FiresWorldGenBase.TryGetWaterSurfaceSmooth(pxw, pzw, out float lvl, out float depth)
+                            && depth >= 0.25f && lvl > 30.25f && lvl > waterY)
+                            waterY = lvl;
+                    }
+            }
+
+            var mr = t.Go.GetComponent<MeshRenderer>();
+            if (mr == null) return;
+            if (changed)
+            {
+                if (t.Mask == null)
+                    t.Mask = new Texture2D(MASK_RES, MASK_RES, TextureFormat.RGBA32, mipChain: false)
+                    {
+                        name = "FarQuiltPaint",
+                        filterMode = FilterMode.Bilinear,
+                        wrapMode = TextureWrapMode.Clamp,
+                        hideFlags = HideFlags.HideAndDontSave,
+                    };
+                t.Mask.SetPixels32(px);
+                t.Mask.Apply(false, false);
+            }
+            else if (t.Mask != null)
+            {
+                // Pooled tile that carried paint at its old position — drop it.
+                Object.Destroy(t.Mask);
+                t.Mask = null;
+            }
+            if (t.Mask == null && waterY <= 0f) { mr.SetPropertyBlock(null); return; }
+            if (s_mpb == null) s_mpb = new MaterialPropertyBlock();
+            s_mpb.Clear();
+            if (t.Mask != null) s_mpb.SetTexture(s_maskProp, t.Mask);
+            s_mpb.SetFloat(s_localWaterProp, waterY);
+            mr.SetPropertyBlock(s_mpb);
+        }
+
+        // A zone's paint changed (fresh TerrainComp capture) — the lod tiles
+        // covering it re-mask. Called by DistantPaintCache.Capture.
+        public static void OnZonePaintChanged(Vector2s zone)
+        {
+            if (s_tiles.Count == 0) return;
+            if (s_tiles.TryGetValue(new Vector3Int(zone.x, 0, zone.y), out var n) && n.Go != null)
+                n.MaskDone = false;
+            // A 64m zone can straddle up to 2x2 far supertiles.
+            float minX = zone.x * 64f - 32f, minZ = zone.y * 64f - 32f;
+            for (int dz = 0; dz <= 1; dz++)
+                for (int dx = 0; dx <= 1; dx++)
+                {
+                    var fk = new Vector3Int(
+                        Mathf.FloorToInt((minX + dx * 63.9f) / 256f), 1,
+                        Mathf.FloorToInt((minZ + dz * 63.9f) / 256f));
+                    if (s_tiles.TryGetValue(fk, out var f) && f.Go != null)
+                        f.MaskDone = false;
+                }
         }
 
         private static void TileCenter(Vector3Int key, out float cx, out float cz, out float size)
@@ -260,7 +445,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // window the tile coexists with the growing voxel mesh
                 // (analytic ≈ uncarved surface, −0.8m under it) — a far,
                 // brief, tolerable overlap instead of a hole in the world.
-                show = !VoxelZoneStreamer.IsZoneSolid(new Vector2i(key.x, key.z));
+                show = !VoxelZoneStreamer.IsZoneSolid(new Vector2s(key.x, key.z));
             }
             else
             {
@@ -303,7 +488,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int x = 0; x < verts; x++)
                 {
                     float wx = ox + x * step, wz = oz + z * step;
-                    float h = FiresWorldGenBase.SampleFinalMeters(wx, wz);
+                    float h = FarHeight(wx, wz);
                     if (h > maxH) maxH = h;
                     int i = z * verts + x;
                     vs[i] = new Vector3(wx - ox, h, wz - oz);
@@ -334,10 +519,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int x = 0; x < verts; x++)
                 {
                     int i = z * verts + x;
-                    float hl = x > 0 ? vs[(x - 1) + z * verts].y : FiresWorldGenBase.SampleFinalMeters(ox - step, oz + z * step);
-                    float hr = x < verts - 1 ? vs[(x + 1) + z * verts].y : FiresWorldGenBase.SampleFinalMeters(ox + size + step, oz + z * step);
-                    float hd = z > 0 ? vs[x + (z - 1) * verts].y : FiresWorldGenBase.SampleFinalMeters(ox + x * step, oz - step);
-                    float hu = z < verts - 1 ? vs[x + (z + 1) * verts].y : FiresWorldGenBase.SampleFinalMeters(ox + x * step, oz + size + step);
+                    float hl = x > 0 ? vs[(x - 1) + z * verts].y : FarHeight(ox - step, oz + z * step);
+                    float hr = x < verts - 1 ? vs[(x + 1) + z * verts].y : FarHeight(ox + size + step, oz + z * step);
+                    float hd = z > 0 ? vs[x + (z - 1) * verts].y : FarHeight(ox + x * step, oz - step);
+                    float hu = z < verts - 1 ? vs[x + (z + 1) * verts].y : FarHeight(ox + x * step, oz + size + step);
                     norms[i] = new Vector3(hl - hr, 2f * step, hd - hu).normalized;
                 }
             }
@@ -389,6 +574,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 var mr2 = tile.Go.GetComponent<MeshRenderer>();
                 var cur = TerrainMaterialCache.GetCurrentMaterial();
                 if (mr2 != null && cur != null && mr2.sharedMaterial != cur) mr2.sharedMaterial = cur;
+                // A pooled tile's mask belongs to its OLD position — never let
+                // it show here. Cleared now, rebuilt by the mask drain.
+                if (mr2 != null) mr2.SetPropertyBlock(null);
+                VoxelRenderGroup.Apply(mr2);
+                tile.MaskDone = false;
             }
             // Underlay depth must clear the surface-nets reconstruction band
             // AND the quilt's own chord overshoot: heightfields sampled at 2m
@@ -444,9 +634,18 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (kv.Value.Go != null) Object.Destroy(kv.Value.Go);
                 if (kv.Value.Mesh != null) Object.Destroy(kv.Value.Mesh);
+                if (kv.Value.Mask != null) Object.Destroy(kv.Value.Mask);
             }
             s_tiles.Clear();
-            s_pool.Clear();
+            // Pooled tiles hold GOs/meshes/masks too — HideAndDontSave masks
+            // survive scene unloads, so they MUST be destroyed explicitly.
+            while (s_pool.Count > 0)
+            {
+                var t = s_pool.Pop();
+                if (t.Go != null) Object.Destroy(t.Go);
+                if (t.Mesh != null) Object.Destroy(t.Mesh);
+                if (t.Mask != null) Object.Destroy(t.Mask);
+            }
         }
     }
 }

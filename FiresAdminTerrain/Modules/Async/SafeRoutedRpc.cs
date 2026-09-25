@@ -9,7 +9,7 @@ namespace VerdantsAscent.Async
     ///
     /// WHY THIS EXISTS
     /// ---------------
-    /// Valheim's Steam transport (<c>ZSteamSocket</c> ? <c>SteamNetworkingSockets</c>) has
+    /// Valheim's Steam transport (<c>ZSteamSocket</c> -> <c>SteamNetworkingSockets</c>) has
     /// a hard per-message ceiling of 512 KB (<c>k_cbMaxSteamNetworkingSocketsMessageSizeSend</c>).
     /// When we call <see cref="ZRoutedRpc.InvokeRoutedRPC(long, string, object[])"/> multiple
     /// times in the same frame, the routed packages get queued and then SHIPPED TOGETHER
@@ -25,14 +25,14 @@ namespace VerdantsAscent.Async
     ///
     /// RULES ENFORCED
     /// --------------
-    ///  * <see cref="MaxSafeMessageBytes"/> ? we refuse to dispatch any single ZPackage
+    ///  * <see cref="MaxSafeMessageBytes"/> - we refuse to dispatch any single ZPackage
     ///    whose serialised payload exceeds this budget. Senders MUST chunk below it.
-    ///  * <see cref="PacedChunkedSend"/> ? coroutine-driven chunk pump that yields a
+    ///  * <see cref="PacedChunkedSend"/> - coroutine-driven chunk pump that yields a
     ///    frame between chunks so <c>ZSteamSocket</c> actually flushes each chunk as
     ///    its own Steam message instead of aggregating them.
     ///
     /// EVERY call site that invokes a routed RPC should go through <see cref="InvokeSafe"/>
-    /// (or the paced chunker). The size-check is defence in depth ? it prevents a
+    /// (or the paced chunker). The size-check is defence in depth - it prevents a
     /// regression somewhere else in the codebase from ever reaching Steam's assertion.
     /// </summary>
     public static class SafeRoutedRpc
@@ -61,12 +61,12 @@ namespace VerdantsAscent.Async
         {
             if (ZRoutedRpc.instance == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] Dropping '{method}' ? ZRoutedRpc.instance is null (target={target}).");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] Dropping '{method}' - ZRoutedRpc.instance is null (target={target}).");
                 return false;
             }
             if (pkg == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] Dropping '{method}' ? ZPackage is null (target={target}).");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] Dropping '{method}' - ZPackage is null (target={target}).");
                 return false;
             }
 
@@ -78,15 +78,15 @@ namespace VerdantsAscent.Async
             }
             catch
             {
-                // If we can't measure it, refuse to send ? better a dropped RPC than a
+                // If we can't measure it, refuse to send - better a dropped RPC than a
                 // Steam assertion cascade that desyncs every connected peer.
-                Debug.LogWarning($"[SafeRoutedRpc] Dropping '{method}' ? ZPackage.GetArray() threw (target={target}).");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] Dropping '{method}' - ZPackage.GetArray() threw (target={target}).");
                 return false;
             }
 
             if (size > MaxSafeMessageBytes)
             {
-                Debug.LogError(
+                FiresLogger.LogError(
                     $"[SafeRoutedRpc] REFUSING to send oversize RPC '{method}' " +
                     $"({size:N0} B > {MaxSafeMessageBytes:N0} B cap, target={target}). " +
                     "Caller must chunk this payload via SafeRoutedRpc.PacedChunkedSend.");
@@ -100,14 +100,14 @@ namespace VerdantsAscent.Async
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] InvokeRoutedRPC('{method}') threw: {ex.Message}");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeRoutedRPC('{method}') threw: {ex.Message}");
                 return false;
             }
         }
 
         /// <summary>
         /// Overload for the target-less <c>ZRoutedRpc.InvokeRoutedRPC(methodName, params)</c>
-        /// form (routes the package via Valheim's default target resolution ? typically
+        /// form (routes the package via Valheim's default target resolution - typically
         /// to the server when called from a client). Same size-gating semantics as
         /// <see cref="InvokeSafe(long, string, ZPackage)"/>.
         /// </summary>
@@ -115,12 +115,12 @@ namespace VerdantsAscent.Async
         {
             if (ZRoutedRpc.instance == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] Dropping '{method}' ? ZRoutedRpc.instance is null.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] Dropping '{method}' - ZRoutedRpc.instance is null.");
                 return false;
             }
             if (pkg == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] Dropping '{method}' ? ZPackage is null.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] Dropping '{method}' - ZPackage is null.");
                 return false;
             }
 
@@ -128,13 +128,13 @@ namespace VerdantsAscent.Async
             try { size = pkg.GetArray()?.Length ?? 0; }
             catch
             {
-                Debug.LogWarning($"[SafeRoutedRpc] Dropping '{method}' ? ZPackage.GetArray() threw.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] Dropping '{method}' - ZPackage.GetArray() threw.");
                 return false;
             }
 
             if (size > MaxSafeMessageBytes)
             {
-                Debug.LogError(
+                FiresLogger.LogError(
                     $"[SafeRoutedRpc] REFUSING to send oversize RPC '{method}' " +
                     $"({size:N0} B > {MaxSafeMessageBytes:N0} B cap). " +
                     "Caller must chunk this payload via SafeRoutedRpc.PacedChunkedSend.");
@@ -148,7 +148,7 @@ namespace VerdantsAscent.Async
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] InvokeRoutedRPC('{method}') threw: {ex.Message}");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeRoutedRPC('{method}') threw: {ex.Message}");
                 return false;
             }
         }
@@ -162,7 +162,7 @@ namespace VerdantsAscent.Async
         /// The caller supplies a <paramref name="fillPackage"/> delegate that gets a fresh
         /// <see cref="ZPackage"/> plus the current (chunkIndex, totalChunks) and the raw
         /// chunk bytes. The delegate is responsible for writing any per-call metadata
-        /// (nonce, file name, total size, etc.) followed by the chunk payload ? keeping
+        /// (nonce, file name, total size, etc.) followed by the chunk payload - keeping
         /// the wire format private to each caller.
         ///
         /// The produced ZPackage is dispatched via <see cref="InvokeSafe"/>, so any chunk
@@ -174,7 +174,7 @@ namespace VerdantsAscent.Async
         /// <param name="payload">Raw payload bytes to chunk. Never null (use empty array).</param>
         /// <param name="chunkBytes">Per-chunk payload ceiling. Defaults to <see cref="DefaultChunkBytes"/>.</param>
         /// <param name="fillPackage">
-        /// (pkg, chunkIndex, totalChunks, chunkSlice) ? populate the package. Must not
+        /// (pkg, chunkIndex, totalChunks, chunkSlice) - populate the package. Must not
         /// invoke the RPC; the coroutine does that.
         /// </param>
         /// <param name="onComplete">Optional callback fired after the last chunk is dispatched
@@ -189,7 +189,7 @@ namespace VerdantsAscent.Async
         {
             if (fillPackage == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] PacedChunkedSend('{method}') ? fillPackage delegate is null, aborting.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] PacedChunkedSend('{method}') - fillPackage delegate is null, aborting.");
                 onComplete?.Invoke(0);
                 yield break;
             }
@@ -207,8 +207,8 @@ namespace VerdantsAscent.Async
             {
                 if (ZRoutedRpc.instance == null)
                 {
-                    Debug.LogWarning($"[SafeRoutedRpc] PacedChunkedSend('{method}') aborted at chunk " +
-                                     $"{chunkIndex + 1}/{totalChunks} ? ZRoutedRpc gone.");
+                    FiresLogger.LogWarning($"[SafeRoutedRpc] PacedChunkedSend('{method}') aborted at chunk " +
+                                     $"{chunkIndex + 1}/{totalChunks} - ZRoutedRpc gone.");
                     break;
                 }
 
@@ -235,7 +235,7 @@ namespace VerdantsAscent.Async
                 }
                 catch (Exception fillEx)
                 {
-                    Debug.LogWarning($"[SafeRoutedRpc] PacedChunkedSend('{method}') fillPackage threw on chunk " +
+                    FiresLogger.LogWarning($"[SafeRoutedRpc] PacedChunkedSend('{method}') fillPackage threw on chunk " +
                                      $"{chunkIndex + 1}/{totalChunks}: {fillEx.Message}");
                     break;
                 }
@@ -258,11 +258,11 @@ namespace VerdantsAscent.Async
                 // resumed immediately on the next frame and queued chunk N+1, both
                 // chunks would sit in the queue together and the next
                 // SendQueuedPackages call would concatenate them into one
-                // SteamNetworkingSockets.SendMessageToConnection call ? blowing past
+                // SteamNetworkingSockets.SendMessageToConnection call - blowing past
                 // the 512 KB hard cap and triggering the infamous assertion cascade
                 // ("Message size 683789 is too big. Max is 524288"). Yielding TWICE
-                // guarantees at least one full Update tick ? and therefore one
-                // SendQueuedPackages flush ? between successive chunk enqueues.
+                // guarantees at least one full Update tick - and therefore one
+                // SendQueuedPackages flush - between successive chunk enqueues.
                 yield return null;
                 yield return null;
             }
@@ -285,7 +285,7 @@ namespace VerdantsAscent.Async
 
         /// <summary>
         /// Returns true iff a routed-RPC handler's <c>sender</c> argument matches
-        /// our own ZRoutedRpc peer id ? i.e. the handler is currently processing
+        /// our own ZRoutedRpc peer id - i.e. the handler is currently processing
         /// our own <c>Everybody</c> broadcast looping back around. Safe to call
         /// from anywhere; returns false when the RPC layer isn't initialised yet.
         /// </summary>
@@ -308,7 +308,7 @@ namespace VerdantsAscent.Async
         /// is unsafe). Every per-peer dispatch also goes through <see cref="InvokeSafe"/>
         /// so an oversize payload is still refused.
         ///
-        /// No-ops (and returns 0) when called from a non-server peer ? enforce
+        /// No-ops (and returns 0) when called from a non-server peer - enforce
         /// server-only via the caller if stricter semantics are required.
         /// </summary>
         /// <param name="excludePeerId">Peer id to skip. Pass <c>0</c> to send to all
@@ -320,17 +320,17 @@ namespace VerdantsAscent.Async
         {
             if (ZRoutedRpc.instance == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') ? ZRoutedRpc.instance is null.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') - ZRoutedRpc.instance is null.");
                 return 0;
             }
             if (ZNet.instance == null || !ZNet.instance.IsServer())
             {
-                Debug.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') ? caller is not the server, refusing to fan out.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') - caller is not the server, refusing to fan out.");
                 return 0;
             }
             if (pkg == null)
             {
-                Debug.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') ? ZPackage is null.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') - ZPackage is null.");
                 return 0;
             }
 
@@ -338,14 +338,14 @@ namespace VerdantsAscent.Async
             try { snapshot = pkg.GetArray(); }
             catch
             {
-                Debug.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') ? ZPackage.GetArray() threw.");
+                FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeSafeToAllExcept('{method}') - ZPackage.GetArray() threw.");
                 return 0;
             }
             if (snapshot == null) snapshot = Array.Empty<byte>();
 
             if (snapshot.Length > MaxSafeMessageBytes)
             {
-                Debug.LogError(
+                FiresLogger.LogError(
                     $"[SafeRoutedRpc] REFUSING fan-out of oversize RPC '{method}' " +
                     $"({snapshot.Length:N0} B > {MaxSafeMessageBytes:N0} B cap). " +
                     "Caller must chunk via SafeRoutedRpc.PacedChunkedSend.");
@@ -362,14 +362,14 @@ namespace VerdantsAscent.Async
                 if (peer == null) continue;
                 if (peer.m_uid == excludePeerId) continue;
 
-                // Fresh ZPackage per dispatch ? ZPackage is stateful (internal
+                // Fresh ZPackage per dispatch - ZPackage is stateful (internal
                 // read/write cursor), so reusing one instance across multiple
                 // InvokeRoutedRPC calls can deliver a half-read payload.
                 ZPackage perPeer;
                 try { perPeer = new ZPackage(snapshot); }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[SafeRoutedRpc] Failed to rebuild ZPackage for peer {peer.m_uid}: {ex.Message}");
+                    FiresLogger.LogWarning($"[SafeRoutedRpc] Failed to rebuild ZPackage for peer {peer.m_uid}: {ex.Message}");
                     continue;
                 }
 
@@ -380,7 +380,7 @@ namespace VerdantsAscent.Async
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[SafeRoutedRpc] InvokeRoutedRPC('{method}') to peer {peer.m_uid} threw: {ex.Message}");
+                    FiresLogger.LogWarning($"[SafeRoutedRpc] InvokeRoutedRPC('{method}') to peer {peer.m_uid} threw: {ex.Message}");
                 }
             }
             return sent;

@@ -18,21 +18,21 @@ namespace VerdantsAscent.Water.Tools
 
             new Terminal.ConsoleCommand("ice_water_raise",
                 "[args] - Raises floating ice top surface. raise=H for amount, circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => RaiseFloatingIce(args)));
+                (Terminal.ConsoleEventFailable)(args => RaiseFloatingIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("ice_water_lower",
                 "[args] - Lowers floating ice top surface. lower=H for amount, circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => LowerFloatingIce(args)));
+                (Terminal.ConsoleEventFailable)(args => LowerFloatingIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("ice_water_smooth",
                 "[args] - Smooths floating ice top surface. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => SmoothFloatingIce(args)));
+                (Terminal.ConsoleEventFailable)(args => SmoothFloatingIce(args)), isCheat: true);
 
             new Terminal.ConsoleCommand("delete_ice_water",
                 "[args] - Removes floating ice in radius. circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => DeleteFloatingIce(args)));
+                (Terminal.ConsoleEventFailable)(args => DeleteFloatingIce(args)), isCheat: true);
 
-            Debug.Log("[FloatingIceCommands] Initialized - Floating ice commands registered");
+            FiresLogger.LogInfo("[FloatingIceCommands] Initialized - Floating ice commands registered");
         }
 
         private static bool RaiseFloatingIce(Terminal.ConsoleEventArgs args)

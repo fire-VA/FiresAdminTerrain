@@ -102,7 +102,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             if (miss != null)
                             {
                                 faces++; badFaces++; reported++;
-                                Debug.LogWarning(miss);
+                                FiresLogger.LogWarning(miss);
                             }
                         }
                         continue;
@@ -120,7 +120,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (reported < maxReports)
                         {
                             reported++;
-                            Debug.LogWarning(report);
+                            FiresLogger.LogWarning(report);
                         }
                     }
                 }

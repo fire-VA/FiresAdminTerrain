@@ -105,7 +105,7 @@ namespace VerdantsAscent.Water.Core
                     break;
 
                 default:
-                    // Non-hazardous — disable
+                    // Non-hazardous - disable
                     enabled = false;
                     return;
             }
@@ -190,7 +190,7 @@ namespace VerdantsAscent.Water.Core
 
             if (LingeringDuration <= 0f)
             {
-                // No lingering — remove status effect immediately
+                // No lingering - remove status effect immediately
                 var seman = character.GetSEMan();
                 if (seman != null)
                 {
@@ -200,7 +200,7 @@ namespace VerdantsAscent.Water.Core
                             seman.RemoveStatusEffect("Freezing".GetStableHashCode());
                             break;
                         case CustomLiquidType.BoilingWater:
-                            // Boiling has no lingering — stop burning on exit
+                            // Boiling has no lingering - stop burning on exit
                             seman.RemoveStatusEffect("Burning".GetStableHashCode());
                             break;
                     }
@@ -219,7 +219,7 @@ namespace VerdantsAscent.Water.Core
             var freezingSE = seman.GetStatusEffect("Freezing".GetStableHashCode());
             if (freezingSE != null)
             {
-                // Already applied — just reset the timer so it doesn't expire
+                // Already applied - just reset the timer so it doesn't expire
                 freezingSE.ResetTime();
             }
             else
@@ -241,7 +241,7 @@ namespace VerdantsAscent.Water.Core
             var burningSE = seman.GetStatusEffect("Burning".GetStableHashCode());
             if (burningSE != null)
             {
-                // Already applied — just reset the timer so it doesn't expire
+                // Already applied - just reset the timer so it doesn't expire
                 burningSE.ResetTime();
             }
             else

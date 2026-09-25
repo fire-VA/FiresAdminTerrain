@@ -10,25 +10,25 @@ namespace VerdantsAscent.Modules.Utilities
     ///
     /// CONTEXT
     /// -------
-    /// We write to <see cref="Player.m_customData"/> in many places � vault,
+    /// We write to <see cref="Player.m_customData"/> in many places - vault,
     /// per-player companion roster, periodic save ticks, async RPC handlers
     /// triggered by the spawn pipeline. Several of those writes were observed
     /// to fire during lifecycle windows where the engine is still
-    /// initialising the player object � fresh-world first spawn, bed
+    /// initialising the player object - fresh-world first spawn, bed
     /// respawn, dungeon teleport. Modifying customData during that window
     /// has been observed to hard-crash the game (no managed exception,
     /// Player.log truncates mid-spawn).
     ///
     /// DESIGN
     /// ------
-    /// We do NOT skip writes when the gate is closed � that would silently
+    /// We do NOT skip writes when the gate is closed - that would silently
     /// drop authoritative server data, roster updates, vault sync, etc.
     /// Instead, callers wrap their write in <see cref="RunWhenReady"/>:
     /// the work runs immediately if the gate is open, and is otherwise
     /// queued on a hidden driver MonoBehaviour that polls each frame and
     /// fires the action the moment the player becomes ready (or after a
     /// per-call timeout, in which case the action is dropped with a
-    /// warning � bounded so a never-ready player can't grow the queue
+    /// warning - bounded so a never-ready player can't grow the queue
     /// without limit).
     ///
     /// All queue operations run on the Unity main thread; the queue is a
@@ -65,7 +65,7 @@ namespace VerdantsAscent.Modules.Utilities
             if (p == null) return false;
 
             // Detect destroyed-but-not-null reference (common around respawn
-            // and bed-teleport � the C# reference survives a frame or two
+            // and bed-teleport - the C# reference survives a frame or two
             // after Unity has torn down the GameObject).
             try { if (!p) return false; }
             catch { return false; }
@@ -96,7 +96,7 @@ namespace VerdantsAscent.Modules.Utilities
         /// Runs <paramref name="work"/> against <paramref name="player"/>
         /// the moment <see cref="IsReadyForCustomDataWrite"/> returns true,
         /// or after at most <paramref name="timeoutSeconds"/> of waiting
-        /// (in which case the action is dropped with a warning � never
+        /// (in which case the action is dropped with a warning - never
         /// executed against a not-ready player).
         ///
         /// CRITICAL: The action is ALWAYS deferred to at least the next
@@ -106,13 +106,13 @@ namespace VerdantsAscent.Modules.Utilities
         /// <c>Player.OnSpawned</c>. The predicate alone reports the
         /// player as "ready" at that point (m_nview valid, m_customData
         /// non-null, ZNet up, not teleporting) but the engine has not
-        /// finished its post-spawn finalisation � self-routed RPCs that
+        /// finished its post-spawn finalisation - self-routed RPCs that
         /// write <c>m_customData</c> from inside the spawn call stack
         /// hard-crash the game with no managed exception. Running on the
         /// next frame's Update gets us out of that call stack.
         ///
         /// Safe to call from Harmony postfixes, RPC handlers, coroutines,
-        /// and Update methods. Not thread-safe � call from the Unity main
+        /// and Update methods. Not thread-safe - call from the Unity main
         /// thread only (which all Harmony patches and ZRoutedRpc handlers
         /// already do).
         /// </summary>
@@ -122,7 +122,7 @@ namespace VerdantsAscent.Modules.Utilities
             if (player == null)
             {
                 if (VerboseLogging)
-                    Debug.Log($"{LogPrefix} RunWhenReady called with null player � dropping.");
+                    FiresLogger.LogInfo($"{LogPrefix} RunWhenReady called with null player - dropping.");
                 return;
             }
 
@@ -133,7 +133,7 @@ namespace VerdantsAscent.Modules.Utilities
         /// Convenience overload that targets <see cref="Player.m_localPlayer"/>
         /// and re-resolves it at the moment the gate opens. Use this in RPC
         /// handlers that need to apply data to "whichever player is local
-        /// right now" � re-resolving handles the rare case where the
+        /// right now" - re-resolving handles the rare case where the
         /// localPlayer reference changes (character switch) while we were
         /// waiting.
         ///
@@ -178,16 +178,16 @@ namespace VerdantsAscent.Modules.Utilities
             string targetDesc = "<null player>";
             try { if (p != null) targetDesc = p.GetPlayerName() ?? "<unnamed>"; } catch { targetDesc = "<unnameable>"; }
             string workDesc = work?.Method?.DeclaringType?.FullName + "." + (work?.Method?.Name ?? "<unknown>");
-            Debug.Log($"[LoginFreeze][DIAG] PlayerSpawnGate.InvokeWork ENTER target={targetDesc} work={workDesc}");
+            FiresLogger.LogInfo($"[LoginFreeze][DIAG] PlayerSpawnGate.InvokeWork ENTER target={targetDesc} work={workDesc}");
             try { work(p); }
             catch (Exception ex)
             {
-                Debug.LogWarning($"{LogPrefix} deferred action threw: {ex.Message}");
+                FiresLogger.LogWarning($"{LogPrefix} deferred action threw: {ex.Message}");
             }
-            Debug.Log($"[LoginFreeze][DIAG] PlayerSpawnGate.InvokeWork EXIT target={targetDesc} work={workDesc}");
+            FiresLogger.LogInfo($"[LoginFreeze][DIAG] PlayerSpawnGate.InvokeWork EXIT target={targetDesc} work={workDesc}");
         }
 
-        // ??????????????????????????? DRIVER ???????????????????????????
+        // =========================== DRIVER ===========================
 
         /// <summary>
         /// Hidden MonoBehaviour that polls queued entries every frame.
@@ -225,7 +225,7 @@ namespace VerdantsAscent.Modules.Utilities
             {
                 if (_queue.Count >= MAX_QUEUED)
                 {
-                    Debug.LogWarning($"{LogPrefix} queue at MAX_QUEUED ({MAX_QUEUED}) � dropping enqueue.");
+                    FiresLogger.LogWarning($"{LogPrefix} queue at MAX_QUEUED ({MAX_QUEUED}) - dropping enqueue.");
                     return;
                 }
 
@@ -242,7 +242,7 @@ namespace VerdantsAscent.Modules.Utilities
             {
                 if (_queue.Count >= MAX_QUEUED)
                 {
-                    Debug.LogWarning($"{LogPrefix} queue at MAX_QUEUED ({MAX_QUEUED}) � dropping enqueue.");
+                    FiresLogger.LogWarning($"{LogPrefix} queue at MAX_QUEUED ({MAX_QUEUED}) - dropping enqueue.");
                     return;
                 }
 
@@ -280,8 +280,8 @@ namespace VerdantsAscent.Modules.Utilities
                         _queue.RemoveAt(i);
                         if (VerboseLogging)
                         {
-                            Debug.LogWarning($"{LogPrefix} deferred action timed out before player became ready " +
-                                $"(useLocal={e.UseLocal}, target={(target == null ? "null" : SafeName(target))}) � dropping.");
+                            FiresLogger.LogWarning($"{LogPrefix} deferred action timed out before player became ready " +
+                                $"(useLocal={e.UseLocal}, target={(target == null ? "null" : SafeName(target))}) - dropping.");
                         }
                         continue;
                     }

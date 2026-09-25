@@ -7,7 +7,7 @@ using VerdantsAscent.Water.Tools;
 namespace VerdantsAscent.Water.Core
 {
     /// <summary>
-    /// Floating ice controller — water-based iceberg with height-modifiable top surface.
+    /// Floating ice controller - water-based iceberg with height-modifiable top surface.
     /// 
     /// Floating ice controller features:
     /// - Floating at water level with vanilla Floating component for bobbing
@@ -20,9 +20,9 @@ namespace VerdantsAscent.Water.Core
     /// - ZDO persistence via ice1 prefab clone
     /// 
     /// THREE-COLLIDER ARCHITECTURE:
-    /// 1. Walking MeshCollider on child "IceShell" GO — follows sculpted top surface
-    /// 2. Floating BoxCollider on root GO (trigger) — buoyancy only
-    /// 3. Bottom mesh has NO collider — purely cosmetic
+    /// 1. Walking MeshCollider on child "IceShell" GO - follows sculpted top surface
+    /// 2. Floating BoxCollider on root GO (trigger) - buoyancy only
+    /// 3. Bottom mesh has NO collider - purely cosmetic
     /// </summary>
     public class FloatingIceController : MonoBehaviour
     {
@@ -70,7 +70,7 @@ namespace VerdantsAscent.Water.Core
         private int _gridHeight;
         private float _boundsMinX, _boundsMaxX, _boundsMinZ, _boundsMaxZ;
 
-        // Mesh components — ice shell (top + sides)
+        // Mesh components - ice shell (top + sides)
         private GameObject _iceGO;
         private MeshFilter _iceMeshFilter;
         private MeshRenderer _iceRenderer;
@@ -121,7 +121,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Public API — Initialization
+        #region Public API - Initialization
 
         public void InitializeFloating(Vector3 center, float radius)
         {
@@ -150,12 +150,12 @@ namespace VerdantsAscent.Water.Core
                 s_allFloatingIce.Add(this);
 
             SaveToZDO();
-            Debug.Log($"[FloatingIceController] Initialized: r={radius}, Y={IceSurfaceY:F2}");
+            FiresLogger.LogInfo($"[FloatingIceController] Initialized: r={radius}, Y={IceSurfaceY:F2}");
         }
 
         #endregion
 
-        #region Public API — Footprints
+        #region Public API - Footprints
 
         public void AddFootprint(Vector3 center, float radius)
         {
@@ -167,7 +167,7 @@ namespace VerdantsAscent.Water.Core
             RebuildMesh();
 
             SaveToZDO();
-            Debug.Log($"[FloatingIceController] Added footprint at {center}, r={radius}, total={_footprints.Count}");
+            FiresLogger.LogInfo($"[FloatingIceController] Added footprint at {center}, r={radius}, total={_footprints.Count}");
         }
 
         public bool OverlapsWithDisk(Vector3 center, float radius)
@@ -182,7 +182,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Public API — Height Modification
+        #region Public API - Height Modification
 
         public void ModifyTopHeights(Vector3 worldPos, float delta, float radius)
         {
@@ -279,7 +279,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Public API — Holes
+        #region Public API - Holes
 
         public bool BreakIceAt(Vector3 worldPos, float radius)
         {
@@ -297,13 +297,13 @@ namespace VerdantsAscent.Water.Core
             });
 
             RebuildMesh();
-            Debug.Log($"[FloatingIceController] Broke ice at {worldPos}, r={radius:F1} ({_holes.Count} holes)");
+            FiresLogger.LogInfo($"[FloatingIceController] Broke ice at {worldPos}, r={radius:F1} ({_holes.Count} holes)");
             return true;
         }
 
         #endregion
 
-        #region Public API — Queries & Removal
+        #region Public API - Queries & Removal
 
         public static FloatingIceController GetFloatingIceAt(Vector3 worldPos)
         {
@@ -352,7 +352,7 @@ namespace VerdantsAscent.Water.Core
             if (LoadFromZDO())
             {
                 _initialized = true;
-                Debug.Log($"[FloatingIceController] Restored from ZDO at {transform.position} with {_footprints.Count} footprints");
+                FiresLogger.LogInfo($"[FloatingIceController] Restored from ZDO at {transform.position} with {_footprints.Count} footprints");
             }
         }
 
@@ -595,7 +595,7 @@ namespace VerdantsAscent.Water.Core
             _walkCollider = _iceGO.AddComponent<MeshCollider>();
             _walkCollider.convex = false;
 
-            // Bottom mesh (visual only — deep iceberg shape, no collider)
+            // Bottom mesh (visual only - deep iceberg shape, no collider)
             if (_bottomGO != null) Destroy(_bottomGO);
             _bottomGO = new GameObject("IceBottom");
             _bottomGO.transform.SetParent(transform);
@@ -743,7 +743,7 @@ namespace VerdantsAscent.Water.Core
                         continue;
                     }
 
-                    // Boundary quad — emit with heights via IceMeshUtility
+                    // Boundary quad - emit with heights via IceMeshUtility
                     // Use topY with height offset for each corner
                     EmitBoundaryTopFace(verts, tris, uvs, norms,
                         wx0, wz0, d0, h0, wx1, wz1, d1, h1,
@@ -1079,7 +1079,7 @@ namespace VerdantsAscent.Water.Core
                         continue;
                     }
 
-                    // Boundary bottom — use flipped emitter with iceberg depth
+                    // Boundary bottom - use flipped emitter with iceberg depth
                     Func<float, float> botYFunc = (ed) => ComputeIcebergBottomY(ed, maxEdgeDist);
                     IceMeshUtility.EmitMarchingSquaresQuadFlipped(verts, tris, uvs, norms,
                         wx0, wz0, d0, wx1, wz1, d1, wx2, wz2, d2, wx3, wz3, d3,
@@ -1393,7 +1393,7 @@ namespace VerdantsAscent.Water.Core
             foreach (var c in existingColliders)
                 if (c != null) c.enabled = false;
 
-            // Destroy Piece component if present — prevents IH from
+            // Destroy Piece component if present - prevents IH from
             // treating existing ice as a "piece" that blocks placement.
             var piece = gameObject.GetComponent<Piece>();
             if (piece != null)

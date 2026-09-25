@@ -133,7 +133,7 @@ namespace VerdantsAscent.Water.Core
             // trigger calling SetLiquidLevel, which fought vanilla's own
             // per-frame level writes and bounced the player between swim and
             // walk every few frames.
-            float gen = VerdantsAscent.Terrain.Voxel.VoxelGenWaterMesh.SurfaceAt(worldPos);
+            float gen = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(worldPos);
             if (gen > highestLevel)
                 highestLevel = gen;
 
@@ -377,11 +377,7 @@ namespace VerdantsAscent.Water.Core
 
                 // GetZone returns Vector2s on public test; convert back so the
                 // == compare against the Vector2i `zone` parameter still type-checks.
-#if PUBLIC_TEST
                 Vector2i waterZone = ZoneSystem.instance != null ? ZoneSystem.GetZone(water.transform.position).ToVector2i() : Vector2i.zero;
-#else
-                Vector2i waterZone = ZoneSystem.instance != null ? ZoneSystem.GetZone(water.transform.position) : Vector2i.zero;
-#endif
                 if (waterZone == zone)
                     toRemove.Add(water);
             }
@@ -402,11 +398,7 @@ namespace VerdantsAscent.Water.Core
                 if (combiner == null) continue;
 
                 // Same Vector2s → Vector2i conversion as waterZone above.
-#if PUBLIC_TEST
                 Vector2i combinerZone = ZoneSystem.instance != null ? ZoneSystem.GetZone(combiner.transform.position).ToVector2i() : Vector2i.zero;
-#else
-                Vector2i combinerZone = ZoneSystem.instance != null ? ZoneSystem.GetZone(combiner.transform.position) : Vector2i.zero;
-#endif
                 if (combinerZone == zone)
                     combinersToRemove.Add(combiner);
             }

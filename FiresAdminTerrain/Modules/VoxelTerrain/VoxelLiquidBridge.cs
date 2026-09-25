@@ -21,11 +21,10 @@ namespace VerdantsAscent.Terrain.Voxel
     // higher — same interpolated crossing the mesh renders, no physics, no
     // races. Solid-at-top columns become full-height walls (+maxDepth), so
     // water dams against thick voxel rock just like a cliff.
-    [HarmonyPatch(typeof(LiquidVolume), "UpdateHeights")]
-    internal static class LiquidVolume_UpdateHeights_VoxelSurface
+    // Called from the postfix of FAT's one LiquidVolume.UpdateHeights hook (FatVanillaHooks), before the clamp guard.
+    internal static class LiquidVoxelSurface
     {
-        [HarmonyPostfix]
-        private static void Postfix(LiquidVolume __instance)
+        internal static void Apply(LiquidVolume __instance)
         {
             try
             {
@@ -45,7 +44,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
                 bool changed = false;
                 var mutex = FiresLiquidGridOps.MeshDataLock(__instance);
-                if (mutex != null) mutex.WaitOne();   // reentrant for this thread — safe if caller holds it
+                if (mutex != null) System.Threading.Monitor.Enter(mutex);   // reentrant for this thread — safe if caller holds it
                 try
                 {
                     for (int z = 0; z < num; z++)
@@ -75,12 +74,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 finally
                 {
-                    if (mutex != null) mutex.ReleaseMutex();
+                    if (mutex != null) System.Threading.Monitor.Exit(mutex);
                 }
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[FiresVoxel] UpdateHeights voxel bridge threw: {ex.Message}");
+                FiresLogger.LogWarning($"[FiresVoxel] UpdateHeights voxel bridge threw: {ex.Message}");
             }
         }
     }

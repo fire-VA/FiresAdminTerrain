@@ -51,7 +51,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (Time.time >= s_nextLog)
                 {
                     s_nextLog = Time.time + 5f;
-                    Debug.Log($"[FiresVoxel] cave pop-out caught at ({pos.x:0},{pos.z:0}): " +
+                    FiresLogger.LogInfo($"[FiresVoxel] cave pop-out caught at ({pos.x:0},{pos.z:0}): " +
                               $"Δy +{pos.y - s_lastPos.y:0.0}m in one tick (surface {surf:0.0}) — restored.");
                 }
                 return;   // keep last state — still in the cave

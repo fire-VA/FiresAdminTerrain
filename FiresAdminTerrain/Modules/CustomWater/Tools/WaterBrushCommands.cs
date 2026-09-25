@@ -213,7 +213,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_snow FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] PlaceLandSnowFromBrush threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] PlaceLandSnowFromBrush threw: {ex}");
             }
         }
 
@@ -237,7 +237,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_swimmable_lava FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] PlaceSwimmableLava threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] PlaceSwimmableLava threw: {ex}");
             }
         }
 
@@ -285,7 +285,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_water → {label} FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] PlaceDisk({label}) threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] PlaceDisk({label}) threw: {ex}");
             }
         }
 
@@ -307,11 +307,11 @@ namespace VerdantsAscent.Water.Tools
             // session had zero trace of this command: we couldn't tell
             // "command never fired" apart from "center resolve silently
             // failed". Now both cases are named in the log.
-            Debug.Log($"[WaterBrushCommands] va_brush_water_volume fired | line='{args.FullLine}'");
+            FiresLogger.LogInfo($"[WaterBrushCommands] va_brush_water_volume fired | line='{args.FullLine}'");
             if (!RulerArgs.TryResolveCenter(args, out var center, out _))
             {
                 args.Context.AddString("va_brush_water_volume FAILED: could not resolve center (no IH ruler position, cursor raycast missed).");
-                Debug.LogWarning("[WaterBrushCommands] va_brush_water_volume ABORTED — TryResolveCenter failed.");
+                FiresLogger.LogWarning("[WaterBrushCommands] va_brush_water_volume ABORTED — TryResolveCenter failed.");
                 return;
             }
 
@@ -332,7 +332,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_water_volume FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] PlaceWaterVolume threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] PlaceWaterVolume threw: {ex}");
             }
         }
 
@@ -350,11 +350,11 @@ namespace VerdantsAscent.Water.Tools
         // the "height off the bank" X (how far below the rim the water sits).
         private static void PlaceSpring(Terminal.ConsoleEventArgs args)
         {
-            Debug.Log($"[WaterBrushCommands] va_brush_water_spring fired | line='{args.FullLine}'");
+            FiresLogger.LogInfo($"[WaterBrushCommands] va_brush_water_spring fired | line='{args.FullLine}'");
             if (!RulerArgs.TryResolveCenter(args, out var center, out _))
             {
                 args.Context.AddString("va_brush_water_spring FAILED: could not resolve center (no IH ruler position, cursor raycast missed).");
-                Debug.LogWarning("[WaterBrushCommands] va_brush_water_spring ABORTED — TryResolveCenter failed.");
+                FiresLogger.LogWarning("[WaterBrushCommands] va_brush_water_spring ABORTED — TryResolveCenter failed.");
                 return;
             }
 
@@ -382,7 +382,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_water_spring FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] PlaceSpring threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] PlaceSpring threw: {ex}");
             }
         }
 
@@ -429,7 +429,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_waterfall FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] PlaceWaterfall threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] PlaceWaterfall threw: {ex}");
             }
         }
 
@@ -467,7 +467,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex)
             {
                 args.Context.AddString($"va_brush_water_delete FAILED: {ex.Message}");
-                Debug.LogError($"[WaterBrushCommands] DeleteDisks threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] DeleteDisks threw: {ex}");
                 return;
             }
 
@@ -498,9 +498,14 @@ namespace VerdantsAscent.Water.Tools
                 foreach (var c in new System.Collections.Generic.List<WaterMeshCombiner>(WaterMeshCombiner.AllCombiners))
                     if (c != null && c.MopWaterAt(center, radius)) mopped++;
             }
-            catch (System.Exception ex) { Debug.LogWarning($"[WaterBrushCommands] mop combiner pass: {ex.Message}"); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[WaterBrushCommands] mop combiner pass: {ex.Message}"); }
 
-            args.Context.AddString($"va_brush_water_mop: mopped {vol:F0}m³ from {pours} pour(s) + {mopped} disk mesh(es) at r={radius:F1}.");
+            // Generated carve+fill water mops too (persisted per column).
+            int gen = 0;
+            try { gen = VerdantsAscent.Terrain.Voxel.VoxelWorld.MopGeneratedWater(center, radius); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[WaterBrushCommands] mop generated pass: {ex.Message}"); }
+
+            args.Context.AddString($"va_brush_water_mop: mopped {vol:F0}m³ from {pours} pour(s) + {mopped} disk mesh(es) + {gen} generated column(s) at r={radius:F1}.");
         }
 
         // Round-84 — Freeze/unfreeze spring flow. Toggles each spring under the
@@ -530,7 +535,7 @@ namespace VerdantsAscent.Water.Tools
                     if (river.m_frozen) froze++; else thawed++;
                 }
             }
-            catch (System.Exception ex) { Debug.LogError($"[WaterBrushCommands] FreezeWater threw: {ex}"); }
+            catch (System.Exception ex) { FiresLogger.LogError($"[WaterBrushCommands] FreezeWater threw: {ex}"); }
 
             args.Context.AddString($"va_brush_water_freeze: froze {froze}, unfroze {thawed} spring(s) at r={radius:F1}.");
         }
@@ -607,7 +612,7 @@ namespace VerdantsAscent.Water.Tools
             }
             catch (System.Exception ex)
             {
-                Debug.LogError($"[WaterBrushCommands] RemoveLiquidLocal threw: {ex}");
+                FiresLogger.LogError($"[WaterBrushCommands] RemoveLiquidLocal threw: {ex}");
             }
             return (pours, volume);
         }
@@ -627,7 +632,7 @@ namespace VerdantsAscent.Water.Tools
                 var river = root.GetComponent<FiresLiquidRiverController>();
                 if (river != null) Object.Destroy(river);
             }
-            catch (System.Exception ex) { Debug.LogWarning($"[WaterBrushCommands] StopSpringEmitter: {ex.Message}"); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[WaterBrushCommands] StopSpringEmitter: {ex.Message}"); }
         }
 
         // Round-79 — run the flat-ground spill cull once on a pour under the
@@ -644,7 +649,7 @@ namespace VerdantsAscent.Water.Tools
                 int num = lv.m_width + 1;
                 int c = lv.m_width / 2;
                 int srcHalf = Mathf.Max(1, lv.m_initialArea / 2) + 1;
-                mutex.WaitOne();
+                System.Threading.Monitor.Enter(mutex);
                 try
                 {
                     if (FiresLiquidGridOps.CullFlatSpill(depths, heights, num, c, c, srcHalf, 0.35f, 0.5f) > 0f)
@@ -653,15 +658,9 @@ namespace VerdantsAscent.Water.Tools
                         FiresLiquidGridOps.NeedsSaving(lv) = true;
                     }
                 }
-                finally { mutex.ReleaseMutex(); }
+                finally { System.Threading.Monitor.Exit(mutex); }
             }
-            catch (System.Exception ex) { Debug.LogWarning($"[WaterBrushCommands] CullPour: {ex.Message}"); }
-        }
-
-        [HarmonyPatch(typeof(Terminal), nameof(Terminal.InitTerminal))]
-        private static class Terminal_InitTerminal_RegisterWaterBrushCommands
-        {
-            private static void Postfix() => Register();
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[WaterBrushCommands] CullPour: {ex.Message}"); }
         }
     }
 }

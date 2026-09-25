@@ -1,16 +1,13 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Text.RegularExpressions;
-using BepInEx;
 using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Persistence
 {
     // VAFatToolIcons — generates a distinct, Fires-branded sprite for every
-    // Infinity Hammer tool we define in infinity_tools.yaml, and registers each
-    // as a named StatusEffect so IH's SpriteHelper.FindSprite("fires_<slug>")
-    // resolves to it.
+    // native Fires tool piece (NativeToolNames). SpriteFor() hands the sprite
+    // straight to Piece.m_icon; the StatusEffect registration is kept only so a
+    // player who writes their own IH yaml can still reference "fires_<slug>".
     //
     // Design language (v2 — glance-first):
     //   * FAMILY = glyph. Terrain=chevrons/bar, paint=drop, biome=leaf,
@@ -36,11 +33,18 @@ namespace VerdantsAscent.Terrain.Persistence
         // Generated ONCE; re-added to every ObjectDB (it's rebuilt menu↔game).
         private static List<StatusEffect> _cache;
 
-        [HarmonyLib.HarmonyPatch(typeof(ObjectDB), nameof(ObjectDB.Awake))]
-        private static class ObjectDB_Awake_Patch
+        // Sprites requested by name before/without a StatusEffect pass.
+        private static readonly Dictionary<string, Sprite> _looseSprites
+            = new Dictionary<string, Sprite>(StringComparer.OrdinalIgnoreCase);
+
+        // Every native Fires tool piece that wants a branded icon. Display names
+        // double as the StyleFor() keywords, so a new tool only has to be named
+        // for its family to pick the right glyph and colour.
+        public static readonly string[] NativeToolNames =
         {
-            private static void Postfix() => Register();
-        }
+            "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere",
+            "Vriver", "Vpour", "Vpool",
+        };
 
         // "Paint Cultivated" -> "fires_paint_cultivated". Non-alnum runs → '_'.
         public static string SlugFor(string toolName)
@@ -82,7 +86,8 @@ namespace VerdantsAscent.Terrain.Persistence
                         UnityEngine.Object.DontDestroyOnLoad(se);
                         _cache.Add(se);
                     }
-                    Debug.Log($"[FiresAdminTerrain] VAFatToolIcons: generated {_cache.Count} branded tool icon(s).");
+                    if (_cache.Count > 0)
+                        FiresLogger.LogInfo($"VAFatToolIcons: generated {_cache.Count} branded tool icon(s).");
                 }
 
                 var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -97,36 +102,57 @@ namespace VerdantsAscent.Terrain.Persistence
                     added++;
                 }
                 if (added > 0)
-                    Debug.Log($"[FiresAdminTerrain] VAFatToolIcons: registered {added} tool icon(s) into ObjectDB.");
+                    FiresLogger.LogInfo($"VAFatToolIcons: registered {added} tool icon(s) into ObjectDB.");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[FiresAdminTerrain] VAFatToolIcons.Register failed: {ex.Message}");
+                FiresLogger.LogWarning($"VAFatToolIcons.Register failed: {ex.Message}");
             }
         }
 
         // (toolName, slug) for every tool whose icon references fires_*.
+        // The tools are OUR OWN hoe/hammer pieces now, so the branded set is
+        // declared in code instead of scraped out of infinity_tools.yaml. The
+        // yaml round-trip is gone entirely — a piece takes its sprite straight
+        // from SpriteFor(), and nothing has to exist on disk for icons to work.
         private static List<KeyValuePair<string, string>> ReadBrandedTools()
         {
-            var result = new List<KeyValuePair<string, string>>();
+            var result = new List<KeyValuePair<string, string>>(NativeToolNames.Length);
+            foreach (var name in NativeToolNames)
+                result.Add(new KeyValuePair<string, string>(name, SlugFor(name)));
+            return result;
+        }
+
+        // Sprite for one tool, built on demand and cached. Shares the Register()
+        // cache so a tool that already has a StatusEffect never rasterises twice.
+        public static Sprite SpriteFor(string toolName)
+        {
+            if (string.IsNullOrEmpty(toolName)) return null;
+            if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
+                return null;
+
+            if (_cache != null)
+            {
+                foreach (var se in _cache)
+                    if (se != null && string.Equals(se.m_name, toolName, StringComparison.OrdinalIgnoreCase))
+                        return se.m_icon;
+            }
+
+            Sprite loose;
+            if (_looseSprites.TryGetValue(toolName, out loose) && loose != null) return loose;
+
             try
             {
-                string path = Path.Combine(Paths.ConfigPath, "infinity_tools.yaml");
-                if (!File.Exists(path)) return result;
-                var nameRx = new Regex(@"^\s*-\s*name:\s*(.+?)\s*$");
-                var iconRx = new Regex(@"^\s*icon:\s*(" + SlugPrefix + @"[a-z0-9_]+)\s*$");
-                string current = null;
-                foreach (var line in File.ReadAllLines(path))
+                loose = BuildSprite(toolName);
+                if (loose != null)
                 {
-                    var nm = nameRx.Match(line);
-                    if (nm.Success) { current = nm.Groups[1].Value.Trim().Trim('"', '\''); continue; }
-                    var im = iconRx.Match(line);
-                    if (im.Success && !string.IsNullOrEmpty(current))
-                        result.Add(new KeyValuePair<string, string>(current, im.Groups[1].Value));
+                    UnityEngine.Object.DontDestroyOnLoad(loose);
+                    UnityEngine.Object.DontDestroyOnLoad(loose.texture);
+                    _looseSprites[toolName] = loose;
                 }
             }
-            catch (Exception ex) { Debug.LogWarning($"[FiresAdminTerrain] VAFatToolIcons.ReadBrandedTools: {ex.Message}"); }
-            return result;
+            catch (Exception ex) { FiresLogger.LogWarning($"VAFatToolIcons.SpriteFor({toolName}): {ex.Message}"); }
+            return loose;
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -168,6 +194,20 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             string n = name.ToLowerInvariant();
             bool island = n.Contains("floating island");
+
+            // ── native V-tool pieces (exact names; ahead of the keyword families
+            //    so "Vdelete" reads as a restore rather than a generic destroy) ──
+            switch (n)
+            {
+                case "vcarve":  return S(0x8A6238, Glyph.ChevronDown);
+                case "vfill":   return S(0x8A6238, Glyph.ChevronUp);
+                case "vdelete": return S(0x92703F, Glyph.FlatBar, Overlay.Slash);
+                case "vcube":   return S(0x6A5540, Glyph.Diamond);
+                case "vsphere": return S(0x6A5540, Glyph.Ring);
+                case "vriver":  return S(0x6E8FA8, Glyph.Wave, Overlay.ChipLand);
+                case "vpour":   return S(0x2E77C0, Glyph.Drop, Overlay.WaveUnder);
+                case "vpool":   return S(0x2E77C0, Glyph.Wave, Overlay.BarUnder);
+            }
 
             // ── util / mode tools ──
             if (n.Contains("clutter clear")) return S(0x4F9A34, Glyph.Leaf, Overlay.Slash);

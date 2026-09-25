@@ -8,7 +8,7 @@ namespace VerdantsAscent.Terrain.Clutter
     //
     // Why this file still exists:
     //   * RegionScrubber calls ClearInRadius (Clutter scope).
-    //   * BiomePaintPersistence + the Snow trio + a few other KEEP files
+    //   * BiomePaintPersistence and a few other KEEP files
     //     call PaintClutter / CycleNext / AllClutterTypes / etc. as a
     //     compile-time surface.
     //   * Deleting the class wholesale would force surgery into every
@@ -25,8 +25,6 @@ namespace VerdantsAscent.Terrain.Clutter
     //   - "painted clutter" no longer respawns or persists. Existing
     //     painted-clutter ZDO bytes from a previous session load as dead
     //     data and never visually re-spawn until Phase D5.
-    //   - "snow trail" tracks (SnowTrailController) stop hiding/showing
-    //     painted clutter (no clutter to hide).
     //   - "biome paint" no longer re-rolls custom clutter on biome change
     //     (still triggers vanilla grass roll via ClutterSystem.ResetGrass).
     // None of these break anything visually for tile-anchor terrain; the
@@ -165,29 +163,6 @@ namespace VerdantsAscent.Terrain.Clutter
         public static void RestoreClutterState(List<ClutterInstanceData> clutterData)
         {
             // No-op until D5.
-        }
-
-        // ── Invalidate cache (SnowClutterConfig calls this) ───────────────
-        public static void InvalidateCache()
-        {
-            // No-op until D5.
-        }
-
-        // ── Snow-specific stubs (kept compiling for SnowTrailController) ──
-        // These were previously on ClutterPaintTool. Once D5 spawns real
-        // snow clutter via FAP source-link, these grow real bodies.
-        public static void ShowAllHiddenClutter() { /* no-op until D5 */ }
-        public static bool HasSnowClutterNear(Vector3 pos, float radius) => false;
-        public static void HideClutterInRadius(Vector3 pos, float radius) { /* no-op until D5 */ }
-
-        // SnowCommands.cs alias for ClearAllPainted.
-        public static int ClearAllClutter() => ClearAllPainted();
-
-        // SnowCommands.cs alias for ClearInRadius (returns int for legacy compat).
-        public static int ClearClutter(Vector3 pos, float radius)
-        {
-            ClearInRadius(pos, radius);
-            return 0;
         }
     }
 }

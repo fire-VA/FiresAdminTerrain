@@ -469,7 +469,7 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            Debug.LogWarning("[WaterMaterialManager] Could not capture tar material from vanilla - using fallback");
+            FiresLogger.LogWarning("[WaterMaterialManager] Could not capture tar material from vanilla - using fallback");
         }
 
         /// <summary>
@@ -544,11 +544,11 @@ namespace VerdantsAscent.Water.Core
                 // Setup for transparency
                 SetupTransparentMaterial(s_waterMaterial);
 
-                Debug.LogWarning("[WaterMaterialManager] Using fallback water material - shader capture failed");
+                FiresLogger.LogWarning("[WaterMaterialManager] Using fallback water material - shader capture failed");
             }
             else
             {
-                Debug.LogError("[WaterMaterialManager] Could not find any shader for water material!");
+                FiresLogger.LogError("[WaterMaterialManager] Could not find any shader for water material!");
             }
         }
 
@@ -573,7 +573,7 @@ namespace VerdantsAscent.Water.Core
                 // Setup for transparency (slight)
                 SetupTransparentMaterial(s_tarMaterial);
 
-                Debug.LogWarning("[WaterMaterialManager] Using fallback tar material");
+                FiresLogger.LogWarning("[WaterMaterialManager] Using fallback tar material");
             }
         }
 
@@ -653,7 +653,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Tunes an ice material after capture to reduce excessive reflectivity/brightness.
-        /// Vanilla ice materials can be blindingly white and shiny � this brings them to
+        /// Vanilla ice materials can be blindingly white and shiny - this brings them to
         /// a level where the surface texture is visible even in daylight.
         /// </summary>
         private static void TuneIceMaterial(Material mat)
@@ -898,7 +898,7 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// Creates boiling water material � tinted orange version of captured water material.
+        /// Creates boiling water material - tinted orange version of captured water material.
         /// </summary>
         private static Material CreateBoilingFallback()
         {
@@ -935,7 +935,7 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// Creates freezing water material � tinted deep blue version of captured water material.
+        /// Creates freezing water material - tinted deep blue version of captured water material.
         /// </summary>
         private static Material CreateFreezingFallback()
         {

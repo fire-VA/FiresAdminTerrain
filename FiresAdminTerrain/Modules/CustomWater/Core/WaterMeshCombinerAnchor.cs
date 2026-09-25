@@ -24,10 +24,10 @@ namespace VerdantsAscent.Water.Core
     /// and the combined result is what gets persisted.
     /// 
     /// DATA FLOW:
-    /// 1. Disk placed ? Absorbed into combiner ? Disk destroyed
+    /// 1. Disk placed -> Absorbed into combiner -> Disk destroyed
     /// 2. Combiner generates mesh from accumulated disk data
-    /// 3. World saves ? Anchor saves COMBINED mesh state (not disks!)
-    /// 4. World loads ? Anchor restores mesh DIRECTLY (no recombination!)
+    /// 3. World saves -> Anchor saves COMBINED mesh state (not disks!)
+    /// 4. World loads -> Anchor restores mesh DIRECTLY (no recombination!)
     /// </summary>
     public class WaterMeshCombinerAnchor : MonoBehaviour
     {
@@ -58,9 +58,9 @@ namespace VerdantsAscent.Water.Core
 
         private const int CURRENT_VERSION = 3; // v3: segmented grid data across multiple ZDOs
 
-        // Monolithic storage threshold: grids with uncompressed height data ? this size
+        // Monolithic storage threshold: grids with uncompressed height data <= this size
         // use the legacy single-ZDO approach. Larger grids use segment anchors.
-        // 8KB / 8 bytes per cell (surface + terrain, 4 bytes each) = 1024 cells = ~32�32
+        // 8KB / 8 bytes per cell (surface + terrain, 4 bytes each) = 1024 cells = ~32x32
         private const int MONOLITHIC_CELL_THRESHOLD = 1024;
 
         // Maximum segment anchors per combiner to prevent ZDO spam
@@ -70,7 +70,7 @@ namespace VerdantsAscent.Water.Core
         private const float SEGMENT_SPACING = 128f;
 
         // Prefab name to use for ZDO persistence
-        // Uses CustomRiver � it's on the "piece" layer (not terrain), so it won't
+        // Uses CustomRiver - it's on the "piece" layer (not terrain), so it won't
         // interfere with terrain raycasts or pull river water down to anchor Y.
         // The dirtfloor prefab was on the "terrain" layer which caused river surface
         // heights to get pulled down to the anchor's hidden Y=-10 position.
@@ -102,7 +102,7 @@ namespace VerdantsAscent.Water.Core
 
         // Static flag: when true, the next WaterMeshCombinerAnchor.Awake() call should
         // NOT self-destruct even if isAnchor is false in the ZDO (because we haven't
-        // set it yet � the ZDO flags get set after Instantiate returns).
+        // set it yet - the ZDO flags get set after Instantiate returns).
         private static bool s_nextInstantiateIsPending = false;
 
         /// <summary>
@@ -154,7 +154,7 @@ namespace VerdantsAscent.Water.Core
 
             if (_nview == null)
             {
-                Debug.LogError("[WaterMeshCombinerAnchor] No ZNetView found!");
+                FiresLogger.LogError("[WaterMeshCombinerAnchor] No ZNetView found!");
                 Destroy(this);
                 return;
             }
@@ -221,7 +221,7 @@ namespace VerdantsAscent.Water.Core
             if (s_anchorsByZdoId.TryGetValue(zdoId, out var existingAnchorById) && existingAnchorById != null && existingAnchorById != this)
             {
                 // Another anchor instance already handles this ZDO - destroy this duplicate
-                if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Duplicate anchor for ZDO {zdoId} - destroying self");
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Duplicate anchor for ZDO {zdoId} - destroying self");
                 _dataLoaded = true;
                 Destroy(gameObject); // Not DestroyPermanently - don't touch the ZDO
                 return;
@@ -250,7 +250,7 @@ namespace VerdantsAscent.Water.Core
                 if (otherDataSize >= myDataSize)
                 {
                     // The existing anchor has more or equal data - destroy this one
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Duplicate anchor at position {myPos:F1} (ZDO {zdoId}). " +
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Duplicate anchor at position {myPos:F1} (ZDO {zdoId}). " +
                              $"Existing anchor has {otherDataSize} bytes, this has {myDataSize} bytes. Destroying this duplicate.");
                     _dataLoaded = true;
                     DestroyPermanently(); // Clear the ZDO data to prevent it from coming back
@@ -259,7 +259,7 @@ namespace VerdantsAscent.Water.Core
                 else
                 {
                     // This anchor has more data - destroy the existing one instead
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Duplicate anchor at position {myPos:F1}. " +
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Duplicate anchor at position {myPos:F1}. " +
                              $"This anchor has {myDataSize} bytes, existing has {otherDataSize} bytes. Destroying existing duplicate.");
                     existingAnchorByPos.DestroyPermanently();
                     // Continue with this anchor's initialization
@@ -300,7 +300,7 @@ namespace VerdantsAscent.Water.Core
                     {
                         // Combiner already has a DIFFERENT anchor - this is a stale anchor
                         // DESTROY THIS STALE ANCHOR - only ONE anchor per combiner!
-                        if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Combiner at {combiner.transform.position} already has anchor. This is a STALE anchor - destroying self.");
+                        if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Combiner at {combiner.transform.position} already has anchor. This is a STALE anchor - destroying self.");
                         _dataLoaded = true;
                         DestroyPermanently();
                         return;
@@ -328,7 +328,7 @@ namespace VerdantsAscent.Water.Core
                     if (_combiner.Anchor == null)
                         _combiner.Anchor = this;
                     _dataLoaded = true;
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Linked to existing cached combiner at {myPos}");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Linked to existing cached combiner at {myPos}");
                     return;
                 }
 
@@ -337,10 +337,10 @@ namespace VerdantsAscent.Water.Core
                 _combiner = WaterCombinerCache.RestoreFromCache(cachedData, this);
                 if (_combiner != null)
                 {
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Restored from file cache at {myPos} ({cachedData.WaterDiskData?.Length / WaterCombinerCache.WaterCombinerGroupData.DISK_STRIDE ?? 0} disks)");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Restored from file cache at {myPos} ({cachedData.WaterDiskData?.Length / WaterCombinerCache.WaterCombinerGroupData.DISK_STRIDE ?? 0} disks)");
                     return;
                 }
-                // Cache restore failed � fall through to ZDO restoration
+                // Cache restore failed - fall through to ZDO restoration
             }
 
             // Check if we have saved data to restore from ZDO (fallback)
@@ -348,13 +348,13 @@ namespace VerdantsAscent.Water.Core
 
             if (version > 0 && !_dataLoaded)
             {
-                if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Start: Beginning ZDO restoration for ZDO {zdoId} at {myPos} (version={version}, isOwner={_nview.IsOwner()}, noCache=true)");
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Beginning ZDO restoration for ZDO {zdoId} at {myPos} (version={version}, isOwner={_nview.IsOwner()}, noCache=true)");
                 StartCoroutine(RestoreFromZDOAsync());
             }
             else if (version == 0 && !_dataLoaded)
             {
-                // No ZDO data AND no cache � check if cache has anything at all for diagnostic
-                Debug.LogWarning($"[WaterMeshCombinerAnchor] Start: ZDO {zdoId} has isAnchor=true but version=0 and no cache! " +
+                // No ZDO data AND no cache - check if cache has anything at all for diagnostic
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] Start: ZDO {zdoId} has isAnchor=true but version=0 and no cache! " +
                     $"Anchor data was never saved. Pos={myPos}, isOwner={_nview.IsOwner()}");
             }
         }
@@ -472,7 +472,7 @@ namespace VerdantsAscent.Water.Core
 
             if (WaterMeshCombiner.s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombinerAnchor] Linked to combiner at {combiner.transform.position}");
+                FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Linked to combiner at {combiner.transform.position}");
             }
         }
 
@@ -483,7 +483,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Saves all combiner data to the ZDO.
         /// 
-        /// For small water bodies (grid ? MONOLITHIC_CELL_THRESHOLD), saves everything
+        /// For small water bodies (grid <= MONOLITHIC_CELL_THRESHOLD), saves everything
         /// in the primary anchor ZDO (monolithic, backward compatible).
         /// 
         /// For large water bodies, distributes grid height data across segment anchors
@@ -505,7 +505,7 @@ namespace VerdantsAscent.Water.Core
 
             if (_combiner == null)
             {
-                Debug.LogWarning("[WaterMeshCombinerAnchor] Cannot save - no combiner linked");
+                FiresLogger.LogWarning("[WaterMeshCombinerAnchor] Cannot save - no combiner linked");
                 return;
             }
 
@@ -566,7 +566,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WaterMeshCombinerAnchor] Failed to save to ZDO: {ex.Message}");
+                FiresLogger.LogError($"[WaterMeshCombinerAnchor] Failed to save to ZDO: {ex.Message}");
             }
         }
 
@@ -739,7 +739,7 @@ namespace VerdantsAscent.Water.Core
 
             if (WaterMeshCombiner.s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombinerAnchor] Saved {segmentCount} segments for grid {gridWidth}x{gridHeight} " +
+                FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Saved {segmentCount} segments for grid {gridWidth}x{gridHeight} " +
                     $"({rowsPerSegment} rows/segment)");
             }
         }
@@ -787,7 +787,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 else
                 {
-                    Debug.LogWarning($"[WaterMeshCombinerAnchor] Failed to create segment {idx}");
+                    FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] Failed to create segment {idx}");
                     break;
                 }
             }
@@ -856,7 +856,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterMeshCombinerAnchor] Failed to load segment index: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] Failed to load segment index: {ex.Message}");
             }
 
             return result;
@@ -891,7 +891,7 @@ namespace VerdantsAscent.Water.Core
 
             if (zdoids.Count == 0 && segmentCount == 0)
             {
-                // No segments � this shouldn't happen for v3 with large grids
+                // No segments - this shouldn't happen for v3 with large grids
                 return;
             }
 
@@ -917,7 +917,7 @@ namespace VerdantsAscent.Water.Core
             _combiner.SetSurfaceHeights(surfaceHeights);
             _combiner.SetTerrainHeights(terrainHeights);
 
-            if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Restored {loadedSegments}/{zdoids.Count} segments " +
+            if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Restored {loadedSegments}/{zdoids.Count} segments " +
                 $"({totalRows}/{gridHeight} rows) for grid {gridWidth}x{gridHeight}");
         }
 
@@ -983,7 +983,7 @@ namespace VerdantsAscent.Water.Core
             var zdo = _nview?.GetZDO();
             if (zdo == null)
             {
-                Debug.LogWarning($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: ZDO is null!");
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: ZDO is null!");
                 yield break;
             }
 
@@ -994,7 +994,7 @@ namespace VerdantsAscent.Water.Core
             Vector3 combinerPosition = _realWaterPosition.sqrMagnitude > 0.01f ? _realWaterPosition : transform.position;
             int version = zdo.GetInt(s_versionHash, 0);
 
-            if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Starting restoration at {combinerPosition} " +
+            if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Starting restoration at {combinerPosition} " +
                 $"(anchor at {transform.position}, ZDO {zdo.m_uid}, version={version})");
 
             // Check if a combiner already exists at this position
@@ -1007,7 +1007,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     if (existingCombiner.Anchor != null && existingCombiner.Anchor != this)
                     {
-                        if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Combiner at {combinerPosition} already has anchor. This is STALE - destroying self.");
+                        if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Combiner at {combinerPosition} already has anchor. This is STALE - destroying self.");
                         DestroyPermanently();
                         yield break;
                     }
@@ -1017,7 +1017,7 @@ namespace VerdantsAscent.Water.Core
                     {
                         _combiner.Anchor = this;
                     }
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Linked to existing combiner at {combinerPosition}");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Linked to existing combiner at {combinerPosition}");
                     yield break;
                 }
             }
@@ -1086,7 +1086,7 @@ namespace VerdantsAscent.Water.Core
             // Diagnostic logging
             byte[] gridDataBytes = zdo.GetByteArray(s_gridDataHash);
             byte[] disksBytes = zdo.GetByteArray(s_waterDisksHash);
-            if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: ZDO data � " +
+            if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: ZDO data - " +
                 $"gridData={gridDataBytes?.Length ?? 0}, disks={disksBytes?.Length ?? 0} | " +
                 $"hasGridData={hasGridData}, diskCount={diskCount}, version={version}, " +
                 $"segmented={isSegmented}, segments={segmentCount}, " +
@@ -1098,25 +1098,25 @@ namespace VerdantsAscent.Water.Core
                 _combiner.SetRestoredFromPersistence(true);
                 WaterCombinerCache.UpdateCombinerCache(_combiner);
 
-                // V2 ? V3 MIGRATION: next save will use v3 format automatically
+                // V2 -> V3 MIGRATION: next save will use v3 format automatically
                 if (version < 3 && _nview.IsOwner())
                 {
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] v{version}?v3 migration queued for next save at {combinerPosition}");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] v{version}?v3 migration queued for next save at {combinerPosition}");
                 }
 
-                if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Restored from " +
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Restored from " +
                     $"{(isSegmented ? "segmented" : "monolithic")} data at {combinerPosition}");
             }
             else if (diskCount > 0)
             {
-                if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Regenerating from {diskCount} disks at {combinerPosition} (no saved grid data)");
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Regenerating from {diskCount} disks at {combinerPosition} (no saved grid data)");
                 _combiner.ForceRegenerate();
                 WaterCombinerCache.UpdateCombinerCache(_combiner);
             }
             else
             {
                 bool isOwner = _nview != null && _nview.IsOwner();
-                Debug.LogWarning($"[WaterMeshCombinerAnchor] No valid data to restore at {combinerPosition} - " +
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] No valid data to restore at {combinerPosition} - " +
                     $"no grid data AND no disks! isOwner={isOwner}, version={version}. " +
                     (isOwner
                         ? "This anchor ZDO was not saved properly during generation."
@@ -1128,7 +1128,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 else
                 {
-                    Debug.LogWarning($"[WaterMeshCombinerAnchor] Owner has no data for anchor at {combinerPosition}. Destroying empty combiner.");
+                    FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] Owner has no data for anchor at {combinerPosition}. Destroying empty combiner.");
                     if (_combiner != null)
                     {
                         Destroy(_combiner.gameObject);
@@ -1163,7 +1163,7 @@ namespace VerdantsAscent.Water.Core
                 byte[] disksBytes = zdo.GetByteArray(s_waterDisksHash);
                 byte[] surfaceBytes = zdo.GetByteArray(s_surfaceHeightsHash);
 
-                if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Retry {attempt + 1}/{retryDelays.Length} for ZDO {zdoId} at {combinerPosition}: " +
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Retry {attempt + 1}/{retryDelays.Length} for ZDO {zdoId} at {combinerPosition}: " +
                     $"grid={gridBytes?.Length ?? 0}, disks={disksBytes?.Length ?? 0}, surface={surfaceBytes?.Length ?? 0}");
 
                 // Try loading disks
@@ -1190,36 +1190,36 @@ namespace VerdantsAscent.Water.Core
                     _combiner.RestoreFromAnchorData();
                     _combiner.SetRestoredFromPersistence(true);
                     WaterCombinerCache.UpdateCombinerCache(_combiner);
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Retry {attempt + 1} SUCCESS: Restored from grid data at {combinerPosition}");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Retry {attempt + 1} SUCCESS: Restored from grid data at {combinerPosition}");
                     yield break;
                 }
                 else if (diskCount > 0)
                 {
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Retry {attempt + 1} SUCCESS: Regenerating from {diskCount} disks at {combinerPosition}");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Retry {attempt + 1} SUCCESS: Regenerating from {diskCount} disks at {combinerPosition}");
                     _combiner.ForceRegenerate();
                     WaterCombinerCache.UpdateCombinerCache(_combiner);
                     yield break;
                 }
             }
 
-            // All retries exhausted � ZDO byte arrays will never sync to non-owners.
+            // All retries exhausted - ZDO byte arrays will never sync to non-owners.
             // FALLBACK: Request disk data from server via RPC. The server has the
             // authoritative disk list in its WaterOperationRPC cache. The client
             // receives the disks and regenerates the mesh locally via terrain sampling.
             // This is slower than grid restoration but produces visible water.
-            Debug.LogWarning($"[WaterMeshCombinerAnchor] All retries exhausted for ZDO {zdoId} at {combinerPosition}. " +
+            FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] All retries exhausted for ZDO {zdoId} at {combinerPosition}. " +
                 $"Requesting disk data from server via RPC fallback.");
 
             if (_combiner != null && WaterOperationRPC.IsMultiplayer())
             {
                 // Request disks from server for this specific anchor position
                 WaterOperationRPC.RequestDiskSyncForPosition(combinerPosition, _combiner);
-                // Don't destroy the combiner � the RPC callback will populate it
+                // Don't destroy the combiner - the RPC callback will populate it
             }
             else if (_combiner != null)
             {
-                // Single player with no data � genuinely broken
-                Debug.LogWarning($"[WaterMeshCombinerAnchor] Single player with no data for anchor at {combinerPosition}. Destroying empty combiner.");
+                // Single player with no data - genuinely broken
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] Single player with no data for anchor at {combinerPosition}. Destroying empty combiner.");
                 Destroy(_combiner.gameObject);
                 _combiner = null;
             }
@@ -1243,7 +1243,7 @@ namespace VerdantsAscent.Water.Core
                 byte[] data = DecompressData(compressed);
                 if (data == null || data.Length == 0)
                 {
-                    Debug.LogWarning("[WaterMeshCombinerAnchor] LoadWaterDisks: Decompressed data is empty");
+                    FiresLogger.LogWarning("[WaterMeshCombinerAnchor] LoadWaterDisks: Decompressed data is empty");
                     return;
                 }
 
@@ -1256,7 +1256,7 @@ namespace VerdantsAscent.Water.Core
                 // If count is absurdly large or data is too small, the data is corrupt.
                 if (count < 0 || count > 10000)
                 {
-                    Debug.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Invalid disk count {count}, skipping");
+                    FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Invalid disk count {count}, skipping");
                     return;
                 }
 
@@ -1264,7 +1264,7 @@ namespace VerdantsAscent.Water.Core
                 int remainingBytes = data.Length - 4; // subtract the count int we already read
                 if (count > 0 && remainingBytes < count * minBytesPerDisk)
                 {
-                    Debug.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Data too small for {count} disks " +
+                    FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Data too small for {count} disks " +
                                    $"(need {count * minBytesPerDisk} bytes, have {remainingBytes}). Data may be corrupt or from an older version.");
                     // Don't return - try to read what we can, the loop will catch individual failures
                 }
@@ -1292,7 +1292,7 @@ namespace VerdantsAscent.Water.Core
                     catch (Exception diskEx)
                     {
                         // Truncated data mid-disk - stop reading further disks
-                        Debug.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Failed to read disk {i + 1}/{count}: {diskEx.Message}. Loading {disks.Count} disks that were read successfully.");
+                        FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Failed to read disk {i + 1}/{count}: {diskEx.Message}. Loading {disks.Count} disks that were read successfully.");
                         break;
                     }
                 }
@@ -1305,7 +1305,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Failed to load water disks: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Failed to load water disks: {ex.Message}");
             }
         }
 
@@ -1419,7 +1419,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void DestroyPermanently()
         {
-            if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Permanently destroying anchor at {transform.position}");
+            if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Permanently destroying anchor at {transform.position}");
 
             // Destroy all segment anchors first
             DestroyAllSegments();
@@ -1464,7 +1464,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[WaterMeshCombinerAnchor] ZNetScene.Destroy failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] ZNetScene.Destroy failed: {ex.Message}");
                     // Fall through to manual cleanup
                 }
             }
@@ -1515,7 +1515,7 @@ namespace VerdantsAscent.Water.Core
             var existingAnchor = go.GetComponent<WaterMeshCombinerAnchor>();
             if (existingAnchor == null)
             {
-                if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Converting legacy {go.name} to water anchor at {go.transform.position}");
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Converting legacy {go.name} to water anchor at {go.transform.position}");
                 go.AddComponent<WaterMeshCombinerAnchor>();
             }
         }
@@ -1544,14 +1544,14 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNetScene.instance == null)
             {
-                Debug.LogError("[WaterMeshCombinerAnchor] Cannot create anchor - ZNetScene not available");
+                FiresLogger.LogError("[WaterMeshCombinerAnchor] Cannot create anchor - ZNetScene not available");
                 return null;
             }
 
             GameObject prefab = FindPrefab();
             if (prefab == null)
             {
-                Debug.LogError("[WaterMeshCombinerAnchor] Cannot find prefab for anchor - water will NOT persist!");
+                FiresLogger.LogError("[WaterMeshCombinerAnchor] Cannot find prefab for anchor - water will NOT persist!");
                 return null;
             }
 
@@ -1584,7 +1584,7 @@ namespace VerdantsAscent.Water.Core
 
             if (WaterMeshCombiner.s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombinerAnchor] Created anchor at Y={ANCHOR_HIDDEN_Y} for water at {position}");
+                FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Created anchor at Y={ANCHOR_HIDDEN_Y} for water at {position}");
             }
 
             return anchor;
@@ -1598,10 +1598,10 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Finds a prefab to use for anchor ZDO.
-        /// Prefers CustomRiver � it's on the "piece" layer so it won't interfere
+        /// Prefers CustomRiver - it's on the "piece" layer so it won't interfere
         /// with terrain raycasts (the old dirtfloor prefab was on "terrain" layer
         /// which caused river surfaces to get pulled down to anchor Y=-10).
-        /// Does NOT fall back to dirtfloor � using dirtfloor caused water anchors to
+        /// Does NOT fall back to dirtfloor - using dirtfloor caused water anchors to
         /// spawn as terrain pieces and interfere with the terrain system.
         /// Result is cached after first successful lookup.
         /// </summary>
@@ -1625,12 +1625,12 @@ namespace VerdantsAscent.Water.Core
                 if (prefab != null)
                 {
                     s_cachedPrefab = prefab;
-                    if (WaterMeshCombiner.s_verboseLogging) Debug.Log($"[WaterMeshCombinerAnchor] Using '{prefab.name}' prefab for water anchors (piece layer)");
+                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Using '{prefab.name}' prefab for water anchors (piece layer)");
                     return prefab;
                 }
             }
 
-            Debug.LogError("[WaterMeshCombinerAnchor] FindPrefab: CustomRiver prefab NOT found in ZNetScene! " +
+            FiresLogger.LogError("[WaterMeshCombinerAnchor] FindPrefab: CustomRiver prefab NOT found in ZNetScene! " +
                 "Water persistence will FAIL! Ensure CustomRiver is registered in VAPieceManager and ZNetScene.");
             return null;
         }

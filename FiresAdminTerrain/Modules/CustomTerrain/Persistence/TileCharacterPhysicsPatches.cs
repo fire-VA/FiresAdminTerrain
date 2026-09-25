@@ -29,7 +29,6 @@ namespace VerdantsAscent.Terrain.Persistence
     // are sufficient for the walk-under behavior the user wants. If
     // tile-height reads in motion code prove needed later, re-add via
     // explicit ArgumentType.Out spec to avoid the same PatchAll abort.
-    [HarmonyPatch]
     internal static class TileCharacterPhysicsPatches
     {
         // Match radius for "near custom terrain" detection. Roughly the
@@ -38,10 +37,8 @@ namespace VerdantsAscent.Terrain.Persistence
         private const float NEAR_TILE_RADIUS = 48f;
 
         // ── 1. UnderWorldCheck skip ──────────────────────────────────────
-
-        [HarmonyPatch(typeof(Character), "UnderWorldCheck")]
-        [HarmonyPrefix]
-        private static bool UnderWorldCheck_SkipNearCustomTile(Character __instance)
+        // Called after VoxelUnderWorld from FAT's one Character.UnderWorldCheck hook (FatVanillaHooks).
+        internal static bool AllowUnderWorldCheck(Character __instance)
         {
             if (__instance == null) return true;
 

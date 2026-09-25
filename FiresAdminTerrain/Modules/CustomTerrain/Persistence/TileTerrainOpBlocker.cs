@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -31,15 +32,25 @@ namespace VerdantsAscent.Terrain.Persistence
         // edge still block. 4m matches the original mod's check_radius.
         private const float OP_CHECK_RADIUS = 4f;
 
-        [HarmonyPatch(typeof(TerrainOp), "Awake")]
-        private static class TerrainOp_Awake_BlockOverTile
+        // From FAT's one TerrainOp.Awake hook (FatVanillaHooks), a Normal-priority
+        // prefix after the zone-mode refusal.
+        internal static bool AllowTerrainOp(TerrainOp op) => OverTile.Allow(op);
+
+        private static TerrainOp s_lastRoutedOp;
+
+        // Later prefixes on the same hook still run after this one returns false, so
+        // they ask this before treating the op as unclaimed.
+        internal static bool WasRoutedToTile(TerrainOp op) => op != null && ReferenceEquals(op, s_lastRoutedOp);
+
+        private static class OverTile
         {
             // Returning false = skip vanilla Awake = the op never registers
             // with TerrainComp and won't mutate any heightmap. We also destroy
             // the GameObject so its m_onPlacedEffect doesn't echo.
-            private static bool Prefix(TerrainOp __instance)
+            internal static bool Allow(TerrainOp __instance)
             {
                 if (__instance == null) return true;
+                if (VerdantsAscent.Terrain.Zones.ZoneModeRefusals.WasCancelled(__instance)) return false;
                 Vector3 position = __instance.transform.position;
 
                 // 2026-05-30 round-54 — phantom-op guard. Some external
@@ -113,7 +124,42 @@ namespace VerdantsAscent.Terrain.Persistence
                 // We're over our floating terrain. Re-route the intent
                 // to our brush so the user's input has SOME effect (vs just
                 // being silently no-op'd), then destroy the vanilla op.
+                //
+                // TileBrushRPC's receivers permit only some ops to a non-admin, so an op
+                // this peer may not send whole would half-apply after the vanilla op was
+                // already destroyed. Say so instead, and leave the vanilla ground alone.
+                if (!PeerMayApplyEveryFlag(__instance.m_settings, out string deniedFlag))
+                {
+                    s_lastRoutedOp = __instance;
+                    Player.m_localPlayer?.Message(MessageHud.MessageType.Center, NonAdminMessage);
+                    FiresLogger.LogInfo($"[TileTerrainOpBlocker] refused a vanilla TerrainOp at {position} - this peer may not {deniedFlag} a FAT tile.");
+                    UnityEngine.Object.Destroy(__instance.gameObject);
+                    return false;
+                }
+
+                s_lastRoutedOp = __instance;
                 string routeDesc = RouteToOurBrush(__instance, position);
+
+                // UNIFIED PAINT (the hard sand edge on tile borders): the route above
+                // only writes tiles that ALREADY exist, and destroying the vanilla op
+                // used to throw away the rest — a stroke crossing off anchored terrain
+                // painted NOTHING on the vanilla side (paint stopped dead on the border).
+                // If this op PAINTS, mirror the stroke into the vanilla system through
+                // vanilla's OWN owner-RPC (paint-only settings — exact vanilla math,
+                // multiplayer-correct, and vanilla heights can never deform: the skyland
+                // protection stands in full). The tile side got the stroke from
+                // RouteToOurBrush above with the SAME falloff formula, so both sides of
+                // any boundary are one continuous curve. Under-tile vanilla paint sits
+                // occluded beneath the tile mesh — harmless, and it means removing a
+                // tile later reveals correctly-painted ground instead of a bald patch.
+                var st = __instance.m_settings;
+                if (st != null && st.m_paintCleared)
+                {
+                    int mirrored = VerdantsAscent.Terrain.Paint.FiresUnifiedPaint.MirrorPaint(
+                        position, Mathf.Max(0.5f, st.m_paintRadius), st.m_paintType, st.m_paintHeightCheck);
+                    if (mirrored > 0)
+                        FiresLogger.LogVerbose($"[TileTerrainOpBlocker] paint mirrored to {mirrored} vanilla comp(s) at {position}.");
+                }
 
                 // Mute the effect so we don't get a phantom dirt-splat at the
                 // vanilla terrain Y when the player is way up on a skyland.
@@ -142,50 +188,62 @@ namespace VerdantsAscent.Terrain.Persistence
             return false;
         }
 
-        // Map the vanilla op's settings to one of our brush ops. Best-effort —
-        // vanilla terrain ops have a richer parameter set than our 4 brush
-        // primitives; we collapse to the closest equivalent. Returns a short
-        // description of what was routed for logging.
+        private const float MinOpRadius = 0.5f;
+        private const float MinRaiseFalloff = 1f;
+        private const float VanillaSmoothStrength = 0.25f;
+        private const string NonAdminMessage = "Only admins can reshape this terrain. You can still level, smooth and paint it.";
+
+        // One vanilla op can carry several flags, and m_settings is the shared prefab
+        // instance - stripping a flag would corrupt the prefab for the whole session. So
+        // an op is applied whole or refused whole, in vanilla's flag order.
+        private static bool PeerMayApplyEveryFlag(TerrainOp.Settings s, out string deniedFlag)
+        {
+            deniedFlag = null;
+            if (s == null) return true;
+            if (s.m_level && !TileBrushRPC.LocalPeerMayEdit(TileBrushRPC.TileOp.Level)) deniedFlag = "level";
+            else if (s.m_raise && !TileBrushRPC.LocalPeerMayEdit(TileBrushRPC.TileOp.Raise)) deniedFlag = "raise";
+            else if (s.m_smooth && !TileBrushRPC.LocalPeerMayEdit(TileBrushRPC.TileOp.Smooth)) deniedFlag = "smooth";
+            else if (s.m_paintCleared && !TileBrushRPC.LocalPeerMayEdit(TileBrushRPC.TileOp.Paint)) deniedFlag = "paint";
+            return deniedFlag == null;
+        }
+
+        // Sends every terrain flag the vanilla op carries - level, raise, smooth,
+        // paint - in TerrainComp.InternalDoOperation's order, through TileBrushRPC so
+        // the tile's owner applies it. Returns a description for logging.
         private static string RouteToOurBrush(TerrainOp op, Vector3 position)
         {
             var s = op.m_settings;
             if (s == null) return "no settings (no-op)";
 
-            // Level (flatten to op Y) → BrushFlat at op.position.y
+            // Vanilla lifts level and smooth by m_levelOffset; raise and paint use the op point.
+            Vector3 levelPosition = position + Vector3.up * s.m_levelOffset;
+
+            var routed = new List<string>();
             if (s.m_level)
             {
-                float radius = Mathf.Max(s.m_levelRadius, 0.5f);
-                int touched = TileBrush.BrushFlat(position, radius, position.y);
-                return $"Level r={radius:F1} y={position.y:F1} → BrushFlat touched {touched} tile(s)";
+                float radius = Mathf.Max(s.m_levelRadius, MinOpRadius);
+                TileBrushRPC.SendFlat(levelPosition, radius, levelPosition.y, square: false);
+                routed.Add($"level r={radius:F1} y={levelPosition.y:F1}");
             }
-            // Raise/Lower (delta) → BrushRaise with signed delta
             if (s.m_raise)
             {
-                float radius = Mathf.Max(s.m_raiseRadius, 0.5f);
-                float delta = s.m_raiseDelta;
-                float falloff = Mathf.Max(s.m_raisePower, 1f);
-                int touched = TileBrush.BrushRaise(position, radius, delta, falloff);
-                return $"Raise r={radius:F1} delta={delta:F2} → BrushRaise touched {touched} tile(s)";
+                float radius = Mathf.Max(s.m_raiseRadius, MinOpRadius);
+                TileBrushRPC.SendRaise(position, radius, s.m_raiseDelta, Mathf.Max(s.m_raisePower, MinRaiseFalloff));
+                routed.Add($"raise r={radius:F1} delta={s.m_raiseDelta:F2}");
             }
-            // Smooth — closest analogue is "clear" (reset to unmodified, lets
-            // adjacent terrain bleed through). Not a perfect smooth but it
-            // does break the sharp-edge artifact a vanilla smooth was trying
-            // to remove.
             if (s.m_smooth)
             {
-                float radius = Mathf.Max(s.m_smoothRadius, 0.5f);
-                int touched = TileBrush.BrushClear(position, radius);
-                return $"Smooth r={radius:F1} → BrushClear touched {touched} tile(s)";
+                float radius = Mathf.Max(s.m_smoothRadius, MinOpRadius);
+                TileBrushRPC.SendSmooth(levelPosition, radius, VanillaSmoothStrength);
+                routed.Add($"smooth r={radius:F1}");
             }
-            // Paint — map vanilla paint type to RGB color
             if (s.m_paintCleared)
             {
-                float radius = Mathf.Max(s.m_paintRadius, 0.5f);
-                Color32 color = MapPaintTypeToColor(s.m_paintType);
-                int touched = TileBrush.BrushPaint(position, radius, color);
-                return $"Paint {s.m_paintType} r={radius:F1} → BrushPaint touched {touched} tile(s)";
+                float radius = Mathf.Max(s.m_paintRadius, MinOpRadius);
+                TileBrushRPC.SendPaint(position, radius, MapPaintTypeToColor(s.m_paintType), square: false);
+                routed.Add($"paint {s.m_paintType} r={radius:F1}");
             }
-            return $"unhandled op (level={s.m_level} raise={s.m_raise} smooth={s.m_smooth} paint={s.m_paintCleared})";
+            return routed.Count == 0 ? "no terrain flags (no-op)" : string.Join(", ", routed);
         }
 
         // Vanilla TerrainModifier.PaintType → our R/G/B/A paint-mask
@@ -207,11 +265,15 @@ namespace VerdantsAscent.Terrain.Persistence
             //   m_paintMaskCultivated  = (0, 1, 0, 1) → (0,   255, 0,   255)
             //   m_paintMaskPaved       = (0, 0, 1, 1) → (0,   0,   255, 255)
             //   m_paintMaskNothing     = (0, 0, 0, 1) → (0,   0,   0,   255)
+            //   m_paintMaskClearVegetation = (0, 0, 0, 0) -> (0, 0, 0, 0)
+            //   m_paintMaskDeepSnow    = (1, 1, 1, 1) -> (255, 255, 255, 255)
             switch (vanillaType)
             {
                 case TerrainModifier.PaintType.Dirt:      return new Color32(255, 0,   0,   255);
                 case TerrainModifier.PaintType.Cultivate: return new Color32(0,   255, 0,   255);
                 case TerrainModifier.PaintType.Paved:     return new Color32(0,   0,   255, 255);
+                case TerrainModifier.PaintType.DeepSnow:  return new Color32(255, 255, 255, 255);
+                case TerrainModifier.PaintType.ClearVegetation: return new Color32(0, 0, 0, 0);
                 // Reset / Grass / anything else → restore default look
                 // (no paint, vegetation present). Same effect as "paint
                 // grass" in IH and the vanilla hoe's reset op.

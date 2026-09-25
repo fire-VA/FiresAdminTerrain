@@ -12,23 +12,10 @@
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <LangVersion>latest</LangVersion>
     <FileAlignment>512</FileAlignment>
+    <CodePage>65001</CodePage>
     <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildProjectDirectory)=/_/</PathMap>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!--
-      Public-test build toggle. Default flipped to `true` on 2026-05-11 when
-      the local libs\assembly_valheim_publicized.dll was refreshed against the
-      upcoming public-test build (Vector2s migration). With the publicized DLL
-      now exposing Vector2s-style ZoneSystem.GetZone, the live-build (#else)
-      code path no longer compiles â€” Vector2i â†” Vector2s mismatches are the
-      expected failure mode if you flip this back to `false`.
-
-      To return to live-build compilation: regenerate
-      libs\assembly_valheim_publicized.dll from a live assembly_valheim.dll
-      AND flip this default back to `false`. Don't do one without the other.
-
-      Override at the command line with: msbuild /p:PublicTest=false
-    -->
-    <PublicTest Condition=" '$(PublicTest)' == '' ">false</PublicTest>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <DebugSymbols>true</DebugSymbols>
@@ -43,12 +30,12 @@
     <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
+    <!-- ENABLE_PROFILER: ProfilerMarker.Begin/End are [Conditional("ENABLE_PROFILER")], so without it every marker
+         compiles away and FAT is invisible in a Unity Profiler capture. The markers cost tens of nanoseconds when no
+         profiler is attached, and they are what lets [perf] name FAT's frames instead of guessing at "(native code)". -->
+    <DefineConstants>TRACE;ENABLE_PROFILER</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(PublicTest)' == 'true' ">
-    <DefineConstants>$(DefineConstants);PUBLIC_TEST</DefineConstants>
   </PropertyGroup>
   <Choose>
     <When Condition="($(OS) == 'Unix' OR $(OS) == 'OSX') AND $(GamePath) == ''">
@@ -72,24 +59,20 @@
       <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim dedicated server\BepInEx\core\0Harmony.dll</HintPath>
     </Reference>
     <Reference Include="assembly_guiutils">
-      <HintPath>..\libs\assembly_guiutils_publicized.dll</HintPath>
+      <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\publicized_assemblies\assembly_guiutils_publicized.dll</HintPath>
     </Reference>
     <Reference Include="assembly_utils">
-      <!-- Pinned to the stashed legacy DLL on purpose. Steam may be on either the
-           live or public-test branch; resolving via $(GamePath) would silently emit
-           IL bound to whichever GetStableHashCode overload is in the currently
-           installed assembly_utils. The legacy stash gives us deterministic
-           call (string) IL, which works natively on the live build and via the
-           FiresHashFixer (string) shim on the public-test build. Flip back to
-           $(GamePath) once the upcoming build is the only build. -->
-      <HintPath>..\..\assembly_valheim\lib\assembly_utils.dll</HintPath>
-      <Private>True</Private>
+      <HintPath>$(GamePath)\valheim_Data\Managed\assembly_utils.dll</HintPath>
+      <Private>False</Private>
+      </Reference>
+    <Reference Include="SoftReferenceableAssets">
+      <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\SoftReferenceableAssets.dll</HintPath>
     </Reference>
     <Reference Include="assembly_valheim">
-      <HintPath>..\libs\assembly_valheim_publicized.dll</HintPath>
+      <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\publicized_assemblies\assembly_valheim_publicized.dll</HintPath>
     </Reference>
     <Reference Include="FiresUnifiedCore">
-      <HintPath>..\..\FiresUnifiedCore\FiresUnifiedCore\bin\Debug\FiresUnifiedCore.dll</HintPath>
+      <HintPath>..\..\FiresUnifiedCore\FiresUnifiedCore\bin\Release\FiresUnifiedCore.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="BepInEx">
@@ -117,7 +100,7 @@
       <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.AnimationModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.AssetBundleModule">
-      <HintPath>..\libs\UnityEngine.AssetBundleModule_publicized.dll</HintPath>
+      <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\publicized_assemblies\UnityEngine.AssetBundleModule_publicized.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
       <HintPath>..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
@@ -169,17 +152,31 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="FiresAdminTerrain.cs" />
-    <Compile Include="Managers\AdminSyncing.cs" />
     <Compile Include="Managers\ConfigManager.cs" />
-    <Compile Include="Managers\ConfigSync.cs" />
     <Compile Include="Modules\Async\AsyncShutdownManager.cs" />
     <Compile Include="Modules\Async\BackgroundWorker.cs" />
     <Compile Include="Modules\Async\FrameBudgetScheduler.cs" />
     <Compile Include="Modules\Async\MainThreadDispatcher.cs" />
     <Compile Include="Modules\Async\ManifestDiffSync.cs" />
     <Compile Include="Modules\Async\SafeRoutedRpc.cs" />
+    <Compile Include="Modules\BcImport\BcSaveSystemPatches.cs" />
+    <Compile Include="Modules\BcImport\BcConvert.cs" />
+    <Compile Include="Modules\BcImport\BcWorldListMenu.cs" />
+    <Compile Include="Modules\BcImport\BcForestFactorPatch.cs" />
+    <Compile Include="Modules\BcImport\BcMigratedWorld.cs" />
+    <Compile Include="Modules\BcImport\BcWorldData.cs" />
+    <Compile Include="Modules\BcImport\BcImportCommands.cs" />
+    <Compile Include="Modules\BcImport\BcNoise.cs" />
+    <Compile Include="Modules\BcImport\BcWorldGen.cs" />
+    <Compile Include="Modules\BcImport\FastNoiseLite.cs" />
+    <Compile Include="Modules\BcImport\BcImageMaps.cs" />
+    <Compile Include="Modules\BcImport\BcSaveLocator.cs" />
+    <Compile Include="Modules\BcImport\BcSaveReader.cs" />
+    <Compile Include="Modules\BcImport\BcWorldSettings.cs" />
     <Compile Include="Modules\CustomTerrain\Biome\BiomeFilePersistence.cs" />
     <Compile Include="Modules\CustomTerrain\Biome\BiomeManager.cs" />
+    <Compile Include="Modules\CustomTerrain\Paint\DistantPaintCache.cs" />
+    <Compile Include="Modules\CustomTerrain\Paint\FiresUnifiedPaint.cs" />
     <Compile Include="Modules\CustomTerrain\Biome\BiomeOverlayPainter.cs" />
     <Compile Include="Modules\CustomTerrain\Biome\BiomePaintPersistence.cs" />
     <Compile Include="Modules\CustomTerrain\Clutter\ClutterManager.cs" />
@@ -194,9 +191,9 @@
     <Compile Include="Modules\CustomTerrain\Persistence\TileDebugCommands.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileMeshRenderer.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileMeshUnderside.cs" />
-    <Compile Include="Modules\CustomTerrain\Persistence\TileProactiveSpawner.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileBrush.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileHammerCompat.cs" />
+    <Compile Include="Modules\CustomTerrain\Persistence\WecTerrainBridge.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileBrushCommands.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileBrushDrag.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\TileBrushRPC.cs" />
@@ -215,15 +212,7 @@
     <Compile Include="Modules\CustomTerrain\Lifecycle\RulerArgs.cs" />
     <Compile Include="Modules\CustomTerrain\Lifecycle\VanillaTerrainOpScrubber.cs" />
     <Compile Include="Modules\CustomTerrain\Persistence\ZoneStreamTiming.cs" />
-    <Compile Include="Modules\CustomTerrain\Snow\SnowClutterConfig.cs" />
-    <Compile Include="Modules\CustomTerrain\Snow\SnowCommands.cs" />
-    <Compile Include="Modules\CustomTerrain\Snow\SnowGroundMesh.cs" />
-    <Compile Include="Modules\CustomTerrain\Snow\SnowTrailController.cs" />
-    <Compile Include="Modules\CustomTerrain\Snow\SnowTrailPaint.cs" />
-    <Compile Include="Modules\CustomTerrain\Utilities\MaterialVariantSystem.cs" />
     <Compile Include="Modules\CustomTerrain\Utilities\RateLimitedLogHandler.cs" />
-    <Compile Include="Modules\CustomTerrain\Utilities\TerrainMaterialCache.cs" />
-    <Compile Include="Modules\CustomTerrain\Utilities\TerritorySnowManager.cs" />
     <Compile Include="Modules\CustomWater\Core\CustomLiquidType.cs" />
     <Compile Include="Modules\CustomWater\Core\CustomWaterBase.cs" />
     <Compile Include="Modules\CustomWater\Core\CustomWaterManager.cs" />
@@ -239,11 +228,13 @@
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidWaterDebug.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidWaterPrefab.cs" />
     <!-- Round-82: FiresLiquidSpringEmitter retired (replaced by
-         FiresLiquidRiverController â€” the emitter fought vanilla's threaded
+         FiresLiquidRiverController - the emitter fought vanilla's threaded
          flatten). File kept on disk but not compiled. -->
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidGridOps.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidRiverController.cs" />
+    <Compile Include="Modules\CustomWater\FiresWaterAuthority.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidConfig.cs" />
+    <Compile Include="Modules\CustomWater\Volume\FiresInlandWaterConfig.cs" />
     <Compile Include="Modules\CustomWater\Volume\WaterVolumeSettle.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombinerAnchor.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterOperationRPC.cs" />
@@ -258,28 +249,143 @@
     <Compile Include="Modules\VoxelTerrain\VoxelMesherSurfaceNets.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelMeshPipeline.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelChunkView.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelRenderGroup.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelBrushCommands.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelSeamAudit.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelToolPieces.cs" />
-    <Compile Include="Modules\VoxelTerrain\VoxelGenWaterMesh.cs" />
+    <Compile Include="Modules\VoxelTerrain\LegacyMesh\VoxelGenWaterMesh.cs" />
     <Compile Include="Modules\VoxelTerrain\WaterCensus.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCavePopGuard.cs" />
     <Compile Include="Modules\VoxelTerrain\FarVegImpostors.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelLiquidBridge.cs" />
+    <Compile Include="Modules\VoxelTerrain\DeepNorthSnowMask.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldGenBase.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresNewWorldOptions.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresPng.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelOnlyPatches.cs" />
     <Compile Include="Modules\VoxelTerrain\FarQuilt.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveNoise.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveContent.cs" />
-    <Compile Include="Modules\VoxelTerrain\VoxelWaterSurvey.cs" />
+    <Compile Include="Modules\VoxelTerrain\HeightmapBuildCache.cs" />
+    <Compile Include="Modules\VoxelTerrain\CaveContentConfig.cs" />
+    <Compile Include="Modules\VoxelTerrain\TreeSeedDrops.cs" />
+    <Compile Include="Modules\VoxelTerrain\TreeSaplingPrefabs.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveRecord.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveChests.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCavePickables.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveSpawners.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelSurfaceSnap.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCaveClutter.cs" />
+    <Compile Include="Modules\VoxelTerrain\LegacyMesh\VoxelWaterSurvey.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelGenLiquid.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelChunkCache.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelWaterSurface.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresMinimapRivers.cs" />
+    <Compile Include="Modules\VoxelTerrain\AltBiomePointGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\BiomeIndexGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\DeepNorthMapPatch.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresClutterWaterEcology.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresVegWaterEcology.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterPlan.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterPlanner.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresRiverCarve.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterPortShims.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterBaseSupport.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterQueriesSb.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterSeeding.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterNormalizeSb.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterSurfaceSb.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterAuditSb.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresRock.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresDrainage.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresRiverLevels.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresRiverTrace.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresChannelClassify.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterRules.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterConform.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresCaveCamera.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresClimate.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresGenTuning.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresLocationPads.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldEdits.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresLocationPatches.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresLocationHeight.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresImportedFlow.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresVegProfiler.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresTerrainPredicates.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresFarWater.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresMapMarks.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslandProps.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Registry.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Commands.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresBakeDrift.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresMinimapCache.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneOpenSet.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeConfig.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeGate.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeRegistry.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeCoreBridge.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModePatches.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModePopulation.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeHandshake.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeRefusals.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeTerrainRefresh.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeOpening.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeIslands.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeDiagnostics.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeCommands.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeBorderWalls.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkTiers.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkMachines.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModePrefabs.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkSpawner.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeSkylands.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeSeedGhost.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeSwaps.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeEyeOfTheBeholder.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeSeeds.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeHammerChest.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeStartCave.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModePark.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeLandmarks.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeRavenHints.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeRegistryMirror.cs" />
+    <Compile Include="Modules\FatVanillaHooks.cs" />
+    <Compile Include="Modules\FatStatus.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Zones.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Biomes.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Shape.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Ground.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslandTerrainGuard.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeFinders.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterfalls.cs" />
+    <Compile Include="Modules\Performance\VegetationDensity.cs" />
+    <Compile Include="Modules\Performance\FiresFrameAudit.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelZoneStreamer.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelBrushDrag.cs" />
-    <Compile Include="Modules\VoxelTerrain\VoxelClutterBridge.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelAnchorPrefab.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelChunkAnchor.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveEnv.cs" />
+    <Compile Include="Modules\VoxelTerrain\GenWaterField.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelHydrology.cs" />
+    <Compile Include="Modules\VoxelTerrain\HydrologyGuards.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWaterGuards.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeBuilds.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkBlueprint.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkKeys.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChaosHammer.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkTools.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeStartGround.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldProfile.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldRecords.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldClone.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresVanillaDialog.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresWorldMenu.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelSheetFalls.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelLakeBasins.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelVanillaRivers.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelRiverNetwork.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceCombiner.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceCommands.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceController.cs" />
@@ -313,6 +419,7 @@
     <Compile Include="Modules\CustomWater\Tools\IcePlacementTool.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterBalloonShell.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterBrushCommands.cs" />
+    <Compile Include="Modules\CustomWater\Tools\WaterShapingTools.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterBrushDrag.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterDebugCommands.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterDumpCommand.cs" />
@@ -322,18 +429,19 @@
     <Compile Include="Bridge\EnvironmentBoxTerrainProvider.cs" />
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxClutterSpawner.cs" />
     <Compile Include="Modules\EnvironmentBoxes\EnvironmentBoxPatches.cs" />
+    <Compile Include="Modules\Performance\ClutterGroundProbe.cs" />
     <Compile Include="Modules\Performance\ClutterSpreadPatches.cs" />
     <Compile Include="Modules\Utilities\NetworkObjectHelper.cs" />
     <Compile Include="Modules\Utilities\PlayerSpawnGate.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Utilities\FiresLogger.cs" />
-    <Compile Include="Utilities\FiresLogColorPatch.cs" />
     <Compile Include="Utilities\VAFatBanner.cs" />
+    <Compile Include="Utilities\FatHelpContent.cs" />
     <Compile Include="Utilities\VAFatLoadSummary.cs" />
     <Compile Include="Utilities\VATileRestoreBatch.cs" />
   </ItemGroup>
   <!--
-    Source-link block â€” shared utility files that live in sibling Fires-* mods.
+    Source-link block - shared utility files that live in sibling Fires-* mods.
     Uses <Link> to expose them inside this project's tree without copying files.
     Pattern documented in reference_source_link_pattern.md (first applied to
     PlayerSpawnGate 2026-05-20). FAP holds the newer/better implementations.
@@ -371,29 +479,10 @@
   -->
   <ItemGroup>
     <EmbeddedResource Include="adminterrain" />
+    <EmbeddedResource Include="fireswaterfall" />
+    <EmbeddedResource Include="fireszones" />
     <None Include="packages.config" />
     <None Include="Docs\TERRAIN_WATER_PERSISTENCE_BUGFIX_TRACKER.md" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-  <!-- Post-build deploy to the active r2modman 'BlueHills' test profile. Gated on
-       Exists so a missing/renamed profile (other machines, CI) just skips and never
-       fails the build. Copies only the built DLL + PDB into the existing r2modman-
-       managed mod folder; other files there (bundles, configs) are left untouched. -->
-  <PropertyGroup>
-    <BlueHillsPluginDir>C:\Users\travi\AppData\Roaming\r2modmanPlus-local\Valheim\profiles\BlueHills\BepInEx\plugins\FiresAdminTerrain\</BlueHillsPluginDir>
-    <BlueHillsDediDir>C:\Program Files (x86)\Steam\steamapps\common\Valheim dedicated server - BlueHills\BepInEx\plugins\FiresAdminTerrain\</BlueHillsDediDir>
-  </PropertyGroup>
-  <Target Name="DeployToBlueHills" AfterTargets="Build" Condition="Exists('$(BlueHillsPluginDir)')">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BlueHillsPluginDir)" OverwriteReadOnlyFiles="true" />
-    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(BlueHillsPluginDir)" OverwriteReadOnlyFiles="true" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
-    <Message Importance="high" Text="Deployed $(TargetFileName) (+pdb) -> $(BlueHillsPluginDir)" />
-  </Target>
-  <!-- The dedi is a SEPARATE install ("Valheim dedicated server - BlueHills", not the
-       plain "Valheim dedicated server" folder). Without this target the dedi silently
-       kept running a stale DLL while the client had the new one. Mirrors FAP's csproj. -->
-  <Target Name="DeployToBlueHillsDedi" AfterTargets="Build" Condition="Exists('$(BlueHillsDediDir)')">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BlueHillsDediDir)" OverwriteReadOnlyFiles="true" />
-    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(BlueHillsDediDir)" OverwriteReadOnlyFiles="true" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
-    <Message Importance="high" Text="Deployed $(TargetFileName) (+pdb) -> $(BlueHillsDediDir)" />
-  </Target>
 </Project>

@@ -54,7 +54,7 @@ namespace VerdantsAscent.Water.Core
 
             newController.Remove();
 
-            Debug.Log($"[LandIceCombiner] Combined footprint into existing controller ({target.Footprints.Count} total footprints)");
+            FiresLogger.LogInfo($"[LandIceCombiner] Combined footprint into existing controller ({target.Footprints.Count} total footprints)");
             return target;
         }
     }

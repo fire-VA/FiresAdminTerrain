@@ -17,8 +17,7 @@ namespace VerdantsAscent.Terrain.Voxel
     {
         public static bool Active =>
             FiresVoxelConfig.Enabled != null && FiresVoxelConfig.Enabled.Value
-            && FiresVoxelConfig.WorldMode != null
-            && FiresVoxelConfig.WorldMode.Value == VoxelWorldMode.VoxelOnly
+            && FiresVoxelConfig.WorldKind == VoxelWorldMode.VoxelOnly
             && FiresWorldGenBase.Active;
 
         internal static readonly AccessTools.FieldRef<Heightmap, bool> IsDistantLod =
@@ -82,31 +81,52 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 yield return ins;
             }
+            // Harmony re-runs transpilers whenever another mod patches or
+            // unpatches the method; report a result only when it changes.
+            if (swapped == s_loggedSites) yield break;
+            s_loggedSites = swapped;
             if (swapped == 0)
-                Debug.LogWarning("[FiresVoxel] Attack.DoMeleeAttack terrain-lookup transpiler matched NO call sites — pickaxe-on-voxel stays inert (game update changed the method?).");
+                FiresLogger.LogWarning("[FiresVoxel] Attack.DoMeleeAttack terrain-lookup transpiler matched NO call sites — pickaxe-on-voxel stays inert (game update changed the method?).");
             else
-                Debug.Log($"[FiresVoxel] Attack.DoMeleeAttack terrain lookup shimmed ({swapped} site(s)) — pickaxe/hoe hits on voxel chunks resolve the zone heightmap.");
+                FiresLogger.LogInfo($"[FiresVoxel] Attack.DoMeleeAttack terrain lookup shimmed ({swapped} site(s)) — pickaxe/hoe hits on voxel chunks resolve the zone heightmap.");
         }
+
+        private static int s_loggedSites = -1;
     }
 
-    // Pickaxe on VOXEL ground = a true 3D dig, not vanilla's column drop.
-    // Vanilla's TerrainOp lowers the heightfield from the hit point to the
-    // surface — you can never tunnel INTO a wall. On voxel ground the swing
-    // becomes a 2m-circle voxel carve at the exact hit point (the same op as
-    // the Vcarve tool), so pickaxes dig sideways, downward, overhangs — real
-    // tunnels. Ground without voxel data (tiles/vanilla) keeps the vanilla op.
+    // Pickaxe dig = a true 3D dig, not vanilla's column drop. Vanilla's
+    // TerrainOp lowers the heightfield from the hit point to the surface —
+    // you can never tunnel INTO a wall. The swing becomes a 2m-circle voxel
+    // carve at the exact hit point (the same op as the Vcarve tool), so
+    // pickaxes dig sideways, downward, overhangs — real tunnels. On vanilla
+    // ground the first dig converts the zone (ZoneReplace/PlacedOnly: the
+    // carve arms it exactly like a brush does); with Terrain Mode Off,
+    // vanilla ground keeps the vanilla op. Wards and no-build locations gate
+    // the dig exactly like vanilla's. Only terrain-op hits dig: a VFX-only
+    // spawnOnHitTerrain (sledge slams) never carves.
     [HarmonyPatch(typeof(Attack), nameof(Attack.SpawnOnHitTerrain))]
     internal static class Patch_Attack_SpawnOnHitTerrain_VoxelDig
     {
-        private static bool Prefix(Vector3 hitPoint, ItemDrop.ItemData weapon, ref GameObject __result)
+        private const float DigRadius = 1.0f;
+
+        private static bool Prefix(Vector3 hitPoint, GameObject prefab, ref GameObject __result)
         {
-            if (FiresVoxelConfig.Enabled == null || !FiresVoxelConfig.Enabled.Value) return true;
-            // Only claim the swing when the hit point sits on/in voxel ground.
-            if (!VoxelWorld.TrySampleSurfaceY(hitPoint.x, hitPoint.z, hitPoint.y + 3f, hitPoint.y - 3f, out _, out bool solid)
-                && !solid)
-                return true;
-            VoxelWorld.ApplyBrush(hitPoint, 1.0f, 0f, VoxelBrushShape.Sphere, VoxelBrushMode.Carve);
+            if (FiresVoxelConfig.Enabled == null || !FiresVoxelConfig.Enabled.Value || prefab == null) return true;
+            var modifier = prefab.GetComponentInChildren<TerrainModifier>();
+            var op = prefab.GetComponentInChildren<TerrainOp>();
+            if (modifier == null && op == null) return true;
+            if (Zones.ZoneModeRefusals.TerrainEditTouchesClosed(hitPoint, DigRadius)) return true;
+
+            bool onVoxel = VoxelWorld.TrySampleSurfaceY(hitPoint.x, hitPoint.z, hitPoint.y + 3f, hitPoint.y - 3f, out _, out bool solid)
+                || solid;
+            if (!onVoxel && !(FiresVoxelConfig.StreamerRuns && FiresVoxelConfig.WrapsBrushedZones)) return true;
+
             __result = null;
+            if (modifier != null && (!PrivateArea.CheckAccess(hitPoint, modifier.GetRadius()) || Location.IsInsideNoBuildLocation(hitPoint)))
+                return false;
+            if (op != null && (!PrivateArea.CheckAccess(hitPoint, op.GetRadius()) || Location.IsInsideNoBuildLocation(hitPoint)))
+                return false;
+            VoxelWorld.ApplyBrush(hitPoint, DigRadius, 0f, VoxelBrushShape.Sphere, VoxelBrushMode.Carve);
             return false;
         }
     }
@@ -154,17 +174,21 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 yield return ins;
             }
+            if (swapped == s_loggedSites) yield break;
+            s_loggedSites = swapped;
             if (swapped == 0)
-                Debug.LogWarning("[FiresVoxel] Player.PieceRayTest terrain-lookup transpiler matched NO call sites — hoe/cultivator stay dead on voxel ground (game update changed the method?).");
+                FiresLogger.LogWarning("[FiresVoxel] Player.PieceRayTest terrain-lookup transpiler matched NO call sites — hoe/cultivator stay dead on voxel ground (game update changed the method?).");
             else
-                Debug.Log($"[FiresVoxel] Player.PieceRayTest terrain lookup shimmed ({swapped} site(s)) — hoe/cultivator ground pieces resolve the zone heightmap on voxel ground.");
+                FiresLogger.LogInfo($"[FiresVoxel] Player.PieceRayTest terrain lookup shimmed ({swapped} site(s)) — hoe/cultivator ground pieces resolve the zone heightmap on voxel ground.");
         }
+
+        private static int s_loggedSites = -1;
     }
 
-    [HarmonyPatch(typeof(Heightmap), "RebuildRenderMesh")]
-    internal static class Patch_Heightmap_RebuildRenderMesh_VoxelOnly
+    // The Normal-priority prefix of FAT's one Heightmap.RebuildRenderMesh hook (FatVanillaHooks).
+    internal static class VoxelOnlyRenderMesh
     {
-        private static bool Prefix(Heightmap __instance)
+        internal static bool Allow(Heightmap __instance)
         {
             if (!VoxelOnlyMode.Active) return true;
             if (!VoxelOnlyMode.IsDistantLod(__instance)) return false;   // near: never renders
@@ -192,19 +216,18 @@ namespace VerdantsAscent.Terrain.Voxel
     // lava-damage poll). Our generator paints no vanilla lava, so the answer
     // on a voxel-owned world is simply 0. Priority.First + return false skips
     // EWD's prefix and the original in one move.
-    [HarmonyPatch(typeof(Heightmap), "GetLava", typeof(Vector3))]
-    internal static class Patch_Heightmap_GetLava_VoxelOnly
+    // Called first from FAT's one Heightmap.GetLava hook (FatVanillaHooks), before FiresLavaQueries.
+    internal static class VoxelOnlyLava
     {
         private static bool s_logged;
 
-        [HarmonyPriority(Priority.First)]
-        private static bool Prefix(ref float __result)
+        internal static bool Shield(ref float __result)
         {
             if (!VoxelOnlyMode.Active) return true;
             if (!s_logged)
             {
                 s_logged = true;
-                Debug.Log("[FiresVoxel] Heightmap.GetLava shielded on voxel world (no vanilla lava; EWD BiomeHeat NRE class suppressed).");
+                FiresLogger.LogInfo("[FiresVoxel] Heightmap.GetLava shielded on voxel world (no vanilla lava; EWD BiomeHeat NRE class suppressed).");
             }
             __result = 0f;
             return false;
@@ -218,8 +241,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // to the surface. If a solid voxel floor exists beneath the character,
     // they are inside the voxel world: no rescue. No voxel data below at
     // all → vanilla's check still runs (real void safety net).
-    [HarmonyPatch(typeof(Character), "UnderWorldCheck")]
-    internal static class Patch_Character_UnderWorldCheck_VoxelAware
+    internal static class VoxelUnderWorld
     {
         private static readonly AccessTools.FieldRef<Character, float> TimerRef =
             AccessTools.FieldRefAccess<Character, float>("m_underWorldCheckTimer");
@@ -229,7 +251,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // deleted — a terrain-layer ray can hit a 2D tile or an unbaked
         // collider and lie, voxel DENSITY cannot). Guards merged from the
         // retired patch: dead-skip, NPC cadence mirror, timer contract.
-        private static bool Prefix(Character __instance, float dt)
+        // Called from FAT's one Character.UnderWorldCheck hook (FatVanillaHooks).
+        internal static bool Allow(Character __instance, float dt)
         {
             if (FiresVoxelConfig.Enabled == null || !FiresVoxelConfig.Enabled.Value) return true;
             if (__instance == null || __instance.IsDead()) return true;
@@ -238,7 +261,11 @@ namespace VerdantsAscent.Terrain.Voxel
             var zs = ZoneSystem.instance;
             if (zs == null) return true;
             var p = __instance.transform.position;
-            if (p.y >= zs.GetGroundHeight(p) - 1f) return false;   // vanilla wouldn't push — save it the work
+            if (p.y >= zs.GetGroundHeight(p) - 1f)
+            {
+                TimerRef(__instance) = 0f;   // vanilla resets here too; without it NPCs re-check every frame
+                return false;
+            }
             if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, p.y + 2f, p.y - 300f, out _, out _))
             {
                 TimerRef(__instance) = 0f;   // keep the NPC cadence contract
@@ -255,20 +282,101 @@ namespace VerdantsAscent.Terrain.Voxel
     // stuck wrap can never become an infinite loading screen (the streamer
     // wraps around ZNet's reference position pre-spawn, which vanilla sets
     // to the pending spawn point).
+    // Vegetation/rock fallers must WAIT for the voxel ground. StaticPhysics
+    // starts fall-checking the moment its zone spawns, but voxel colliders
+    // arrive from the mesh pipeline AFTER — trees fell through the
+    // not-yet-solid ground and pogoed when it landed ("veg wigs out", worst
+    // on sky islands where the fall is 200m). Skip the whole update until
+    // the zone's colliders are live: the object stands at its spawn height,
+    // then ground-checks against REAL ground. Readiness-gated, not a timer.
+    [HarmonyPatch(typeof(StaticPhysics), nameof(StaticPhysics.SUpdate))]
+    internal static class Patch_StaticPhysics_WaitForVoxelGround
+    {
+        private static bool Prefix(StaticPhysics __instance)
+        {
+            if (VoxelCaveContent.IsCaveContent(__instance)) return false;
+            // A prop dressed onto a skyland never falls or pushes up at all. Vanilla measures the ground it should sit on
+            // with ZoneSystem.GetGroundHeight (GetSolidHeight only when m_checkSolids, which these rocks do not set), and
+            // that is the heightmap 150 m below: every rock and stone dropped out of the sky once its area loaded. It
+            // keeps the height the dressing placed it at.
+            if (FiresSkyIslands.IsOnZoneSkyland(__instance.transform.position)) return false;
+            if (!FiresWorldGenBase.Active) return true;
+            // Solid AND settled for 3s — bounce reports persisted with the
+            // bare solid gate; the settle window outlasts collider bake races.
+            return VoxelZoneStreamer.IsZoneSolidFor(ZoneSystem.GetZone(__instance.transform.position), 3f);
+        }
+    }
+
     [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.IsAreaReady))]
     internal static class Patch_ZNetScene_IsAreaReady_VoxelOnly
     {
         private static float s_gateSince = -1f;
+        private static float s_nextDiag;
+        // The exact point a spawn/teleport is waiting on — served to the
+        // streamer as its pre-spawn wrap center. Ground truth from the gate
+        // itself: the old chain (peer refpositions, then own refposition)
+        // could center the wrap somewhere else entirely, and the streamer
+        // then wrapped NOTHING near the spawn while the gate waited on it —
+        // the full 45s FAIL-OPEN burned on every login.
+        private static Vector3 s_pendingPoint;
+        private static float s_pendingAt = -1f;
+
+        internal static Vector3 PendingSpawnArea(float maxAge)
+            => s_pendingAt >= 0f && Time.realtimeSinceStartup - s_pendingAt <= maxAge
+               ? s_pendingPoint : Vector3.zero;
 
         private static void Postfix(Vector3 point, ref bool __result)
         {
-            if (!__result || !VoxelOnlyMode.Active) return;
-            if (VoxelZoneStreamer.AreaSolid(point)) { s_gateSince = -1f; return; }
-
-            if (s_gateSince < 0f) s_gateSince = Time.realtimeSinceStartup;
-            if (Time.realtimeSinceStartup - s_gateSince > 45f)
+            if (!__result || !(VoxelOnlyMode.Active || FiresSkyIslands.IsOnZoneSkyland(point))) return;
+            if (VoxelZoneStreamer.AreaSolid(point))
             {
-                Debug.LogWarning("[FiresVoxel] VoxelOnly spawn gate FAIL-OPEN after 45s — voxel colliders not ready, releasing anyway.");
+                if (s_gateSince >= 0f)
+                    FiresLogger.LogInfo($"[FiresVoxel] spawn gate released — area solid after " +
+                              $"{Time.realtimeSinceStartup - s_gateSince:F1}s.");
+                s_gateSince = -1f;
+                s_pendingAt = -1f;
+                VoxelMeshPipeline.SpawnGateBoost = false;
+                return;
+            }
+
+            s_pendingPoint = point;
+            s_pendingAt = Time.realtimeSinceStartup;
+            // Vanilla's spawn flow is supposed to point the reference position
+            // at the pending spawn every frame (zones spawn around refpos —
+            // without it there is nothing for the streamer to wrap). Assert it
+            // ourselves while holding so no other mod's spawn flow can starve
+            // the area of vanilla zones.
+            if (ZNet.instance != null && Player.m_localPlayer == null)
+                ZNet.instance.SetReferencePosition(point);
+
+            if (s_gateSince < 0f)
+            {
+                s_gateSince = Time.realtimeSinceStartup;
+                s_nextDiag = 0f;
+                FiresLogger.LogInfo($"[FiresVoxel] spawn gate HOLDING at {point:F0} — full-throttle drain. " +
+                          $"{VoxelZoneStreamer.DescribeArea(point)}");
+            }
+            // The loading screen has no gameplay to hitch: the spawn area was
+            // draining at the gameplay throttle (2 applies + 2 collider assigns
+            // per frame), which is why 3x3 zones could burn the whole 45s.
+            // Open the pipeline wide until the gate releases.
+            VoxelMeshPipeline.SpawnGateBoost = true;
+
+            float held = Time.realtimeSinceStartup - s_gateSince;
+            if (held > 5f && Time.realtimeSinceStartup >= s_nextDiag)
+            {
+                s_nextDiag = Time.realtimeSinceStartup + 10f;
+                FiresLogger.LogWarning($"[FiresVoxel] spawn gate holding {held:F0}s: {VoxelZoneStreamer.DescribeArea(point)}");
+            }
+            if (held > 45f)
+            {
+                FiresLogger.LogWarning($"[FiresVoxel] VoxelOnly spawn gate FAIL-OPEN after 45s — releasing anyway. " +
+                                 $"Blockers: {VoxelZoneStreamer.DescribeArea(point)}");
+                // Fresh timer for any LATER gating episode — the stale timer
+                // made every subsequent check fail-open instantly (the second
+                // FAIL-OPEN line every login).
+                s_gateSince = -1f;
+                VoxelMeshPipeline.SpawnGateBoost = false;
                 return;   // leave __result true
             }
             __result = false;
@@ -290,7 +398,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!s_warned)
             {
                 s_warned = true;
-                Debug.LogWarning($"[FiresVoxel] EffectArea WITHOUT a Collider on '{__instance.transform.root.name}/{__instance.name}' — Awake skipped (was NRE-ing every load). Fix the prefab.");
+                FiresLogger.LogWarning($"[FiresVoxel] EffectArea WITHOUT a Collider on '{__instance.transform.root.name}/{__instance.name}' — Awake skipped (was NRE-ing every load). Fix the prefab.");
             }
             return false;
         }
@@ -315,7 +423,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_logged || __instance.m_waterSurface == null) return;
             s_logged = true;
             var mat = __instance.m_waterSurface.sharedMaterial;
-            Debug.Log($"[FiresVoxel] zone water surface: material='{(mat != null ? mat.name : "null")}' " +
+            FiresLogger.LogInfo($"[FiresVoxel] zone water surface: material='{(mat != null ? mat.name : "null")}' " +
                       $"shader='{(mat != null && mat.shader != null ? mat.shader.name : "null")}'");
         }
     }
@@ -336,47 +444,6 @@ namespace VerdantsAscent.Terrain.Voxel
     // heightmap DATA instead — the exact values the voxels are built from, so
     // vegetation, locations and spawns land on the voxel surface by
     // construction, and SpawnZone has zero physics dependency.
-    // Vanilla clutter's ground probe raycasts (our voxel colliders answer —
-    // height and normal are already carved truth) but then dereferences
-    // GetComponent<Heightmap>() on the hit collider with NO null check. Voxel
-    // chunk colliders carry no Heightmap → NRE → grass never places on voxel
-    // ground. Resolve the ZONE heightmap through the same resolver the
-    // pickaxe/hoe shims use; biome, vegetation mask and the cleared paint
-    // (river beds) all read from it downstream.
-    [HarmonyPatch(typeof(ClutterSystem), nameof(ClutterSystem.GetGroundInfo))]
-    internal static class Patch_ClutterSystem_GetGroundInfo_VoxelOnly
-    {
-        // int, NOT LayerMask — a LayerMask FieldRef throws on the value-type
-        // mismatch EVERY call and killed clutter everywhere (menu included).
-        private static readonly AccessTools.FieldRef<ClutterSystem, int> s_rayMask =
-            AccessTools.FieldRefAccess<ClutterSystem, int>("m_placeRayMask");
-
-        private static bool Prefix(ClutterSystem __instance, Vector3 p, out Vector3 point,
-            out Vector3 normal, out Heightmap hmap, out Heightmap.Biome biome, ref bool __result)
-        {
-            point = p; normal = Vector3.up; hmap = null; biome = Heightmap.Biome.Meadows;
-            if (!VoxelOnlyMode.Active || ZNetScene.instance == null) return true;
-            int mask = s_rayMask(__instance);
-            if (Physics.Raycast(p + Vector3.up * 500f, Vector3.down, out var hit, 1000f, mask))
-            {
-                point = hit.point;
-                normal = hit.normal;
-                hmap = hit.collider.GetComponent<Heightmap>();
-                if (hmap == null) hmap = VoxelHeightmapResolver.FromChunkGO(hit.collider.gameObject);
-                if (hmap != null)
-                {
-                    biome = FiresWorldGenBase.IsWetAt(point.x, point.z)
-                        ? Heightmap.Biome.Ocean
-                        : hmap.GetBiome(point);
-                    __result = true;
-                    return false;
-                }
-            }
-            __result = false;
-            return false;
-        }
-    }
-
     [HarmonyPatch(typeof(ZoneSystem), nameof(ZoneSystem.GetGroundData))]
     internal static class Patch_ZoneSystem_GetGroundData_VoxelOnly
     {
@@ -392,27 +459,122 @@ namespace VerdantsAscent.Terrain.Voxel
             float channelDepth = FiresVoxelConfig.WaterMinChannelDepth != null
                 ? FiresVoxelConfig.WaterMinChannelDepth.Value : 0f;
             if (channelDepth <= 0f) return heightmapY;
-            if (!FiresWorldGenBase.TryGetGenWaterSmooth(wx, wz, out float lvl, out float depth)) return heightmapY;
+            // RECONCILED surface — must stay in step with the bed carve in
+            // VoxelChunk.RunPendingGenerate or veg jumps again.
+            if (!FiresWorldGenBase.TryGetWaterSurfaceSmooth(wx, wz, out float lvl, out float depth)) return heightmapY;
             if (depth < 0.25f || lvl <= 30.25f) return heightmapY;
             float wantBed = lvl - channelDepth;
             return heightmapY > wantBed ? wantBed : heightmapY;
         }
 
+        // Every voxel world, whatever its generator and terrain kind: vanilla's top-down ray that lands on voxel ground
+        // hits a chunk collider with no Heightmap, so it answers no biome and no heightmap (and callers read no lava).
+        // The zone's own heightmap answers them, the generator's biome where none is loaded; the height stays the ray's.
+        private static void Postfix(ref Vector3 p, ref Heightmap.Biome biome, ref Heightmap.BiomeArea biomeArea, ref Heightmap hmap)
+        {
+            if (hmap != null || biome != Heightmap.Biome.None || !FiresVoxelConfig.StreamerRuns) return;
+            if (!VoxelWorld.TrySampleSurfaceY(p.x, p.z, p.y + VoxelHitTolerance, p.y - VoxelHitTolerance, out _, out _)) return;
+            var zoneMap = Heightmap.FindHeightmap(p);
+            if (zoneMap != null)
+            {
+                hmap = zoneMap;
+                biome = zoneMap.GetBiome(p);
+                biomeArea = zoneMap.GetBiomeArea();
+                return;
+            }
+            if (WorldGenerator.instance != null) biome = WorldGenerator.instance.GetBiome(p.x, p.z);
+        }
+
+        private const float VoxelHitTolerance = 0.5f;
+
+        // Timed wrapper — see FiresVegProfiler. Zero cost outside PlaceVegetation:
+        // one bool test, and the stopwatch only runs while that method is on the stack.
         private static bool Prefix(ref Vector3 p, ref Vector3 normal, ref Heightmap.Biome biome,
+            ref Heightmap.BiomeArea biomeArea, ref Heightmap hmap)
+        {
+            if (!FiresVegProfiler.Inside) return PrefixBody(ref p, ref normal, ref biome, ref biomeArea, ref hmap);
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            FiresVegProfiler.GroundCalls++;
+            bool r = PrefixBody(ref p, ref normal, ref biome, ref biomeArea, ref hmap);
+            FiresVegProfiler.GroundTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            return r;
+        }
+
+        private static bool PrefixBody(ref Vector3 p, ref Vector3 normal, ref Heightmap.Biome biome,
             ref Heightmap.BiomeArea biomeArea, ref Heightmap hmap)
         {
             if (!VoxelOnlyMode.Active) return true;
             var hm = Heightmap.FindHeightmap(p);
-            if (hm == null) return true;
-
-            if (!Heightmap.GetHeight(p, out float h)) return true;
+            // THE GENERATOR CAN ALWAYS ANSWER; A HEIGHTMAP CANNOT.
+            // Handing this back to vanilla when no Heightmap exists is what
+            // buried locations: ZoneSystem.PlaceLocations discards the sited y
+            // and re-snaps through GetGroundData, and during world generation
+            // the zone's Heightmap has usually not been built, so vanilla
+            // answered from a terrain that does not exist on a Fires world and
+            // the start temple ended up ~60m under the surface, dragging its
+            // clear-area hole down with it. Our height field needs no
+            // Heightmap, no collider and no voxel chunk — it is the same
+            // SampleFinalMeters the terrain is built from, so answering from it
+            // puts locations exactly on the surface by construction.
+            if (hm == null || !Heightmap.GetHeight(p, out float h))
+            {
+                if (!FiresWorldGenBase.Active) return true;
+                // The GENERATED surface, not PredictedSurface: that subtracts a
+                // channel depth wherever the water field reports water, which is
+                // another route to a y below the ground.
+                p.y = FiresWorldGenBase.SampleFinalMeters(p.x, p.z);
+                // A REAL NORMAL. Returning Vector3.up here made every tilt-based
+                // placement rule see dead-flat ground — 527 maxTilt rules in the
+                // shipped Expand World set alone, all of which would pass on a
+                // cliff. Central difference on the same height field, 2m arms to
+                // match the grid the terrain is built on.
+                float hxm = FiresWorldGenBase.SampleFinalMeters(p.x - 2f, p.z);
+                float hxp = FiresWorldGenBase.SampleFinalMeters(p.x + 2f, p.z);
+                float hzm = FiresWorldGenBase.SampleFinalMeters(p.x, p.z - 2f);
+                float hzp = FiresWorldGenBase.SampleFinalMeters(p.x, p.z + 2f);
+                normal = new Vector3(hxm - hxp, 4f, hzm - hzp).normalized;
+                biome = FiresWorldGenBase.SampleBiome(p.x, p.z);
+                biomeArea = Heightmap.BiomeArea.Median;
+                hmap = null;
+                return false;
+            }
 
             // CARVED TRUTH FIRST (audit §3): spawns/vegetation/locations land
             // via this call — answering from heightmap DATA put them on the
             // UNCARVED surface (floating over riverbeds, buried over fills).
             // The voxel top surface is the ground where voxel data exists;
             // heightmap data stays the fallback for unwrapped zones.
-            bool voxel = VoxelWorld.TrySampleSurfaceY(p.x, p.z, h + 64f, h - 200f, out float vs, out _);
+            bool isle = FiresSkyIslands.IslandAt(p.x, p.z);
+            float probeTop = isle ? h + 340f : h + 64f;
+            // One-zone-at-a-time skylands carry their own dressing, so the ground under them keeps ALL of its
+            // own: probe from below the island's underside and never land on the island.
+            bool zoneWorld = Zones.ZoneModeRegistry.ModeActive;
+            if (isle && zoneWorld)
+                probeTop = FiresSkyIslands.TryBottomAt(p.x, p.z, out float islandBottom)
+                    ? Mathf.Min(h + 64f, islandBottom - 1f) : h + 64f;
+            if (FiresVegProfiler.Inside) FiresVegProfiler.VoxelProbes++;
+            bool voxel = VoxelWorld.TrySampleSurfaceY(p.x, p.z, probeTop, h - 200f, out float vs, out _);
+            // SKY ISLAND SPLIT — the top-down probe finds the ISLAND as "the
+            // surface", which hoisted EVERY veg item off the ground below
+            // (bare terrain under a fully-forested island). Ground keeps most
+            // of its vegetation; a deterministic ~30% share stays on the
+            // island so it isn't bare either.
+            if (voxel && isle && !zoneWorld
+                && FiresWorldGenBase.TryGetGenGround(p.x, p.z, out float baseG)
+                && vs > baseG + 12f)
+            {
+                uint hsh;
+                unchecked
+                {
+                    hsh = (uint)(Mathf.FloorToInt(p.x) * 374761393) ^ (uint)(Mathf.FloorToInt(p.z) * 668265263);
+                    hsh ^= hsh >> 13; hsh *= 1274126177u; hsh ^= hsh >> 16;
+                }
+                if ((hsh & 1023) >= 307)   // ~70% of items return to the ground
+                {
+                    if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, baseG + 6f, h - 200f, out float gs, out _)) vs = gs;
+                    else voxel = false;    // ground column not in yet — predicted surface below
+                }
+            }
             // Voxel data not in for this column yet (the zone's heightmap is
             // created BEFORE the streamer wraps it, and vegetation places right
             // then). Handing back the raw heightmap here puts flora on the
@@ -421,6 +583,11 @@ namespace VerdantsAscent.Terrain.Voxel
             // is the heightmap minus the gen-water bed carve, so predict that
             // and place on the height the terrain is ABOUT to have.
             p.y = voxel ? vs : PredictedSurface(p.x, p.z, h);
+            // A wrapped voxel column already carries any location pad (baked in
+            // GatherColumns); when the column isn't in yet, add the pad to the
+            // predicted surface so flora/spawns over it land on the pad, not the
+            // rough ground it replaced.
+            if (!voxel && FiresLocationPads.TrySample(p.x, p.z, p.y, out float lpy)) p.y = lpy;
 
             float hx0, hx1, hz0, hz1;
             if (voxel)
@@ -449,6 +616,85 @@ namespace VerdantsAscent.Terrain.Voxel
                 biome = Heightmap.Biome.Ocean;
             biomeArea = hm.GetBiomeArea();
             hmap = hm;
+            return false;
+        }
+    }
+
+    // ZoneSystem.GetGroundHeight is a physics ray from y=6000 on the terrain
+    // mask. In the voxel world that is wrong three ways: it grabs a SKY
+    // ISLAND's top instead of the ground beneath it, it returns the caller's
+    // own p.y as a garbage fallback wherever no collider is streamed (unloaded
+    // zones — which is where location suitability runs), and where it does hit
+    // it reads whatever collider happens to exist instead of the 2m truth.
+    // GetTerrainDelta — the location placement suitability check — is built on
+    // this call, which is how locations approved on garbage deltas ended up
+    // pulling terrain to extremes. Answer analytically from the SAME sources
+    // the mesher builds from: voxel surface where data exists, 2m grid + bed
+    // carve prediction everywhere else. The probe window anchors near the
+    // ground so islands overhead can never hijack the sample.
+    internal static class VoxelGroundTruth
+    {
+        internal static bool Sample(Vector3 p, out float y)
+        {
+            y = 0f;
+            if (!Heightmap.GetHeight(p, out float h)
+                && !FiresWorldGenBase.TryGetGenGround(p.x, p.z, out h))
+                return false;
+            if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, h + 24f, h - 200f, out float vs, out _))
+            { y = vs; return true; }   // wrapped column already carries the pad
+            y = Patch_ZoneSystem_GetGroundData_VoxelOnly.PredictedSurface(p.x, p.z, h);
+            if (FiresLocationPads.TrySample(p.x, p.z, y, out float lpy)) y = lpy;
+            return true;
+        }
+    }
+
+    // ExpandWorldData's BiomeHeat.GetLava prefix reads hm.m_renderMesh
+    // .colors32 — NULL on voxel-swapped heightmaps → an NRE every
+    // FixedUpdate for any character standing in Ashlands (log spam). Our
+    // FIRST-priority prefix answers from the worldgen lava field (the same
+    // data that paints the mask) and skips both the original and EWD's
+    // prefix — and gameplay lava damage now tracks OUR pools and flows
+    // exactly. Called second from FAT's one Heightmap.GetLava hook
+    // (FatVanillaHooks), so its value stands over VoxelOnlyLava's 0.
+    internal static class FiresLavaQueries
+    {
+        internal static bool GetLava(Vector3 worldPos, ref float __result)
+        {
+            if (!FiresWorldGenBase.Active) return true;
+            __result = FiresWorldGenBase.SampleLavaMask(worldPos.x, worldPos.z).a;
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Heightmap), nameof(Heightmap.IsLava))]
+    [HarmonyPriority(Priority.First)]
+    internal static class Patch_Heightmap_IsLava_FiresLava
+    {
+        private static bool Prefix(Vector3 worldPos, float lavaValue, ref bool __result)
+        {
+            if (!FiresWorldGenBase.Active) return true;
+            __result = FiresWorldGenBase.SampleLavaMask(worldPos.x, worldPos.z).a > lavaValue;
+            return false;
+        }
+    }
+
+    // Called first from FAT's one hook on each GetGroundHeight overload (FatVanillaHooks), before the tile ruler lift.
+    internal static class VoxelGroundHeight
+    {
+        internal static bool Single(Vector3 p, ref float __result)
+        {
+            if (!VoxelOnlyMode.Active) return true;
+            if (!VoxelGroundTruth.Sample(p, out float y)) return true;
+            __result = y;
+            return false;
+        }
+
+        internal static bool WithOut(Vector3 p, ref float height, ref bool __result)
+        {
+            if (!VoxelOnlyMode.Active) return true;
+            if (!VoxelGroundTruth.Sample(p, out float y)) return true;
+            height = y;
+            __result = true;
             return false;
         }
     }

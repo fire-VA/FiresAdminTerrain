@@ -62,13 +62,13 @@ namespace VerdantsAscent.Terrain.Persistence
                 "Force a heightmap-material capture from any vanilla Heightmap in the loaded scene. Useful if tiles are rendering as the Standard fallback (admin yard with no vanilla terrain ever loaded this session).",
                 (args) =>
                 {
-                    if (VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.HasMaterial)
+                    if (FiresCore.Materials.TerrainMaterialCache.HasMaterial)
                     {
                         args.Context.AddString("va_terrain_capture: already cached — no-op. Use va_terrain_recapture to drop the cache and re-grab (e.g. after HD Terrain finished loading).");
                         return;
                     }
-                    int scanned = VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.ForceCaptureFromScene();
-                    if (VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.HasMaterial)
+                    int scanned = FiresCore.Materials.TerrainMaterialCache.ForceCaptureFromScene();
+                    if (FiresCore.Materials.TerrainMaterialCache.HasMaterial)
                     {
                         args.Context.AddString($"va_terrain_capture: scanned {scanned} heightmap(s), captured heightmap material. All tiles upgraded.");
                     }
@@ -83,8 +83,8 @@ namespace VerdantsAscent.Terrain.Persistence
                 "Drop the cached tile material and re-capture from a vanilla Heightmap. Use after a shader-swap mod (e.g. ValheimHDTerrain) finishes loading so tiles pick up the new look. Refreshes every tile renderer in the world.",
                 (args) =>
                 {
-                    int scanned = VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.ForceRecaptureFromScene();
-                    if (VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.HasMaterial)
+                    int scanned = FiresCore.Materials.TerrainMaterialCache.ForceRecaptureFromScene();
+                    if (FiresCore.Materials.TerrainMaterialCache.HasMaterial)
                     {
                         args.Context.AddString($"va_terrain_recapture: cleared cache, scanned {scanned} heightmap(s), captured fresh material. All tiles upgraded.");
                     }
@@ -204,7 +204,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // Phase 1 — destroy every currently-loaded TileAnchor via ZNetScene.Destroy
         //           (synchronous, fast).
         // Phase 2 — POKE every entry in ZoneSystem.m_generatedZones (HashSet of
-        //           Vector2i, private). Calling ZoneSystem.PokeLocalZone(zoneID)
+        //           Vector2s, private). Calling ZoneSystem.PokeLocalZone(zoneID)
         //           via reflection forces that zone to spawn its ZDOs into
         //           ZDOMan. Without this, "cold" zones (generated historically
         //           but not visited this session) have their VATile ZDOs sitting
@@ -301,7 +301,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         // ── ZoneSystem reflection: m_generatedZones + PokeLocalZone ──────────
         // Cached lazily on first wipe_all. Both are private vanilla members
-        // (HashSet<Vector2i> and bool method respectively).
+        // (HashSet<Vector2s> and bool method respectively).
         private static FieldInfo s_generatedZonesField;
         private static MethodInfo s_pokeLocalZoneMethod;
         private static bool s_zoneReflectionAttempted;
@@ -319,27 +319,27 @@ namespace VerdantsAscent.Terrain.Persistence
                 "PokeLocalZone",
                 BindingFlags.NonPublic | BindingFlags.Instance,
                 binder: null,
-                types: new[] { typeof(Vector2i) },
+                types: new[] { typeof(Vector2s) },
                 modifiers: null);
 
             if (s_generatedZonesField == null)
                 FiresLogger.LogError("[TileDeleteOps] ZoneSystem.m_generatedZones field not found via reflection — wipe_all cannot enumerate cold zones.");
             if (s_pokeLocalZoneMethod == null)
-                FiresLogger.LogError("[TileDeleteOps] ZoneSystem.PokeLocalZone(Vector2i) method not found via reflection — wipe_all cannot force-load cold zones.");
+                FiresLogger.LogError("[TileDeleteOps] ZoneSystem.PokeLocalZone(Vector2s) method not found via reflection — wipe_all cannot force-load cold zones.");
 
             return s_generatedZonesField != null && s_pokeLocalZoneMethod != null;
         }
 
-        private static List<Vector2i> SnapshotGeneratedZones()
+        private static List<Vector2s> SnapshotGeneratedZones()
         {
             if (!EnsureZoneReflection()) return null;
             if (ZoneSystem.instance == null) return null;
             try
             {
                 var raw = s_generatedZonesField.GetValue(ZoneSystem.instance);
-                if (raw is HashSet<Vector2i> set)
+                if (raw is HashSet<Vector2s> set)
                 {
-                    return new List<Vector2i>(set);
+                    return new List<Vector2s>(set);
                 }
                 FiresLogger.LogError($"[TileDeleteOps] m_generatedZones returned unexpected type {raw?.GetType().FullName ?? "<null>"}");
                 return null;
@@ -353,7 +353,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         // PokeLocalZone returns true if it just spawned the zone fresh (out parameter
         // distinguishes that from "already loaded, just reset TTL").
-        private static bool TryPokeLocalZone(Vector2i zoneID, out bool spawnedFresh)
+        private static bool TryPokeLocalZone(Vector2s zoneID, out bool spawnedFresh)
         {
             spawnedFresh = false;
             if (!EnsureZoneReflection()) return false;
@@ -558,13 +558,6 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             if (args.Length <= idx) return def;
             return float.TryParse(args[idx], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : def;
-        }
-
-        // Auto-register alongside the brush commands.
-        [HarmonyPatch(typeof(Terminal), nameof(Terminal.InitTerminal))]
-        private static class Terminal_InitTerminal_RegisterTileDeleteOps
-        {
-            private static void Postfix() => Register();
         }
     }
 }

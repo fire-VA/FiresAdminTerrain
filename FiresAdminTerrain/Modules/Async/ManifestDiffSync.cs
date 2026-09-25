@@ -9,19 +9,19 @@ using UnityEngine;
 namespace VerdantsAscent.Async
 {
     /// <summary>
-    /// Generic manifest-diff sync primitive ? "don't re-send what the peer already has".
+    /// Generic manifest-diff sync primitive - "don't re-send what the peer already has".
     ///
     /// THE PRINCIPLE
     /// -------------
     /// Whenever the server fan-outs a batch of files to a joining client (cfg packs,
     /// saved NPC JSON, quest databases, territory blobs, UI layouts, sprite assets,
-    /// anything file-backed), the na?ve implementation re-ships every byte on every
+    /// anything file-backed), the naive implementation re-ships every byte on every
     /// login. That both wastes Steam bandwidth AND multiplies the risk of tripping the
     /// 512 KB per-message cap when Steam's send queue concatenates adjacent packages.
     ///
     /// <see cref="UIBuilder.UILayoutSyncRPC"/> already proves the right shape:
-    ///  1. Server on peer-validated ? <see cref="RequestFromPeer"/>("UILayouts").
-    ///  2. Client receives ? enumerates its local folder for that namespace,
+    ///  1. Server on peer-validated -> <see cref="RequestFromPeer"/>("UILayouts").
+    ///  2. Client receives -> enumerates its local folder for that namespace,
     ///     replies with {relativePath =&gt; sha256}.
     ///  3. Server caches the manifest per (peer, namespace) and, while looping over
     ///     its own files, simply skips any whose local hash matches the peer's.
@@ -32,7 +32,7 @@ namespace VerdantsAscent.Async
     ///
     /// USAGE
     /// -----
-    ///  * At mod init (BOTH sides ? the client is the responder, the server is the
+    ///  * At mod init (BOTH sides - the client is the responder, the server is the
     ///    requester, and a listen-server is both):
     ///        <c>ManifestDiffSync.EnsureRegistered();</c>
     ///        <c>ManifestDiffSync.RegisterFolder("SavedNPCs",
@@ -48,7 +48,7 @@ namespace VerdantsAscent.Async
     ///  * On peer disconnect (optional cleanup):
     ///        <c>ManifestDiffSync.ForgetPeer(peerUid);</c>
     ///
-    /// The helper never touches the file payload itself ? it only brokers the
+    /// The helper never touches the file payload itself - it only brokers the
     /// "does the peer already have this?" question. The caller is still responsible
     /// for the actual content RPC, chunking, and applying on the receiver side.
     /// </summary>
@@ -100,13 +100,13 @@ namespace VerdantsAscent.Async
         /// <summary>
         /// Idempotent registration of the two shared routed RPCs. Safe to call from
         /// anywhere; returns early if the RPC layer isn't ready yet (caller should
-        /// retry at next convenient hook ? e.g. <c>ZNet.Awake</c> postfix).
+        /// retry at next convenient hook - e.g. <c>ZNet.Awake</c> postfix).
         ///
         /// Each <c>Register</c> is wrapped individually: if one RPC name collides
         /// with something already in <c>ZRoutedRpc.m_functions</c> (rare, but
         /// observed when another subsystem has stable-hashed the same string) we
         /// still bind whatever else we can instead of silently leaving both handlers
-        /// unregistered ? which would make every future manifest query time out and
+        /// unregistered - which would make every future manifest query time out and
         /// defeat the entire diff-sync system.
         /// </summary>
         public static void EnsureRegistered()
@@ -127,7 +127,7 @@ namespace VerdantsAscent.Async
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ManifestDiffSync] Register('{rpcName}') failed: {ex.Message}");
+                FiresLogger.LogWarning($"[ManifestDiffSync] Register('{rpcName}') failed: {ex.Message}");
             }
         }
 
@@ -187,7 +187,7 @@ namespace VerdantsAscent.Async
         // can enumerate, but the client still needs to remember across sessions what
         // content it last received so future logins can skip the full resend when nothing
         // changed on the server. We stash one tiny file per namespace under
-        // BepInEx/config/FiresAdminTerrain/cache/manifests/<key>.hash ? each file is exactly
+        // BepInEx/config/FiresAdminTerrain/cache/manifests/<key>.hash - each file is exactly
         // 64 hex chars of SHA-256, so the whole cache is a handful of bytes even across
         // dozens of namespaces.
         //
@@ -231,7 +231,7 @@ namespace VerdantsAscent.Async
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ManifestDiffSync] RememberBlobHash('{namespaceKey}') failed: {ex.Message}");
+                FiresLogger.LogWarning($"[ManifestDiffSync] RememberBlobHash('{namespaceKey}') failed: {ex.Message}");
             }
         }
 
@@ -249,7 +249,7 @@ namespace VerdantsAscent.Async
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ManifestDiffSync] GetPersistedBlobHash('{namespaceKey}') failed: {ex.Message}");
+                FiresLogger.LogWarning($"[ManifestDiffSync] GetPersistedBlobHash('{namespaceKey}') failed: {ex.Message}");
             }
             return string.Empty;
         }
@@ -311,7 +311,7 @@ namespace VerdantsAscent.Async
         /// same SHA-256 for <paramref name="relativePath"/> as our local copy. When no
         /// manifest has been received (timeout / older client), returns false so the
         /// caller falls back to the legacy "send everything" path and the peer still
-        /// ends up synced ? correctness over bandwidth.
+        /// ends up synced - correctness over bandwidth.
         /// </summary>
         public static bool HasSameHash(long peerUid, string namespaceKey, string relativePath, string localHashHex)
         {
@@ -340,7 +340,7 @@ namespace VerdantsAscent.Async
             }
         }
 
-        /// <summary>Drop all cached manifests for a peer ? call on disconnect.</summary>
+        /// <summary>Drop all cached manifests for a peer - call on disconnect.</summary>
         public static void ForgetPeer(long peerUid)
         {
             lock (_lock)
@@ -409,7 +409,7 @@ namespace VerdantsAscent.Async
                 try { hash = hashReg.HashProvider() ?? string.Empty; }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[ManifestDiffSync] hash provider for '{namespaceKey}' threw: {ex.Message}");
+                    FiresLogger.LogWarning($"[ManifestDiffSync] hash provider for '{namespaceKey}' threw: {ex.Message}");
                     hash = string.Empty;
                 }
                 manifest[string.Empty] = hash;
@@ -428,7 +428,7 @@ namespace VerdantsAscent.Async
             try { files = Directory.GetFiles(folder, reg.SearchPattern, reg.Search); }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ManifestDiffSync] BuildLocalManifest('{namespaceKey}') enumerate failed: {ex.Message}");
+                FiresLogger.LogWarning($"[ManifestDiffSync] BuildLocalManifest('{namespaceKey}') enumerate failed: {ex.Message}");
                 return manifest;
             }
 
@@ -458,7 +458,7 @@ namespace VerdantsAscent.Async
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[ManifestDiffSync] Hashing '{rel}' failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[ManifestDiffSync] Hashing '{rel}' failed: {ex.Message}");
                     continue;
                 }
 
@@ -478,14 +478,14 @@ namespace VerdantsAscent.Async
             catch { return; }
             if (string.IsNullOrEmpty(namespaceKey)) return;
 
-            // Everyone can be asked for a manifest ? on a listen-server the server is
+            // Everyone can be asked for a manifest - on a listen-server the server is
             // both the asker and a potential responder for other peers. We just refuse
             // to enumerate namespaces that weren't registered locally.
             Dictionary<string, string> manifest;
             try { manifest = BuildLocalManifest(namespaceKey); }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ManifestDiffSync] BuildLocalManifest('{namespaceKey}') threw: {ex.Message}");
+                FiresLogger.LogWarning($"[ManifestDiffSync] BuildLocalManifest('{namespaceKey}') threw: {ex.Message}");
                 return;
             }
 
@@ -529,7 +529,7 @@ namespace VerdantsAscent.Async
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ManifestDiffSync] RPC_OnReply decode failed: {ex.Message}");
+                FiresLogger.LogWarning($"[ManifestDiffSync] RPC_OnReply decode failed: {ex.Message}");
             }
         }
     }

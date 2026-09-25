@@ -281,12 +281,12 @@ namespace VerdantsAscent.Water.Core
                 string filePath = Path.Combine(cfgDir, DumpFileName);
                 File.WriteAllText(filePath, report.ToString());
                 args.Context.AddString($"Full report written to: {filePath}");
-                Debug.Log($"[WaterDumpCommand] Wrote {finds.Count} entries to {filePath}");
+                FiresLogger.LogInfo($"[WaterDumpCommand] Wrote {finds.Count} entries to {filePath}");
             }
             catch (System.Exception ex)
             {
                 args.Context.AddString($"Failed to write dump file: {ex.Message}");
-                Debug.LogWarning($"[WaterDumpCommand] write failed: {ex}");
+                FiresLogger.LogWarning($"[WaterDumpCommand] write failed: {ex}");
             }
         }
 
@@ -302,12 +302,6 @@ namespace VerdantsAscent.Water.Core
             if (string.IsNullOrEmpty(s)) return s;
             if (s.Length <= 50) return s;
             return "..." + s.Substring(s.Length - 47);
-        }
-
-        [HarmonyPatch(typeof(Terminal), nameof(Terminal.InitTerminal))]
-        private static class Terminal_InitTerminal_RegisterWaterDump
-        {
-            private static void Postfix() => Register();
         }
     }
 }

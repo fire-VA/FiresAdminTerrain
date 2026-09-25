@@ -57,7 +57,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[BiomePaintPersistence] Failed to cache reflection: {ex.Message}");
+                FiresLogger.LogError($"[BiomePaintPersistence] Failed to cache reflection: {ex.Message}");
             }
         }
 
@@ -202,7 +202,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] BiomeFilePersistence.RecordBiomeReset threw: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] BiomeFilePersistence.RecordBiomeReset threw: {ex.Message}");
             }
 
             // Refresh vertex colors on overlapping Heightmaps so the change
@@ -213,7 +213,7 @@ namespace VerdantsAscent.Terrain.Biome
             int totalRemoved = removed + zdoRemoved;
             if (totalRemoved > 0)
             {
-                Debug.Log($"[BiomePaintPersistence] RemoveOverlapping at {center} r={radius:F1} → removed {removed} in-memory + {zdoRemoved} from ZDO + file cache trimmed");
+                FiresLogger.LogInfo($"[BiomePaintPersistence] RemoveOverlapping at {center} r={radius:F1} → removed {removed} in-memory + {zdoRemoved} from ZDO + file cache trimmed");
             }
             return totalRemoved;
         }
@@ -353,7 +353,7 @@ namespace VerdantsAscent.Terrain.Biome
             // Only log individual paints when NOT restoring (avoids 800+ log lines on world load)
             if (!_isRestoring)
             {
-                Debug.Log($"[BiomePaintPersistence] Painted {biome} on VANILLA terrain at {center}, radius {radius}");
+                FiresLogger.LogInfo($"[BiomePaintPersistence] Painted {biome} on VANILLA terrain at {center}, radius {radius}");
             }
 
             // Force vanilla heightmaps to regenerate so our RebuildRenderMesh patch can apply colors
@@ -443,7 +443,7 @@ namespace VerdantsAscent.Terrain.Biome
 
             if (removed > 0)
             {
-                Debug.Log($"[BiomePaintPersistence] Reset {removed} paints on VANILLA terrain at {center}");
+                FiresLogger.LogInfo($"[BiomePaintPersistence] Reset {removed} paints on VANILLA terrain at {center}");
             }
 
             return removed;
@@ -478,7 +478,7 @@ namespace VerdantsAscent.Terrain.Biome
             // Only clear grass for biomes that shouldn't have meadows-style grass
             bool shouldClearGrass = ShouldClearGrassForBiome(biome);
 
-            Debug.Log($"[BiomePaintPersistence] PaintVanillaHeightmapMask: biome={biome}, shouldClearGrass={shouldClearGrass}");
+            FiresLogger.LogInfo($"[BiomePaintPersistence] PaintVanillaHeightmapMask: biome={biome}, shouldClearGrass={shouldClearGrass}");
 
             if (!shouldClearGrass) return;
 
@@ -630,12 +630,12 @@ namespace VerdantsAscent.Terrain.Biome
                         saveMethod?.Invoke(tc, null);
                     }
 
-                    Debug.Log($"[BiomePaintPersistence] Painted vanilla heightmap mask at {center}, radius {radius}");
+                    FiresLogger.LogInfo($"[BiomePaintPersistence] Painted vanilla heightmap mask at {center}, radius {radius}");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to paint vanilla heightmap mask: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to paint vanilla heightmap mask: {ex.Message}");
             }
         }
 
@@ -757,7 +757,7 @@ namespace VerdantsAscent.Terrain.Biome
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[BiomePaintPersistence.OverwriteVanillaPaintMask] threw on TerrainComp: {ex.Message}");
+                    FiresLogger.LogWarning($"[BiomePaintPersistence.OverwriteVanillaPaintMask] threw on TerrainComp: {ex.Message}");
                 }
             }
 
@@ -766,7 +766,7 @@ namespace VerdantsAscent.Terrain.Biome
             // refresh from the patched paint mask.
             ForceHeightmapRegeneration(center, radius);
 
-            Debug.Log($"[BiomePaintPersistence] OverwriteVanillaPaintMask at {center}, r={radius:F1}, color={paintColor} → {touched} TerrainComp(s)");
+            FiresLogger.LogInfo($"[BiomePaintPersistence] OverwriteVanillaPaintMask at {center}, r={radius:F1}, color={paintColor} → {touched} TerrainComp(s)");
             return touched;
         }
 
@@ -795,7 +795,7 @@ namespace VerdantsAscent.Terrain.Biome
                 int version = pkg.ReadInt();
                 if (version != DATA_VERSION)
                 {
-                    Debug.LogWarning($"[BiomePaintPersistence] Unknown biome data version {version}");
+                    FiresLogger.LogWarning($"[BiomePaintPersistence] Unknown biome data version {version}");
                     return paints;
                 }
 
@@ -814,7 +814,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to load biome paints: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to load biome paints: {ex.Message}");
             }
 
             return paints;
@@ -848,7 +848,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to save biome paints: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to save biome paints: {ex.Message}");
             }
         }
 
@@ -888,7 +888,7 @@ namespace VerdantsAscent.Terrain.Biome
             var nview = terrainComp.GetComponent<ZNetView>();
             if (nview == null || !nview.IsValid())
             {
-                Debug.LogWarning($"[BiomePaintPersistence] TerrainComp has no valid ZNetView at {center}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] TerrainComp has no valid ZNetView at {center}");
                 return;
             }
 
@@ -938,7 +938,7 @@ namespace VerdantsAscent.Terrain.Biome
 
             SaveClutterPaintsToTerrainCompDirect(terrainComp, existingPaints);
 
-            Debug.Log($"[BiomePaintPersistence] Recorded clutter paint: {clutterType} at {center}, radius {radius}");
+            FiresLogger.LogInfo($"[BiomePaintPersistence] Recorded clutter paint: {clutterType} at {center}, radius {radius}");
         }
 
         /// <summary>
@@ -985,7 +985,7 @@ namespace VerdantsAscent.Terrain.Biome
             if (removed > 0)
             {
                 SaveClutterPaintsToTerrainCompDirect(terrainComp, existingPaints);
-                Debug.Log($"[BiomePaintPersistence] Removed {removed} clutter paints at {center}");
+                FiresLogger.LogInfo($"[BiomePaintPersistence] Removed {removed} clutter paints at {center}");
             }
         }
 
@@ -1023,7 +1023,7 @@ namespace VerdantsAscent.Terrain.Biome
                 }
             }
 
-            Debug.Log($"[BiomePaintPersistence] Cleared clutter persistence from {clearedComps} TerrainComps");
+            FiresLogger.LogInfo($"[BiomePaintPersistence] Cleared clutter persistence from {clearedComps} TerrainComps");
         }
 
         /// <summary>
@@ -1079,7 +1079,7 @@ namespace VerdantsAscent.Terrain.Biome
 
             // NOTE: Do NOT call hmap.Poke() - it causes terrain compiler spam
 
-            Debug.Log($"[BiomePaintPersistence] Recorded biome paint: {biome} at {center}, radius {radius}");
+            FiresLogger.LogInfo($"[BiomePaintPersistence] Recorded biome paint: {biome} at {center}, radius {radius}");
         }
 
         /// <summary>
@@ -1112,7 +1112,7 @@ namespace VerdantsAscent.Terrain.Biome
 
                 // NOTE: Do NOT call hmap.Poke() - it causes terrain compiler spam
 
-                Debug.Log($"[BiomePaintPersistence] Cleared {removed} biome paints at {center}");
+                FiresLogger.LogInfo($"[BiomePaintPersistence] Cleared {removed} biome paints at {center}");
             }
         }
 
@@ -1157,7 +1157,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to load clutter paints: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to load clutter paints: {ex.Message}");
             }
 
             return paints;
@@ -1174,7 +1174,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to save clutter paints: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to save clutter paints: {ex.Message}");
             }
         }
 
@@ -1211,7 +1211,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to save clutter paints: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to save clutter paints: {ex.Message}");
             }
         }
 
@@ -1247,7 +1247,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomePaintPersistence] Failed to save biome paints: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomePaintPersistence] Failed to save biome paints: {ex.Message}");
             }
         }
 
@@ -1275,7 +1275,7 @@ namespace VerdantsAscent.Terrain.Biome
             {
                 _activePaints.AddRange(biomePaints);
                 _hasAnyPaintedAreas = true;
-                Debug.Log($"[BiomePaintPersistence] Loaded {biomePaints.Count} biome paints from TerrainComp at {terrainComp.transform.position}");
+                FiresLogger.LogInfo($"[BiomePaintPersistence] Loaded {biomePaints.Count} biome paints from TerrainComp at {terrainComp.transform.position}");
 
                 // NOTE: Do NOT call hmap.Poke() here!
                 // Poke() internally calls GetAndCreateTerrainCompiler() which creates duplicate TerrainComps
@@ -1337,7 +1337,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             _spawnedClutterByTerrainComp.Clear();
 
-            Debug.Log("[BiomePaintPersistence] World unloaded - cleared all paint caches");
+            FiresLogger.LogInfo("[BiomePaintPersistence] World unloaded - cleared all paint caches");
         }
 
         /// <summary>
@@ -1457,7 +1457,7 @@ namespace VerdantsAscent.Terrain.Biome
 
                     if (totalPaints > 0)
                     {
-                        Debug.Log($"[BiomePaintPersistence] Restored {totalPaints} clutter paints ({totalInstances} instances spawned)");
+                        FiresLogger.LogInfo($"[BiomePaintPersistence] Restored {totalPaints} clutter paints ({totalInstances} instances spawned)");
                     }
                 }
                 finally
@@ -1514,13 +1514,11 @@ namespace VerdantsAscent.Terrain.Biome
         public static class BiomePaintPatches
         {
             /// <summary>
-            /// Patch Heightmap.RebuildRenderMesh to apply our biome paint colors.
-            /// This runs AFTER vanilla builds the mesh, so we can override vertex colors.
+            /// Applies our biome paint colors after vanilla builds the mesh, so we can override vertex colors.
+            /// The Priority.Last - 5 postfix of FAT's one Heightmap.RebuildRenderMesh hook (FatVanillaHooks):
+            /// it runs after the environment-box colours, so paint has the last word on painted vertices.
             /// </summary>
-            [HarmonyPatch(typeof(Heightmap), "RebuildRenderMesh")]
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.Last - 5)] // Run after other patches but before EnvironmentBoxPatches
-            public static void Heightmap_RebuildRenderMesh_Postfix(Heightmap __instance)
+            internal static void ApplyPaintColors(Heightmap __instance)
             {
                 // Fast exit if no painted areas
                 if (!_hasAnyPaintedAreas) return;
@@ -1582,7 +1580,7 @@ namespace VerdantsAscent.Terrain.Biome
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[BiomePaintPersistence] Error in RebuildRenderMesh patch: {ex.Message}");
+                    FiresLogger.LogWarning($"[BiomePaintPersistence] Error in RebuildRenderMesh patch: {ex.Message}");
                 }
             }
 
@@ -1604,7 +1602,7 @@ namespace VerdantsAscent.Terrain.Biome
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[BiomePaintPersistence] Error in TerrainComp_Load: {ex.Message}");
+                    FiresLogger.LogWarning($"[BiomePaintPersistence] Error in TerrainComp_Load: {ex.Message}");
                 }
             }
 
@@ -1618,7 +1616,7 @@ namespace VerdantsAscent.Terrain.Biome
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[BiomePaintPersistence] Error in TerrainComp_OnDestroy: {ex.Message}");
+                    FiresLogger.LogWarning($"[BiomePaintPersistence] Error in TerrainComp_OnDestroy: {ex.Message}");
                 }
             }
 

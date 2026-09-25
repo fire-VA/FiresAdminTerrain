@@ -180,7 +180,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Tracks which grid rows have been modified since the last save.
-        /// Used for partial segment saves � only dirty segments are written.
+        /// Used for partial segment saves - only dirty segments are written.
         /// -1 means no dirty rows. Updated by MopWaterAt and ForceRegenerate.
         /// </summary>
         private int _dirtyRowMin = -1;
@@ -210,12 +210,12 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Ambient VFX controller (shoreline splash, waterfall spray, surface debris, audio).
-        /// Ephemeral � no ZDO, no persistence. Rebuilt after each mesh regeneration.
+        /// Ephemeral - no ZDO, no persistence. Rebuilt after each mesh regeneration.
         /// </summary>
         private WaterAmbientVFX _ambientVFX;
 
         /// <summary>
-        /// Lava water overlay � thin water layer rendered above the lava surface.
+        /// Lava water overlay - thin water layer rendered above the lava surface.
         /// The water shader's refraction over the opaque lava material produces a
         /// phenomenal molten-glass look. Only created when CustomLiquidType == Lava.
         /// </summary>
@@ -363,7 +363,7 @@ namespace VerdantsAscent.Water.Core
                 _ambientVFX = null;
             }
 
-            if (s_verboseLogging) Debug.Log($"[WaterMeshCombiner] OnDestroy at {transform.position}: Cleaned up all water components");
+            if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] OnDestroy at {transform.position}: Cleaned up all water components");
         }
 
         private void Update()
@@ -418,7 +418,7 @@ namespace VerdantsAscent.Water.Core
 
             if (s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombiner] AddWaterDiskInternal: Added disk at {disk.Position}, radius={disk.Radius} (total: {_waterDisks.Count})");
+                FiresLogger.LogInfo($"[WaterMeshCombiner] AddWaterDiskInternal: Added disk at {disk.Position}, radius={disk.Radius} (total: {_waterDisks.Count})");
             }
         }
 
@@ -464,7 +464,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 if (s_verboseLogging)
                 {
-                    Debug.Log($"[WaterMeshCombiner] Batch added {addedCount} water disks (skipRegen={skipRegeneration})");
+                    FiresLogger.LogInfo($"[WaterMeshCombiner] Batch added {addedCount} water disks (skipRegen={skipRegeneration})");
                 }
             }
         }
@@ -534,7 +534,7 @@ namespace VerdantsAscent.Water.Core
 
             if (s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombiner] Cleared all disks from combiner at {transform.position}");
+                FiresLogger.LogInfo($"[WaterMeshCombiner] Cleared all disks from combiner at {transform.position}");
             }
         }
 
@@ -545,7 +545,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void DestroyPermanently()
         {
-            if (s_verboseLogging) Debug.Log($"[WaterMeshCombiner] DestroyPermanently at {transform.position}: {_waterDisks.Count} disks");
+            if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] DestroyPermanently at {transform.position}: {_waterDisks.Count} disks");
 
             // Notify file cache of permanent deletion
             WaterCombinerCache.OnCombinerPermanentlyDeleted(this);
@@ -641,7 +641,7 @@ namespace VerdantsAscent.Water.Core
                 return float.MinValue;
 
             // CRITICAL: Check if position is actually within a water disk's geometry.
-            // The bounding box is rectangular but water disks are circular � without this
+            // The bounding box is rectangular but water disks are circular - without this
             // check, players in the corners of the bounding box (far from any disk) would
             // still get a valid water level and swim in the air.
             if (!IsWithinAnyDiskRadius(worldPos))
@@ -717,7 +717,7 @@ namespace VerdantsAscent.Water.Core
                 return false;
 
             // CRITICAL: Check actual disk geometry, not just bounding box.
-            // The bounding box is rectangular but disks are circular � corners of the
+            // The bounding box is rectangular but disks are circular - corners of the
             // bounding box extend far beyond any actual water.
             if (!IsWithinAnyDiskRadius(worldPos))
                 return false;
@@ -739,7 +739,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Checks if a world position is within ANY water disk's radius (+ blend distance).
-        /// This is the true geometry check � water disks are circular, not rectangular.
+        /// This is the true geometry check - water disks are circular, not rectangular.
         /// Used to prevent false positives from the rectangular bounding box.
         /// </summary>
         private bool IsWithinAnyDiskRadius(Vector3 worldPos)
@@ -1014,7 +1014,7 @@ namespace VerdantsAscent.Water.Core
 
                     if (s_verboseLogging)
                     {
-                        Debug.Log($"[WaterMeshCombiner] Added disk to existing combiner at {combiner.transform.position} (now has {combiner._waterDisks.Count} disks)");
+                        FiresLogger.LogInfo($"[WaterMeshCombiner] Added disk to existing combiner at {combiner.transform.position} (now has {combiner._waterDisks.Count} disks)");
                     }
 
                     return combiner;
@@ -1038,7 +1038,7 @@ namespace VerdantsAscent.Water.Core
             // Start() will skip the add if already present.
             s_allCombiners.Add(newCombiner);
 
-            // DON'T create anchor yet � defer until debounce timer fires.
+            // DON'T create anchor yet - defer until debounce timer fires.
             // This prevents creating an anchor that immediately gets more disks added
             // during rapid click-and-hold placement.
             newCombiner.QueueDebouncedSave();
@@ -1070,7 +1070,7 @@ namespace VerdantsAscent.Water.Core
 
             if (s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombiner] Created NEW combiner at {disk.Position} (anchor deferred, type={newCombiner.CustomLiquidType})");
+                FiresLogger.LogInfo($"[WaterMeshCombiner] Created NEW combiner at {disk.Position} (anchor deferred, type={newCombiner.CustomLiquidType})");
             }
 
             return newCombiner;
@@ -1110,7 +1110,7 @@ namespace VerdantsAscent.Water.Core
             {
                 if (combiner == null) continue;
 
-                // Use XZ distance only � water bodies at different elevations
+                // Use XZ distance only - water bodies at different elevations
                 // (e.g. rivers at Y=30 vs mountains at Y=5000) should still be
                 // found by horizontal radius searches.
                 Vector3 pos = combiner.transform.position;
@@ -1146,7 +1146,7 @@ namespace VerdantsAscent.Water.Core
 
             WaterAmbientVFX.ResetStaticCache();
 
-            if (s_verboseLogging) Debug.Log("[WaterMeshCombiner] Cleared all water combiners");
+            if (s_verboseLogging) FiresLogger.LogInfo("[WaterMeshCombiner] Cleared all water combiners");
         }
 
         /// <summary>
@@ -1165,7 +1165,7 @@ namespace VerdantsAscent.Water.Core
             int removed = before - s_allCombiners.Count;
             if (removed > 0)
             {
-                if (s_verboseLogging) Debug.Log($"[WaterMeshCombiner] PurgeDestroyedCombiners: Removed {removed} null entries, {s_allCombiners.Count} remaining");
+                if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] PurgeDestroyedCombiners: Removed {removed} null entries, {s_allCombiners.Count} remaining");
             }
         }
 
@@ -1217,7 +1217,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (_surfaceHeights == null || _surfaceHeights.Length == 0)
             {
-                if (s_verboseLogging) Debug.Log("[WaterMeshCombiner] MopWaterAt: No surface heights to modify");
+                if (s_verboseLogging) FiresLogger.LogInfo("[WaterMeshCombiner] MopWaterAt: No surface heights to modify");
                 return false;
             }
 
@@ -1290,7 +1290,7 @@ namespace VerdantsAscent.Water.Core
 
                 if (!hasAnyWater)
                 {
-                    if (s_verboseLogging) Debug.Log("[WaterMeshCombiner] MopWaterAt: All water removed, destroying combiner");
+                    if (s_verboseLogging) FiresLogger.LogInfo("[WaterMeshCombiner] MopWaterAt: All water removed, destroying combiner");
                     // All water removed - destroy anchor and combiner
                     // Don't save here - we're about to destroy everything anyway
                     if (Anchor != null)
@@ -1311,7 +1311,7 @@ namespace VerdantsAscent.Water.Core
 
                 if (s_verboseLogging)
                 {
-                    Debug.Log($"[WaterMeshCombiner] MopWaterAt: Removed water at {worldPos}, radius={radius}");
+                    FiresLogger.LogInfo($"[WaterMeshCombiner] MopWaterAt: Removed water at {worldPos}, radius={radius}");
                 }
             }
 
@@ -1379,7 +1379,7 @@ namespace VerdantsAscent.Water.Core
                     disksToRemove.Add(disk);
                     if (s_verboseLogging)
                     {
-                        Debug.Log($"[WaterMeshCombiner] SyncDisksWithGridState: Removing disk at {disk.Position} - no water coverage ({samplesWithWater}/{samples} samples)");
+                        FiresLogger.LogInfo($"[WaterMeshCombiner] SyncDisksWithGridState: Removing disk at {disk.Position} - no water coverage ({samplesWithWater}/{samples} samples)");
                     }
                 }
             }
@@ -1392,7 +1392,7 @@ namespace VerdantsAscent.Water.Core
 
             if (disksToRemove.Count > 0)
             {
-                if (s_verboseLogging) Debug.Log($"[WaterMeshCombiner] SyncDisksWithGridState: Removed {disksToRemove.Count} disks with no water coverage. {_waterDisks.Count} disks remaining.");
+                if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] SyncDisksWithGridState: Removed {disksToRemove.Count} disks with no water coverage. {_waterDisks.Count} disks remaining.");
             }
         }
 
@@ -1635,7 +1635,7 @@ namespace VerdantsAscent.Water.Core
             }
             frozen.Initialize(this);
 
-            // Hide the water mesh � ice/snow replaces it visually
+            // Hide the water mesh - ice/snow replaces it visually
             if (_meshRenderer != null)
                 _meshRenderer.enabled = false;
         }
@@ -1764,7 +1764,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (_surfaceHeights == null || _surfaceHeights.Length == 0)
             {
-                Debug.LogWarning("[WaterMeshCombiner] Cannot restore - no surface height data");
+                FiresLogger.LogWarning("[WaterMeshCombiner] Cannot restore - no surface height data");
                 return;
             }
 
@@ -1772,7 +1772,7 @@ namespace VerdantsAscent.Water.Core
             int expectedGridSize = _gridWidth * _gridHeight;
             if (expectedGridSize <= 0)
             {
-                Debug.LogWarning($"[WaterMeshCombiner] Invalid grid dimensions: {_gridWidth}x{_gridHeight}");
+                FiresLogger.LogWarning($"[WaterMeshCombiner] Invalid grid dimensions: {_gridWidth}x{_gridHeight}");
                 // Try to infer dimensions from surface heights array
                 int surfaceCount = _surfaceHeights.Length;
                 int inferredSize = (int)Mathf.Sqrt(surfaceCount);
@@ -1781,11 +1781,11 @@ namespace VerdantsAscent.Water.Core
                     _gridWidth = inferredSize;
                     _gridHeight = inferredSize;
                     expectedGridSize = surfaceCount;
-                    if (s_verboseLogging) Debug.Log($"[WaterMeshCombiner] Inferred grid size: {_gridWidth}x{_gridHeight}");
+                    if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] Inferred grid size: {_gridWidth}x{_gridHeight}");
                 }
                 else
                 {
-                    Debug.LogError($"[WaterMeshCombiner] Cannot infer grid dimensions from {surfaceCount} surface heights");
+                    FiresLogger.LogError($"[WaterMeshCombiner] Cannot infer grid dimensions from {surfaceCount} surface heights");
                     return;
                 }
             }
@@ -1793,7 +1793,7 @@ namespace VerdantsAscent.Water.Core
             // Ensure surface heights array matches expected size
             if (_surfaceHeights.Length != expectedGridSize)
             {
-                Debug.LogWarning($"[WaterMeshCombiner] Surface heights array mismatch: got {_surfaceHeights.Length}, expected {expectedGridSize} ({_gridWidth}x{_gridHeight}). Regenerating from disks.");
+                FiresLogger.LogWarning($"[WaterMeshCombiner] Surface heights array mismatch: got {_surfaceHeights.Length}, expected {expectedGridSize} ({_gridWidth}x{_gridHeight}). Regenerating from disks.");
                 // Fall back to disk regeneration
                 if (_waterDisks.Count > 0)
                 {
@@ -1834,7 +1834,7 @@ namespace VerdantsAscent.Water.Core
             {
                 // Use bounds min as origin - this is the correct way
                 _gridOrigin = new Vector3(_combinedBounds.min.x, 0, _combinedBounds.min.z);
-                if (s_verboseLogging) Debug.Log($"[WaterMeshCombiner] RestoreFromAnchorData: Set gridOrigin from bounds: {_gridOrigin}");
+                if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] RestoreFromAnchorData: Set gridOrigin from bounds: {_gridOrigin}");
             }
             else
             {
@@ -1842,7 +1842,7 @@ namespace VerdantsAscent.Water.Core
                 float gridWidthWorld = (_gridWidth - 1) * _cellSize;
                 float gridHeightWorld = (_gridHeight - 1) * _cellSize;
                 _gridOrigin = transform.position - new Vector3(gridWidthWorld * 0.5f, 0, gridHeightWorld * 0.5f);
-                Debug.LogWarning($"[WaterMeshCombiner] RestoreFromAnchorData: No bounds available, estimated gridOrigin: {_gridOrigin}");
+                FiresLogger.LogWarning($"[WaterMeshCombiner] RestoreFromAnchorData: No bounds available, estimated gridOrigin: {_gridOrigin}");
             }
 
             // Build mesh from restored grid data
@@ -1877,7 +1877,7 @@ namespace VerdantsAscent.Water.Core
 
             if (s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombiner] Restored mesh from anchor data: grid {_gridWidth}x{_gridHeight}");
+                FiresLogger.LogInfo($"[WaterMeshCombiner] Restored mesh from anchor data: grid {_gridWidth}x{_gridHeight}");
             }
         }
 
@@ -1910,12 +1910,12 @@ namespace VerdantsAscent.Water.Core
                 Anchor.LinkToCombiner(this);
                 if (s_verboseLogging)
                 {
-                    Debug.Log($"[WaterMeshCombiner] EnsureAnchorExists: Anchor created for combiner at {transform.position}");
+                    FiresLogger.LogInfo($"[WaterMeshCombiner] EnsureAnchorExists: Anchor created for combiner at {transform.position}");
                 }
             }
             else
             {
-                Debug.LogError($"[WaterMeshCombiner] EnsureAnchorExists: FAILED to create anchor! Water will NOT persist!");
+                FiresLogger.LogError($"[WaterMeshCombiner] EnsureAnchorExists: FAILED to create anchor! Water will NOT persist!");
             }
         }
 
@@ -1953,7 +1953,7 @@ namespace VerdantsAscent.Water.Core
             if (_waterDisks.Count == 0) return;
 
             // Only the server/host persists water. Remote clients just have the
-            // visual combiner � they don't own the anchor ZDO and the CustomRiver
+            // visual combiner - they don't own the anchor ZDO and the CustomRiver
             // prefab lookup would fail because registration timing differs.
             if (ZNet.instance != null && !ZNet.instance.IsServer()) return;
 
@@ -1988,7 +1988,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     if (!_restoredFromPersistence)
                     {
-                        Debug.LogWarning($"[WaterMeshCombiner] SaveToAnchor: No anchor for combiner at {transform.position}. Water will NOT persist!");
+                        FiresLogger.LogWarning($"[WaterMeshCombiner] SaveToAnchor: No anchor for combiner at {transform.position}. Water will NOT persist!");
                     }
                     return;
                 }
@@ -1996,7 +1996,7 @@ namespace VerdantsAscent.Water.Core
 
             if (s_verboseLogging)
             {
-                Debug.Log($"[WaterMeshCombiner] SaveToAnchor: Saving {_waterDisks.Count} disks to anchor at {transform.position}");
+                FiresLogger.LogInfo($"[WaterMeshCombiner] SaveToAnchor: Saving {_waterDisks.Count} disks to anchor at {transform.position}");
             }
             Anchor.SaveToZDO();
 
@@ -2016,7 +2016,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Marks a range of grid rows as dirty (modified since last save).
-        /// Used for partial segment saves � only segments covering dirty rows are written.
+        /// Used for partial segment saves - only segments covering dirty rows are written.
         /// </summary>
         public void MarkRowsDirty(int rowMin, int rowMax)
         {

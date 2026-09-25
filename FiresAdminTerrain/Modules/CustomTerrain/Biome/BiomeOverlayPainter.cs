@@ -49,7 +49,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomeOverlayPainter] Failed to cache reflection: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomeOverlayPainter] Failed to cache reflection: {ex.Message}");
             }
         }
 
@@ -176,7 +176,7 @@ namespace VerdantsAscent.Terrain.Biome
 
             VerdantsAscent.Terrain.Persistence.TileUndoLog.EndOperation();
 
-            Debug.Log($"[BiomeOverlayPainter] Painted {overlay} overlay at {center}, radius {radius}, affected {totalAffected} vertices");
+            FiresLogger.LogInfo($"[BiomeOverlayPainter] Painted {overlay} overlay at {center}, radius {radius}, affected {totalAffected} vertices");
 
             return totalAffected;
         }
@@ -204,12 +204,12 @@ namespace VerdantsAscent.Terrain.Biome
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[BiomeOverlayPainter] Failed to reset heightmap: {ex.Message}");
+                    FiresLogger.LogWarning($"[BiomeOverlayPainter] Failed to reset heightmap: {ex.Message}");
                 }
             }
 
             _paintedHeightmaps.Clear();
-            Debug.Log("[BiomeOverlayPainter] Reset all overlays");
+            FiresLogger.LogInfo("[BiomeOverlayPainter] Reset all overlays");
         }
 
         /// <summary>
@@ -340,7 +340,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomeOverlayPainter] Error painting heightmap: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomeOverlayPainter] Error painting heightmap: {ex.Message}");
                 return 0;
             }
         }
@@ -394,7 +394,7 @@ namespace VerdantsAscent.Terrain.Biome
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BiomeOverlayPainter] Error updating corner biomes: {ex.Message}");
+                FiresLogger.LogWarning($"[BiomeOverlayPainter] Error updating corner biomes: {ex.Message}");
             }
         }
 
@@ -474,7 +474,7 @@ namespace VerdantsAscent.Terrain.Biome
                     float radius = 4f; // Default radius for Infinity Hammer compatibility
 
                     // Debug: log all args
-                    Debug.Log($"[BiomeOverlayPainter] paint_biome called with {args.Length} args: {string.Join(", ", args.Args)}");
+                    FiresLogger.LogInfo($"[BiomeOverlayPainter] paint_biome called with {args.Length} args: {string.Join(", ", args.Args)}");
 
                     // Parse arguments - handle Infinity Hammer's expanded <area> format
                     for (int i = 1; i < args.Length; i++)
@@ -496,7 +496,7 @@ namespace VerdantsAscent.Terrain.Biome
                                 if (radiusParts.Length > 0 && float.TryParse(radiusParts[0], out float r))
                                 {
                                     radius = r;
-                                    Debug.Log($"[BiomeOverlayPainter] Parsed radius from circle={value}: {radius}");
+                                    FiresLogger.LogInfo($"[BiomeOverlayPainter] Parsed radius from circle={value}: {radius}");
                                 }
                             }
                             continue;
@@ -506,13 +506,13 @@ namespace VerdantsAscent.Terrain.Biome
                         if (float.TryParse(arg, out float numValue))
                         {
                             radius = numValue;
-                            Debug.Log($"[BiomeOverlayPainter] Parsed radius from number: {radius}");
+                            FiresLogger.LogInfo($"[BiomeOverlayPainter] Parsed radius from number: {radius}");
                         }
                         else
                         {
                             // Not a number - must be biome type
                             overlay = ParseOverlayType(arg);
-                            Debug.Log($"[BiomeOverlayPainter] Parsed overlay type: {overlay} from '{arg}'");
+                            FiresLogger.LogInfo($"[BiomeOverlayPainter] Parsed overlay type: {overlay} from '{arg}'");
                         }
                     }
 

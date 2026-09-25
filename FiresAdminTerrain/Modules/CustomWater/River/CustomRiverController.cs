@@ -369,7 +369,7 @@ namespace VerdantsAscent.Water.Core
 
             if (vanillaWater > terrainHeight)
             {
-                Debug.Log($"[CustomRiver] Waterfall landed in vanilla water at {landingPos}");
+                FiresLogger.LogInfo($"[CustomRiver] Waterfall landed in vanilla water at {landingPos}");
                 return;
             }
 
@@ -377,7 +377,7 @@ namespace VerdantsAscent.Water.Core
             var existingWater = CustomWaterManager.GetWaterAt(landingPos);
             if (existingWater != null)
             {
-                Debug.Log($"[CustomRiver] Waterfall merged into existing water at {landingPos}");
+                FiresLogger.LogInfo($"[CustomRiver] Waterfall merged into existing water at {landingPos}");
                 return;
             }
 
@@ -392,7 +392,7 @@ namespace VerdantsAscent.Water.Core
             downstreamRiver.SetUpstreamSource(this);
             _downstreamRivers.Add(downstreamRiver);
 
-            Debug.Log($"[CustomRiver] Spawned downstream river at {landingPos}");
+            FiresLogger.LogInfo($"[CustomRiver] Spawned downstream river at {landingPos}");
         }
 
         #endregion

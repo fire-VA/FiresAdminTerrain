@@ -326,7 +326,7 @@ References (all hardcoded HintPaths, not resolved through NuGet):
 - `0Harmony.dll` (from BepInEx core, dedi-server path)
 - `assembly_guiutils_publicized.dll` (from local libs/)
 - `assembly_utils.dll` (pinned to `..\..\assembly_valheim\lib\assembly_utils.dll` — see memory `reference_assembly_utils_pin`)
-- `assembly_valheim_publicized.dll` (from libs/, with `PublicTest` toggle described in csproj comment)
+- `assembly_valheim_publicized.dll` (from the live Steam install's `publicized_assemblies\`; the old `PublicTest` build toggle was removed 2026-09-23, we build against 1.0 only)
 - `BepInEx.dll` (from `..\..\..\customspawnsmod\lib\` — fragile path)
 - `gui_framework.dll`, `Splatform.dll`, Unity modules (all from `Program Files (x86)\Steam\steamapps\common\Valheim\...`)
 - `Newtonsoft.Json` (from packages/)

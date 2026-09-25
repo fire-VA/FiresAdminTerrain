@@ -4,7 +4,7 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // P1 — lives on every spawned VAVoxel anchor. One anchor = one EDITED
-    // chunk. The ZDO carries the chunk key + the compressed density blob;
+    // chunk. The ZDO carries the chunk key + the compressed brush edit blob;
     // this component applies it on spawn (world load / zone stream-in) and
     // re-applies whenever the ZDO data revision changes (another client
     // brushing the same chunk).
@@ -64,19 +64,30 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (Time.time - _bornAt > 30f && ZNetScene.instance != null)
                     {
                         if (!_nv.IsOwner()) _nv.ClaimOwnership();
-                        Debug.LogWarning("[FiresVoxel] destroying keyless zombie VAVoxel anchor (no data written).");
+                        FiresLogger.LogWarning("[FiresVoxel] destroying keyless zombie VAVoxel anchor (no data written).");
                         ZNetScene.instance.Destroy(gameObject);
                     }
                     return;   // fresh spawn — writer sets keys shortly
                 }
                 _key = new Vector3Int(kx, zdo.GetInt(VoxelAnchorPrefab.ZDO_KY), zdo.GetInt(VoxelAnchorPrefab.ZDO_KZ));
 
+                // Hygiene: an anchor written in an older blob format is removed
+                // by its owner instead of rotting in the save.
+                int ver = zdo.GetInt(VoxelAnchorPrefab.ZDO_VER, 0);
+                if (ver != VoxelAnchorPrefab.EditsFormatVersion)
+                {
+                    if (!_nv.IsOwner()) _nv.ClaimOwnership();
+                    FiresLogger.LogWarning($"[FiresVoxel] removing VAVoxel anchor for chunk {_key} saved in format {ver} (current {VoxelAnchorPrefab.EditsFormatVersion}).");
+                    if (ZNetScene.instance != null) ZNetScene.instance.Destroy(gameObject);
+                    return;
+                }
+
                 // Hygiene: duplicate anchor for a key already claimed by a live
                 // anchor (simultaneous first-saves from two clients). Keep the
                 // established one; the duplicate self-destructs if we can own it.
                 if (s_byKey.TryGetValue(_key, out var existing) && existing != null && !ReferenceEquals(existing, this))
                 {
-                    Debug.LogWarning($"[FiresVoxel] duplicate VAVoxel anchor for chunk {_key} — removing the newcomer.");
+                    FiresLogger.LogWarning($"[FiresVoxel] duplicate VAVoxel anchor for chunk {_key} — removing the newcomer.");
                     if (!_nv.IsOwner()) _nv.ClaimOwnership();
                     if (ZNetScene.instance != null) ZNetScene.instance.Destroy(gameObject);
                     return;
@@ -130,27 +141,28 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (!_capWarned)
                     {
                         _capWarned = true;
-                        Debug.LogWarning($"[FiresVoxel] chunk cap reached — restore deferred for {_key} (retrying at 5s cadence).");
+                        FiresLogger.LogWarning($"[FiresVoxel] chunk cap reached — restore deferred for {_key} (retrying at 5s cadence).");
                     }
                     return ApplyOutcome.Transient;
                 }
 
-                var packed = zdo.GetByteArray(VoxelAnchorPrefab.ZDO_DENSITY);
+                var packed = zdo.GetByteArray(VoxelAnchorPrefab.ZDO_EDITS);
                 if (packed == null) return ApplyOutcome.Transient;   // writer hasn't landed yet
                 var raw = Utils.Decompress(packed);
-                if (!chunk.ImportDensity(raw)) return ApplyOutcome.PermanentForRevision;
+                if (!chunk.ImportBrushEdits(raw)) return ApplyOutcome.PermanentForRevision;
                 // Persisted borders can predate the canonical-border fix (or
                 // the neighbourhood changed since the save) — re-mirror rings
                 // from live owners so restores never resurrect stale seams.
                 chunk.MirrorBordersNow(true);
                 VoxelMeshPipeline.EnqueueRemesh(chunk);
+                if (chunk.HasBrushEdits) VoxelZoneStreamer.MarkZoneBrushed(_key);
                 if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value)
-                    Debug.Log($"[FiresVoxel] anchor restored chunk {_key} ({packed.Length} bytes packed, rev {zdo.DataRevision}).");
+                    FiresLogger.LogInfo($"[FiresVoxel] anchor restored chunk {_key} ({packed.Length} bytes packed, rev {zdo.DataRevision}).");
                 return ApplyOutcome.Success;
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[FiresVoxel] anchor apply failed for {_key}: {ex.Message}");
+                FiresLogger.LogWarning($"[FiresVoxel] anchor apply failed for {_key}: {ex.Message}");
                 return ApplyOutcome.Transient;
             }
         }
@@ -159,6 +171,39 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (_keyKnown && s_byKey.TryGetValue(_key, out var cur) && ReferenceEquals(cur, this))
                 s_byKey.Remove(_key);
+        }
+
+        private static readonly List<ZDO> s_zoneAnchors = new List<ZDO>();
+
+        // A dedicated server keeps no anchor instances near its players, so its copy of a zone reads the zone's
+        // VAVoxel ZDOs directly. Only chunks the zone holds, and only revisions not imported yet.
+        internal static int ImportZoneEditsFromZdos(Vector2s zone, List<Vector3Int> zoneKeys,
+            Dictionary<Vector3Int, uint> importedRevisions)
+        {
+            if (ZDOMan.instance == null) return 0;
+            int anchorPrefab = VoxelAnchorPrefab.PrefabName.GetStableHashCode();
+            s_zoneAnchors.Clear();
+            ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(0, 0), s_zoneAnchors);
+            int imported = 0;
+            foreach (var zdo in s_zoneAnchors)
+            {
+                if (zdo == null || zdo.GetPrefab() != anchorPrefab) continue;
+                if (zdo.GetInt(VoxelAnchorPrefab.ZDO_VER, 0) != VoxelAnchorPrefab.EditsFormatVersion) continue;
+                int kx = zdo.GetInt(VoxelAnchorPrefab.ZDO_KX, int.MinValue);
+                if (kx == int.MinValue) continue;
+                var key = new Vector3Int(kx, zdo.GetInt(VoxelAnchorPrefab.ZDO_KY), zdo.GetInt(VoxelAnchorPrefab.ZDO_KZ));
+                if (!zoneKeys.Contains(key)) continue;
+                uint revision = zdo.DataRevision;
+                if (importedRevisions.TryGetValue(key, out uint seen) && seen == revision) continue;
+                var packed = zdo.GetByteArray(VoxelAnchorPrefab.ZDO_EDITS);
+                if (packed == null) continue;
+                var chunk = VoxelWorld.GetOrCreateForRestore(key);
+                if (chunk == null || !chunk.ImportBrushEdits(Utils.Decompress(packed))) continue;
+                importedRevisions[key] = revision;
+                imported++;
+            }
+            s_zoneAnchors.Clear();
+            return imported;
         }
     }
 }

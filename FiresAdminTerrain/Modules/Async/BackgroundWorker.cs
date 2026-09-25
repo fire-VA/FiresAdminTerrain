@@ -21,7 +21,7 @@ namespace VerdantsAscent.Async
     }
 
     /// <summary>
-    /// A generic single-thread background worker that processes jobs of type TInput ? TOutput.
+    /// A generic single-thread background worker that processes jobs of type TInput -> TOutput.
     /// 
     /// Consumers provide a processing function; the worker handles threading, queuing, 
     /// callback dispatch, and shutdown.
@@ -35,7 +35,7 @@ namespace VerdantsAscent.Async
     /// <see cref="AsyncShutdownManager"/> so all workers can be shut down centrally on logout.</para>
     /// 
     /// <para><b>Constraints (.NET 4.8 / Unity Mono):</b> Uses Thread + Monitor (no Task/async).
-    /// The processing function must NOT call Unity API — only pure math/data operations.</para>
+    /// The processing function must NOT call Unity API - only pure math/data operations.</para>
     /// 
     /// Usage:
     /// <code>
@@ -70,7 +70,7 @@ namespace VerdantsAscent.Async
         /// <param name="name">Thread name (for debugging)</param>
         /// <param name="processFunc">
         /// Function that processes a job on the background thread.
-        /// Receives (input, output) — must populate output fields.
+        /// Receives (input, output) - must populate output fields.
         /// Must NOT call Unity API.
         /// </param>
         public BackgroundWorker(string name, Action<TInput, TOutput> processFunc)
@@ -92,7 +92,7 @@ namespace VerdantsAscent.Async
 
         /// <summary>
         /// Queues a job for background processing.
-        /// Thread-safe — can be called from any thread (typically main thread).
+        /// Thread-safe - can be called from any thread (typically main thread).
         /// </summary>
         /// <param name="input">Job input data (snapshotted on caller's thread)</param>
         /// <param name="callback">Callback invoked on main thread when job completes</param>
@@ -205,13 +205,13 @@ namespace VerdantsAscent.Async
                             }
                             catch (Exception ex)
                             {
-                                Debug.LogWarning($"[{_name}] Callback failed: {ex.Message}");
+                                FiresLogger.LogWarning($"[{_name}] Callback failed: {ex.Message}");
                             }
                         });
                     }
                     catch (Exception ex)
                     {
-                        Debug.LogWarning($"[{_name}] Job failed: {ex.Message}\n{ex.StackTrace}");
+                        FiresLogger.LogWarning($"[{_name}] Job failed: {ex.Message}\n{ex.StackTrace}");
                     }
                     finally
                     {

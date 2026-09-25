@@ -10,13 +10,13 @@ namespace VerdantsAscent.Water.Core
 {
     /// <summary>
     /// Reads Better Continents' heightmap image directly via reflection and uses the
-    /// EXACT SAME height formula BC uses to convert pixel values ? world terrain Y.
+    /// EXACT SAME height formula BC uses to convert pixel values -> world terrain Y.
     /// 
     /// KEY INSIGHT: We read BC's ImageMapFloat.Map (the same float[] that GetValue()
     /// bilinear-interpolates from) and apply BC's own height pipeline formula:
     ///   worldY = (pixelValue * HeightmapAmount - 0.15 + SeaLevelAdjustment) * 200
     /// 
-    /// This gives us EXACT terrain heights at every pixel — identical to what BC's
+    /// This gives us EXACT terrain heights at every pixel - identical to what BC's
     /// GetBiomeHeight postfix returns for HeightmapOverrideAll mode. We use these for:
     /// - Depression detection: find channels painted into the heightmap at ANY elevation
     /// - XZ positions and widths: pixel-accurate channel geometry
@@ -41,7 +41,7 @@ namespace VerdantsAscent.Water.Core
     ///   pixel = normalized * (Size - 1)
     ///   Map[y * Size + x], row-major, image flipped vertically on load
     /// 
-    /// HEIGHT FORMULA (from BC source — GetBiomeHeightWithHeight postfix):
+    /// HEIGHT FORMULA (from BC source - GetBiomeHeightWithHeight postfix):
     ///   With HeightmapOverrideAll + default blend/add/mask:
     ///     ApplyHeightmap(x, y, 0) = pixelValue * HeightmapAmount
     ///     GetBaseHeight = pixelValue * HeightmapAmount - 0.15 + SeaLevelAdjustment
@@ -52,7 +52,7 @@ namespace VerdantsAscent.Water.Core
     /// 
     /// THREAD SAFETY:
     /// - ReadHeightmap() copies the float[] once on main thread (reflection)
-    /// - All analysis methods operate on the copied snapshot — background thread safe
+    /// - All analysis methods operate on the copied snapshot - background thread safe
     /// - Output is List&lt;DetectedWaterBody&gt; consumed by AutoWaterGenerator
     /// </summary>
     public static class BCHeightmapWaterDetector
@@ -66,7 +66,7 @@ namespace VerdantsAscent.Water.Core
         /// AUTO-SCALED: When DetectWaterBodies() runs, this is automatically scaled
         /// proportionally to the snapshot resolution so the physical neighborhood
         /// size (~160m) stays constant regardless of grid resolution:
-        ///   1024px ? 8,  2048px ? 16,  4096px ? 32,  8192px ? 64,  20480px ? 160
+        ///   1024px -> 8,  2048px -> 16,  4096px -> 32,  8192px -> 64,  20480px -> 160
         /// 
         /// This value is the base for a 2048px map. Set to 0 to disable auto-scaling.
         /// </summary>
@@ -75,7 +75,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Minimum depression depth (in normalized 0-1 height units) for a pixel to
         /// qualify as part of a water feature relative to its neighborhood average.
-        /// This catches rivers at ANY elevation — not just below sea level.
+        /// This catches rivers at ANY elevation - not just below sea level.
         /// 0.005 = ~1m at 200m scale. 0.008 = ~1.6m. 0.01 = ~2m.
         /// </summary>
         public static float MinDepressionDepth = 0.008f;
@@ -108,7 +108,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Maximum number of pixels a single water body can have before being split
-        /// into smaller strips. At 20480x20480, a body with 2M pixels covers ~20 km².
+        /// into smaller strips. At 20480x20480, a body with 2M pixels covers ~20 km^2.
         /// Bodies larger than this are split along their longer bounding-box axis into
         /// overlapping strips, each containing at most MaxPixelsPerBody pixels.
         /// Each strip is then classified and traced independently.
@@ -118,7 +118,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Maximum time in milliseconds to spend on a single water body in Step 4.
         /// If a body exceeds this, its tracing is aborted and it's skipped.
-        /// Default 30 seconds — most bodies finish in under 1 second.
+        /// Default 30 seconds - most bodies finish in under 1 second.
         /// </summary>
         public static long MaxMillisecondsPerBody = 30000;
 
@@ -150,24 +150,24 @@ namespace VerdantsAscent.Water.Core
                 var bcType = Type.GetType("BetterContinents.BetterContinents, BetterContinents");
                 if (bcType == null)
                 {
-                    Debug.Log("[BCHeightmapWaterDetector] BetterContinents not loaded");
+                    FiresLogger.LogInfo("[BCHeightmapWaterDetector] BetterContinents not loaded");
                     return;
                 }
 
                 _bcSettingsField = AccessTools.Field(bcType, "Settings");
                 if (_bcSettingsField == null)
                 {
-                    Debug.LogWarning("[BCHeightmapWaterDetector] Could not find BetterContinents.Settings");
+                    FiresLogger.LogWarning("[BCHeightmapWaterDetector] Could not find BetterContinents.Settings");
                     return;
                 }
 
-                // World size fields — BC has static float fields on the main class
+                // World size fields - BC has static float fields on the main class
                 _bcWorldRadiusField = AccessTools.Field(bcType, "WorldRadius");
                 _bcTotalRadiusField = AccessTools.Field(bcType, "TotalRadius");
 
                 var settingsType = _bcSettingsField.FieldType;
 
-                // HeightMap field — BC v0.7.30 uses "HeightMap" (private ImageMapFloat)
+                // HeightMap field - BC v0.7.30 uses "HeightMap" (private ImageMapFloat)
                 _heightmapField = AccessTools.Field(settingsType, "HeightMap");
                 if (_heightmapField == null)
                     _heightmapField = AccessTools.Field(settingsType, "Heightmap");
@@ -176,14 +176,14 @@ namespace VerdantsAscent.Water.Core
 
                 if (_heightmapField == null)
                 {
-                    Debug.LogWarning("[BCHeightmapWaterDetector] Could not find heightmap field on BC Settings");
+                    FiresLogger.LogWarning("[BCHeightmapWaterDetector] Could not find heightmap field on BC Settings");
                     return;
                 }
 
                 _heightmapAmountField = AccessTools.Field(settingsType, "HeightmapAmount");
                 _seaLevelField = AccessTools.Field(settingsType, "SeaLevelAdjustment");
 
-                // ImageMapFloat fields — from decompiled BC source:
+                // ImageMapFloat fields - from decompiled BC source:
                 //   private float[] Map   (on ImageMapFloat)
                 //   public int Size       (on ImageMapBase, inherited)
                 var imageMapType = _heightmapField.FieldType;
@@ -210,20 +210,20 @@ namespace VerdantsAscent.Water.Core
                 if (_imageMapField != null && _imageMapSizeField != null)
                 {
                     _canReadHeightmap = true;
-                    Debug.Log($"[BCHeightmapWaterDetector] Reflection initialized — can read BC heightmap. " +
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Reflection initialized - can read BC heightmap. " +
                         $"MapField={_imageMapField.Name} ({_imageMapField.DeclaringType.Name}), " +
                         $"SizeField={_imageMapSizeField.Name} ({_imageMapSizeField.DeclaringType.Name})");
                 }
                 else
                 {
-                    Debug.LogWarning($"[BCHeightmapWaterDetector] Could not find ImageMapFloat internals. " +
+                    FiresLogger.LogWarning($"[BCHeightmapWaterDetector] Could not find ImageMapFloat internals. " +
                         $"MapField={((_imageMapField != null) ? _imageMapField.Name : "null")}, " +
                         $"SizeField={((_imageMapSizeField != null) ? _imageMapSizeField.Name : "null")}");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BCHeightmapWaterDetector] Reflection init failed: {ex.Message}");
+                FiresLogger.LogWarning($"[BCHeightmapWaterDetector] Reflection init failed: {ex.Message}");
             }
         }
 
@@ -264,7 +264,7 @@ namespace VerdantsAscent.Water.Core
             public float SeaLevelAdjustment;
             /// <summary>
             /// When true, Map[] contains actual world Y heights sampled from
-            /// WorldGenerator.GetHeight() — the FINAL terrain including all BC
+            /// WorldGenerator.GetHeight() - the FINAL terrain including all BC
             /// modifications (roughmap, flatmap, noise layers, river carving, etc.).
             /// HeightmapToWorldY() returns the value as-is (identity passthrough).
             /// Depression thresholds are in meters, not normalized 0-1.
@@ -302,7 +302,7 @@ namespace VerdantsAscent.Water.Core
 
                 if (size < 32 || size > 16384)
                 {
-                    Debug.LogWarning($"[BCHeightmapWaterDetector] Unexpected heightmap size: {size}");
+                    FiresLogger.LogWarning($"[BCHeightmapWaterDetector] Unexpected heightmap size: {size}");
                     return null;
                 }
 
@@ -310,7 +310,7 @@ namespace VerdantsAscent.Water.Core
                 float[] mapCopy = new float[mapArray.Length];
                 Array.Copy(mapArray, mapCopy, mapArray.Length);
 
-                // Read world size — BC static fields: WorldRadius=10000, TotalRadius=10500
+                // Read world size - BC static fields: WorldRadius=10000, TotalRadius=10500
                 float worldRadius = 10000f;
                 float totalRadius = 10500f;
 
@@ -345,7 +345,7 @@ namespace VerdantsAscent.Water.Core
                 float testWorldY_at_030 = HeightmapToWorldY_Static(0.30f, heightmapAmount, seaLevelAdj);
                 float testWorldY_at_015 = HeightmapToWorldY_Static(0.15f, heightmapAmount, seaLevelAdj);
 
-                Debug.Log($"[BCHeightmapWaterDetector] Read heightmap: {size}x{size}, " +
+                FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Read heightmap: {size}x{size}, " +
                     $"worldRadius={worldRadius}, totalRadius={totalRadius}, " +
                     $"heightmapAmount={heightmapAmount}, seaLevelAdj={seaLevelAdj:F4}, " +
                     $"seaLevelPixelThreshold={seaLevelPixel:F4}, " +
@@ -363,7 +363,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[BCHeightmapWaterDetector] Failed to read heightmap: {ex.Message}");
+                FiresLogger.LogWarning($"[BCHeightmapWaterDetector] Failed to read heightmap: {ex.Message}");
                 return null;
             }
         }
@@ -387,7 +387,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Converts a raw heightmap pixel value (0-1) to world Y height using BC's
-        /// EXACT formula from GetBiomeHeightWithHeight ? GetBaseHeight ? ApplyHeightmap.
+        /// EXACT formula from GetBiomeHeightWithHeight -> GetBaseHeight -> ApplyHeightmap.
         /// 
         /// From decompiled BC source (v0.7.30):
         ///   ApplyHeightmap: blendedValue = pixelValue * HeightmapAmount (when blend=1, add=0, mask=0)
@@ -456,7 +456,7 @@ namespace VerdantsAscent.Water.Core
         #region Water Body Detection (Background Thread Safe)
 
         /// <summary>
-        /// Result of water body detection — a connected region of water pixels.
+        /// Result of water body detection - a connected region of water pixels.
         /// </summary>
         public class DetectedWaterBody
         {
@@ -490,7 +490,7 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// Main detection pipeline. ALL PURE MATH — background thread safe.
+        /// Main detection pipeline. ALL PURE MATH - background thread safe.
         /// 
         /// Uses the heightmap grayscale VALUES directly to compute exact terrain heights,
         /// then combines two detection strategies:
@@ -507,7 +507,7 @@ namespace VerdantsAscent.Water.Core
         /// CENTER-OUT ORDERING:
         /// Water bodies are sorted by distance from world center before being returned.
         /// This ensures rivers near the player spawn (world center) are generated first,
-        /// and if generation limits are hit, edge-of-world rivers are trimmed — not
+        /// and if generation limits are hit, edge-of-world rivers are trimmed - not
         /// the important central ones.
         /// </summary>
         public static List<DetectedWaterBody> DetectWaterBodies(HeightmapSnapshot snap)
@@ -525,7 +525,7 @@ namespace VerdantsAscent.Water.Core
 
             // Auto-scale neighborhood radius proportionally to resolution.
             // Base: 16px at 2048px = ~160m physical neighborhood.
-            // At 4096px ? 32px, at 8192px ? 64px. Same physical area.
+            // At 4096px -> 32px, at 8192px -> 64px. Same physical area.
             int scaledNeighborhoodRadius = NeighborhoodRadius;
             if (NeighborhoodRadius > 0)
             {
@@ -540,7 +540,7 @@ namespace VerdantsAscent.Water.Core
 
             // Step 0: Build circular world mask to exclude edge garbage
             MainThreadDispatcher.Enqueue(() =>
-                Debug.Log($"[BCHeightmapWaterDetector] Step 0/{size}x{size}: Building world mask..."));
+                FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 0/{size}x{size}: Building world mask..."));
 
             bool[] worldMask = new bool[size * size];
             float halfSize = (size - 1) * 0.5f;
@@ -562,7 +562,7 @@ namespace VerdantsAscent.Water.Core
             {
                 long elapsed = progressSW.ElapsedMilliseconds;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 0 complete: world mask built ({elapsed}ms)"));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 0 complete: world mask built ({elapsed}ms)"));
             }
 
             // Step 1: Compute neighborhood average via separable box blur
@@ -570,20 +570,20 @@ namespace VerdantsAscent.Water.Core
                 long elapsed = progressSW.ElapsedMilliseconds;
                 int blurRadius = Math.Max(2, scaledNeighborhoodRadius);
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 1/{size}x{size}: Box blur (radius={blurRadius}, {(long)size * size * 2} ops)... this is the slowest step"));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 1/{size}x{size}: Box blur (radius={blurRadius}, {(long)size * size * 2} ops)... this is the slowest step"));
             }
             float[] neighborhoodAvg = BoxBlur2Pass(map, size, Math.Max(2, scaledNeighborhoodRadius), progressSW, PROGRESS_INTERVAL_MS);
 
             {
                 long elapsed = progressSW.ElapsedMilliseconds;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 1 complete: box blur done ({elapsed}ms)"));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 1 complete: box blur done ({elapsed}ms)"));
             }
 
-            // Step 2: Find depressed pixels — lower than neighborhood average by threshold
+            // Step 2: Find depressed pixels - lower than neighborhood average by threshold
             // When using world height cache, Map[] values are in meters (world Y) so
             // depression differences are already in meters. The normalized threshold
-            // (0.008 ? 1.6m at 200m height scale) must be converted to meters.
+            // (0.008 ~ 1.6m at 200m height scale) must be converted to meters.
             // When using BC heightmap, values are 0-1 normalized and the threshold
             // is used directly.
             float effectiveDepressionThreshold = snap.IsWorldHeightCache
@@ -591,7 +591,7 @@ namespace VerdantsAscent.Water.Core
                 : MinDepressionDepth;
 
             MainThreadDispatcher.Enqueue(() =>
-                Debug.Log($"[BCHeightmapWaterDetector] Step 2: Finding depressed pixels (threshold={effectiveDepressionThreshold:F4})..."));
+                FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 2: Finding depressed pixels (threshold={effectiveDepressionThreshold:F4})..."));
 
             bool[] isDepressed = new bool[size * size];
             float[] depressionMap = new float[size * size];
@@ -614,7 +614,7 @@ namespace VerdantsAscent.Water.Core
                 long elapsed = progressSW.ElapsedMilliseconds;
                 int dc = depressedCount;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 2 complete: {dc} depressed pixels found ({elapsed}ms)"));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 2 complete: {dc} depressed pixels found ({elapsed}ms)"));
             }
 
             if (depressedCount == 0)
@@ -626,7 +626,7 @@ namespace VerdantsAscent.Water.Core
                 int dc = depressedCount;
                 int smbp = scaledMinBodyPixels;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 3: Flood-filling {dc} depressed pixels (minBody={smbp})..."));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 3: Flood-filling {dc} depressed pixels (minBody={smbp})..."));
             }
             var waterBodies = FloodFillRegions(isDepressed, depressionMap, size, scaledMinBodyPixels, progressSW, PROGRESS_INTERVAL_MS);
 
@@ -634,10 +634,10 @@ namespace VerdantsAscent.Water.Core
                 long elapsed = progressSW.ElapsedMilliseconds;
                 int wbc = waterBodies.Count;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 3 complete: {wbc} water bodies found ({elapsed}ms)"));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 3 complete: {wbc} water bodies found ({elapsed}ms)"));
             }
 
-            // Step 3.5: Sort water bodies center-out — prioritize rivers near world center
+            // Step 3.5: Sort water bodies center-out - prioritize rivers near world center
             // so that if MaxWaterBodies or MaxPaths clips the list, edge rivers are
             // trimmed rather than the important central ones.
             float pixelCenter = halfSize;
@@ -660,7 +660,7 @@ namespace VerdantsAscent.Water.Core
             {
                 int wbc = waterBodies.Count;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Step 4: Classifying and tracing {wbc} water bodies..."));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 4: Classifying and tracing {wbc} water bodies..."));
             }
             float mpp = MetersPerPixel(snap);
             long step4LastProgressMs = progressSW.ElapsedMilliseconds;
@@ -698,7 +698,7 @@ namespace VerdantsAscent.Water.Core
                     int stripCount = strips != null ? strips.Count : 0;
                     string typeName = wb.Type.ToString();
                     MainThreadDispatcher.Enqueue(() =>
-                        Debug.Log($"[BCHeightmapWaterDetector] Step 4: SPLIT oversized {typeName} #{splitNum} " +
+                        FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 4: SPLIT oversized {typeName} #{splitNum} " +
                             $"({pxCount} pixels, {bboxMetersW:F0}x{bboxMetersH:F0}m) into {stripCount} strips"));
 
                     if (strips != null && strips.Count > 0)
@@ -718,7 +718,7 @@ namespace VerdantsAscent.Water.Core
                     int pxCount = bodyPixelCount;
                     string typeName = wb.Type.ToString();
                     MainThreadDispatcher.Enqueue(() =>
-                        Debug.Log($"[BCHeightmapWaterDetector] Step 4 progress: {processed}/{total} bodies " +
+                        FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Step 4 progress: {processed}/{total} bodies " +
                             $"(split={split}, timedOut={timedOut}), current={typeName} {pxCount}px ({elapsed}ms)"));
                 }
 
@@ -734,11 +734,11 @@ namespace VerdantsAscent.Water.Core
                         int pxCount = bodyPixelCount;
                         long be = bodyElapsed;
                         MainThreadDispatcher.Enqueue(() =>
-                            Debug.LogWarning($"[BCHeightmapWaterDetector] Step 4: Body took {be}ms ({pxCount} pixels) — continuing"));
+                            FiresLogger.LogWarning($"[BCHeightmapWaterDetector] Step 4: Body took {be}ms ({pxCount} pixels) - continuing"));
                     }
 
                     // AUTO-GENERATE SPRINGS at the origin point of each river/stream.
-                    // The origin is the highest elevation end — where water emerges
+                    // The origin is the highest elevation end - where water emerges
                     // from the ground. A small puddle at the headwaters looks natural.
                     if (wb.PathPoints != null && wb.PathPoints.Count >= 2)
                     {
@@ -783,7 +783,7 @@ namespace VerdantsAscent.Water.Core
                 else if (wb.Type == WaterBodyType.Lake || wb.Type == WaterBodyType.Pond)
                 {
                     // Lakes and ponds use the same flat-fill logic.
-                    // Ponds are just smaller — GenerateLakePoints handles both.
+                    // Ponds are just smaller - GenerateLakePoints handles both.
                     wb.PathPoints = GenerateLakePoints(wb, map, snap, mpp);
 
                     // Check per-body timeout
@@ -794,7 +794,7 @@ namespace VerdantsAscent.Water.Core
                         int pxCount = bodyPixelCount;
                         long be = bodyElapsed;
                         MainThreadDispatcher.Enqueue(() =>
-                            Debug.LogWarning($"[BCHeightmapWaterDetector] Step 4: Lake/Pond took {be}ms ({pxCount} pixels) — skipping decompose"));
+                            FiresLogger.LogWarning($"[BCHeightmapWaterDetector] Step 4: Lake/Pond took {be}ms ({pxCount} pixels) - skipping decompose"));
                         // Skip the expensive decompose step for timed-out bodies
                         continue;
                     }
@@ -803,7 +803,7 @@ namespace VerdantsAscent.Water.Core
                     // fill level too low, etc.), re-analyze its pixel region for
                     // elongated sub-features (river channels) or small depressions
                     // (ponds) that can be placed instead. The lake's pixels contain
-                    // real depressed terrain — the failure was in finding a single
+                    // real depressed terrain - the failure was in finding a single
                     // fill level, not in the depression itself.
                     // Only attempt decompose for reasonably-sized lakes to avoid
                     // creating huge HashSets and bool arrays for massive bodies.
@@ -818,7 +818,7 @@ namespace VerdantsAscent.Water.Core
                 else if (wb.Type == WaterBodyType.Spring)
                 {
                     // Springs detected from heightmap: tiny depressions (<20m across).
-                    // Use GenerateLakePoints — it produces a small flat-fill grid.
+                    // Use GenerateLakePoints - it produces a small flat-fill grid.
                     wb.PathPoints = GenerateLakePoints(wb, map, snap, mpp);
                 }
             }
@@ -834,7 +834,7 @@ namespace VerdantsAscent.Water.Core
                 int split = step4Split;
                 int timedOut = step4TimedOut;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Detection complete: {wbc} water bodies ({fbc} fallbacks, " +
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Detection complete: {wbc} water bodies ({fbc} fallbacks, " +
                         $"{split} split oversized, {timedOut} timed out) in {elapsed}ms"));
             }
 
@@ -884,7 +884,7 @@ namespace VerdantsAscent.Water.Core
                         int row = y;
                         int totalRows = size;
                         MainThreadDispatcher.Enqueue(() =>
-                            Debug.Log($"[BCHeightmapWaterDetector] Box blur horizontal pass: {row}/{totalRows} rows ({now}ms)"));
+                            FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Box blur horizontal pass: {row}/{totalRows} rows ({now}ms)"));
                     }
                 }
             }
@@ -893,7 +893,7 @@ namespace VerdantsAscent.Water.Core
             {
                 long elapsed = progressSW.ElapsedMilliseconds;
                 MainThreadDispatcher.Enqueue(() =>
-                    Debug.Log($"[BCHeightmapWaterDetector] Box blur horizontal pass complete ({elapsed}ms), starting vertical pass..."));
+                    FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Box blur horizontal pass complete ({elapsed}ms), starting vertical pass..."));
             }
 
             // Vertical pass
@@ -928,7 +928,7 @@ namespace VerdantsAscent.Water.Core
                         int col = x;
                         int totalCols = size;
                         MainThreadDispatcher.Enqueue(() =>
-                            Debug.Log($"[BCHeightmapWaterDetector] Box blur vertical pass: {col}/{totalCols} columns ({now}ms)"));
+                            FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Box blur vertical pass: {col}/{totalCols} columns ({now}ms)"));
                     }
                 }
             }
@@ -1013,7 +1013,7 @@ namespace VerdantsAscent.Water.Core
                             int rc = result.Count;
                             int currentRegionSize = pxs.Count;
                             MainThreadDispatcher.Enqueue(() =>
-                                Debug.Log($"[BCHeightmapWaterDetector] Flood fill: {pv} pixels visited, {rc} bodies found, current region: {currentRegionSize} pixels ({now}ms)"));
+                                FiresLogger.LogInfo($"[BCHeightmapWaterDetector] Flood fill: {pv} pixels visited, {rc} bodies found, current region: {currentRegionSize} pixels ({now}ms)"));
                         }
                     }
                 }
@@ -1073,7 +1073,7 @@ namespace VerdantsAscent.Water.Core
             }
             else
             {
-                // Compact shape — classify by size:
+                // Compact shape - classify by size:
                 //   Spring: <20m across (puddle at a depression or origin point)
                 //   Pond:   20-200m across (tar-pit sized standing water)
                 //   Lake:   200m+ across (large standing water body)
@@ -1096,15 +1096,15 @@ namespace VerdantsAscent.Water.Core
         /// 
         /// At each cross-section, computes THREE height references:
         /// 
-        /// 1. TerrainY — EXACT world height from heightmap at the lowest bed pixel
+        /// 1. TerrainY - EXACT world height from heightmap at the lowest bed pixel
         ///    (using BC's formula: worldY = (pixelValue * Amount - 0.15 + SeaLevelAdj) * 200)
         ///    The darkest pixels at the highest elevations are origin springs/headwaters.
         /// 
-        /// 2. DepressionDepth — how far below the banks the bed is, in world meters.
+        /// 2. DepressionDepth - how far below the banks the bed is, in world meters.
         ///    Computed from the depression map (neighborhoodAvg - localHeight) scaled to
         ///    meters. This tells us the channel's relative depth at each cross-section.
         /// 
-        /// 3. BankY — the height of the lowest non-depressed (bank) pixel adjacent to
+        /// 3. BankY - the height of the lowest non-depressed (bank) pixel adjacent to
         ///    the channel edges. Found by scanning 1-3 pixels outside minY/maxY (or
         ///    minX/maxX). Water must NEVER exceed this minus a small margin.
         /// 
@@ -1130,7 +1130,7 @@ namespace VerdantsAscent.Water.Core
             bool walkX = bboxW >= bboxH;
 
             // For large water bodies, use a bounding-box-local bool[] grid instead of
-            // HashSet<long>. This eliminates hash overhead — O(1) array lookup is ~10x
+            // HashSet<long>. This eliminates hash overhead - O(1) array lookup is ~10x
             // faster than HashSet.Contains() for millions of entries.
             // Also use a local float[] for depression depth instead of Dictionary.
             bool useBBoxGrid = (long)bboxW * bboxH <= 50_000_000 && wb.PixelXs.Count > 50000;
@@ -1154,7 +1154,7 @@ namespace VerdantsAscent.Water.Core
             }
             else
             {
-                // Small body — HashSet is fine
+                // Small body - HashSet is fine
                 pixelSet = new HashSet<long>();
                 depthLookup = new Dictionary<long, float>();
                 for (int i = 0; i < wb.PixelXs.Count; i++)
@@ -1167,7 +1167,7 @@ namespace VerdantsAscent.Water.Core
 
             // Dynamic step scaling: for huge bodies, increase trace step to avoid
             // spending minutes on a single water body. At 20480px, a body spanning
-            // 5000 pixels wide would normally trace 5000 cross-sections — we cap at ~2000.
+            // 5000 pixels wide would normally trace 5000 cross-sections - we cap at ~2000.
             int longerDim = Math.Max(bboxW, bboxH);
             int step = Math.Max(1, ChannelTraceStep);
             if (longerDim > 2000)
@@ -1179,12 +1179,12 @@ namespace VerdantsAscent.Water.Core
             // multiply by HeightmapAmount * 200 to get meters.
             float heightScale = snap.IsWorldHeightCache ? 1f : snap.HeightmapAmount * 200f;
 
-            // IMPORTANT: TraceCenterline provides RAW data — bed height, bank height,
+            // IMPORTANT: TraceCenterline provides RAW data - bed height, bank height,
             // depression depth. It does NOT compute the final water surface level.
             // That's DropRiverToTerrain's job (single authority for surface computation).
             // SurfaceY is set to 0 here so DropRiverToTerrain knows it needs to compute it.
 
-            // Helper lambdas for pixel membership and depth lookup — unified for both grid and HashSet paths
+            // Helper lambdas for pixel membership and depth lookup - unified for both grid and HashSet paths
             Func<int, int, bool> containsPixel;
             Func<int, int, float> getDepth;
             if (useBBoxGrid)
@@ -1299,7 +1299,7 @@ namespace VerdantsAscent.Water.Core
                         }
                     }
 
-                    // Use the LOWER of the two banks — this is where water would spill
+                    // Use the LOWER of the two banks - this is where water would spill
                     float bankPixelVal = Math.Min(leftBankVal, rightBankVal);
 
                     float bankY;
@@ -1342,7 +1342,7 @@ namespace VerdantsAscent.Water.Core
 
                         float depth = getDepth(px, py);
 
-                        // Weight by depth SQUARED — same as walkX branch
+                        // Weight by depth SQUARED - same as walkX branch
                         float w = (depth + 0.001f) * (depth + 0.001f);
                         weightedX += px * w;
                         totalWeight += w;
@@ -1433,7 +1433,7 @@ namespace VerdantsAscent.Water.Core
             // min of target spacing and the actual pixel spacing to avoid over-densifying.
             if (points.Count >= 2)
             {
-                float targetSpacing = Math.Min(2f, mpp * 0.8f); // At 8K, mpp?2.5 ? target?2.0
+                float targetSpacing = Math.Min(2f, mpp * 0.8f); // At 8K, mpp~2.5 -> target~2.0
                 var dense = new List<AutoWaterGenerator.PathPoint>();
                 dense.Add(points[0]);
 
@@ -1485,7 +1485,7 @@ namespace VerdantsAscent.Water.Core
             float diskRadius = Math.Max(5f, mpp * 2f);
             int gridStep = Math.Max(1, (int)(diskRadius * 0.8f / mpp));
 
-            // Build pixel lookup — use bounding-box-local bool[] for large bodies,
+            // Build pixel lookup - use bounding-box-local bool[] for large bodies,
             // HashSet for small ones. The grid gives O(1) lookups without hash overhead.
             int bboxW = wb.MaxPX - wb.MinPX + 1;
             int bboxH = wb.MaxPY - wb.MinPY + 1;
@@ -1579,7 +1579,7 @@ namespace VerdantsAscent.Water.Core
 
             float fillWorldY = HeightmapToWorldY(fillPixelVal, snap);
 
-            // Generate grid points — only where terrain is below fill level
+            // Generate grid points - only where terrain is below fill level
             for (int py = wb.MinPY; py <= wb.MaxPY; py += gridStep)
             {
                 for (int px = wb.MinPX; px <= wb.MaxPX; px += gridStep)
@@ -1631,7 +1631,7 @@ namespace VerdantsAscent.Water.Core
         /// bounding-box axis. Each strip contains a subset of the original pixels
         /// and is independently classified and traced.
         /// 
-        /// WHY: A 51M pixel river spanning 18km×12km would take hours to trace as
+        /// WHY: A 51M pixel river spanning 18kmx12km would take hours to trace as
         /// a single body. By splitting into strips of ~MaxPixelsPerBody pixels each,
         /// we can trace each strip in seconds. The strips overlap by 50 pixels to
         /// ensure continuity at boundaries.
@@ -1812,13 +1812,13 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Lake Fallback — Decompose Into Sub-Features
+        #region Lake Fallback - Decompose Into Sub-Features
 
         /// <summary>
         /// When a detected lake cannot be placed (GenerateLakePoints returns 0 points),
         /// this method re-analyzes the lake's pixel region to find sub-features:
-        /// - Elongated channels within the lake bounds ? rivers/streams
-        /// - Small isolated depressions ? ponds with their own local fill levels
+        /// - Elongated channels within the lake bounds -> rivers/streams
+        /// - Small isolated depressions -> ponds with their own local fill levels
         ///
         /// WHY THIS HAPPENS: A large lake region may have no single clear fill level
         /// because the "lake" is actually a wide valley with multiple channels at
@@ -1845,7 +1845,7 @@ namespace VerdantsAscent.Water.Core
             int pixelCount = lakeBounds.PixelXs.Count;
             if (pixelCount < minBodyPixels * 2) return result;
 
-            // Build a pixel lookup — use bounding-box-local grid for large bodies
+            // Build a pixel lookup - use bounding-box-local grid for large bodies
             int lBboxW = lakeBounds.MaxPX - lakeBounds.MinPX + 1;
             int lBboxH = lakeBounds.MaxPY - lakeBounds.MinPY + 1;
             long lBboxArea = (long)lBboxW * lBboxH;
@@ -2020,7 +2020,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 else
                 {
-                    // Small pond within the failed lake — try GenerateLakePoints
+                    // Small pond within the failed lake - try GenerateLakePoints
                     // with the sub-region's tighter bounds
                     subBody.PathPoints = GenerateLakePoints(subBody, map, snap, mpp);
                 }

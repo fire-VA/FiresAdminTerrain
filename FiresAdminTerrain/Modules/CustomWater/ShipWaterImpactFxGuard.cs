@@ -41,7 +41,7 @@ namespace VerdantsAscent.Water.Core
             foreach (var e in arr)
                 if (e != null && e.m_prefab != null) cleaned.Add(e);
             fx.m_effectPrefabs = cleaned.ToArray();
-            Debug.Log($"[FiresLiquidWater] stripped {arr.Length - cleaned.Count} null water-impact effect(s) from ship '{__instance.name}' (was crash-spamming EffectList.Create).");
+            FiresLogger.LogInfo($"[FiresLiquidWater] stripped {arr.Length - cleaned.Count} null water-impact effect(s) from ship '{__instance.name}' (was crash-spamming EffectList.Create).");
         }
     }
 }

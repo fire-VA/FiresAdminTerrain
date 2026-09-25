@@ -1,3 +1,4 @@
+using FiresCore.Sync;
 using HarmonyLib;
 using System.Collections.Generic;
 using UnityEngine;
@@ -9,13 +10,13 @@ namespace VerdantsAscent.Water.Core
     /// 
     /// NOTE: Auto water does NOT run automatically on world load.
     /// The player must explicitly trigger it via the va_auto_water_generate console command.
-    /// Admins on clients can use the command � it sends an RPC to the server to run generation.
+    /// Admins on clients can use the command - it sends an RPC to the server to run generation.
     /// 
     /// Hooks:
-    /// 1. WorldGenerator.Pregenerate() Postfix � caches river/stream/lake counts for status display
-    /// 2. Game.Logout() � cancels any in-progress generation
-    /// 3. ZNet.Start Postfix � registers the auto water generation RPC
-    /// 4. ZoneSystem.SpawnZone Postfix � one-shot cleanup on first zone load after generation
+    /// 1. WorldGenerator.Pregenerate() Postfix - caches river/stream/lake counts for status display
+    /// 2. Game.Logout() - cancels any in-progress generation
+    /// 3. ZNet.Start Postfix - registers the auto water generation RPC
+    /// 4. ZoneSystem.SpawnZone Postfix - one-shot cleanup on first zone load after generation
     /// </summary>
     [HarmonyPatch]
     public static class AutoWaterPatches
@@ -74,7 +75,7 @@ namespace VerdantsAscent.Water.Core
             AutoWaterGenerator.CachedLakeCount = lakes?.Count ?? 0;
 
             bool isServer = ZNet.instance != null && ZNet.instance.IsServer();
-            Debug.Log($"[AutoWaterPatches] World data cached ({(isServer ? "server" : "client")}): " +
+            FiresLogger.LogInfo($"[AutoWaterPatches] World data cached ({(isServer ? "server" : "client")}): " +
                        $"{AutoWaterGenerator.CachedRiverCount} rivers, " +
                        $"{AutoWaterGenerator.CachedStreamCount} streams, {AutoWaterGenerator.CachedLakeCount} lakes. " +
                        WorldGeneratorAccess.GetBCStatusString());
@@ -84,10 +85,7 @@ namespace VerdantsAscent.Water.Core
         /// Register the auto water generation RPC when ZNet starts.
         /// This allows admin clients to request generation on the server.
         /// </summary>
-        [HarmonyPatch(typeof(ZNet), "Start")]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.Low)]
-        private static void ZNet_Start_Postfix_AutoWater(ZNet __instance)
+        internal static void OnZNetStart(ZNet __instance)
         {
             if (Game.instance == null) return;
             InitializeRPC();
@@ -109,11 +107,11 @@ namespace VerdantsAscent.Water.Core
                 ZRoutedRpc.instance.Register(RPC_NOTIFY_GENERATION_COMPLETE, new System.Action<long, int, int>(RPC_HandleGenerationComplete));
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_STREAM_COMBINER, RPC_HandleStreamCombiner);
                 _rpcInitialized = true;
-                Debug.Log("[AutoWaterPatches] Auto water generation + clear + build cache + stream + notify RPCs registered");
+                FiresLogger.LogInfo("[AutoWaterPatches] Auto water generation + clear + build cache + stream + notify RPCs registered");
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[AutoWaterPatches] Failed to register auto water RPC: {ex.Message}");
+                FiresLogger.LogWarning($"[AutoWaterPatches] Failed to register auto water RPC: {ex.Message}");
             }
         }
 
@@ -124,7 +122,7 @@ namespace VerdantsAscent.Water.Core
         /// NOTE: No client-side admin check here. The server authoritatively validates
         /// admin status in RPC_HandleRequestAutoWater via AdminSyncing.IsAdmin(sender),
         /// which checks the actual adminlist.txt. The client-side ConfigSync.IsAdmin
-        /// (lockExempt) flag is unreliable � AdminSyncing only sends it when the admin
+        /// (lockExempt) flag is unreliable - AdminSyncing only sends it when the admin
         /// list changes (polled every 30s), so it may still be false even for admins
         /// who just connected.
         /// </summary>
@@ -132,7 +130,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNet.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] Cannot request generation � ZNet not available");
+                FiresLogger.LogWarning("[AutoWaterPatches] Cannot request generation - ZNet not available");
                 return;
             }
 
@@ -145,13 +143,13 @@ namespace VerdantsAscent.Water.Core
 
             if (ZRoutedRpc.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] Cannot request generation � ZRoutedRpc not available");
+                FiresLogger.LogWarning("[AutoWaterPatches] Cannot request generation - ZRoutedRpc not available");
                 return;
             }
 
-            // Send RPC to server � server validates admin status authoritatively
+            // Send RPC to server - server validates admin status authoritatively
             ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_REQUEST_AUTO_WATER);
-            Debug.Log("[AutoWaterPatches] Sent auto water generation request to server");
+            FiresLogger.LogInfo("[AutoWaterPatches] Sent auto water generation request to server");
         }
 
         /// <summary>
@@ -168,15 +166,15 @@ namespace VerdantsAscent.Water.Core
             // Validate sender is admin (skip check for local server calls where sender is 0)
             if (sender != 0L && !AdminSyncing.IsAdmin(sender))
             {
-                Debug.LogWarning($"[AutoWaterPatches] Non-admin peer {sender} tried to request auto water generation � rejected");
+                FiresLogger.LogWarning($"[AutoWaterPatches] Non-admin peer {sender} tried to request auto water generation - rejected");
                 return;
             }
 
-            Debug.Log($"[AutoWaterPatches] Received auto water generation request from peer {sender}");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Received auto water generation request from peer {sender}");
 
             if (WorldGenerator.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] WorldGenerator not available � cannot generate");
+                FiresLogger.LogWarning("[AutoWaterPatches] WorldGenerator not available - cannot generate");
                 return;
             }
 
@@ -186,7 +184,7 @@ namespace VerdantsAscent.Water.Core
             {
                 int loadedDestroyed, zdoDestroyed;
                 ClearAllWaterInternal(out loadedDestroyed, out zdoDestroyed);
-                Debug.Log($"[AutoWaterPatches] Pre-generation clear: {loadedDestroyed} loaded, {zdoDestroyed} ZDOs destroyed");
+                FiresLogger.LogInfo($"[AutoWaterPatches] Pre-generation clear: {loadedDestroyed} loaded, {zdoDestroyed} ZDOs destroyed");
             }
 
             // Also clear the file-based water cache (clean slate for new generation)
@@ -203,7 +201,7 @@ namespace VerdantsAscent.Water.Core
 
             AutoWaterGenerator.GenerateFromWorldData(lakes, rivers, streams);
 
-            Debug.Log($"[AutoWaterPatches] Started auto water generation on server (clean slate): " +
+            FiresLogger.LogInfo($"[AutoWaterPatches] Started auto water generation on server (clean slate): " +
                 $"{rivers?.Count ?? 0} rivers, {streams?.Count ?? 0} streams, {lakes?.Count ?? 0} lakes");
         }
 
@@ -217,7 +215,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNet.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] Cannot request cache build � ZNet not available");
+                FiresLogger.LogWarning("[AutoWaterPatches] Cannot request cache build - ZNet not available");
                 return;
             }
 
@@ -229,12 +227,12 @@ namespace VerdantsAscent.Water.Core
 
             if (ZRoutedRpc.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] Cannot request cache build � ZRoutedRpc not available");
+                FiresLogger.LogWarning("[AutoWaterPatches] Cannot request cache build - ZRoutedRpc not available");
                 return;
             }
 
             ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_REQUEST_BUILD_CACHE);
-            Debug.Log("[AutoWaterPatches] Sent height cache build request to server");
+            FiresLogger.LogInfo("[AutoWaterPatches] Sent height cache build request to server");
         }
 
         /// <summary>
@@ -248,21 +246,21 @@ namespace VerdantsAscent.Water.Core
 
             if (sender != 0L && !AdminSyncing.IsAdmin(sender))
             {
-                Debug.LogWarning($"[AutoWaterPatches] Non-admin peer {sender} tried to request cache build � rejected");
+                FiresLogger.LogWarning($"[AutoWaterPatches] Non-admin peer {sender} tried to request cache build - rejected");
                 return;
             }
 
-            Debug.Log($"[AutoWaterPatches] Received height cache build request from peer {sender}");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Received height cache build request from peer {sender}");
 
             if (WorldGenerator.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] WorldGenerator not available � cannot build cache");
+                FiresLogger.LogWarning("[AutoWaterPatches] WorldGenerator not available - cannot build cache");
                 return;
             }
 
             if (WorldHeightCache.IsBuilding)
             {
-                Debug.Log("[AutoWaterPatches] Height cache build already in progress");
+                FiresLogger.LogInfo("[AutoWaterPatches] Height cache build already in progress");
                 return;
             }
 
@@ -271,11 +269,11 @@ namespace VerdantsAscent.Water.Core
                 var existingSnap = WorldHeightCache.CachedSnapshot;
                 if (existingSnap != null && existingSnap.Size == WorldHeightCache.GridSize)
                 {
-                    Debug.Log($"[AutoWaterPatches] Height cache already built at correct resolution ({existingSnap.Size}x{existingSnap.Size})");
+                    FiresLogger.LogInfo($"[AutoWaterPatches] Height cache already built at correct resolution ({existingSnap.Size}x{existingSnap.Size})");
                     return;
                 }
-                // Cache exists but at wrong resolution � clear it and rebuild
-                Debug.Log($"[AutoWaterPatches] Height cache exists at {existingSnap?.Size}x{existingSnap?.Size} but configured GridSize is {WorldHeightCache.GridSize} � rebuilding");
+                // Cache exists but at wrong resolution - clear it and rebuild
+                FiresLogger.LogInfo($"[AutoWaterPatches] Height cache exists at {existingSnap?.Size}x{existingSnap?.Size} but configured GridSize is {WorldHeightCache.GridSize} - rebuilding");
                 WorldHeightCache.ClearCache();
             }
 
@@ -298,17 +296,17 @@ namespace VerdantsAscent.Water.Core
             var host = Game.instance != null ? (MonoBehaviour)Game.instance : (MonoBehaviour)ZoneSystem.instance;
             if (host == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] No coroutine host available for cache build");
+                FiresLogger.LogWarning("[AutoWaterPatches] No coroutine host available for cache build");
                 return;
             }
 
-            Debug.Log($"[AutoWaterPatches] Starting server-side height cache build ({WorldHeightCache.GridSize}x{WorldHeightCache.GridSize})...");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Starting server-side height cache build ({WorldHeightCache.GridSize}x{WorldHeightCache.GridSize})...");
             host.StartCoroutine(WorldHeightCache.BuildCacheCoroutine(snap =>
             {
                 if (snap != null)
-                    Debug.Log($"[AutoWaterPatches] Server height cache built: {snap.Size}x{snap.Size}, saved to disk");
+                    FiresLogger.LogInfo($"[AutoWaterPatches] Server height cache built: {snap.Size}x{snap.Size}, saved to disk");
                 else
-                    Debug.LogWarning("[AutoWaterPatches] Server height cache build failed");
+                    FiresLogger.LogWarning("[AutoWaterPatches] Server height cache build failed");
             }));
         }
 
@@ -320,7 +318,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNet.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] Cannot request clear � ZNet not available");
+                FiresLogger.LogWarning("[AutoWaterPatches] Cannot request clear - ZNet not available");
                 return;
             }
 
@@ -332,12 +330,12 @@ namespace VerdantsAscent.Water.Core
 
             if (ZRoutedRpc.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] Cannot request clear � ZRoutedRpc not available");
+                FiresLogger.LogWarning("[AutoWaterPatches] Cannot request clear - ZRoutedRpc not available");
                 return;
             }
 
             ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_REQUEST_CLEAR_WATER);
-            Debug.Log("[AutoWaterPatches] Sent clear auto water request to server");
+            FiresLogger.LogInfo("[AutoWaterPatches] Sent clear auto water request to server");
         }
 
         /// <summary>
@@ -352,11 +350,11 @@ namespace VerdantsAscent.Water.Core
 
             if (sender != 0L && !AdminSyncing.IsAdmin(sender))
             {
-                Debug.LogWarning($"[AutoWaterPatches] Non-admin peer {sender} tried to clear auto water � rejected");
+                FiresLogger.LogWarning($"[AutoWaterPatches] Non-admin peer {sender} tried to clear auto water - rejected");
                 return;
             }
 
-            Debug.Log($"[AutoWaterPatches] Received clear auto water request from peer {sender}");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Received clear auto water request from peer {sender}");
 
             // Clear file-based cache too
             WaterCombinerCache.ClearCache();
@@ -367,7 +365,7 @@ namespace VerdantsAscent.Water.Core
             _lastClearLoadedCount = loadedDestroyed;
             _lastClearZdoCount = zdoDestroyed;
 
-            Debug.Log($"[AutoWaterPatches] Clear complete: {loadedDestroyed} loaded objects, {zdoDestroyed} ZDOs destroyed");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Clear complete: {loadedDestroyed} loaded objects, {zdoDestroyed} ZDOs destroyed");
         }
 
         // Cached results from last clear for console feedback
@@ -404,7 +402,7 @@ namespace VerdantsAscent.Water.Core
 
             if (ZDOMan.instance == null)
             {
-                Debug.LogWarning("[AutoWaterPatches] ZDOMan not available � cannot clear");
+                FiresLogger.LogWarning("[AutoWaterPatches] ZDOMan not available - cannot clear");
                 return;
             }
 
@@ -412,7 +410,7 @@ namespace VerdantsAscent.Water.Core
             if (AutoWaterGenerator.IsGenerating)
             {
                 AutoWaterGenerator.CancelGeneration();
-                Debug.Log("[AutoWaterPatches] Cancelled in-progress auto water generation");
+                FiresLogger.LogInfo("[AutoWaterPatches] Cancelled in-progress auto water generation");
             }
 
             // Phase 1: Destroy all loaded WaterMeshCombiners
@@ -488,7 +486,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[AutoWaterPatches] Failed to destroy ZDO: {ex.Message}");
+                    FiresLogger.LogWarning($"[AutoWaterPatches] Failed to destroy ZDO: {ex.Message}");
                 }
             }
 
@@ -532,13 +530,13 @@ namespace VerdantsAscent.Water.Core
             }
             WaterCombinerCache.SaveCacheAsync();
 
-            // Notify clients BEFORE the save � if the save takes a long time,
+            // Notify clients BEFORE the save - if the save takes a long time,
             // clients still get the notification. The data is already in ZDOs
             // and will be committed by the async save below.
             if (ZRoutedRpc.instance != null)
             {
                 ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_NOTIFY_GENERATION_COMPLETE, combinerCount, diskCount);
-                Debug.Log($"[AutoWaterPatches] Notified all clients: generation complete " +
+                FiresLogger.LogInfo($"[AutoWaterPatches] Notified all clients: generation complete " +
                     $"({combinerCount} combiners, {diskCount} disks, " +
                     $"{_streamedCombinerCount} streamed incrementally). Cache saved.");
             }
@@ -555,16 +553,16 @@ namespace VerdantsAscent.Water.Core
         /// Streams a single combiner's disk data to all connected clients via RPC.
         /// Called by AutoWaterGenerator after each path completes in Phase 3/4.
         /// 
-        /// This enables INCREMENTAL water visibility on clients � they can see
+        /// This enables INCREMENTAL water visibility on clients - they can see
         /// rivers and lakes appearing during the 30+ minute server-side generation
         /// instead of waiting until the end.
         /// 
         /// SERVER-ONLY. Sends a compact ZPackage containing just the disk positions,
-        /// radii, depths, and liquid types � enough for the client to create a
+        /// radii, depths, and liquid types - enough for the client to create a
         /// combiner and regenerate the mesh locally.
         /// 
-        /// Each RPC payload is small (one combiner = ~40-60 bytes per disk � N disks).
-        /// For a typical river with 200 disks, that's ~12KB per RPC � well within
+        /// Each RPC payload is small (one combiner = ~40-60 bytes per disk - N disks).
+        /// For a typical river with 200 disks, that's ~12KB per RPC - well within
         /// Valheim's network limits.
         /// </summary>
         public static void StreamCombinerToClients(WaterMeshCombiner combiner)
@@ -576,7 +574,7 @@ namespace VerdantsAscent.Water.Core
             var disks = combiner.WaterDisks;
             if (disks == null || disks.Count == 0) return;
 
-            // Don't stream in single player � no clients to send to
+            // Don't stream in single player - no clients to send to
             if (ZNet.IsSinglePlayer) return;
 
             var pkg = new ZPackage();
@@ -606,20 +604,21 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Client-side RPC handler. When the server notifies that generation is complete,
         /// clients log the result. The anchor ZDOs are already syncing via Valheim's normal
-        /// ZDO protocol � ZNetScene will instantiate them automatically near the player.
+        /// ZDO protocol - ZNetScene will instantiate them automatically near the player.
         /// When a CustomRiver ZDO with the anchor flag is instantiated, the prefab's
         /// WaterMeshCombinerAnchor component detects isAnchor=true in Awake() and
-        /// Start() triggers RestoreFromZDOAsync() ? visible water.
+        /// Start() triggers RestoreFromZDOAsync() -> visible water.
         /// 
         /// Players may need to move to new areas (or log out and back in) for water in
         /// distant zones to appear, as ZDOs only sync for zones near the player.
         /// </summary>
         private static void RPC_HandleGenerationComplete(long sender, int combinerCount, int diskCount)
         {
-            // Server doesn't need to handle its own notification � it already has the combiners
+            // Server doesn't need to handle its own notification - it already has the combiners
             if (ZNet.instance != null && ZNet.instance.IsServer()) return;
+            if (!VerdantsAscent.Terrain.Lifecycle.AdminCheck.IsAdmin(sender)) return;
 
-            Debug.Log($"[AutoWaterPatches] Server completed water generation: {combinerCount} combiners, {diskCount} disks. " +
+            FiresLogger.LogInfo($"[AutoWaterPatches] Server completed water generation: {combinerCount} combiners, {diskCount} disks. " +
                 $"Client received {_streamedCombinerCount} combiners ({_streamedDiskCount} disks) incrementally during generation. " +
                 "Remaining water anchors will appear as you explore (ZDO sync is automatic).");
 
@@ -637,9 +636,9 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private static void RPC_HandleStreamCombiner(long sender, ZPackage pkg)
         {
-            // Server doesn't need to handle its own stream � it already has the combiners
+            // Server doesn't need to handle its own stream - it already has the combiners
             if (ZNet.instance != null && ZNet.instance.IsServer()) return;
-            if (pkg == null) return;
+            if (pkg == null || !VerdantsAscent.Terrain.Lifecycle.AdminCheck.IsAdmin(sender)) return;
 
             try
             {
@@ -700,16 +699,16 @@ namespace VerdantsAscent.Water.Core
                 _streamedCombinerCount++;
                 _streamedDiskCount += diskCount;
 
-                // Log progress periodically (not every combiner � too spammy)
+                // Log progress periodically (not every combiner - too spammy)
                 if (_streamedCombinerCount % 10 == 0 || _streamedCombinerCount <= 3)
                 {
-                    Debug.Log($"[AutoWaterPatches] Received water data: {_streamedCombinerCount} combiners, " +
+                    FiresLogger.LogInfo($"[AutoWaterPatches] Received water data: {_streamedCombinerCount} combiners, " +
                         $"{_streamedDiskCount} disks so far (latest: {diskCount} disks at ({centerPos.x:F0},{centerPos.z:F0}))");
                 }
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[AutoWaterPatches] Error handling streamed combiner: {ex.Message}");
+                FiresLogger.LogWarning($"[AutoWaterPatches] Error handling streamed combiner: {ex.Message}");
             }
         }
 
@@ -722,7 +721,7 @@ namespace VerdantsAscent.Water.Core
         {
             _pendingZoneLoadCleanup = true;
             _zoneLoadCleanupDelay = 0;
-            Debug.Log("[AutoWaterPatches] Zone-load cleanup scheduled (will run on next zone spawn)");
+            FiresLogger.LogInfo("[AutoWaterPatches] Zone-load cleanup scheduled (will run on next zone spawn)");
         }
 
         /// <summary>
@@ -736,10 +735,7 @@ namespace VerdantsAscent.Water.Core
         /// Runs ONCE then disables itself until the next generation.
         /// Uses a small frame delay so the zone's Heightmap data is fully loaded first.
         /// </summary>
-        [HarmonyPatch(typeof(ZoneSystem), "SpawnZone")]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.Low)]
-        private static void ZoneSystem_SpawnZone_Postfix_AutoWater()
+        internal static void OnZoneSpawned()
         {
             if (!_pendingZoneLoadCleanup) return;
             if (ZNet.instance == null || !ZNet.instance.IsServer()) return;
@@ -785,15 +781,15 @@ namespace VerdantsAscent.Water.Core
 
             IsCleaningUp = true;
             int totalCombiners = WaterMeshCombiner.AllCombiners.Count;
-            Debug.Log($"[AutoWaterPatches] Zone-load cleanup starting � {totalCombiners} combiners (segmented)");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Zone-load cleanup starting - {totalCombiners} combiners (segmented)");
 
-            // ---- PHASE 1: SCAN � check disk heights, clamp floating ones ----
+            // ---- PHASE 1: SCAN - check disk heights, clamp floating ones ----
             // Only clamp disks that are truly floating (ponds, lakes, springs).
             // Rivers and streams intentionally have their water plane sitting above
-            // the terrain at disk edges � the cross-section is meant to be level,
+            // the terrain at disk edges - the cross-section is meant to be level,
             // and the combiner's TerrainClipPass handles bank clipping.
             const float MAX_FLOAT_POND = 2.5f;
-            const float MAX_FLOAT_RIVER = 8.0f;  // Rivers can float higher at edges � bank clipping handles it
+            const float MAX_FLOAT_RIVER = 8.0f;  // Rivers can float higher at edges - bank clipping handles it
             const int SCAN_BATCH_SIZE = 20;
             int combinersChecked = 0;
             int disksClamped = 0;
@@ -853,10 +849,10 @@ namespace VerdantsAscent.Water.Core
                     yield return null;
             }
 
-            Debug.Log($"[AutoWaterPatches] Phase 1 (scan) done: {combinersChecked} checked, " +
+            FiresLogger.LogInfo($"[AutoWaterPatches] Phase 1 (scan) done: {combinersChecked} checked, " +
                 $"{modifiedCombiners.Count} need regen ({disksClamped} disks clamped)");
 
-            // ---- PHASE 2: REGENERATE � one combiner at a time, async ----
+            // ---- PHASE 2: REGENERATE - one combiner at a time, async ----
             int combinersFixed = 0;
 
             for (int i = 0; i < modifiedCombiners.Count; i++)
@@ -870,7 +866,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[AutoWaterPatches] Async regen failed for combiner {i}: {ex.Message}");
+                    FiresLogger.LogWarning($"[AutoWaterPatches] Async regen failed for combiner {i}: {ex.Message}");
                     continue;
                 }
 
@@ -887,9 +883,9 @@ namespace VerdantsAscent.Water.Core
                 yield return null;
             }
 
-            Debug.Log($"[AutoWaterPatches] Phase 2 (regen) done: {combinersFixed} combiners regenerated");
+            FiresLogger.LogInfo($"[AutoWaterPatches] Phase 2 (regen) done: {combinersFixed} combiners regenerated");
 
-            // ---- PHASE 3: SAVE � batch save modified combiners ----
+            // ---- PHASE 3: SAVE - batch save modified combiners ----
             const int SAVE_BATCH_SIZE = 5;
             int saved = 0;
 
@@ -904,7 +900,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[AutoWaterPatches] Save failed for combiner {i}: {ex.Message}");
+                    FiresLogger.LogWarning($"[AutoWaterPatches] Save failed for combiner {i}: {ex.Message}");
                 }
 
                 saved++;
@@ -914,17 +910,14 @@ namespace VerdantsAscent.Water.Core
 
             IsCleaningUp = false;
 
-            Debug.Log($"[AutoWaterPatches] Zone-load cleanup done: {combinersChecked} checked, " +
+            FiresLogger.LogInfo($"[AutoWaterPatches] Zone-load cleanup done: {combinersChecked} checked, " +
                 $"{combinersFixed} regenerated ({disksClamped} disks clamped), {saved} saved");
         }
 
         /// <summary>
         /// Cancel any in-progress generation on logout to prevent stale coroutines.
         /// </summary>
-        [HarmonyPatch(typeof(Game), "Logout")]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.High)]
-        private static void Game_Logout_Postfix_AutoWater()
+        internal static void OnLogout()
         {
             if (AutoWaterGenerator.IsGenerating)
             {

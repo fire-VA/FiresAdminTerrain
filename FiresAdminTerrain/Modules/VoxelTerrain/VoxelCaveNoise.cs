@@ -21,6 +21,59 @@ namespace VerdantsAscent.Terrain.Voxel
         private static int s_seed;
         public static void SetSeed(int worldSeed) => s_seed = worldSeed;
 
+        // Per-cell sinkhole veto cache. CarveSdf runs per VOXEL, but the site
+        // and its wet test are per CELL, so without a cache the water field
+        // would be sampled nine times for every voxel in the column. Chunk
+        // generation walks columns in order, so a one-entry cache hits almost
+        // always. Thread-static: chunk generation is multi-threaded.
+        [System.ThreadStatic] private static int t_sinkCX, t_sinkCZ;
+        [System.ThreadStatic] private static bool t_sinkValid, t_sinkWet;
+
+        private static bool SinkholeSiteWet(int cx, int cz, float sx, float sz, float radius)
+        {
+            if (t_sinkValid && t_sinkCX == cx && t_sinkCZ == cz) return t_sinkWet;
+            // No caching while the water field is down: a chunk generated in
+            // that window would latch "dry" for the cell and carve a shaft
+            // under a river the field would have vetoed.
+            if (!FiresWorldGenBase.Active) return false;
+            t_sinkCX = cx; t_sinkCZ = cz; t_sinkValid = true;
+            t_sinkWet = false;
+            {
+                // Centre plus a ring at the rim + margin: a shaft must clear the
+                // channel entirely, not merely miss its centreline.
+                float m = radius * 1.6f + 4f;
+                if (FiresWorldGenBase.IsWetAt(sx, sz)) t_sinkWet = true;
+                else
+                    for (int k = 0; k < 8 && !t_sinkWet; k++)
+                    {
+                        float a = k * (Mathf.PI * 2f / 8f);
+                        if (FiresWorldGenBase.IsWetAt(sx + Mathf.Cos(a) * m, sz + Mathf.Sin(a) * m))
+                            t_sinkWet = true;
+                    }
+            }
+            return t_sinkWet;
+        }
+
+        // Per-column wet cache for the ENTRANCE veto (4m quantized). An
+        // entrance releasing the surface pinch under a riverbed drives the
+        // tunnel through the bed to open air — the "sinkhole in the river"
+        // holes the shaft veto alone never covered.
+        [System.ThreadStatic] private static int t_entCX, t_entCZ;
+        [System.ThreadStatic] private static bool t_entValid, t_entWet;
+
+        private static bool EntranceColumnWet(float wx, float wz)
+        {
+            int cx = Mathf.FloorToInt(wx * 0.25f), cz = Mathf.FloorToInt(wz * 0.25f);
+            if (t_entValid && t_entCX == cx && t_entCZ == cz) return t_entWet;
+            if (!FiresWorldGenBase.Active) return false;
+            t_entCX = cx; t_entCZ = cz; t_entValid = true;
+            float sx = (cx + 0.5f) * 4f, sz = (cz + 0.5f) * 4f;
+            t_entWet = FiresWorldGenBase.IsWetAt(sx, sz)
+                || FiresWorldGenBase.IsWetAt(sx + 10f, sz) || FiresWorldGenBase.IsWetAt(sx - 10f, sz)
+                || FiresWorldGenBase.IsWetAt(sx, sz + 10f) || FiresWorldGenBase.IsWetAt(sx, sz - 10f);
+            return t_entWet;
+        }
+
         private static float Hash(int x, int y, int z)
         {
             unchecked
@@ -63,13 +116,21 @@ namespace VerdantsAscent.Terrain.Voxel
         // erosion detail, undercuts) — same seed, same guarantees.
         public static float Noise01(float x, float y, float z) => Noise(x, y, z);
 
-        // Carve SDF at a world position (metres, > 0 inside a tunnel).
+        // Carve SDF at a world position (metres, > 0 inside a tunnel): the noise
+        // caves, unioned with a chunk world's guaranteed start cave.
+        public static float CarveSdf(float wx, float wy, float wz, float depthBelowSurface, bool sinkholes = true)
+        {
+            float carve = CarveNoise(wx, wy, wz, depthBelowSurface, sinkholes);
+            float start = Zones.ZoneModeStartCave.Carve(wx, wy, wz);
+            return start > carve ? Mathf.Min(start, 12f) : carve;
+        }
+
         // depthBelowSurface pinches tunnels shut approaching the surface so
         // most stay buried and a few break through as natural entrances.
         // Gates: only above CaveMinY (W1 keeps caves above the y30 water
         // table — flooded caves need the tier-2 water mesh first) and within
         // CaveMaxDepth of the surface (no bottomless voids).
-        public static float CarveSdf(float wx, float wy, float wz, float depthBelowSurface)
+        private static float CarveNoise(float wx, float wy, float wz, float depthBelowSurface, bool sinkholes)
         {
             if (wy < FiresVoxelConfig.CaveMinY.Value) return -10f;
 
@@ -83,14 +144,46 @@ namespace VerdantsAscent.Terrain.Voxel
             // exactly the case that must reach the open air.
             float sinkhole = -10f;
             float sinkDepth = FiresVoxelConfig.SinkholeDepth.Value;
-            if (depthBelowSurface <= sinkDepth)
+            if (sinkholes && depthBelowSurface <= sinkDepth)
             {
-                float sThresh = FiresVoxelConfig.SinkholeRarity.Value;
-                float sf = f * 0.22f;
-                float sh = Noise(wx * sf + 1721.3f, 7.77f, wz * sf + 449.9f);
-                if (sh > sThresh)
+                // ONE SHAFT PER SPACING CELL. The old sparse-noise mask cut
+                // wherever the field crossed its threshold, and a smooth field
+                // crosses a threshold along a whole CONTOUR — so a single high
+                // region produced a scatter of part-holes and slivers across an
+                // entire hillside instead of one hole. Quantise to a spacing
+                // grid and give each cell exactly one jittered site: a column
+                // carves only inside that site's radius, so the extras are never
+                // cut at all and the roof between sites is never opened. That is
+                // strictly better than carving them and patching the mesh back
+                // over — there is nothing to patch.
+                float spacing = Mathf.Max(16f, FiresVoxelConfig.SinkholeSpacing.Value);
+                int cx = Mathf.FloorToInt(wx / spacing);
+                int cz = Mathf.FloorToInt(wz / spacing);
+                // Rarity now reads as "share of cells with NO shaft", so the
+                // existing config still means higher = rarer.
+                float radius = Mathf.Max(1f, FiresVoxelConfig.SinkholeRadius.Value);
+                // Inset the jitter so a site can never straddle a cell edge
+                // and end up touching its neighbour's shaft.
+                float inset = Mathf.Clamp01((radius * 1.5f) / spacing);
+                float span = Mathf.Max(0f, 1f - inset * 2f);
+                float sxw = (cx + inset + span * Hash(cx, 90002, cz)) * spacing;
+                float szw = (cz + inset + span * Hash(cx, 90003, cz)) * spacing;
+                // NEVER UNDER A RIVER. A shaft that opens in a bed drains the
+                // channel into the cave layer and leaves the holes punched
+                // straight through the riverbed. Skips the SHAFT only — tunnels
+                // below still carve here, they just stay roofed. The site is
+                // deterministic per cell so the test is cached per cell per
+                // thread; the field reads are immutable load-time arrays and
+                // therefore worker-safe.
+                if (Hash(cx, 90001, cz) >= FiresVoxelConfig.SinkholeRarity.Value
+                    && !SinkholeSiteWet(cx, cz, sxw, szw, radius))
                 {
-                    float t = (sh - sThresh) / Mathf.Max(1f - sThresh, 1e-4f);
+                    float ddx = wx - sxw, ddz = wz - szw;
+                    float dist = Mathf.Sqrt(ddx * ddx + ddz * ddz);
+                    // Radial falloff: 1 at the site, 0 at the rim. Wobble the rim
+                    // a little so the mouth is not a machined circle.
+                    float wob = 0.82f + 0.36f * Noise(wx * 0.09f, 613.1f, wz * 0.09f);
+                    float t = dist >= radius * wob ? 0f : 1f - dist / (radius * wob);
                     // FUNNEL, not a column. Narrow at the lip and opening out as
                     // it descends, so the cave ROOF survives everywhere except
                     // the entrance itself. The first cut had this inverted —
@@ -99,14 +192,16 @@ namespace VerdantsAscent.Terrain.Voxel
                     // fragments over a butchered crater.
                     float depthT = Mathf.Clamp01(depthBelowSurface / Mathf.Max(sinkDepth, 1f));
                     float profile = Mathf.Lerp(0.28f, 1f, depthT * depthT);
-                    float bite = t * FiresVoxelConfig.SinkholeRadius.Value * profile;
-                    // A shaft either cuts properly or not at all. Around the
-                    // threshold contour `bite` ramps up from ~0, and a carve of a
-                    // few centimetres leaves a paper-thin shell sitting on the
-                    // original surface — those are the ribbons//checkerboard
-                    // slivers left hanging around a sinkhole. Below the minimum
-                    // bite the shaft simply doesn't cut, giving a clean rim.
-                    sinkhole = bite >= SINK_MIN_BITE ? bite : -10f;
+                    float bite = t * radius * profile;
+                    // CONTINUOUS min-bite: SHIFT the carve down by the minimum
+                    // instead of gating it. The old binary gate (bite or −10)
+                    // made the density field DISCONTINUOUS across the whole
+                    // threshold contour — adjacent voxels jumped solid↔cut and
+                    // the mesher rendered the step as a diamond LATTICE with
+                    // sawtooth rims (user screenshots). Subtracting moves the
+                    // zero crossing to where the bite reaches the minimum,
+                    // smoothly: same no-sliver guarantee, one clean hole.
+                    sinkhole = bite - SINK_MIN_BITE;
                 }
             }
 
@@ -122,7 +217,10 @@ namespace VerdantsAscent.Terrain.Voxel
             float eThresh = FiresVoxelConfig.EntranceRarity.Value;
             float ef = f * 0.35f;
             float ent = Noise(wx * ef + 913.1f, 3.21f, wz * ef + 285.7f);
-            if (ent > eThresh)
+            // NEVER release the pinch under water: an entrance in a riverbed
+            // is a drain hole, exactly like the vetoed shafts. Tunnels still
+            // run below — they just keep their roof.
+            if (ent > eThresh && !EntranceColumnWet(wx, wz))
             {
                 float e = (ent - eThresh) / Mathf.Max(1f - eThresh, 1e-4f);
                 pinch = Mathf.Lerp(pinch, 1f, Mathf.SmoothStep(0f, 1f, e));
@@ -155,6 +253,13 @@ namespace VerdantsAscent.Terrain.Voxel
             // so distance-to-wall ≈ (width − m) / (0.5·freq). width 0.05 @
             // freq 0.025 ≈ 4m-radius tunnels. Clamped to keep the SDF band sane.
             float tunnel = (width - m) / Mathf.Max(0.5f * f, 1e-4f);
+
+            // Near the surface the carve is SHIFTED down by the min-bite
+            // (fading back to no shift at 3m depth) — small carves close
+            // smoothly instead of flipping per-voxel. The old binary gate
+            // aliased into checkerboard shells around breach rims.
+            if (depthBelowSurface < 3f)
+                tunnel -= SINK_MIN_BITE * (1f - depthBelowSurface / 3f);
 
             // Union of the two carves — a sinkhole punches through regardless of
             // whether a tunnel happens to run here, and drops into one where it does.

@@ -38,6 +38,8 @@ namespace VerdantsAscent.Water.Core
             return Localization.instance.Localize("[<color=yellow><b>$KEY_Use</b></color>] Climb");
         }
 
+        public float GetHoverOffset() => 0f;
+
         public string GetHoverName()
         {
             return "";
@@ -62,7 +64,7 @@ namespace VerdantsAscent.Water.Core
             }
             else
             {
-                // At dead center � use their forward direction
+                // At dead center - use their forward direction
                 climbDir = user.transform.forward;
                 climbDir.y = 0f;
                 climbDir.Normalize();
@@ -128,7 +130,7 @@ namespace VerdantsAscent.Water.Core
     /// 
     /// PERSISTENCE:
     /// - Ice state is persisted via the combiner's <see cref="CustomLiquidType"/> on the anchor ZDO.
-    /// - Ice holes are NOT persisted (they reset on reload � holes refreeze).
+    /// - Ice holes are NOT persisted (they reset on reload - holes refreeze).
     /// </summary>
     public class FrozenWaterController : MonoBehaviour
     {
@@ -260,7 +262,7 @@ namespace VerdantsAscent.Water.Core
 
             IsFrozen = true;
 
-            Debug.Log($"[FrozenWaterController] Initialized {(IsSnowMode ? "SNOW" : "ICE")} surface at {transform.position}");
+            FiresLogger.LogInfo($"[FrozenWaterController] Initialized {(IsSnowMode ? "SNOW" : "ICE")} surface at {transform.position}");
         }
 
         /// <summary>
@@ -286,7 +288,7 @@ namespace VerdantsAscent.Water.Core
             _iceRenderer = null;
             _iceCollider = null;
 
-            Debug.Log($"[FrozenWaterController] Thawed ice at {transform.position}");
+            FiresLogger.LogInfo($"[FrozenWaterController] Thawed ice at {transform.position}");
         }
 
         /// <summary>
@@ -318,7 +320,7 @@ namespace VerdantsAscent.Water.Core
             // Check if position is actually over this ice
             if (!_combiner.ContainsPosition(worldPos)) return false;
 
-            // Enforce hole limit � remove oldest hole (refreezes)
+            // Enforce hole limit - remove oldest hole (refreezes)
             if (_holes.Count >= MAX_HOLES)
             {
                 _holes.RemoveAt(0);
@@ -334,7 +336,7 @@ namespace VerdantsAscent.Water.Core
             _meshDirty = true;
             RebuildIceMesh();
 
-            Debug.Log($"[FrozenWaterController] Broke ice at {worldPos}, radius={radius:F1}m ({_holes.Count} holes)");
+            FiresLogger.LogInfo($"[FrozenWaterController] Broke ice at {worldPos}, radius={radius:F1}m ({_holes.Count} holes)");
             return true;
         }
 
@@ -462,11 +464,11 @@ namespace VerdantsAscent.Water.Core
         /// 
         /// ARCHITECTURE: Two separate meshes on two separate GameObjects:
         /// 
-        /// 1. WATER VOLUME � A closed box (top + 4 sides + bottom) using the
+        /// 1. WATER VOLUME - A closed box (top + 4 sides + bottom) using the
         ///    water material. Always complete, never has holes. Sits slightly
         ///    inset from the ice shell so it's only visible through ice holes.
         /// 
-        /// 2. ICE SHELL � A closed box (top + 4 sides + bottom) using the ice
+        /// 2. ICE SHELL - A closed box (top + 4 sides + bottom) using the ice
         ///    material. The top face has circular cutouts where holes are punched.
         ///    Sides and bottom are always intact so the ice looks like a solid
         ///    block. The MeshCollider only covers the ice top (not holes) so
@@ -580,7 +582,7 @@ namespace VerdantsAscent.Water.Core
             {
                 BuildBoxMesh(_waterMesh, gridW, gridH, cellSize, gridOrigin,
                              hasWater, isValidQuadCorner, isEdge,
-                             holeArray: null, // no holes � water is always complete
+                             holeArray: null, // no holes - water is always complete
                              topY: bottomY + 0.01f, // water top just below ice bottom
                              botY: bottomY - ICE_THICKNESS);
 
@@ -703,7 +705,7 @@ namespace VerdantsAscent.Water.Core
                     if (holeArray != null && (holeArray[i0] || holeArray[i1] || holeArray[i2] || holeArray[i3]))
                         continue;
 
-                    // Top face (normal up) � CCW winding
+                    // Top face (normal up) - CCW winding
                     tris.Add(v0); tris.Add(v2); tris.Add(v1);
                     tris.Add(v1); tris.Add(v2); tris.Add(v3);
                 }
@@ -726,7 +728,7 @@ namespace VerdantsAscent.Water.Core
                     int v2 = botVertIdx[i2], v3 = botVertIdx[i3];
                     if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) continue;
 
-                    // Bottom face (normal down) � reversed winding
+                    // Bottom face (normal down) - reversed winding
                     tris.Add(v0); tris.Add(v1); tris.Add(v2);
                     tris.Add(v1); tris.Add(v3); tris.Add(v2);
                 }

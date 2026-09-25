@@ -15,9 +15,9 @@ namespace VerdantsAscent.Utilities
     /// Key patches:
     /// 1. Heightmap.GetBiome - Returns forced biome when inside env box (for terrain paint, vegetation)
     /// 2. Heightmap.FindBiomeClutter - Returns forced biome for clutter/vegetation spawning
-    /// 3. ClutterSystem.GetGroundInfo - Returns forced biome for clutter placement
-    /// 4. EnvMan.GetBiome - Returns forced biome for environment calculations
-    /// 5. Heightmap.RebuildRenderMesh - Applies per-vertex biome colors for visual terrain override
+    /// 3. EnvMan.GetBiome - Returns forced biome for environment calculations
+    /// 4. Heightmap.RebuildRenderMesh - Applies per-vertex biome colors for visual terrain override
+    /// (ClutterSystem.GetGroundInfo is owned by VerdantsAscent.Performance.ClutterGroundProbe.)
     /// 
     /// NOTE: We intentionally do NOT patch WorldGenerator.GetBiome because:
     /// - It's used by the minimap/map rendering system
@@ -54,7 +54,7 @@ namespace VerdantsAscent.Utilities
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[EnvironmentBoxPatches] Failed to cache reflection: {ex.Message}");
+                FiresLogger.LogWarning($"[EnvironmentBoxPatches] Failed to cache reflection: {ex.Message}");
             }
         }
 
@@ -126,6 +126,8 @@ namespace VerdantsAscent.Utilities
         [HarmonyPriority(Priority.Last)]
         private static void GetBiome_Postfix(Vector3 point, ref Heightmap.Biome __result)
         {
+            if (VerdantsAscent.Terrain.Voxel.FiresSkyIslands.TrySkylandBiomeAt(point, out var skylandBiome))
+                __result = skylandBiome;
             // Check if point is inside an env box with biome override
             var envBox = EnvironmentBoxController.GetEnvBoxAtPosition(point);
             if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
@@ -155,228 +157,6 @@ namespace VerdantsAscent.Utilities
             if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
             {
                 __result = envBox.ForcedBiome;
-            }
-        }
-
-        #endregion
-
-        #region ClutterSystem.GetGroundInfo Patch
-
-        // Cached layer mask for custom terrain raycast
-        private static int _customTerrainLayerMask = 0;
-
-        // Round-89 — one-time proof-of-life logs for clutter on voxel terrain.
-        private static int s_voxelClutterLogs = 0;
-
-        // Track which patches have logged NRE to avoid spam
-        private static readonly HashSet<Vector2Int> _loggedNrePatches = new HashSet<Vector2Int>();
-        private static int _lastClearFrame = 0;
-        private const int ClearLoggedPatchesInterval = 18000; // Clear every ~5 minutes at 60fps
-
-        private static int GetTerrainLayerMask()
-        {
-            if (_customTerrainLayerMask == 0)
-            {
-                _customTerrainLayerMask = LayerMask.GetMask("terrain");
-            }
-            return _customTerrainLayerMask;
-        }
-
-        /// <summary>
-        /// PREFIX patch for ClutterSystem.GetGroundInfo to handle custom terrain.
-        /// 
-        /// The vanilla method raycasts on the "terrain" layer and then calls:
-        ///   hmap = hitInfo.collider.GetComponent&lt;Heightmap&gt;();
-        ///   biome = hmap.GetBiome(point);  // NRE if hmap is null!
-        /// 
-        /// Our custom terrain (CustomHeightmap, DirtFloorMeshCombiner) is on the "terrain" layer
-        /// to allow vanilla clutter to spawn, but it doesn't have a vanilla Heightmap component.
-        /// 
-        /// IMPORTANT: GenerateVegPatch uses hmap for additional checks AFTER GetGroundInfo returns:
-        /// - hmap.GetOceanDepth() for ocean depth filtering
-        /// - hmap.GetVegetationMask() for vegetation mask filtering
-        /// - hmap.IsCleared() for cleared/uncleared filtering
-        /// 
-        /// So we MUST return a valid Heightmap even for custom terrain. We find the nearest
-        /// vanilla heightmap at that position to use for these checks.
-        /// </summary>
-        [HarmonyPatch(typeof(ClutterSystem), nameof(ClutterSystem.GetGroundInfo))]
-        [HarmonyPrefix]
-        [HarmonyPriority(Priority.First)]
-        private static bool ClutterSystem_GetGroundInfo_Prefix(
-            ClutterSystem __instance,
-            Vector3 p,
-            out Vector3 point,
-            out Vector3 normal,
-            out Heightmap hmap,
-            out Heightmap.Biome biome,
-            ref bool __result)
-        {
-            // Initialize out parameters
-            point = p;
-            normal = Vector3.up;
-            hmap = null;
-            biome = Heightmap.Biome.Meadows;
-
-            // Do the raycast ourselves (same as vanilla)
-            int layerMask = GetTerrainLayerMask();
-            RaycastHit hitInfo;
-
-            if (!Physics.Raycast(p + Vector3.up * 500f, Vector3.down, out hitInfo, 1000f, layerMask))
-            {
-                // No hit - return false
-                __result = false;
-                return false; // Skip original
-            }
-
-            // COMMON CASE FIRST: an ordinary vanilla Heightmap collider is by far
-            // the most frequent hit. ClutterSystem fires one raycast per grass
-            // candidate — thousands per 8m patch — so doing this cheap single-object
-            // GetComponent<Heightmap> BEFORE the GetComponentInParent<TerrainTile>
-            // hierarchy walk keeps the common path off the walk entirely. A collider
-            // carrying a Heightmap is never one of our custom tiles, so the outcome
-            // is identical to checking the tile first.
-            var vanillaHeightmap = hitInfo.collider.GetComponent<Heightmap>();
-            if (vanillaHeightmap != null)
-            {
-                point = hitInfo.point;
-                normal = hitInfo.normal;
-                hmap = vanillaHeightmap;
-                biome = vanillaHeightmap.GetBiome(point);
-
-                // Check for env box biome override
-                var envBox = EnvironmentBoxController.GetEnvBoxAtPosition(point);
-                if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
-                {
-                    biome = envBox.ForcedBiome;
-                }
-
-                __result = true;
-                return false; // Skip original since we handled it
-            }
-
-            // Round-89 — VOXEL terrain (wrapped zones + brush chunks). This
-            // prefix REPLACES vanilla GetGroundInfo entirely, so the old bail
-            // below silently starved wrapped zones of ALL clutter ("grass gone
-            // when returning"): a voxel collider is neither a vanilla Heightmap
-            // nor a TerrainTile. The wrapped zone's Heightmap component is
-            // still alive as the data API — use it exactly like the tile path.
-            if (VerdantsAscent.Terrain.Voxel.VoxelWorld.ChunkCount > 0
-                && hitInfo.collider.GetComponent<VerdantsAscent.Terrain.Voxel.VoxelChunkView>() != null)
-            {
-                point = hitInfo.point;
-                normal = hitInfo.normal;
-                hmap = Heightmap.FindHeightmap(point);
-                if (hmap == null)
-                {
-                    __result = false;   // zone data not up yet — no clutter this pass
-                    return false;
-                }
-                biome = hmap.GetBiome(point);
-                var envBoxVoxel = EnvironmentBoxController.GetEnvBoxAtPosition(point);
-                if (envBoxVoxel != null && envBoxVoxel.ForcedBiome != Heightmap.Biome.None)
-                    biome = envBoxVoxel.ForcedBiome;
-                if (s_voxelClutterLogs < 3)
-                {
-                    s_voxelClutterLogs++;
-                    Debug.Log($"[FiresVoxel] clutter ground resolved on voxel terrain at {point} biome={biome} (log {s_voxelClutterLogs}/3).");
-                }
-                __result = true;
-                return false;
-            }
-
-            // Not a vanilla Heightmap. ONLY now pay for the parent walk — and only
-            // when at least one custom tile is actually loaded. A pure-vanilla world,
-            // or any area with no placed custom terrain, never walks the hierarchy.
-            var customTile = VerdantsAscent.Terrain.Persistence.TerrainTile.AnyActive
-                ? hitInfo.collider.GetComponentInParent<VerdantsAscent.Terrain.Persistence.TerrainTile>()
-                : null;
-
-            if (customTile == null)
-            {
-                // Terrain-layer collider with neither a Heightmap nor a custom tile.
-                // Vanilla would NRE on hmap.GetBiome here — bail safely (no clutter).
-                __result = false;
-                return false;
-            }
-
-            // It's our custom terrain! Handle it properly.
-            point = hitInfo.point;
-            normal = hitInfo.normal;
-
-            // CRITICAL: We must return a valid Heightmap for GenerateVegPatch to use
-            // for ocean depth, vegetation mask, and cleared checks.
-            // Find the vanilla heightmap at this position (there's always one under custom terrain).
-            hmap = Heightmap.FindHeightmap(point);
-
-            // If no heightmap found (edge case during zone loading), let vanilla handle it
-            // This prevents NREs when heightmaps aren't loaded yet
-            if (hmap == null)
-            {
-                // During zone loading, heightmaps may not be available yet
-                // Return true to let vanilla ClutterSystem.GetGroundInfo run and handle it
-                // This is safer than proceeding with null heightmap
-                return true; // Let vanilla method run
-            }
-
-            // Determine biome for this position
-            // First check for env box override
-            var envBoxAtPoint = EnvironmentBoxController.GetEnvBoxAtPosition(point);
-            if (envBoxAtPoint != null && envBoxAtPoint.ForcedBiome != Heightmap.Biome.None)
-            {
-                biome = envBoxAtPoint.ForcedBiome;
-            }
-            else if (WorldGenerator.instance != null)
-            {
-                // Use world generator biome (what vanilla terrain would return)
-                biome = WorldGenerator.instance.GetBiome(point);
-            }
-            else
-            {
-                biome = Heightmap.Biome.Meadows;
-            }
-
-            __result = true;
-            return false; // Skip original method - we've handled everything
-        }
-
-        /// <summary>
-        /// POSTFIX patch for ClutterSystem.GetGroundInfo to handle env box biome overrides
-        /// when vanilla terrain is hit. This runs after the original method (if prefix didn't skip it).
-        /// 
-        /// Note: With the prefix handling all cases, this postfix may not run often,
-        /// but it's here as a safety net for any edge cases.
-        /// </summary>
-        [HarmonyPatch(typeof(ClutterSystem), nameof(ClutterSystem.GetGroundInfo))]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.Last)]
-        private static void ClutterSystem_GetGroundInfo_Postfix(Vector3 p, Heightmap hmap, ref Heightmap.Biome biome, bool __result)
-        {
-            // Guard: Skip during world shutdown/loading
-            if (ZNet.instance == null) return;
-
-            // Only override if the original method succeeded and we have a valid heightmap
-            if (!__result) return;
-            if (hmap == null) return;
-
-            // Fast check - skip if no biome override boxes are active
-            if (!HasAnyBiomeOverrideBoxes()) return;
-
-            // Additional guard: Make sure heightmap hasn't been destroyed
-            try
-            {
-                if (hmap.gameObject == null) return;
-            }
-            catch
-            {
-                return;
-            }
-
-            // Check if point is inside an env box with biome override
-            var envBox = EnvironmentBoxController.GetEnvBoxAtPosition(p);
-            if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
-            {
-                biome = envBox.ForcedBiome;
             }
         }
 
@@ -429,14 +209,22 @@ namespace VerdantsAscent.Utilities
                 // If we want ONLY the forced biome's clutter (not mixed), use:
                 // __result = envBox.ForcedBiome;
             }
+
+            if (__result != Heightmap.Biome.None)
+                __result |= VerdantsAscent.Terrain.Voxel.FiresSkyIslands.SkylandBiomesOver(center, halfSize);
         }
 
         #endregion
 
         #region ClutterSystem.GenerateVegPatch Error Handling
 
+        // Track which patches have logged NRE to avoid spam
+        private static readonly HashSet<Vector2Int> _loggedNrePatches = new HashSet<Vector2Int>();
+        private static int _lastClearFrame = 0;
+        private const int ClearLoggedPatchesInterval = 18000; // Clear every ~5 minutes at 60fps
+
         /// <summary>
-        /// PREFIX patch for ClutterSystem.GenerateVegPatch.
+        /// A prefix of FAT's one ClutterSystem.GenerateVegPatch hook (FatVanillaHooks).
         ///
         /// On a dedicated server there is no rendered camera and no point generating
         /// vegetation patches at all - but Unity still ticks ClutterSystem because
@@ -450,23 +238,19 @@ namespace VerdantsAscent.Utilities
         /// Finalizer below catches any remaining NREs from custom-terrain edge
         /// cases (zone transitions, Heightmap destroyed mid-call, etc.).
         /// </summary>
-        [HarmonyPatch(typeof(ClutterSystem), "GenerateVegPatch")]
-        [HarmonyPrefix]
-        private static bool ClutterSystem_GenerateVegPatch_SkipOnServer()
+        internal static bool ClutterRunsHere()
         {
             return !(ZNet.instance != null && ZNet.instance.IsDedicated());
         }
 
         /// <summary>
-        /// FINALIZER patch for ClutterSystem.GenerateVegPatch to catch any residual
+        /// The first finalizer of FAT's one ClutterSystem.GenerateVegPatch hook: catches any residual
         /// NullReferenceExceptions that slip past the dedicated-server skip above.
         /// On a client these can still occur during zone transitions, with custom
         /// terrain on the "terrain" layer that lacks a vanilla Heightmap, or when
         /// GetGroundInfo returns a stale hmap reference.
         /// </summary>
-        [HarmonyPatch(typeof(ClutterSystem), "GenerateVegPatch")]
-        [HarmonyFinalizer]
-        private static Exception ClutterSystem_GenerateVegPatch_Finalizer(Exception __exception, Vector2Int patchID)
+        internal static Exception SuppressClutterNre(Exception __exception, Vector2Int patchID)
         {
             if (__exception is NullReferenceException)
             {
@@ -487,7 +271,7 @@ namespace VerdantsAscent.Utilities
                     && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.LogTimings != null
                     && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.LogTimings.Value)
                 {
-                    Debug.LogWarning($"[EnvironmentBoxPatches] Suppressed ClutterSystem NRE for patch {patchID} (custom terrain or zone loading - heightmap unavailable)");
+                    FiresLogger.LogWarning($"[EnvironmentBoxPatches] Suppressed ClutterSystem NRE for patch {patchID} (custom terrain or zone loading - heightmap unavailable)");
                 }
 
                 return null; // Swallow the exception
@@ -507,13 +291,18 @@ namespace VerdantsAscent.Utilities
         [HarmonyPatch(typeof(EnvMan), "GetBiome")]
         [HarmonyPostfix]
         [HarmonyPriority(Priority.Last)]
-        private static void EnvMan_GetBiome_Postfix(ref Heightmap.Biome __result)
+        // 1.0 widened EnvMan.GetBiome from Heightmap.Biome to BiomeSector - the biome plus its extent,
+        // neighbours, height range and alt-biomes - so forcing one means handing back the world's real
+        // sector for it, not a bare enum. Core owns that lookup.
+        private static void EnvMan_GetBiome_Postfix(ref BiomeSector __result)
         {
-            // Check if player is inside an env box
+            var player = Player.m_localPlayer;
+            if (player != null && VerdantsAscent.Terrain.Voxel.FiresSkyIslands.TrySkylandBiomeAt(player.transform.position, out var skylandBiome))
+                __result = FiresCore.Bridge.BiomeSectorAccess.For(skylandBiome);
             var envBox = EnvironmentBoxController.GetPlayerEnvBox();
             if (envBox != null && envBox.ForcedBiome != Heightmap.Biome.None)
             {
-                __result = envBox.ForcedBiome;
+                __result = FiresCore.Bridge.BiomeSectorAccess.For(envBox.ForcedBiome);
             }
         }
 
@@ -534,11 +323,10 @@ namespace VerdantsAscent.Utilities
         /// 
         /// This does NOT affect terrain HEIGHT because Heightmap.Regenerate() uses
         /// WorldGenerator.GetBiome() for height calculation, which we don't patch.
+        ///
+        /// The Priority.First prefix of FAT's one Heightmap.RebuildRenderMesh hook (FatVanillaHooks).
         /// </summary>
-        [HarmonyPatch(typeof(Heightmap), "RebuildRenderMesh")]
-        [HarmonyPrefix]
-        [HarmonyPriority(Priority.First)]
-        private static void Heightmap_RebuildRenderMesh_Prefix(Heightmap __instance)
+        internal static void BeforeRebuildRenderMesh(Heightmap __instance)
         {
             // Fast exits
             if (__instance == null) return;
@@ -547,7 +335,7 @@ namespace VerdantsAscent.Utilities
             bool hasBiomeBoxes = HasAnyBiomeOverrideBoxes();
             if (_debugTerrainPatches)
             {
-                Debug.Log($"[EnvBoxPatches] PREFIX: HasAnyBiomeOverrideBoxes={hasBiomeBoxes}");
+                FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: HasAnyBiomeOverrideBoxes={hasBiomeBoxes}");
             }
 
             if (!hasBiomeBoxes) return;
@@ -555,7 +343,7 @@ namespace VerdantsAscent.Utilities
             EnsureReflectionCached();
             if (_cornerBiomesField == null)
             {
-                if (_debugTerrainPatches) Debug.LogWarning("[EnvBoxPatches] PREFIX: _cornerBiomesField is NULL!");
+                if (_debugTerrainPatches) FiresLogger.LogWarning("[EnvBoxPatches] PREFIX: _cornerBiomesField is NULL!");
                 return;
             }
 
@@ -563,19 +351,19 @@ namespace VerdantsAscent.Utilities
             var playerEnvBox = EnvironmentBoxController.GetPlayerEnvBox();
             if (playerEnvBox == null)
             {
-                if (_debugTerrainPatches) Debug.Log("[EnvBoxPatches] PREFIX: playerEnvBox is NULL");
+                if (_debugTerrainPatches) FiresLogger.LogInfo("[EnvBoxPatches] PREFIX: playerEnvBox is NULL");
                 return;
             }
 
             if (playerEnvBox.ForcedBiome == Heightmap.Biome.None)
             {
-                if (_debugTerrainPatches) Debug.Log("[EnvBoxPatches] PREFIX: ForcedBiome is None");
+                if (_debugTerrainPatches) FiresLogger.LogInfo("[EnvBoxPatches] PREFIX: ForcedBiome is None");
                 return;
             }
 
             if (_debugTerrainPatches)
             {
-                Debug.Log($"[EnvBoxPatches] PREFIX: ForcedBiome={playerEnvBox.ForcedBiome}");
+                FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: ForcedBiome={playerEnvBox.ForcedBiome}");
             }
 
             // Skip distant LOD heightmaps
@@ -586,7 +374,7 @@ namespace VerdantsAscent.Utilities
                     bool isDistantLod = (bool)_isDistantLodField.GetValue(__instance);
                     if (isDistantLod)
                     {
-                        if (_debugTerrainPatches) Debug.Log("[EnvBoxPatches] PREFIX: Skipping distant LOD");
+                        if (_debugTerrainPatches) FiresLogger.LogInfo("[EnvBoxPatches] PREFIX: Skipping distant LOD");
                         return;
                     }
                 }
@@ -605,13 +393,13 @@ namespace VerdantsAscent.Utilities
 
             if (!hmBounds.Intersects(envBoxBounds))
             {
-                if (_debugTerrainPatches) Debug.Log($"[EnvBoxPatches] PREFIX: Bounds don't intersect. HM={hmPos}, EnvBox={envBoxBounds.center}");
+                if (_debugTerrainPatches) FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Bounds don't intersect. HM={hmPos}, EnvBox={envBoxBounds.center}");
                 return;
             }
 
             if (_debugTerrainPatches)
             {
-                Debug.Log($"[EnvBoxPatches] PREFIX: Processing heightmap at {hmPos}, envBox bounds={envBoxBounds}");
+                FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Processing heightmap at {hmPos}, envBox bounds={envBoxBounds}");
             }
 
             try
@@ -620,13 +408,13 @@ namespace VerdantsAscent.Utilities
                 var cornerBiomes = _cornerBiomesField.GetValue(__instance) as Heightmap.Biome[];
                 if (cornerBiomes == null || cornerBiomes.Length < 4)
                 {
-                    if (_debugTerrainPatches) Debug.LogWarning("[EnvBoxPatches] PREFIX: cornerBiomes array is null or too small");
+                    if (_debugTerrainPatches) FiresLogger.LogWarning("[EnvBoxPatches] PREFIX: cornerBiomes array is null or too small");
                     return;
                 }
 
                 if (_debugTerrainPatches)
                 {
-                    Debug.Log($"[EnvBoxPatches] PREFIX: Original corners: [{cornerBiomes[0]}, {cornerBiomes[1]}, {cornerBiomes[2]}, {cornerBiomes[3]}]");
+                    FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Original corners: [{cornerBiomes[0]}, {cornerBiomes[1]}, {cornerBiomes[2]}, {cornerBiomes[3]}]");
                 }
 
                 // Pre-compute corner positions (XZ only - Y doesn't matter for terrain)
@@ -653,9 +441,9 @@ namespace VerdantsAscent.Utilities
 
                 if (_debugTerrainPatches)
                 {
-                    Debug.Log($"[EnvBoxPatches] PREFIX: 2D bounds: X=[{minX:F1}, {maxX:F1}], Z=[{minZ:F1}, {maxZ:F1}]");
-                    Debug.Log($"[EnvBoxPatches] PREFIX: Corner positions: c0=({c0x:F1}, {c0z:F1}), c1=({c1x:F1}, {c1z:F1}), c2=({c2x:F1}, {c2z:F1}), c3=({c3x:F1}, {c3z:F1})");
-                    Debug.Log($"[EnvBoxPatches] PREFIX: Corner containment: c0={c0Inside}, c1={c1Inside}, c2={c2Inside}, c3={c3Inside}");
+                    FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: 2D bounds: X=[{minX:F1}, {maxX:F1}], Z=[{minZ:F1}, {maxZ:F1}]");
+                    FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Corner positions: c0=({c0x:F1}, {c0z:F1}), c1=({c1x:F1}, {c1z:F1}), c2=({c2x:F1}, {c2z:F1}), c3=({c3x:F1}, {c3z:F1})");
+                    FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Corner containment: c0={c0Inside}, c1={c1Inside}, c2={c2Inside}, c3={c3Inside}");
                 }
 
                 if (c0Inside) { cornerBiomes[0] = forcedBiome; anyChanged = true; }
@@ -670,17 +458,17 @@ namespace VerdantsAscent.Utilities
 
                     if (_debugTerrainPatches)
                     {
-                        Debug.Log($"[EnvBoxPatches] PREFIX: SET corners to [{cornerBiomes[0]}, {cornerBiomes[1]}, {cornerBiomes[2]}, {cornerBiomes[3]}]");
+                        FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: SET corners to [{cornerBiomes[0]}, {cornerBiomes[1]}, {cornerBiomes[2]}, {cornerBiomes[3]}]");
                     }
                 }
                 else
                 {
-                    if (_debugTerrainPatches) Debug.Log("[EnvBoxPatches] PREFIX: No corners inside env box");
+                    if (_debugTerrainPatches) FiresLogger.LogInfo("[EnvBoxPatches] PREFIX: No corners inside env box");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[EnvironmentBoxPatches] Error in RebuildRenderMesh prefix: {ex.Message}");
+                FiresLogger.LogWarning($"[EnvironmentBoxPatches] Error in RebuildRenderMesh prefix: {ex.Message}");
             }
         }
 
@@ -696,11 +484,10 @@ namespace VerdantsAscent.Utilities
         /// 
         /// Priority: Persistent paints > Env Box overrides > World biome
         /// This ensures painted areas stay painted even inside env boxes.
+        ///
+        /// The Priority.Last postfix of FAT's one Heightmap.RebuildRenderMesh hook (FatVanillaHooks).
         /// </summary>
-        [HarmonyPatch(typeof(Heightmap), "RebuildRenderMesh")]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.Last)]
-        private static void Heightmap_RebuildRenderMesh_Postfix(Heightmap __instance)
+        internal static void AfterRebuildRenderMesh(Heightmap __instance)
         {
             // Fast exits
             if (__instance == null) return;
@@ -837,7 +624,7 @@ namespace VerdantsAscent.Utilities
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[EnvironmentBoxPatches] Error applying biome colors: {ex.Message}");
+                FiresLogger.LogWarning($"[EnvironmentBoxPatches] Error applying biome colors: {ex.Message}");
             }
         }
 
@@ -853,12 +640,12 @@ namespace VerdantsAscent.Utilities
         {
             if (ZNet.instance == null) return;
 
-            Debug.Log($"[EnvBoxPatches] RefreshHeightmapsInBounds called: center={bounds.center}, size={bounds.size}");
+            FiresLogger.LogInfo($"[EnvBoxPatches] RefreshHeightmapsInBounds called: center={bounds.center}, size={bounds.size}");
 
             EnsureReflectionCached();
 
             var heightmaps = UnityEngine.Object.FindObjectsByType<Heightmap>(UnityEngine.FindObjectsSortMode.None);
-            Debug.Log($"[EnvBoxPatches] Found {heightmaps.Length} heightmaps in world");
+            FiresLogger.LogInfo($"[EnvBoxPatches] Found {heightmaps.Length} heightmaps in world");
 
             int regeneratedCount = 0;
             foreach (var hm in heightmaps)
@@ -886,18 +673,18 @@ namespace VerdantsAscent.Utilities
                     // Force terrain mesh regeneration - this triggers our RebuildRenderMesh patch
                     try
                     {
-                        Debug.Log($"[EnvBoxPatches] Regenerating heightmap at {hmCenter}");
+                        FiresLogger.LogInfo($"[EnvBoxPatches] Regenerating heightmap at {hmCenter}");
                         hm.Regenerate();
                         regeneratedCount++;
                     }
                     catch (Exception ex)
                     {
-                        Debug.LogWarning($"[EnvironmentBoxPatches] Failed to regenerate heightmap: {ex.Message}");
+                        FiresLogger.LogWarning($"[EnvironmentBoxPatches] Failed to regenerate heightmap: {ex.Message}");
                     }
                 }
             }
 
-            Debug.Log($"[EnvBoxPatches] RefreshHeightmapsInBounds complete: regenerated {regeneratedCount} heightmaps");
+            FiresLogger.LogInfo($"[EnvBoxPatches] RefreshHeightmapsInBounds complete: regenerated {regeneratedCount} heightmaps");
         }
 
         /// <summary>
@@ -948,11 +735,11 @@ namespace VerdantsAscent.Utilities
                 // Clear existing clutter in the area
                 ClutterSystem.instance.ResetGrass(center, radius);
 
-                Debug.Log($"[EnvironmentBoxPatches] Refreshed clutter at {center} with radius {radius}");
+                FiresLogger.LogInfo($"[EnvironmentBoxPatches] Refreshed clutter at {center} with radius {radius}");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[EnvironmentBoxPatches] Failed to refresh clutter: {ex.Message}");
+                FiresLogger.LogWarning($"[EnvironmentBoxPatches] Failed to refresh clutter: {ex.Message}");
             }
         }
 
@@ -967,11 +754,10 @@ namespace VerdantsAscent.Utilities
         /// 
         /// This is the KEY to making vanilla paint tools (hoe, cultivator, Infinity Hammer)
         /// work properly on our custom terrain.
+        ///
+        /// The Priority.Last postfix of FAT's one TerrainComp.DoOperation hook (FatVanillaHooks).
         /// </summary>
-        [HarmonyPatch(typeof(TerrainComp), "DoOperation")]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.Last)]
-        private static void TerrainComp_DoOperation_Postfix(TerrainComp __instance, Vector3 pos, TerrainOp.Settings modifier)
+        internal static void OnTerrainOperation(TerrainComp __instance, Vector3 pos, TerrainOp.Settings modifier)
         {
             // Only care about paint operations
             if (!modifier.m_paintCleared) return;

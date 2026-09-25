@@ -15,9 +15,9 @@ namespace VerdantsAscent.Water.Core
     /// - Uses existing prefab for ZDO (like TerrainCombinerAnchor)
     /// 
     /// DATA FLOW:
-    /// 1. Water placed ? Create anchor ZDO at same position
-    /// 2. World saves ? Anchor ZDO persists
-    /// 3. World loads ? Anchor spawns ? Recreates water from ZDO data
+    /// 1. Water placed -> Create anchor ZDO at same position
+    /// 2. World saves -> Anchor ZDO persists
+    /// 3. World loads -> Anchor spawns -> Recreates water from ZDO data
     /// </summary>
     public class WaterAnchor : MonoBehaviour
     {
@@ -67,7 +67,7 @@ namespace VerdantsAscent.Water.Core
 
             if (m_nview == null)
             {
-                Debug.LogError("[WaterAnchor] No ZNetView found!");
+                FiresLogger.LogError("[WaterAnchor] No ZNetView found!");
                 Destroy(this);
                 return;
             }
@@ -205,7 +205,7 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            Debug.Log($"[WaterAnchor] Linked to {water.GetWaterType()} at {water.transform.position}");
+            FiresLogger.LogInfo($"[WaterAnchor] Linked to {water.GetWaterType()} at {water.transform.position}");
         }
 
         #endregion
@@ -225,7 +225,7 @@ namespace VerdantsAscent.Water.Core
 
             if (m_linkedWater == null)
             {
-                Debug.LogWarning("[WaterAnchor] Cannot save - no water linked");
+                FiresLogger.LogWarning("[WaterAnchor] Cannot save - no water linked");
                 return;
             }
 
@@ -263,11 +263,11 @@ namespace VerdantsAscent.Water.Core
                         break;
                 }
 
-                Debug.Log($"[WaterAnchor] Saved {m_linkedWater.GetWaterType()} to ZDO at {transform.position}");
+                FiresLogger.LogInfo($"[WaterAnchor] Saved {m_linkedWater.GetWaterType()} to ZDO at {transform.position}");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WaterAnchor] Failed to save to ZDO: {ex.Message}");
+                FiresLogger.LogError($"[WaterAnchor] Failed to save to ZDO: {ex.Message}");
             }
         }
 
@@ -329,12 +329,12 @@ namespace VerdantsAscent.Water.Core
                 if (water != null)
                 {
                     m_linkedWater = water;
-                    Debug.Log($"[WaterAnchor] Restored {waterType} from ZDO at {transform.position}");
+                    FiresLogger.LogInfo($"[WaterAnchor] Restored {waterType} from ZDO at {transform.position}");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WaterAnchor] Failed to restore from ZDO: {ex.Message}");
+                FiresLogger.LogError($"[WaterAnchor] Failed to restore from ZDO: {ex.Message}");
             }
         }
 
@@ -351,7 +351,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void DestroyPermanently()
         {
-            Debug.Log($"[WaterAnchor] Permanently destroying anchor at {transform.position}");
+            FiresLogger.LogInfo($"[WaterAnchor] Permanently destroying anchor at {transform.position}");
 
             m_linkedWater = null;
 
@@ -377,7 +377,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[WaterAnchor] ZNetScene.Destroy failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[WaterAnchor] ZNetScene.Destroy failed: {ex.Message}");
                     // Fall through to manual cleanup
                 }
             }
@@ -397,7 +397,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (ZNetScene.instance == null)
             {
-                Debug.LogError("[WaterAnchor] Cannot create anchor - ZNetScene not available");
+                FiresLogger.LogError("[WaterAnchor] Cannot create anchor - ZNetScene not available");
                 return null;
             }
 
@@ -405,7 +405,7 @@ namespace VerdantsAscent.Water.Core
             GameObject prefab = FindAnchorPrefab();
             if (prefab == null)
             {
-                Debug.LogError("[WaterAnchor] Cannot find prefab for anchor");
+                FiresLogger.LogError("[WaterAnchor] Cannot find prefab for anchor");
                 return null;
             }
 
@@ -442,7 +442,7 @@ namespace VerdantsAscent.Water.Core
             // Save water data
             anchor.SaveToZDO();
 
-            Debug.Log($"[WaterAnchor] Created anchor for {water.GetWaterType()} at {position}");
+            FiresLogger.LogInfo($"[WaterAnchor] Created anchor for {water.GetWaterType()} at {position}");
 
             return anchor;
         }
@@ -450,7 +450,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Finds a prefab to use for anchor ZDO.
         /// Uses CustomRiver prefab (piece layer) to avoid terrain raycast interference.
-        /// Does NOT fall back to dirtfloor — using dirtfloor caused water anchors to
+        /// Does NOT fall back to dirtfloor - using dirtfloor caused water anchors to
         /// spawn as terrain pieces and interfere with the terrain system.
         /// </summary>
         private static GameObject FindAnchorPrefab()
@@ -468,7 +468,7 @@ namespace VerdantsAscent.Water.Core
                     return prefab;
             }
 
-            Debug.LogError("[WaterAnchor] FindAnchorPrefab: CustomRiver prefab NOT found in ZNetScene! " +
+            FiresLogger.LogError("[WaterAnchor] FindAnchorPrefab: CustomRiver prefab NOT found in ZNetScene! " +
                 "Water persistence will FAIL! Ensure CustomRiver is registered.");
             return null;
         }

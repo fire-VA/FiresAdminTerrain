@@ -8,7 +8,7 @@ namespace VerdantsAscent.Water.Core
     /// Manages combining overlapping <see cref="LandSnowController"/> placements
     /// into unified snow surfaces by adding footprints to existing controllers.
     ///
-    /// Mirrors <see cref="LandIceCombiner"/> 1:1 — snow is visual-only but uses
+    /// Mirrors <see cref="LandIceCombiner"/> 1:1 - snow is visual-only but uses
     /// the same disk-footprint + mesh-combine architecture as land ice, so when
     /// disks overlap they should merge into a single smoothed mesh rather than
     /// each rendering their own skirt at the overlap boundary (which is what
@@ -60,7 +60,7 @@ namespace VerdantsAscent.Water.Core
 
             newController.Remove();
 
-            Debug.Log($"[LandSnowCombiner] Combined footprint into existing controller ({target.Footprints.Count} total footprints)");
+            FiresLogger.LogInfo($"[LandSnowCombiner] Combined footprint into existing controller ({target.Footprints.Count} total footprints)");
             return target;
         }
     }

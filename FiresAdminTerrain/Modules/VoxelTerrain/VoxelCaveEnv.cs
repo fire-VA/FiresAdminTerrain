@@ -57,12 +57,23 @@ namespace VerdantsAscent.Terrain.Voxel
                     && VoxelWorld.ChunkCount > 0
                     && !player.InLiquid())   // underwater env owns submerged
                 {
-                    if (s_mask < 0) s_mask = LayerMask.GetMask("terrain");
                     var origin = player.transform.position + Vector3.up * 1.8f;
-                    if (Physics.Raycast(origin, Vector3.up, out var hit, RAY_UP, s_mask, QueryTriggerInteraction.Ignore)
-                        && hit.collider.GetComponent<VoxelChunkView>() != null)
+                    // A roof overhead is NOT enough — a sky island (or a
+                    // hand-built voxel bridge) overhead is open air. A cave
+                    // means BELOW the generated surface with a ceiling.
+                    bool underSurface = true;
+                    if (FiresWorldGenBase.Active
+                        && FiresWorldGenBase.TryGetGenGround(origin.x, origin.z, out float cg))
+                        underSurface = origin.y < cg - 1.5f;
+                    if (underSurface)
                     {
-                        wantCave = true;
+                        if (s_mask < 0) s_mask = LayerMask.GetMask("terrain");
+                        if (Physics.Raycast(origin, Vector3.up, out var hit, RAY_UP, s_mask, QueryTriggerInteraction.Ignore)
+                            && hit.collider.GetComponent<VoxelChunkView>() != null
+                            && !FiresSkyIslands.IsOnIsland(hit.point))
+                        {
+                            wantCave = true;
+                        }
                     }
                 }
             }
@@ -97,7 +108,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var root = FiresAdminTerrain.RootObject;
             if (root == null || root.GetComponent<VoxelCaveEnv>() != null) return;
             root.AddComponent<VoxelCaveEnv>();
-            Debug.Log("[FiresVoxel] VoxelCaveEnv attached (up-raycast cave environment).");
+            FiresLogger.LogInfo("[FiresVoxel] VoxelCaveEnv attached (up-raycast cave environment).");
         }
     }
 }

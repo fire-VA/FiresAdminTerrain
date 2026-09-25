@@ -13,15 +13,13 @@ namespace VerdantsAscent.Utilities
     //
     // Banner format:
     //   ╭── 🔧 COMMANDS ──╮
-    //   │ biome paint OK   │
-    //   │ snow OK · ice OK │
-    //   │ land snow OK     │
-    //   ╰──────────────────╯
+    //   │ console cmds: 4/4 sets │
+    //   │ biome persist: OK      │
+    //   ╰────────────────────────╯
     //
-    // All lines tagged [FiresAdminTerrain] [LoadSummary] so the shared
-    // FiresLogColorPatch (the active owner — see the AppDomain
-    // coordination in FiresLogColorPatch) routes them to a distinct
-    // color via the keyword rules.
+    // All lines tagged [LoadSummary] so FiresUnifiedCore's
+    // FiresLogColorPatch routes them to a distinct color via the keyword
+    // rules.
     public static class VAFatLoadSummary
     {
         private const string Tag = "[LoadSummary]";
@@ -33,18 +31,15 @@ namespace VerdantsAscent.Utilities
         // detail (verbose) or rely solely on the banner (default).
         public static bool VerboseEnabled => FiresLogger.VerboseEnabled;
 
-        // 🔧 COMMANDS — terrain / water / snow / ice command-system init
-        // completion banner. Replaces the 5-line "X console commands
-        // registered" cluster in FAT.FinishInit.
-        public static void EmitCommands(int biomePersistence, int biomePainter, int snowCmds, int iceTool, int landSnow)
+        // 🔧 COMMANDS — FAT.FinishInit's console command sets (biome paint,
+        // snow, ice, land snow; client only) and the biome paint
+        // persistence load. Each failure is logged by name before the box.
+        public static void EmitCommands(bool dedicated, int commandSetsRegistered, int commandSets, bool biomePersistence)
         {
-            int total = biomePersistence + biomePainter + snowCmds + iceTool + landSnow;
             EmitMiniBox("🔧 COMMANDS", new[]
             {
-                $"biome paint+persist: {biomePersistence + biomePainter}",
-                $"snow cmds: {snowCmds + landSnow}",
-                $"ice tools: {iceTool}",
-                $"{total} subsystem(s) ready",
+                dedicated ? "console cmds: client only" : $"console cmds: {commandSetsRegistered}/{commandSets} sets",
+                biomePersistence ? "biome persist: OK" : "biome persist: FAILED",
             });
         }
 
@@ -155,7 +150,7 @@ namespace VerdantsAscent.Utilities
         private static void EmitLine(string frame)
         {
             if (FiresAdminTerrain.Log != null) FiresAdminTerrain.Log.LogInfo($"{Tag} {frame}");
-            else Debug.Log($"[FiresAdminTerrain] {Tag} {frame}");
+            else FiresLogger.LogInfo($"{Tag} {frame}");
         }
     }
 }

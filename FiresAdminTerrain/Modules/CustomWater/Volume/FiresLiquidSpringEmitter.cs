@@ -90,7 +90,7 @@ namespace VerdantsAscent.Water.Core
                 int srcHalf = half + 1;
                 float baseY = _lv.transform.position.y;
 
-                mutex.WaitOne();
+                System.Threading.Monitor.Enter(mutex);
                 try
                 {
                     // ── Emit: TOP the source cells toward the ruler fill
@@ -124,7 +124,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 finally
                 {
-                    mutex.ReleaseMutex();
+                    System.Threading.Monitor.Exit(mutex);
                 }
 
                 if (!_loggedStart)

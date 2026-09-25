@@ -345,15 +345,5 @@ namespace VerdantsAscent.Terrain.Persistence
                 : "VATile prefab registration FAILED. Check log for details.");
         }
 
-        // Auto-register on Terminal init so the commands are always available
-        // without wiring through FiresAdminTerrain.FinishInit.
-        [HarmonyPatch(typeof(Terminal), nameof(Terminal.InitTerminal))]
-        private static class Terminal_InitTerminal_RegisterTileCommands
-        {
-            private static void Postfix()
-            {
-                Register();
-            }
-        }
     }
 }

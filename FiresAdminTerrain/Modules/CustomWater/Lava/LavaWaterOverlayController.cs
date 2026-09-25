@@ -6,7 +6,7 @@ namespace VerdantsAscent.Water.Core
     /// Creates a thin water material overlay above the lava surface mesh.
     /// 
     /// The lava material viewed through the vanilla water shader produces a
-    /// phenomenal molten-glass look � the water's refraction and transparency
+    /// phenomenal molten-glass look - the water's refraction and transparency
     /// tints and distorts the bright lava underneath. This controller duplicates
     /// the combiner's water mesh vertices, shifts them up by a small offset,
     /// and renders them with the vanilla water material on the "Water" layer
@@ -132,7 +132,7 @@ namespace VerdantsAscent.Water.Core
             if (_waterMaterial != null)
                 _overlayRenderer.material = _waterMaterial;
 
-            // Start with an empty mesh � RebuildOverlay will populate it
+            // Start with an empty mesh - RebuildOverlay will populate it
             _overlayMesh = new Mesh { name = "LavaWaterOverlay" };
             _overlayMeshFilter.sharedMesh = _overlayMesh;
         }

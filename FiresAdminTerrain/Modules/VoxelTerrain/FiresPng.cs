@@ -59,7 +59,12 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static byte[] Decode(string path, out int w, out int h, out int bitDepth, out int channels)
         {
-            var bytes = File.ReadAllBytes(path);
+            return DecodeRaw(File.ReadAllBytes(path), out w, out h, out bitDepth, out channels);
+        }
+
+        // Rows top-first, one row of channels x (bitDepth/8) bytes per pixel, 16-bit samples big-endian.
+        public static byte[] DecodeRaw(byte[] bytes, out int w, out int h, out int bitDepth, out int channels)
+        {
             if (bytes.Length < 8 || bytes[1] != 'P' || bytes[2] != 'N' || bytes[3] != 'G')
                 throw new Exception("not a PNG");
             w = h = bitDepth = 0;

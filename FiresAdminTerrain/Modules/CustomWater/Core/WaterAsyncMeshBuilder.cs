@@ -12,10 +12,10 @@ namespace VerdantsAscent.Water.Core
     /// vertex/triangle generation to a background thread.
     /// 
     /// ARCHITECTURE (mirrors DirtFloorAsyncMeshBuilder):
-    /// 1. Main thread pre-samples terrain heights (Unity API � requires main thread)
+    /// 1. Main thread pre-samples terrain heights (Unity API - requires main thread)
     /// 2. Main thread snapshots all disk data + terrain heights into thread-safe input
     /// 3. Background thread computes: surface heights, smoothing, depth, vertices, triangles, UVs, colors
-    /// 4. Main thread applies result to Unity Mesh (Unity API � requires main thread)
+    /// 4. Main thread applies result to Unity Mesh (Unity API - requires main thread)
     /// 
     /// KEY CONSTRAINT: No Unity API calls on background thread.
     /// All off-thread work is pure math on plain arrays/structs.
@@ -262,7 +262,7 @@ namespace VerdantsAscent.Water.Core
 
         /// <summary>
         /// Processes a water mesh generation job on a background thread.
-        /// Called by BackgroundWorker � must NOT call Unity API.
+        /// Called by BackgroundWorker - must NOT call Unity API.
         /// </summary>
         private static void ProcessWaterMeshJob(WaterMeshJobInput input, WaterMeshJobOutput output)
         {
@@ -276,14 +276,14 @@ namespace VerdantsAscent.Water.Core
             // Step 2: Fill small surface gaps
             FillSurfaceGaps(surfaceHeights, input);
 
-            // Step 2.5: Gravity settle edges � pull down floating edges, fix buried water
+            // Step 2.5: Gravity settle edges - pull down floating edges, fix buried water
             GravitySettleEdges(surfaceHeights, input);
 
-            // Step 2.6: Channel depth normalization � maintain consistent depth
+            // Step 2.6: Channel depth normalization - maintain consistent depth
             // along river/stream centerlines using pre-sampled terrain heights.
             NormalizeChannelDepth(surfaceHeights, input);
 
-            // Step 2.7: Terrain clip � kill cells where terrain rises above the
+            // Step 2.7: Terrain clip - kill cells where terrain rises above the
             // computed water surface. These are hillside cells that should not
             // have water. Without this, the rectangular grid fills the entire
             // bounding box with water, creating flat sheets that cut through hills.
@@ -434,7 +434,7 @@ namespace VerdantsAscent.Water.Core
                             surfaceY = terrainY + input.WaterTerrainOffset;
                         }
 
-                        // No terrain cap � disk Y is authoritative.
+                        // No terrain cap - disk Y is authoritative.
                         // Terrain clip pass will remove cells where terrain rises above surface.
                     }
 
@@ -577,7 +577,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Fills gaps between water disks by lateral expansion using minimum
         /// neighbor height. Runs multiple iterations for multi-cell gaps.
-        /// Never pulls the surface UP � only extends laterally at or below
+        /// Never pulls the surface UP - only extends laterally at or below
         /// existing water height to preserve the channel depth profile.
         /// </summary>
         private static void FillSurfaceGaps(float[] surfaceHeights, WaterMeshJobInput input)
@@ -634,12 +634,12 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Gravity settle pass: fixes water surface issues relative to terrain.
         /// 
-        /// Background-thread safe (no Unity API) � operates on plain arrays.
+        /// Background-thread safe (no Unity API) - operates on plain arrays.
         /// Mirrors WaterMeshCombiner.GravitySettleEdges().
         /// 
         /// THREE RULES:
         /// 1. FLOATING EDGE PULLDOWN: Edge cells where water is >0.5m above
-        ///    terrain AND no nearby bank terrain contains it ? pull down to terrain.
+        ///    terrain AND no nearby bank terrain contains it -> pull down to terrain.
         /// 2. DISK-CENTER BURIED FIX: Only push water UP if the grid cell is
         ///    near a disk's CENTER position and the surface is below terrain.
         ///    Edge/bank cells below terrain stay put (clip through naturally).
@@ -690,7 +690,7 @@ namespace VerdantsAscent.Water.Core
                     // Only push water UP if the cell is at a disk center and
                     // the surface ended up below terrain. This ensures the center
                     // of each disk is always visible. Edge cells below terrain
-                    // stay put � they clip through bank naturally.
+                    // stay put - they clip through bank naturally.
                     if (surfaceY < terrainY + input.WaterTerrainOffset)
                     {
                         if (isNearDiskCenter)
@@ -761,7 +761,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Cross-section flattening: enforces flat water across the channel width.
         ///
-        /// Background-thread safe (no Unity API) � operates on plain arrays.
+        /// Background-thread safe (no Unity API) - operates on plain arrays.
         /// Mirrors WaterMeshCombiner.NormalizeChannelDepth().
         ///
         /// Builds an ordered disk chain, scans the full centerline for bed height
@@ -937,7 +937,7 @@ namespace VerdantsAscent.Water.Core
 
                     float localFloor = terrainY + input.WaterTerrainOffset;
 
-                    // Bank: terrain above flat level ? convert to bank extension
+                    // Bank: terrain above flat level -> convert to bank extension
                     if (terrainY > flatLevel + 0.1f)
                     {
                         surfaceHeights[idx] = terrainY - BANK_DEPTH_BELOW_TERRAIN;
@@ -1017,18 +1017,18 @@ namespace VerdantsAscent.Water.Core
         /// from extending as a flat sheet through hillsides.
         ///
         /// Without this, the rectangular combiner grid fills the entire bounding box
-        /// with water � cells on steep valley walls get a surface Y interpolated from
+        /// with water - cells on steep valley walls get a surface Y interpolated from
         /// nearby river disks even though the real terrain is meters above the water.
         ///
         /// ALGORITHM:
         /// For each cell with water (surfaceHeight > -50):
-        ///   If terrain > surfaceY + small tolerance ? kill cell (set to -100)
+        ///   If terrain > surfaceY + small tolerance -> kill cell (set to -100)
         ///   UNLESS the cell is a bank extension (surfaceY < terrainY, intentional)
         ///
         /// This runs AFTER NormalizeChannelDepth (which sets flat cross-section levels)
         /// and BEFORE SmoothSurface (which would blur killed cells into neighbors).
         ///
-        /// Background-thread safe � pure array math.
+        /// Background-thread safe - pure array math.
         /// </summary>
         private static void TerrainClipPass(float[] surfaceHeights, WaterMeshJobInput input)
         {
@@ -1046,11 +1046,11 @@ namespace VerdantsAscent.Water.Core
 
                 float terrainY = input.TerrainHeights[i];
 
-                // Skip bank extensions � these are intentionally below terrain
+                // Skip bank extensions - these are intentionally below terrain
                 if (surfaceY < terrainY - 0.01f) continue;
 
                 // If terrain rises above the water surface, this cell is on a
-                // hillside or bank slope � remove the water entirely.
+                // hillside or bank slope - remove the water entirely.
                 if (terrainY > surfaceY + CLIP_TOLERANCE)
                 {
                     surfaceHeights[i] = -100f;
@@ -1114,7 +1114,7 @@ namespace VerdantsAscent.Water.Core
                                 if (surfaceHeights[nidx] > -50f)
                                 {
                                     // Skip bank extension neighbors for non-bank
-                                    // cells � their terrain-relative heights pull
+                                    // cells - their terrain-relative heights pull
                                     // the average toward bank elevation, causing
                                     // the "water riding up banks" artifact.
                                     float nTerrainY = input.TerrainHeights[nidx];
@@ -1140,7 +1140,7 @@ namespace VerdantsAscent.Water.Core
                             }
                             else
                             {
-                                // Never raise surface during smoothing � preserves
+                                // Never raise surface during smoothing - preserves
                                 // the monotonic downhill flow profile from AutoWaterGenerator
                                 if (blended > currentY)
                                     blended = currentY;

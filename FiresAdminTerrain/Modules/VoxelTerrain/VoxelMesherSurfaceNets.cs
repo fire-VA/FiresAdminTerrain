@@ -24,12 +24,31 @@ namespace VerdantsAscent.Terrain.Voxel
         public readonly List<Vector3> Normals = new List<Vector3>(4096);
         public readonly List<Vector4> Tangents = new List<Vector4>(4096);
         public readonly List<Vector2> Uvs = new List<Vector2>(4096);
+        public readonly List<Vector2> Uv1 = new List<Vector2>(4096);   // .x = per-vertex inland waterline (from WetLine) → shader fWL; 0 = vanilla
         public readonly List<Color32> Colors = new List<Color32>(4096);
         public readonly List<int> Tris = new List<int>(16384);
+        // Carve+fill water: the per-column reconciled level rides the SAME
+        // snapshot as the density, so the sheet is built in the same apply as
+        // the terrain mesh — the two cannot exist without each other.
+        public readonly float[] WaterLvl = new float[VoxelChunk.SAMPLES * VoxelChunk.SAMPLES];
+        // Per-column INLAND waterline (FarQuilt recipe: max gen-water surface near
+        // the column where depth≥0.25 & level>30.25 & biome∉{Mtn,DeepN}, else 0),
+        // sampled main-thread in GatherColumns + dilated onto banks. Baked per-vertex
+        // into UV1.x so the wet-shore band rides the river/lake surface (no rectangles).
+        // The 2D ground baseline for these columns, from the same snapshot, so
+        // the water sheet can judge a bank crest at column resolution instead
+        // of probing a field per cell.
+        public readonly float[] Ground = new float[VoxelChunk.SAMPLES * VoxelChunk.SAMPLES];
+        public readonly float[] WetLine = new float[VoxelChunk.SAMPLES * VoxelChunk.SAMPLES];
+        public readonly float[] WetScratch = new float[VoxelChunk.SAMPLES * VoxelChunk.SAMPLES];   // dilation double-buffer for WetLine
+        public bool HasWater;
+        // Chunk world origin. Views sit at (0,0,0) — every mesh on them is
+        // WORLD-space (the terrain verts leave the mesher with this added).
+        public float OriginX, OriginY, OriginZ;
 
         public void ResetMesh()
         {
-            Verts.Clear(); Normals.Clear(); Tangents.Clear(); Uvs.Clear(); Colors.Clear(); Tris.Clear();
+            Verts.Clear(); Normals.Clear(); Tangents.Clear(); Uvs.Clear(); Uv1.Clear(); Colors.Clear(); Tris.Clear();
         }
     }
 
@@ -180,6 +199,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 int bx = Mathf.Clamp(cx + (px * inv > 0.5f ? 1 : 0), -1, C);
                 int bz = Mathf.Clamp(cz + (pz * inv > 0.5f ? 1 : 0), -1, C);
                 buf.Colors.Add(buf.Biome[(bx + 1) + S * (bz + 1)]);
+                buf.Uv1.Add(new Vector2(buf.WetLine[(bx + 1) + S * (bz + 1)], 0f));   // per-vertex inland waterline (same column sample as biome) → shader fWL
                 return idx;
             }
 

@@ -37,13 +37,13 @@ namespace VerdantsAscent.Async
         /// <summary>
         /// Maximum milliseconds to spend executing dispatched actions per frame.
         /// Keeps the main thread responsive for network heartbeats and rendering.
-        /// Default 4ms — leaves ~12ms of a 60fps frame for game logic and rendering.
+        /// Default 4ms - leaves ~12ms of a 60fps frame for game logic and rendering.
         /// </summary>
         public static float MaxBudgetMs = 4f;
 
         /// <summary>
         /// Enqueues an action to be executed on the next main-thread Update().
-        /// Thread-safe — can be called from any thread.
+        /// Thread-safe - can be called from any thread.
         /// </summary>
         public static void Enqueue(Action action)
         {
@@ -77,7 +77,7 @@ namespace VerdantsAscent.Async
         /// <summary>
         /// Starts a Unity coroutine on the dispatcher's hidden GameObject.
         /// MUST be called from the main thread. Use this when you need true
-        /// frame-by-frame pacing (e.g. <c>yield return null</c>) ? the normal
+        /// frame-by-frame pacing (e.g. <c>yield return null</c>) - the normal
         /// <see cref="Enqueue"/> path will drain many actions in a single frame
         /// because it runs on a time budget, which is unsuitable for back-pressure
         /// sensitive work like chunked network sends.
@@ -113,7 +113,7 @@ namespace VerdantsAscent.Async
 
             if (_processingIndex >= _processingList.Count)
             {
-                // Nothing to process — reset for next frame.
+                // Nothing to process - reset for next frame.
                 _processingList.Clear();
                 _processingIndex = 0;
                 return;
@@ -142,7 +142,7 @@ namespace VerdantsAscent.Async
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[MainThreadDispatcher] Action failed: {ex.Message}");
+                    FiresLogger.LogWarning($"[MainThreadDispatcher] Action failed: {ex.Message}");
                 }
             }
 

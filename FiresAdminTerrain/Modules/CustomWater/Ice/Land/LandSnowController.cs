@@ -162,7 +162,7 @@ namespace VerdantsAscent.Water.Core
                 s_allLandSnow.Add(this);
 
             SaveToZDO();
-            Debug.Log($"[LandSnowController] Initialized: r={radius}, Y={SnowSurfaceY:F2}");
+            FiresLogger.LogInfo($"[LandSnowController] Initialized: r={radius}, Y={SnowSurfaceY:F2}");
         }
 
         #endregion
@@ -181,7 +181,7 @@ namespace VerdantsAscent.Water.Core
             RebuildMesh();
 
             SaveToZDO();
-            Debug.Log($"[LandSnowController] Added footprint at {center}, r={radius}, total={_footprints.Count}");
+            FiresLogger.LogInfo($"[LandSnowController] Added footprint at {center}, r={radius}, total={_footprints.Count}");
         }
 
         /// <summary>
@@ -465,7 +465,7 @@ namespace VerdantsAscent.Water.Core
             if (!s_allLandSnow.Contains(this))
                 s_allLandSnow.Add(this);
 
-            Debug.Log($"[LandSnowController] Restored from anchor at {transform.position} with {_footprints.Count} footprints");
+            FiresLogger.LogInfo($"[LandSnowController] Restored from anchor at {transform.position} with {_footprints.Count} footprints");
         }
 
         private void OnDestroy()

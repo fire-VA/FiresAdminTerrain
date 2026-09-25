@@ -121,8 +121,12 @@ namespace VerdantsAscent.Terrain.Biome
             if (_initialized) return;
             _initialized = true;
 
-            Debug.Log("[BiomeFilePersistence] Initialized biome persistence system");
+            FiresLogger.LogInfo("[BiomeFilePersistence] Initialized biome persistence system");
         }
+
+        // A local world's painted biomes: <worlds_local>\<world>.biomedata, beside its save.
+        internal static string LocalPathFor(string worldName)
+            => Path.Combine(SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local), worldName + FILE_EXTENSION);
 
         /// <summary>
         /// Gets the biome data file path for the current world.
@@ -131,32 +135,6 @@ namespace VerdantsAscent.Terrain.Biome
         {
             string worldName = "unknown";
 
-            // Try to get world info from WorldGenerator
-            if (WorldGenerator.instance != null)
-            {
-                var worldField = typeof(WorldGenerator).GetField("m_world", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (worldField != null)
-                {
-                    var world = worldField.GetValue(WorldGenerator.instance) as World;
-                    if (world != null)
-                    {
-                        worldName = world.m_name;
-                        // Public test refactor: World.GetWorldSavePath(FileSource) was moved
-                        // to SaveSystem.GetWorldsSaveRootPath(FileSource). Same shape, new home.
-#if PUBLIC_TEST
-                        string worldFolder = SaveSystem.GetWorldsSaveRootPath(world.m_fileSource);
-#else
-                        string worldFolder = World.GetWorldSavePath(world.m_fileSource);
-#endif
-                        if (!string.IsNullOrEmpty(worldFolder) && !string.IsNullOrEmpty(worldName))
-                        {
-                            return Path.Combine(worldFolder, worldName + FILE_EXTENSION);
-                        }
-                    }
-                }
-            }
-
-            // Fallback: try ZNet.World property
             if (ZNet.instance != null)
             {
                 try
@@ -168,11 +146,7 @@ namespace VerdantsAscent.Terrain.Biome
                         if (world != null)
                         {
                             worldName = world.m_name;
-#if PUBLIC_TEST
                             string worldFolder = SaveSystem.GetWorldsSaveRootPath(world.m_fileSource);
-#else
-                            string worldFolder = World.GetWorldSavePath(world.m_fileSource);
-#endif
                             if (!string.IsNullOrEmpty(worldFolder) && !string.IsNullOrEmpty(worldName))
                             {
                                 return Path.Combine(worldFolder, worldName + FILE_EXTENSION);
@@ -203,14 +177,14 @@ namespace VerdantsAscent.Terrain.Biome
         {
             if (!IsServer())
             {
-                Debug.Log("[BiomeFilePersistence] Not server - skipping save");
+                FiresLogger.LogInfo("[BiomeFilePersistence] Not server - skipping save");
                 return;
             }
 
             string path = GetBiomeDataPath();
             if (string.IsNullOrEmpty(path))
             {
-                Debug.LogWarning("[BiomeFilePersistence] Cannot determine save path");
+                FiresLogger.LogWarning("[BiomeFilePersistence] Cannot determine save path");
                 return;
             }
 
@@ -222,7 +196,7 @@ namespace VerdantsAscent.Terrain.Biome
                     if (File.Exists(path))
                     {
                         File.Delete(path);
-                        Debug.Log("[BiomeFilePersistence] Deleted empty biome data file");
+                        FiresLogger.LogInfo("[BiomeFilePersistence] Deleted empty biome data file");
                     }
                     return;
                 }
@@ -245,11 +219,11 @@ namespace VerdantsAscent.Terrain.Biome
                     }
                 }
 
-                Debug.Log($"[BiomeFilePersistence] Saved {_serverBiomeCache.Count} biome paints to {path}");
+                FiresLogger.LogInfo($"[BiomeFilePersistence] Saved {_serverBiomeCache.Count} biome paints to {path}");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[BiomeFilePersistence] Failed to save biome data: {ex.Message}");
+                FiresLogger.LogError($"[BiomeFilePersistence] Failed to save biome data: {ex.Message}");
             }
         }
 
@@ -261,20 +235,20 @@ namespace VerdantsAscent.Terrain.Biome
         {
             if (!IsServer())
             {
-                Debug.Log("[BiomeFilePersistence] Not server - skipping load");
+                FiresLogger.LogInfo("[BiomeFilePersistence] Not server - skipping load");
                 return;
             }
 
             string path = GetBiomeDataPath();
             if (string.IsNullOrEmpty(path))
             {
-                Debug.LogWarning("[BiomeFilePersistence] Cannot determine load path");
+                FiresLogger.LogWarning("[BiomeFilePersistence] Cannot determine load path");
                 return;
             }
 
             if (!File.Exists(path))
             {
-                Debug.Log("[BiomeFilePersistence] No biome data file found - starting fresh");
+                FiresLogger.LogInfo("[BiomeFilePersistence] No biome data file found - starting fresh");
                 return;
             }
 
@@ -290,14 +264,14 @@ namespace VerdantsAscent.Terrain.Biome
                     int magic = reader.ReadInt32();
                     if (magic != MAGIC_HEADER)
                     {
-                        Debug.LogWarning("[BiomeFilePersistence] Invalid biome data file - wrong magic header");
+                        FiresLogger.LogWarning("[BiomeFilePersistence] Invalid biome data file - wrong magic header");
                         return;
                     }
 
                     int version = reader.ReadInt32();
                     if (version > FILE_VERSION)
                     {
-                        Debug.LogWarning($"[BiomeFilePersistence] Biome data file is from newer version ({version} > {FILE_VERSION})");
+                        FiresLogger.LogWarning($"[BiomeFilePersistence] Biome data file is from newer version ({version} > {FILE_VERSION})");
                     }
 
                     int paintCount = reader.ReadInt32();
@@ -316,7 +290,7 @@ namespace VerdantsAscent.Terrain.Biome
                         }
                         catch (Exception paintEx)
                         {
-                            Debug.LogWarning($"[BiomeFilePersistence] Failed to deserialize paint {i}: {paintEx.Message}");
+                            FiresLogger.LogWarning($"[BiomeFilePersistence] Failed to deserialize paint {i}: {paintEx.Message}");
                         }
                     }
                 }
@@ -327,11 +301,11 @@ namespace VerdantsAscent.Terrain.Biome
                     RestoreBiomePaintsDelayed(loadedPaints);
                 }
 
-                Debug.Log($"[BiomeFilePersistence] Loaded {loadedPaints.Count} biome paints from {path}");
+                FiresLogger.LogInfo($"[BiomeFilePersistence] Loaded {loadedPaints.Count} biome paints from {path}");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[BiomeFilePersistence] Failed to load biome data: {ex.Message}");
+                FiresLogger.LogError($"[BiomeFilePersistence] Failed to load biome data: {ex.Message}");
             }
         }
 
@@ -361,7 +335,7 @@ namespace VerdantsAscent.Terrain.Biome
 
             if (ZoneSystem.instance == null)
             {
-                Debug.LogWarning("[BiomeFilePersistence] ZoneSystem not available - cannot restore biome paints");
+                FiresLogger.LogWarning("[BiomeFilePersistence] ZoneSystem not available - cannot restore biome paints");
                 yield break;
             }
 
@@ -389,7 +363,7 @@ namespace VerdantsAscent.Terrain.Biome
                         failed++;
                         if (failed <= 3)
                         {
-                            Debug.LogWarning($"[BiomeFilePersistence] Failed to restore biome at {paint.Position}: {ex.Message}");
+                            FiresLogger.LogWarning($"[BiomeFilePersistence] Failed to restore biome at {paint.Position}: {ex.Message}");
                         }
                     }
 
@@ -405,7 +379,7 @@ namespace VerdantsAscent.Terrain.Biome
                 BiomePaintPersistence.SetRestoring(false);
             }
 
-            Debug.Log($"[BiomeFilePersistence] Restored {restored}/{paints.Count} biome paints{(failed > 0 ? $" ({failed} failed)" : "")}");
+            FiresLogger.LogInfo($"[BiomeFilePersistence] Restored {restored}/{paints.Count} biome paints{(failed > 0 ? $" ({failed} failed)" : "")}");
         }
 
         /// <summary>
@@ -463,7 +437,7 @@ namespace VerdantsAscent.Terrain.Biome
         public static void ClearCaches()
         {
             _serverBiomeCache.Clear();
-            Debug.Log("[BiomeFilePersistence] Cleared biome caches");
+            FiresLogger.LogInfo("[BiomeFilePersistence] Cleared biome caches");
         }
 
         /// <summary>

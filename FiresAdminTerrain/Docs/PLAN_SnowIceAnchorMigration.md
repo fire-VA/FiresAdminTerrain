@@ -140,13 +140,15 @@ Sweep of legacy ports that are dead?code or partial. Each gets a yes/no decision
 - **Status**: ✅ done
 
 ### 5.2 `SnowGroundMesh` / `SnowClutterConfig` / `SnowCommands` / `SnowTrailController` / `SnowTrailPaint` � RPG?Maker land?snow drift system
-- This is the *old* snow path the user explicitly wants replaced by `LandSnowController` (per turn 1). Today:
-  - `SnowCommands.RegisterCommands()` IS being called in `FiresAdminTerrain.cs:245`, registering `paint_snow_clutter` / `clear_snow_clutter` / `snow_trail`.
-  - `SnowClutterConfig.EnsureRegistered()` lazily registers a clutter type that uses `SnowGroundMesh.GetOrCreateDiscMesh()`.
-  - `SnowTrailController` stamps footprint trails into the same clutter system as the player walks.
-- These are independent of the new `LandSnowController` (which is the mesh disk system). The user has not asked to remove them yet.
-- **Decision needed**: keep both side?by?side (snow clutter = ground sparkle, LandSnowController = thick drift)? Or fold the clutter into LandSnowController as a child renderer? Flag for explicit user direction.
-- **Status**: ? awaiting decision
+- **RESOLVED 2026-09-23 - DELETED, superseded by Valheim 1.0.** The 2026-05-26 answer was "fold into
+  LandSnowController as a child renderer"; that fold never happened and 1.0 made it pointless. Vanilla
+  now ships Deep North deep snow natively: depth in the paint mask's green channel, a raised visible
+  surface, ground materials, movement slow, and footprint trails from `Character.m_deepSnowWalkObj`.
+  All five files, their csproj entries, the `FiresAdminTerrain.cs` registration block and the six
+  snow-only stubs on `ClutterManager` are gone. `LandSnowController` (section 2) is untouched and
+  still owns admin-placed drifts.
+- See `Docs/PLAN_Vanilla10SnowIntegration.md` step 3.
+- **Status**: done (2026-09-23) - source only, not built
 
 ### 5.3 `TileAnchorRegistry.GetOrCreate` � **8c TODO** (`TileAnchorRegistry.cs:45`)
 - Stub. Cross?tile disk ops that overlap an unloaded neighbor tile silently no?op for that neighbor. Phase 8c work.
@@ -221,6 +223,6 @@ Each row is one "major change" ? one build ? log green/red here.
   - NEW `LandSnowAnchor.cs` — `va_landsnow_*` keyspace, mirror API.
   - EDIT `LandSnowController.cs` — anchor-routed Save/Restore.
   - EDIT `LandSnowCommands.PlaceLandSnow` + `WaterBrushCommands.PlaceLandSnowFromBrush` — both now route through `LandSnowAnchor.SpawnNew`.
-- Both files added to `FiresAdminTerrain.csproj`. Build green. DLL deployed to BlueHills profile.
+- Both files added to `FiresAdminTerrain.csproj`. Build green. DLL deployed to the retired main rig profile.
 - _2026-05-26_ — **§5.1 done.** `Managers/VAClutterManager.cs` deleted (FAP source-linked, no callers). Build green.
 - _2026-05-26_ — **Pre-§3.3 placeholder.** `LandSnowController.EmitSkirtQuad` now skips the skirt when the top-face boundary crossing is already at-or-below local terrain (the SINGLE-PILE case — the dome shape from round-28 has tapered the top down to terrain, so no skirt is needed; cliff-edge cases still get the skirt because their crossing stays at disk Y). Will be replaced by explicit DiskDragRouter gating in §3.3.

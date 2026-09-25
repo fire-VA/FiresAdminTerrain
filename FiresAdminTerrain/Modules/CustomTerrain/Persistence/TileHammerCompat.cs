@@ -56,12 +56,12 @@ namespace VerdantsAscent.Terrain.Persistence
                 // (separate from IH) also uses GetGroundHeight for its terrain
                 // ops, and vanilla code paths benefit too. The patches are no-op
                 // overhead if neither mod is loaded.
-                int groundOnly = ApplyGroundHeightPatches();
+                int groundOnly = GroundHeightHooks;
                 VerdantsAscent.Utilities.VAFatLoadSummary.EmitHammerCompat(ihDetected: false, patchesApplied: groundOnly);
                 return;
             }
 
-            int applied = ApplyRulerSnapPatch() + ApplyGroundHeightPatches();
+            int applied = ApplyRulerSnapPatch() + GroundHeightHooks;
             VerdantsAscent.Utilities.VAFatLoadSummary.EmitHammerCompat(ihDetected: true, patchesApplied: applied);
         }
 
@@ -164,6 +164,22 @@ namespace VerdantsAscent.Terrain.Persistence
         [System.ThreadStatic] private static int s_rulerSnapDepth;
         public static bool IsInRulerSnap => s_rulerSnapDepth > 0;
 
+        // World Edit Commands resolves a command's Y through GetGroundHeight before it
+        // touches any terrain, so the lift has to be open for that one call too or a
+        // command aimed at a FAT tile carries the vanilla ground's Y and WecTerrainBridge
+        // cannot tell the tile was the target. Separate counter: the ruler and the
+        // command scope open and close independently.
+        [System.ThreadStatic] private static int s_terrainCommandDepth;
+
+        internal static void BeginTerrainCommandQuery() => s_terrainCommandDepth++;
+
+        internal static void EndTerrainCommandQuery()
+        {
+            if (s_terrainCommandDepth > 0) s_terrainCommandDepth--;
+        }
+
+        private static bool TileLiftOpen => s_rulerSnapDepth > 0 || s_terrainCommandDepth > 0;
+
         private static void BaseRuler_Snap_Prefix() => s_rulerSnapDepth++;
 
         // Postfix runs after vanilla Snap. __result is the snapped position
@@ -259,56 +275,10 @@ namespace VerdantsAscent.Terrain.Persistence
         //
         // Verbatim port of InfinityHammerCompat.ZoneSystem_GetGroundHeight_Prefix
         // from the original RPG-maker mod (Modules/CustomTerrain/Tools/InfinityHammerCompat.cs:388).
-        // Two overloads exist in vanilla — both must be patched.
-        private static int ApplyGroundHeightPatches()
-        {
-            int applied = 0;
-            try
-            {
-                var harmony = new Harmony("VerdantsAscent.TileHammerCompat.GroundHeight");
-
-                // Overload 1: float GetGroundHeight(Vector3)
-                var m1 = typeof(ZoneSystem).GetMethod(
-                    nameof(ZoneSystem.GetGroundHeight),
-                    new[] { typeof(Vector3) });
-                if (m1 != null)
-                {
-                    var prefix = typeof(TileHammerCompat).GetMethod(
-                        nameof(GetGroundHeight_Single_Prefix),
-                        BindingFlags.NonPublic | BindingFlags.Static);
-                    harmony.Patch(m1, prefix: new HarmonyMethod(prefix));
-                    applied++;
-                    FiresLogger.LogVerbose("[TileHammerCompat] Patched ZoneSystem.GetGroundHeight(Vector3) → ruler ring segments will now sample our tile height.");
-                }
-                else
-                {
-                    FiresLogger.LogWarning("[TileHammerCompat] ZoneSystem.GetGroundHeight(Vector3) not found — ruler ring won't lift over tile gaps.");
-                }
-
-                // Overload 2: bool GetGroundHeight(Vector3, out float)
-                var m2 = typeof(ZoneSystem).GetMethod(
-                    nameof(ZoneSystem.GetGroundHeight),
-                    new[] { typeof(Vector3), typeof(float).MakeByRefType() });
-                if (m2 != null)
-                {
-                    var prefix = typeof(TileHammerCompat).GetMethod(
-                        nameof(GetGroundHeight_OutParam_Prefix),
-                        BindingFlags.NonPublic | BindingFlags.Static);
-                    harmony.Patch(m2, prefix: new HarmonyMethod(prefix));
-                    applied++;
-                    FiresLogger.LogVerbose("[TileHammerCompat] Patched ZoneSystem.GetGroundHeight(Vector3, out float).");
-                }
-                else
-                {
-                    FiresLogger.LogWarning("[TileHammerCompat] ZoneSystem.GetGroundHeight(Vector3, out float) not found — some height queries won't lift.");
-                }
-            }
-            catch (Exception ex)
-            {
-                FiresLogger.LogError($"[TileHammerCompat] ApplyGroundHeightPatches threw: {ex}");
-            }
-            return applied;
-        }
+        // Both vanilla overloads run these, from FAT's one hook per overload
+        // (FatVanillaHooks), after the voxel ground-truth prefix, as when they
+        // were patched here by hand.
+        private const int GroundHeightHooks = 2;
 
         // Returning false skips the vanilla method body; __result becomes the
         // value the caller sees. Lift only when the query point is over an
@@ -327,14 +297,14 @@ namespace VerdantsAscent.Terrain.Persistence
         // on virgin ground. Same trade-off here. The center marker is still
         // lifted via the BaseRuler.Snap postfix; once any tile exists at a
         // query position the ring lifts via the path below.
-        private static bool GetGroundHeight_Single_Prefix(Vector3 p, ref float __result)
+        internal static bool GroundHeightSingle(Vector3 p, ref float __result)
         {
             // Only override if we're inside an IH ruler snap call. Otherwise
             // vegetation/AI/character grounding queries fall through to vanilla
             // — so vanilla trees stay planted on vanilla ground even when our
             // skyland is above them. This is the fix for the "all vegetation
             // raises with ruler height" bug spotted 2026-05-24.
-            if (s_rulerSnapDepth <= 0) return true;
+            if (!TileLiftOpen) return true;
 
             if (TileAnchorRegistry.TrySampleHeightAtWorld(p, out float h))
             {
@@ -344,9 +314,9 @@ namespace VerdantsAscent.Terrain.Persistence
             return true;
         }
 
-        private static bool GetGroundHeight_OutParam_Prefix(Vector3 p, ref float height, ref bool __result)
+        internal static bool GroundHeightOut(Vector3 p, ref float height, ref bool __result)
         {
-            if (s_rulerSnapDepth <= 0) return true;
+            if (!TileLiftOpen) return true;
 
             if (TileAnchorRegistry.TrySampleHeightAtWorld(p, out float h))
             {

@@ -41,29 +41,29 @@ namespace VerdantsAscent.Water.Tools
             // place_ice [args] - Auto-detects water vs land
             new Terminal.ConsoleCommand("place_ice",
                 "[args] - Places ice at cursor. On water: floating solid disk. On land: terrain ice overlay. Use circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => PlaceIce(args)));
+                (Terminal.ConsoleEventFailable)(args => PlaceIce(args)), isCheat: true);
 
             // place_ice_land [args] - Force terrain overlay mode
             new Terminal.ConsoleCommand("place_ice_land",
                 "[args] - Places ice overlay on LAND (terrain). Forces terrain overlay mode, ignoring water detection.",
-                (Terminal.ConsoleEventFailable)(args => PlaceIceForced(args, forceFloating: false)));
+                (Terminal.ConsoleEventFailable)(args => PlaceIceForced(args, forceFloating: false)), isCheat: true);
 
             // place_ice_water [args] - Force floating mode
             new Terminal.ConsoleCommand("place_ice_water",
                 "[args] - Places floating ice on WATER. Forces floating mode, ignoring water detection.",
-                (Terminal.ConsoleEventFailable)(args => PlaceIceForced(args, forceFloating: true)));
+                (Terminal.ConsoleEventFailable)(args => PlaceIceForced(args, forceFloating: true)), isCheat: true);
 
             // delete_ice [args] - Removes ice disks in area
             new Terminal.ConsoleCommand("delete_ice",
                 "[args] - Removes standalone ice in radius. Use circle=R for radius.",
-                (Terminal.ConsoleEventFailable)(args => DeleteIce(args)));
+                (Terminal.ConsoleEventFailable)(args => DeleteIce(args)), isCheat: true);
 
             // break_standalone_ice [args] - Punches hole in standalone ice
             new Terminal.ConsoleCommand("break_standalone_ice",
                 "[args] - Breaks hole in standalone floating ice. Use circle=R for hole radius.",
-                (Terminal.ConsoleEventFailable)(args => BreakStandaloneIce(args)));
+                (Terminal.ConsoleEventFailable)(args => BreakStandaloneIce(args)), isCheat: true);
 
-            Debug.Log("[IcePlacementTool] Initialized - Ice placement commands registered");
+            FiresLogger.LogInfo("[IcePlacementTool] Initialized - Ice placement commands registered");
 
             // Initialize land ice height modification commands
             LandIceCommands.Initialize();
@@ -107,7 +107,7 @@ namespace VerdantsAscent.Water.Tools
                             break;
 
                         case "from":
-                            // from=X,Z,Y � IH ruler position; Y is the KEY height value
+                            // from=X,Z,Y - IH ruler position; Y is the KEY height value
                             string[] coords = value.Split(',');
                             if (coords.Length >= 2)
                             {
@@ -122,7 +122,7 @@ namespace VerdantsAscent.Water.Tools
                             break;
 
                         case "offset":
-                            // offset=<h> from IH � PageUp/PageDown height adjustment
+                            // offset=<h> from IH - PageUp/PageDown height adjustment
                             if (float.TryParse(value, out float h))
                                 heightOffset = h;
                             break;
@@ -165,7 +165,7 @@ namespace VerdantsAscent.Water.Tools
                 {
                     go = new GameObject("StandaloneIce");
                     go.transform.position = position;
-                    Debug.LogWarning("[IcePlacementTool] ice1 prefab not found � using bare GameObject (no persistence)");
+                    FiresLogger.LogWarning("[IcePlacementTool] ice1 prefab not found - using bare GameObject (no persistence)");
                 }
                 var controller = go.GetComponent<FloatingIceController>();
                 if (controller == null)
@@ -190,7 +190,7 @@ namespace VerdantsAscent.Water.Tools
                 var surviving = LandIceCombiner.TryCombineNearby(landCtrl);
             }
 
-            Debug.Log($"[IcePlacementTool] Placed ice ({(overWater ? "floating" : "terrain")}) at {position}, r={radius}");
+            FiresLogger.LogInfo($"[IcePlacementTool] Placed ice ({(overWater ? "floating" : "terrain")}) at {position}, r={radius}");
             return true;
         }
 
@@ -230,7 +230,7 @@ namespace VerdantsAscent.Water.Tools
                             break;
 
                         case "from":
-                            // from=X,Z,Y � IH ruler position; Y is the KEY height value
+                            // from=X,Z,Y - IH ruler position; Y is the KEY height value
                             string[] coords = value.Split(',');
                             if (coords.Length >= 2)
                             {
@@ -245,7 +245,7 @@ namespace VerdantsAscent.Water.Tools
                             break;
 
                         case "offset":
-                            // offset=<h> from IH � PageUp/PageDown height adjustment
+                            // offset=<h> from IH - PageUp/PageDown height adjustment
                             if (float.TryParse(value, out float h))
                                 heightOffset = h;
                             break;
@@ -279,7 +279,7 @@ namespace VerdantsAscent.Water.Tools
                 {
                     go = new GameObject("StandaloneIce");
                     go.transform.position = position;
-                    Debug.LogWarning("[IcePlacementTool] ice1 prefab not found � using bare GameObject (no persistence)");
+                    FiresLogger.LogWarning("[IcePlacementTool] ice1 prefab not found - using bare GameObject (no persistence)");
                 }
                 var controller = go.GetComponent<FloatingIceController>();
                 if (controller == null)
@@ -304,7 +304,7 @@ namespace VerdantsAscent.Water.Tools
                 var surviving = LandIceCombiner.TryCombineNearby(landCtrl);
             }
 
-            Debug.Log($"[IcePlacementTool] Placed ice forced ({(forceFloating ? "floating" : "terrain")}) at {position}, r={radius}");
+            FiresLogger.LogInfo($"[IcePlacementTool] Placed ice forced ({(forceFloating ? "floating" : "terrain")}) at {position}, r={radius}");
             return true;
         }
 
@@ -492,7 +492,7 @@ namespace VerdantsAscent.Water.Tools
             if (prefab == null)
                 return null;
 
-            // Instantiate at position � ZNetScene.Instantiate will create the ZDO
+            // Instantiate at position - ZNetScene.Instantiate will create the ZDO
             GameObject go = Object.Instantiate(prefab, position, Quaternion.identity);
             go.name = "StandaloneIce";
 
@@ -515,7 +515,7 @@ namespace VerdantsAscent.Water.Tools
                 if (c != null) c.enabled = false;
             }
 
-            Debug.Log($"[IcePlacementTool] Cloned ice1 prefab at {position} (ZNetView={go.GetComponent<ZNetView>() != null})");
+            FiresLogger.LogInfo($"[IcePlacementTool] Cloned ice1 prefab at {position} (ZNetView={go.GetComponent<ZNetView>() != null})");
             return go;
         }
 
@@ -551,7 +551,7 @@ namespace VerdantsAscent.Water.Tools
         {
             float terrainY = GetTerrainHeight(pos);
 
-            // Check custom water FIRST (always reliable � only exists where explicitly placed)
+            // Check custom water FIRST (always reliable - only exists where explicitly placed)
             var combiner = WaterMeshCombiner.GetCombinerAt(pos);
             if (combiner != null)
             {
@@ -569,7 +569,7 @@ namespace VerdantsAscent.Water.Tools
                     float waterLevel = wv.GetWaterSurface(pos, 1f);
                     if (waterLevel <= -999f) continue;
 
-                    // The terrain must be CLEARLY submerged � at least 1m below water level.
+                    // The terrain must be CLEARLY submerged - at least 1m below water level.
                     // This prevents false positives on beaches and low-lying land where the
                     // ocean datum is close but the ground is not actually underwater.
                     if (terrainY < waterLevel - 1f)

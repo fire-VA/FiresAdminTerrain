@@ -77,14 +77,16 @@ namespace VerdantsAscent.Performance
         {
             float now = Time.unscaledTime;
             if (s_winStart < 0f) { s_winStart = now; return; }
-            if (now - s_winStart < 5f) return;
+            // 60s cadence (was 5s — the raycast-storm hunt is over; during
+            // streaming there is ALWAYS activity, so 5s printed constantly).
+            if (now - s_winStart < 60f) return;
             if (s_winQueued > 0 || s_winDone > 0 || s_winStarved > 0 || s_builders.Count > 0)
             {
                 float oldestAge = 0f;
                 foreach (var b in s_builders.Values)
                     if (now - b.EnqueuedAt > oldestAge) oldestAge = now - b.EnqueuedAt;
                 string lat = s_winDone > 0 ? $"{s_winLatencySum / s_winDone:0.0}s" : "-";
-                Debug.Log($"[FiresClutter] 5s: pending {s_builders.Count} (oldest {oldestAge:0.0}s) | " +
+                FiresLogger.LogVerbose($"[FiresClutter] 60s: pending {s_builders.Count}(oldest {oldestAge:0.0}s) | " +
                           $"+{s_winQueued} queued, {s_winDone} done (avg latency {lat}) | " +
                           $"placed {s_winPlaced:N0} inst | driver {s_winDriverMs:0.0}ms over {s_winFrames} frames | " +
                           $"STARVED {s_winStarved}/{s_winFrames + s_winStarved} (hm rebuild queued)");
@@ -123,7 +125,7 @@ namespace VerdantsAscent.Performance
                     || f_pdObjects == null || f_pdCenter == null)
                 {
                     s_reflectionFailed = true;
-                    Debug.LogWarning("[ClutterSpread] reflection bind incomplete — " +
+                    FiresLogger.LogWarning("[ClutterSpread] reflection bind incomplete — " +
                         "falling back to vanilla synchronous patch generation.");
                     return;
                 }
@@ -132,7 +134,7 @@ namespace VerdantsAscent.Performance
             catch (Exception ex)
             {
                 s_reflectionFailed = true;
-                Debug.LogWarning("[ClutterSpread] reflection failed — vanilla fallback: " + ex.Message);
+                FiresLogger.LogWarning("[ClutterSpread] reflection failed — vanilla fallback: " + ex.Message);
             }
         }
 
@@ -239,7 +241,7 @@ namespace VerdantsAscent.Performance
                         if (!s_loggedError)
                         {
                             s_loggedError = true;
-                            Debug.LogWarning("[ClutterSpread] builder error (dropping patch): " + ex);
+                            FiresLogger.LogWarning("[ClutterSpread] builder error (dropping patch): " + ex);
                         }
                     }
 
@@ -322,7 +324,10 @@ namespace VerdantsAscent.Performance
             int baseAmount = quality == ClutterSystem.Quality.Low ? c.m_amount / 4
                            : quality == ClutterSystem.Quality.Med ? c.m_amount / 2
                            : c.m_amount;
-            int amount = (int)(baseAmount * amountScale);
+            // ROUND, don't truncate: sparse types (m_amount 1-4) truncated to
+            // ZERO at mid sliders — whole clutter species vanished in a step
+            // instead of thinning with the percentage.
+            int amount = Mathf.RoundToInt(baseAmount * amountScale);
 
             Vector3 center = b.Center;
             float halfSize = b.HalfSize;
@@ -412,14 +417,7 @@ namespace VerdantsAscent.Performance
         internal static void OnAwake() => s_builders.Clear();
 
         // ── Harmony hooks (thin — all logic lives above) ──────────────────────
-
-        [HarmonyPatch(typeof(ClutterSystem), "GenerateVegPatch")]
-        private static class GenerateVegPatch_Patch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix(ClutterSystem __instance, Vector2Int patchID, float size, ref object __result)
-                => OnGenerateVegPatch(__instance, patchID, size, ref __result);
-        }
+        // OnGenerateVegPatch runs from FAT's one ClutterSystem.GenerateVegPatch hook (FatVanillaHooks).
 
         [HarmonyPatch(typeof(ClutterSystem), "LateUpdate")]
         private static class LateUpdate_Patch

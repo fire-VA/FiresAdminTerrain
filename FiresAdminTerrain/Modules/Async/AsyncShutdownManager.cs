@@ -68,7 +68,7 @@ namespace VerdantsAscent.Async
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogWarning($"[AsyncShutdownManager] Failed to shutdown worker '{worker.Name}': {ex.Message}");
+                    FiresLogger.LogWarning($"[AsyncShutdownManager] Failed to shutdown worker '{worker.Name}': {ex.Message}");
                 }
             }
 
@@ -79,7 +79,7 @@ namespace VerdantsAscent.Async
 
             if (count > 0)
             {
-                Debug.Log($"[AsyncShutdownManager] Shut down {count} background workers");
+                FiresLogger.LogInfo($"[AsyncShutdownManager] Shut down {count} background workers");
             }
         }
 

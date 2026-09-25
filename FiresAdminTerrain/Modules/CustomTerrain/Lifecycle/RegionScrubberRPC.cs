@@ -114,9 +114,11 @@ namespace VerdantsAscent.Terrain.Lifecycle
 
         private static void RPC_HandleApply(long sender, ZPackage pkg)
         {
-            // Every peer applies the apply broadcast locally. No admin
-            // re-check — the server validated in HandleRequest and chose
-            // to broadcast. Trust the server.
+            if (!AdminCheck.IsAdmin(sender))
+            {
+                FiresLogger.LogWarning($"[RegionScrubberRPC] Non-admin peer {sender} sent a scrub apply — rejected.");
+                return;
+            }
             Unpack(pkg, out var center, out var radius, out var scope, out var source);
 
             // Skip the server's own loopback (it already applied in
@@ -150,19 +152,8 @@ namespace VerdantsAscent.Terrain.Lifecycle
             source = (RegionScrubber.Source)pkg.ReadInt();
         }
 
-        // ── ZNet lifecycle hook ─────────────────────────────────────────
-
-        // Auto-register on ZNet.Awake so the handlers attach to the fresh
-        // ZRoutedRpc instance on every session (logout/login cycles
-        // create a new instance — sticky _registered would break sync).
-        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Awake))]
-        private static class ZNet_Awake_RegisterRegionScrubberRPC
-        {
-            private static void Postfix()
-            {
-                ResetInitialized();
-                Register();
-            }
-        }
+        // FAT's one ZNet.Awake hook (FatVanillaHooks) calls ResetInitialized
+        // then Register every session, so the handlers attach to the fresh
+        // ZRoutedRpc instance (a sticky _registered would break sync).
     }
 }

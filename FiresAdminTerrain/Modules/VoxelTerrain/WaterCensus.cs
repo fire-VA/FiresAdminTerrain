@@ -51,7 +51,7 @@ namespace VerdantsAscent.Terrain.Voxel
             sb.AppendLine($"  heightmap ground={(hm ? g.ToString("F2") : "n/a")} biome={p.GetCurrentBiome()}");
             sb.AppendLine($"  gen mesh SurfaceAt={VoxelGenWaterMesh.SurfaceAt(pos):F2} (-10000 = dry)");
 
-            Debug.Log(sb.ToString());
+            FiresLogger.LogInfo(sb.ToString());
             args.Context?.AddString($"water census: {found} surface(s) — details in log");
         }
 

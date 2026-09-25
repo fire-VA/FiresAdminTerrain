@@ -14,18 +14,18 @@ namespace VerdantsAscent.Water.Core
     /// - Re-created on combiner restore/regeneration
     /// 
     /// FIVE EFFECT TYPES:
-    /// 1. SHORELINE SPLASH — particle mist at water/terrain boundary edges
-    /// 2. SHORELINE FOAM — subtle white particle line along banks
-    /// 3. WATERFALL SPRAY — mist VFX at cliff cells (>2m drop)
-    /// 4. SURFACE DEBRIS — floating leaves/foam bits drifting on the water surface
-    /// 5. AMBIENT AUDIO — looping water sound (river rush or pond ambience)
+    /// 1. SHORELINE SPLASH - particle mist at water/terrain boundary edges
+    /// 2. SHORELINE FOAM - subtle white particle line along banks
+    /// 3. WATERFALL SPRAY - mist VFX at cliff cells (>2m drop)
+    /// 4. SURFACE DEBRIS - floating leaves/foam bits drifting on the water surface
+    /// 5. AMBIENT AUDIO - looping water sound (river rush or pond ambience)
     /// 
     /// PERFORMANCE BUDGET:
     /// - Max 8 shoreline splash emitters per combiner
     /// - Max 4 waterfall spray emitters per combiner
     /// - 1 surface debris emitter per combiner (covers full bounds)
     /// - 1 audio source per combiner
-    /// - All use Unity ParticleSystem — zero CPU when off-screen (culled by renderer bounds)
+    /// - All use Unity ParticleSystem - zero CPU when off-screen (culled by renderer bounds)
     /// </summary>
     public class WaterAmbientVFX : MonoBehaviour
     {
@@ -75,7 +75,7 @@ namespace VerdantsAscent.Water.Core
             // Clean up any existing VFX
             CleanupVFX();
 
-            // Create container parented to combiner — cascade destroy
+            // Create container parented to combiner - cascade destroy
             _vfxContainer = new GameObject("WaterAmbientVFX");
             _vfxContainer.transform.SetParent(combiner.transform, false);
             _vfxContainer.transform.localPosition = Vector3.zero;
@@ -114,7 +114,7 @@ namespace VerdantsAscent.Water.Core
             // 3. Surface debris
             SpawnSurfaceDebris();
 
-            // 4. Ambient audio — disabled: auto-placed SFX conflicts with world audio
+            // 4. Ambient audio - disabled: auto-placed SFX conflicts with world audio
             // SpawnAmbientAudio();
         }
 

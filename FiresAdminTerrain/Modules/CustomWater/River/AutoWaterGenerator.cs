@@ -17,13 +17,13 @@ namespace VerdantsAscent.Water.Core
     /// 2. River/stream path curve math runs on a BACKGROUND THREAD (pure math, no Unity API).
     /// 3. Terrain height sampling runs as a COROUTINE on the main thread (raycasts required).
     /// 4. WaterDisk creation and combiner registration happen on the main thread.
-    /// 5. Anchors persist automatically — subsequent loads restore from ZDO, not re-generation.
+    /// 5. Anchors persist automatically - subsequent loads restore from ZDO, not re-generation.
     /// 
     /// THREAD SAFETY:
-    /// - Path math (sin curves, width interpolation) ? background thread via ThreadPool
-    /// - Terrain sampling (Physics.Raycast, ZoneSystem) ? main thread coroutine
-    /// - Disk/Combiner creation (Unity API) ? main thread
-    /// - Uses MainThreadDispatcher for background?main callbacks
+    /// - Path math (sin curves, width interpolation) -> background thread via ThreadPool
+    /// - Terrain sampling (Physics.Raycast, ZoneSystem) -> main thread coroutine
+    /// - Disk/Combiner creation (Unity API) -> main thread
+    /// - Uses MainThreadDispatcher for background->main callbacks
     /// </summary>
     public static class AutoWaterGenerator
     {
@@ -133,7 +133,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// When true and BC heightmap is available, use heightmap depression analysis
         /// instead of GetRiverWeight for water body detection. The heightmap shows the
-        /// actual painted terrain — river channels are low pixels relative to neighbors.
+        /// actual painted terrain - river channels are low pixels relative to neighbors.
         /// </summary>
         public static bool PreferHeightmapDetection = true;
 
@@ -169,20 +169,20 @@ namespace VerdantsAscent.Water.Core
         #region Path Point Data (Thread-Safe)
 
         /// <summary>
-        /// A single point along a river/stream path. Pure data — no Unity types except Vector3 (struct).
+        /// A single point along a river/stream path. Pure data - no Unity types except Vector3 (struct).
         /// Computed on background thread, consumed on main thread.
         /// 
         /// THREE HEIGHT REFERENCES (heightmap mode):
-        /// 1. TerrainY — absolute bed height from heightmap (BC's exact formula)
-        /// 2. DepressionDepth — how far below the banks the bed is (from depression map,
+        /// 1. TerrainY - absolute bed height from heightmap (BC's exact formula)
+        /// 2. DepressionDepth - how far below the banks the bed is (from depression map,
         ///    in world-space meters). Darkest depression pixels at high elevations are
         ///    river origin points; they flow downhill to lower elevations.
-        /// 3. BankY — the local bank/edge height that water must NOT exceed (from the
+        /// 3. BankY - the local bank/edge height that water must NOT exceed (from the
         ///    non-depressed edge pixels of the cross-section in the heightmap).
         /// 
         /// AutoWaterGenerator's cross-reference uses all three:
-        ///   bedY = min(heightmapTerrainY, realTerrainY)       — never above real ground
-        ///   surfaceY = min(bedY + offset, bankY - margin)     — never above the banks
+        ///   bedY = min(heightmapTerrainY, realTerrainY)       - never above real ground
+        ///   surfaceY = min(bedY + offset, bankY - margin)     - never above the banks
         /// </summary>
         public struct PathPoint
         {
@@ -250,21 +250,21 @@ namespace VerdantsAscent.Water.Core
             // Clients receive them via ZDO sync and restore automatically.
             if (ZNet.instance != null && !ZNet.instance.IsServer())
             {
-                Debug.LogWarning("[AutoWaterGenerator] Skipping — only the server/host generates auto water. " +
+                FiresLogger.LogWarning("[AutoWaterGenerator] Skipping - only the server/host generates auto water. " +
                     "Clients receive water via ZDO sync automatically.");
                 return;
             }
 
             if (_isGenerating)
             {
-                Debug.LogWarning("[AutoWaterGenerator] Generation already in progress");
+                FiresLogger.LogWarning("[AutoWaterGenerator] Generation already in progress");
                 return;
             }
 
             var host = GetOrCreateHost();
             if (host == null)
             {
-                Debug.LogError("[AutoWaterGenerator] No coroutine host available (not in-game?)");
+                FiresLogger.LogError("[AutoWaterGenerator] No coroutine host available (not in-game?)");
                 return;
             }
 
@@ -284,19 +284,19 @@ namespace VerdantsAscent.Water.Core
             var lakesCopy = lakes != null ? new List<Vector2>(lakes) : new List<Vector2>();
 
             int totalSources = riversCopy.Count + streamsCopy.Count + lakesCopy.Count;
-            Debug.Log($"[AutoWaterGenerator] Starting: {riversCopy.Count} rivers, {streamsCopy.Count} streams, {lakesCopy.Count} lakes ({totalSources} total)");
-            Debug.Log($"[AutoWaterGenerator] {WorldGeneratorAccess.GetBCStatusString()}");
+            FiresLogger.LogInfo($"[AutoWaterGenerator] Starting: {riversCopy.Count} rivers, {streamsCopy.Count} streams, {lakesCopy.Count} lakes ({totalSources} total)");
+            FiresLogger.LogInfo($"[AutoWaterGenerator] {WorldGeneratorAccess.GetBCStatusString()}");
 
             // Better Continents heightmap detection:
             // If BC has a heightmap, the creator painted the terrain INCLUDING rivers.
             // The heightmap IS the ground truth. We read it directly and find channels
-            // via relative depression analysis — much more accurate than GetRiverWeight
+            // via relative depression analysis - much more accurate than GetRiverWeight
             // which only knows about vanilla-generated river paths.
             //
             // This is especially critical for HeightmapOverrideAll where AddRivers() is
             // bypassed and GetRiverWeight data doesn't match the actual terrain.
             //
-            // IMPORTANT: The raw BC heightmap PNG is just ONE input — the final terrain
+            // IMPORTANT: The raw BC heightmap PNG is just ONE input - the final terrain
             // also includes roughmap, flatmap, noise layers, biome heights, etc. When
             // we can't read BC's in-memory float[], we fall back to WorldHeightCache
             // which samples WorldGenerator.GetHeight() across a grid. This gives us
@@ -304,13 +304,13 @@ namespace VerdantsAscent.Water.Core
             //
             // PRIORITY ORDER:
             // 1. WorldHeightCache in-memory (if already loaded at correct resolution)
-            //    — This is the BEST source: real final terrain at up to 20480x20480,
+            //    - This is the BEST source: real final terrain at up to 20480x20480,
             //    includes ALL BC patches, noise layers, roughmap, flatmap, river carving.
             // 2. WorldHeightCache from disk (async, resolved in the coroutine)
-            //    — Same quality as #1, just needs to be read from disk first.
+            //    - Same quality as #1, just needs to be read from disk first.
             // 3. Build WorldHeightCache on the fly (slow but comprehensive)
-            // 4. BC's raw heightmap via reflection (8192×8192, missing roughmap/noise/etc.)
-            //    — ONLY used if WorldHeightCache is unavailable AND BC heightmap exists.
+            // 4. BC's raw heightmap via reflection (8192x8192, missing roughmap/noise/etc.)
+            //    - ONLY used if WorldHeightCache is unavailable AND BC heightmap exists.
             // 5. Vanilla GetRiverWeight mode (no heightmap at all)
             //
             // NOTE: We no longer call TryLoadFromDisk() here synchronously because
@@ -328,13 +328,13 @@ namespace VerdantsAscent.Water.Core
                 {
                     heightmapSnapshot = existingSnap;
                     UsedHeightmapDetection = true;
-                    Debug.Log($"[AutoWaterGenerator] Using in-memory WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size}) — " +
+                    FiresLogger.LogInfo($"[AutoWaterGenerator] Using in-memory WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size}) - " +
                         "real terrain with all modifications applied");
                 }
                 else if (existingSnap != null)
                 {
-                    Debug.Log($"[AutoWaterGenerator] In-memory WorldHeightCache ({existingSnap.Size}x{existingSnap.Size}) " +
-                        $"does not match configured GridSize ({WorldHeightCache.GridSize}) — will try disk/rebuild");
+                    FiresLogger.LogInfo($"[AutoWaterGenerator] In-memory WorldHeightCache ({existingSnap.Size}x{existingSnap.Size}) " +
+                        $"does not match configured GridSize ({WorldHeightCache.GridSize}) - will try disk/rebuild");
                     WorldHeightCache.ClearCache();
                 }
             }
@@ -387,7 +387,7 @@ namespace VerdantsAscent.Water.Core
 
         private static MonoBehaviour GetOrCreateHost()
         {
-            // Use Game.instance as coroutine host — it persists for the session
+            // Use Game.instance as coroutine host - it persists for the session
             if (Game.instance != null) return Game.instance;
 
             // Fallback: use ZoneSystem
@@ -423,7 +423,7 @@ namespace VerdantsAscent.Water.Core
             if (needsWorldHeightCache && heightmapSnapshot == null)
             {
                 // Step 1: Try loading from disk asynchronously
-                Debug.Log("[AutoWaterGenerator] Phase 0: Loading WorldHeightCache from disk (async)...");
+                FiresLogger.LogInfo("[AutoWaterGenerator] Phase 0: Loading WorldHeightCache from disk (async)...");
 
                 // Validate existing in-memory cache matches configured GridSize
                 if (WorldHeightCache.HasCache)
@@ -431,7 +431,7 @@ namespace VerdantsAscent.Water.Core
                     var existingSnap = WorldHeightCache.CachedSnapshot;
                     if (existingSnap != null && existingSnap.Size != WorldHeightCache.GridSize)
                     {
-                        Debug.Log($"[AutoWaterGenerator] In-memory cache size {existingSnap.Size} != configured GridSize {WorldHeightCache.GridSize} — invalidating");
+                        FiresLogger.LogInfo($"[AutoWaterGenerator] In-memory cache size {existingSnap.Size} != configured GridSize {WorldHeightCache.GridSize} - invalidating");
                         WorldHeightCache.ClearCache();
                     }
                 }
@@ -441,11 +441,11 @@ namespace VerdantsAscent.Water.Core
                     // Already in memory at correct resolution
                     heightmapSnapshot = WorldHeightCache.CachedSnapshot;
                     UsedHeightmapDetection = true;
-                    Debug.Log($"[AutoWaterGenerator] Using in-memory WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size})");
+                    FiresLogger.LogInfo($"[AutoWaterGenerator] Using in-memory WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size})");
                 }
                 else
                 {
-                    // Try async disk load — yields each frame while background thread reads file
+                    // Try async disk load - yields each frame while background thread reads file
                     bool[] diskLoadResult = { false };
                     yield return WorldHeightCache.TryLoadFromDiskAsync(result => diskLoadResult[0] = result);
 
@@ -453,7 +453,7 @@ namespace VerdantsAscent.Water.Core
                     {
                         heightmapSnapshot = WorldHeightCache.CachedSnapshot;
                         UsedHeightmapDetection = true;
-                        Debug.Log($"[AutoWaterGenerator] Using WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size}) " +
+                        FiresLogger.LogInfo($"[AutoWaterGenerator] Using WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size}) " +
                             $"for depression analysis (configured GridSize={WorldHeightCache.GridSize}, real terrain with all modifications)");
                     }
                 }
@@ -461,7 +461,7 @@ namespace VerdantsAscent.Water.Core
                 // Step 2: If no disk cache, build from scratch
                 if (heightmapSnapshot == null)
                 {
-                    Debug.Log("[AutoWaterGenerator] Phase 0: No cached height data available on server — " +
+                    FiresLogger.LogInfo("[AutoWaterGenerator] Phase 0: No cached height data available on server - " +
                         "building WorldHeightCache from real terrain (this may take several minutes " +
                         "for high-resolution grids, but only needs to happen once per world)...");
 
@@ -472,18 +472,18 @@ namespace VerdantsAscent.Water.Core
                     {
                         heightmapSnapshot = builtSnapshot;
                         UsedHeightmapDetection = true;
-                        Debug.Log("[AutoWaterGenerator] WorldHeightCache built — proceeding with " +
+                        FiresLogger.LogInfo("[AutoWaterGenerator] WorldHeightCache built - proceeding with " +
                             "real-terrain depression analysis");
                     }
                     else
                     {
-                        Debug.LogWarning("[AutoWaterGenerator] WorldHeightCache build failed — " +
+                        FiresLogger.LogWarning("[AutoWaterGenerator] WorldHeightCache build failed - " +
                             "trying BC raw heightmap fallback");
                     }
                 }
 
                 // Step 3: If WorldHeightCache failed entirely, fall back to BC's raw
-                // heightmap via reflection. This is lower quality (8192×8192, missing
+                // heightmap via reflection. This is lower quality (8192x8192, missing
                 // roughmap/noise/etc.) but better than vanilla GetRiverWeight mode.
                 if (heightmapSnapshot == null &&
                     BCHeightmapWaterDetector.CanReadHeightmap && WorldGeneratorAccess.IsBetterContinentsEnabled)
@@ -492,13 +492,13 @@ namespace VerdantsAscent.Water.Core
                     if (heightmapSnapshot != null)
                     {
                         UsedHeightmapDetection = true;
-                        Debug.Log($"[AutoWaterGenerator] Falling back to BC raw heightmap ({heightmapSnapshot.Size}x{heightmapSnapshot.Size}) — " +
+                        FiresLogger.LogInfo($"[AutoWaterGenerator] Falling back to BC raw heightmap ({heightmapSnapshot.Size}x{heightmapSnapshot.Size}) - " +
                             "note: this misses roughmap/noise/flatmap modifications. " +
                             "Run 'va_build_height_cache' first for best results.");
                     }
                     else
                     {
-                        Debug.LogWarning("[AutoWaterGenerator] BC raw heightmap also unavailable — " +
+                        FiresLogger.LogWarning("[AutoWaterGenerator] BC raw heightmap also unavailable - " +
                             "falling back to vanilla GetRiverWeight mode");
                     }
                 }
@@ -508,7 +508,7 @@ namespace VerdantsAscent.Water.Core
             string heightmapSource = heightmapSnapshot == null ? "none (vanilla GetRiverWeight)" :
                 heightmapSnapshot.IsWorldHeightCache ? $"WorldHeightCache ({heightmapSnapshot.Size}x{heightmapSnapshot.Size})" :
                 $"BC raw heightmap ({heightmapSnapshot.Size}x{heightmapSnapshot.Size})";
-            Debug.Log($"[AutoWaterGenerator] Phase 1/4: Computing path curves... (heightmap source: {heightmapSource})");
+            FiresLogger.LogInfo($"[AutoWaterGenerator] Phase 1/4: Computing path curves... (heightmap source: {heightmapSource})");
 
 
             var allPaths = new List<ComputedPath>();
@@ -523,7 +523,7 @@ namespace VerdantsAscent.Water.Core
                         // --- BC HEIGHTMAP MODE ---
                         // Detect water bodies directly from the heightmap image
                         // using relative depression analysis. The heightmap creator
-                        // painted rivers as low channels — we find them by comparing
+                        // painted rivers as low channels - we find them by comparing
                         // each pixel to its neighborhood average.
                         var waterBodies = BCHeightmapWaterDetector.DetectWaterBodies(heightmapSnapshot);
 
@@ -543,7 +543,7 @@ namespace VerdantsAscent.Water.Core
                         }
 
                         MainThreadDispatcher.Enqueue(() =>
-                            Debug.Log($"[AutoWaterGenerator] Heightmap detected {waterBodies.Count} water bodies " +
+                            FiresLogger.LogInfo($"[AutoWaterGenerator] Heightmap detected {waterBodies.Count} water bodies " +
                                 $"(rivers: {hmRivers}, streams: {hmStreams}, lakes: {hmLakes}, ponds: {hmPonds}, springs: {hmSprings}, unknown: {hmUnknown})"));
 
                         // --- TRIBUTARY/RUNOFF FILTERING ---
@@ -712,7 +712,7 @@ namespace VerdantsAscent.Water.Core
                         {
                             int filteredCount = tributariesFiltered;
                             MainThreadDispatcher.Enqueue(() =>
-                                Debug.Log($"[AutoWaterGenerator] Filtered {filteredCount} steep tributary/runoff water bodies " +
+                                FiresLogger.LogInfo($"[AutoWaterGenerator] Filtered {filteredCount} steep tributary/runoff water bodies " +
                                     $"(slope > {TRIBUTARY_SLOPE_THRESHOLD:P0}, height > {TRIBUTARY_HEIGHT_THRESHOLD:F0}m above main river avg {mainRiverAvgHeight:F0}m)"));
                         }
                     }
@@ -752,7 +752,7 @@ namespace VerdantsAscent.Water.Core
                 catch (Exception ex)
                 {
                     MainThreadDispatcher.Enqueue(() =>
-                        Debug.LogError($"[AutoWaterGenerator] Path computation failed: {ex.Message}"));
+                        FiresLogger.LogError($"[AutoWaterGenerator] Path computation failed: {ex.Message}"));
                 }
                 finally
                 {
@@ -769,14 +769,14 @@ namespace VerdantsAscent.Water.Core
                     lastBgProgressLog = Time.realtimeSinceStartup;
                     int pathsSoFar;
                     lock (allPaths) { pathsSoFar = allPaths.Count; }
-                    Debug.Log($"[AutoWaterGenerator] Phase 1 still running... {pathsSoFar} paths computed so far ({sw.ElapsedMilliseconds}ms elapsed)");
+                    FiresLogger.LogInfo($"[AutoWaterGenerator] Phase 1 still running... {pathsSoFar} paths computed so far ({sw.ElapsedMilliseconds}ms elapsed)");
                 }
                 yield return null;
             }
 
             if (allPaths.Count == 0)
             {
-                Debug.Log("[AutoWaterGenerator] No paths found — nothing to generate");
+                FiresLogger.LogInfo("[AutoWaterGenerator] No paths found - nothing to generate");
                 _isGenerating = false;
                 _generationCoroutine = null;
                 yield break;
@@ -807,28 +807,28 @@ namespace VerdantsAscent.Water.Core
             // Enforce MaxPaths limit
             if (allPaths.Count > MaxPaths)
             {
-                Debug.Log($"[AutoWaterGenerator] Trimming {allPaths.Count} paths to MaxPaths limit of {MaxPaths}");
+                FiresLogger.LogInfo($"[AutoWaterGenerator] Trimming {allPaths.Count} paths to MaxPaths limit of {MaxPaths}");
                 allPaths.RemoveRange(MaxPaths, allPaths.Count - MaxPaths);
             }
 
-            Debug.Log($"[AutoWaterGenerator] Phase 1 done: {allPaths.Count} paths ({sw.ElapsedMilliseconds}ms)");
+            FiresLogger.LogInfo($"[AutoWaterGenerator] Phase 1 done: {allPaths.Count} paths ({sw.ElapsedMilliseconds}ms)");
 
             // ---- PHASE 2: Drop-to-terrain height calculation (main thread, batched) ----
             // Simple approach: GetHeight() at each point, clamp to waterLevel, monotonic pass.
             // The combiner handles bank clipping, depth, smoothing independently in its mesh gen.
-            Debug.Log("[AutoWaterGenerator] Phase 2/4: Drop-to-terrain + filtering...");
+            FiresLogger.LogInfo("[AutoWaterGenerator] Phase 2/4: Drop-to-terrain + filtering...");
 
             int totalPoints = 0;
             foreach (var path in allPaths)
                 totalPoints += path.Points.Length;
 
             int pointsProcessed = 0;
-            int pointsPerFrame = 200; // Much faster now — just GetHeight() calls, no cross-sections
+            int pointsPerFrame = 200; // Much faster now - just GetHeight() calls, no cross-sections
             int lastReportedPct = -1;
 
             float waterLevel = GetWaterLevel();
 
-            Debug.Log($"[AutoWaterGenerator] Using global water level: {waterLevel} (heightmap mode: {UsedHeightmapDetection})");
+            FiresLogger.LogInfo($"[AutoWaterGenerator] Using global water level: {waterLevel} (heightmap mode: {UsedHeightmapDetection})");
 
             int skippedOcean = 0;
             int skippedSlope = 0;
@@ -848,7 +848,7 @@ namespace VerdantsAscent.Water.Core
                     path.Points = TrimInvalidPoints(path.Points);
                 }
 
-                // Skip water bodies entirely below ocean level — the ocean already covers them.
+                // Skip water bodies entirely below ocean level - the ocean already covers them.
                 // Only keep paths where at least some points are above the ocean surface.
                 if (path.Points != null && path.Points.Length > 0)
                 {
@@ -868,7 +868,7 @@ namespace VerdantsAscent.Water.Core
                     }
                 }
 
-                // Skip ponds/springs on slopes — they can't produce a flat water surface.
+                // Skip ponds/springs on slopes - they can't produce a flat water surface.
                 // Measure the height range across all points; if the slope is too steep
                 // for the body size, it would just be a tilted plane.
                 if (path.Points != null && path.Points.Length > 1 &&
@@ -888,7 +888,7 @@ namespace VerdantsAscent.Water.Core
                     }
                     float terrainRange = maxTerrain - minTerrain;
                     // If terrain across the pond rises more than 2m, or slope > 15%,
-                    // skip — flat water would look wrong on this terrain.
+                    // skip - flat water would look wrong on this terrain.
                     if (terrainRange > 2f || (maxExtent > 1f && terrainRange / maxExtent > 0.15f))
                     {
                         path.Points = new PathPoint[0];
@@ -904,7 +904,7 @@ namespace VerdantsAscent.Water.Core
                 if (pctBucket > lastReportedPct)
                 {
                     lastReportedPct = pctBucket;
-                    Debug.Log($"[AutoWaterGenerator] Terrain sampling: {pctBucket}% ({pointsProcessed}/{totalPoints})");
+                    FiresLogger.LogInfo($"[AutoWaterGenerator] Terrain sampling: {pctBucket}% ({pointsProcessed}/{totalPoints})");
                 }
 
                 // Yield periodically to avoid blocking the main thread
@@ -914,11 +914,11 @@ namespace VerdantsAscent.Water.Core
 
             if (skippedOcean > 0 || skippedSlope > 0)
             {
-                Debug.Log($"[AutoWaterGenerator] Phase 2 filtering: skipped {skippedOcean} below ocean, {skippedSlope} on slopes");
+                FiresLogger.LogInfo($"[AutoWaterGenerator] Phase 2 filtering: skipped {skippedOcean} below ocean, {skippedSlope} on slopes");
             }
 
             // ---- PHASE 3: Place WaterDisks (main thread, rate-limited) ----
-            Debug.Log("[AutoWaterGenerator] Phase 3/4: Placing water...");
+            FiresLogger.LogInfo("[AutoWaterGenerator] Phase 3/4: Placing water...");
 
             bool prevVerbose = WaterMeshCombiner.s_verboseLogging;
             WaterMeshCombiner.s_verboseLogging = false;
@@ -960,7 +960,7 @@ namespace VerdantsAscent.Water.Core
                         accumulatedDist += Mathf.Sqrt(ddx * ddx + ddz * ddz);
                     }
 
-                    // Radius = 70% of channel width — wide enough to clip through banks
+                    // Radius = 70% of channel width - wide enough to clip through banks
                     float radius = pt.Width * 0.7f;
                     if (radius < 3f) radius = 3f;
 
@@ -995,10 +995,10 @@ namespace VerdantsAscent.Water.Core
 
                 if (disks.Count == 0)
                 {
-                    // Only warn for rivers/streams — other types not being placed is expected
+                    // Only warn for rivers/streams - other types not being placed is expected
                     if (path.SourceType == "river" || path.SourceType == "stream")
                     {
-                        Debug.LogWarning($"[AutoWaterGenerator] Path '{path.SourceType}' at ({path.P0X:F0},{path.P0Z:F0}) has 0 valid points after terrain sampling — skipped");
+                        FiresLogger.LogWarning($"[AutoWaterGenerator] Path '{path.SourceType}' at ({path.P0X:F0},{path.P0Z:F0}) has 0 valid points after terrain sampling - skipped");
                     }
                     continue;
                 }
@@ -1049,7 +1049,7 @@ namespace VerdantsAscent.Water.Core
                 if (pctBucket > lastReportedPct)
                 {
                     lastReportedPct = pctBucket;
-                    Debug.Log($"[AutoWaterGenerator] Placing water: {pctBucket}% ({pathsProcessed}/{totalPaths} paths)");
+                    FiresLogger.LogInfo($"[AutoWaterGenerator] Placing water: {pctBucket}% ({pathsProcessed}/{totalPaths} paths)");
                 }
 
                 pathsThisFrame++;
@@ -1060,12 +1060,12 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            // ---- PHASE 4: CLEANUP — Fix floating disks, remove empty combiners ----
+            // ---- PHASE 4: CLEANUP - Fix floating disks, remove empty combiners ----
             // After all disks are placed and combiners regenerated, do a final sanity pass:
             //   1. Drop floating disks to terrain (surface should not be far above ground)
             //   2. Remove empty or trivially small combiners
             //   3. Force-save all surviving combiners
-            Debug.Log("[AutoWaterGenerator] Phase 4/4: Cleanup — fixing floating disks and empty combiners...");
+            FiresLogger.LogInfo("[AutoWaterGenerator] Phase 4/4: Cleanup - fixing floating disks and empty combiners...");
 
             int floatingFixed = 0;
             int emptyRemoved = 0;
@@ -1164,7 +1164,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (Exception regenEx)
                 {
-                    Debug.LogWarning($"[AutoWaterGenerator] Cleanup regen failed: {regenEx.Message}");
+                    FiresLogger.LogWarning($"[AutoWaterGenerator] Cleanup regen failed: {regenEx.Message}");
                 }
                 cleanupRegenCount++;
                 if (cleanupRegenCount % 5 == 0)
@@ -1182,14 +1182,14 @@ namespace VerdantsAscent.Water.Core
                 }
                 catch (Exception saveEx)
                 {
-                    Debug.LogWarning($"[AutoWaterGenerator] Cleanup save failed: {saveEx.Message}");
+                    FiresLogger.LogWarning($"[AutoWaterGenerator] Cleanup save failed: {saveEx.Message}");
                 }
                 savedCount++;
                 if (savedCount % 10 == 0)
                     yield return null;
             }
 
-            Debug.Log($"[AutoWaterGenerator] Phase 4 COMPLETE: {floatingFixed} combiners had floating disks " +
+            FiresLogger.LogInfo($"[AutoWaterGenerator] Phase 4 COMPLETE: {floatingFixed} combiners had floating disks " +
                 $"({disksClamped} disks clamped), {emptyRemoved} empty combiners removed, " +
                 $"{savedCount} combiners saved");
 
@@ -1203,7 +1203,7 @@ namespace VerdantsAscent.Water.Core
             if (ZNet.instance != null)
             {
                 ZNet.instance.Save(false);
-                Debug.Log("[AutoWaterGenerator] World save queued (async) after generation");
+                FiresLogger.LogInfo("[AutoWaterGenerator] World save queued (async) after generation");
             }
 
             // Schedule a one-shot zone-load cleanup pass.
@@ -1220,13 +1220,13 @@ namespace VerdantsAscent.Water.Core
 
             int combinerCount = WaterMeshCombiner.AllCombiners != null ? WaterMeshCombiner.AllCombiners.Count : 0;
 
-            Debug.Log($"[AutoWaterGenerator] Complete! {sw.ElapsedMilliseconds}ms — {GetGenerationSummary()}, Active combiners: {combinerCount}");
+            FiresLogger.LogInfo($"[AutoWaterGenerator] Complete! {sw.ElapsedMilliseconds}ms - {GetGenerationSummary()}, Active combiners: {combinerCount}");
 
-            // Log per-path summaries (one line per river/stream/lake — not per combiner)
-            // Format: type #N: (startX,startZ)?(endX,endZ) pts=N disks=N
+            // Log per-path summaries (one line per river/stream/lake - not per combiner)
+            // Format: type #N: (startX,startZ)->(endX,endZ) pts=N disks=N
             if (allPaths.Count > 0)
             {
-                Debug.Log($"[AutoWaterGenerator] === WATER BODY SUMMARY ({allPaths.Count} paths) ===");
+                FiresLogger.LogInfo($"[AutoWaterGenerator] === WATER BODY SUMMARY ({allPaths.Count} paths) ===");
 
                 // Count by type for summary
                 int logRivers = 0, logStreams = 0, logLakes = 0, logPonds = 0, logSprings = 0;
@@ -1257,11 +1257,11 @@ namespace VerdantsAscent.Water.Core
                     float dz = last.WorldZ - first.WorldZ;
                     float length = Mathf.Sqrt(dx * dx + dz * dz);
 
-                    Debug.Log($"[AutoWater] {path.SourceType} #{typeIdx}: ({first.WorldX:F0},{first.WorldZ:F0})?({last.WorldX:F0},{last.WorldZ:F0}) " +
+                    FiresLogger.LogInfo($"[AutoWater] {path.SourceType} #{typeIdx}: ({first.WorldX:F0},{first.WorldZ:F0})?({last.WorldX:F0},{last.WorldZ:F0}) " +
                         $"len={length:F0}m avgW={avgWidth:F0}m pts={path.Points.Length} Y={first.SurfaceY:F1}?{last.SurfaceY:F1}");
                 }
 
-                Debug.Log($"[AutoWaterGenerator] === END SUMMARY (rivers={logRivers} streams={logStreams} lakes={logLakes} ponds={logPonds} springs={logSprings}) ===");
+                FiresLogger.LogInfo($"[AutoWaterGenerator] === END SUMMARY (rivers={logRivers} streams={logStreams} lakes={logLakes} ponds={logPonds} springs={logSprings}) ===");
             }
 
             // Notify all connected clients to refresh their zones so water becomes visible
@@ -1270,15 +1270,15 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Path Computation (Background Thread — Pure Math)
+        #region Path Computation (Background Thread - Pure Math)
 
         /// <summary>
         /// Computes a dense "guide path" along a river or stream corridor.
-        /// ALL PURE MATH — safe to call from background thread.
+        /// ALL PURE MATH - safe to call from background thread.
         /// 
         /// This generates closely-spaced points (every RiverSampleStep meters) along the
         /// sinusoidal curve from the River struct. These serve as GUIDE positions for
-        /// Phase 2's GetRiverWeight()-based channel detection — the actual channel center
+        /// Phase 2's GetRiverWeight()-based channel detection - the actual channel center
         /// and width are refined on the main thread by querying the real river data.
         /// 
         /// Uses the same sinusoidal curve formula as vanilla WorldGenerator:
@@ -1301,7 +1301,7 @@ namespace VerdantsAscent.Water.Core
             float perpX = -normZ;
             float perpZ = normX;
 
-            // Use dense sampling — every RiverSampleStep meters
+            // Use dense sampling - every RiverSampleStep meters
             float stepSize = RiverSampleStep;
             if (stepSize < 1f) stepSize = 1f;
 
@@ -1331,7 +1331,7 @@ namespace VerdantsAscent.Water.Core
                 float worldX = baseX + perpX * curveOffset;
                 float worldZ = baseZ + perpZ * curveOffset;
 
-                // Width hint from the River struct — Phase 2 will refine using GetRiverWeight
+                // Width hint from the River struct - Phase 2 will refine using GetRiverWeight
                 float widthT = 0.5f + 0.5f * (float)Math.Sin(distAlongPath * 0.1f);
                 float width = river.widthMin + (river.widthMax - river.widthMin) * widthT;
 
@@ -1362,7 +1362,7 @@ namespace VerdantsAscent.Water.Core
         /// Computes lake disk positions as a grid of candidate points.
         /// Actual terrain sampling and extent detection happens on the main thread
         /// in SampleLakeTerrainCoroutine since it needs Unity API.
-        /// Pure math — background thread safe.
+        /// Pure math - background thread safe.
         /// </summary>
         private static ComputedPath ComputeLakePath(Vector2 lakeCenter, float maxDepth, LiquidType liquidType)
         {
@@ -1425,7 +1425,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region Terrain Sampling (Main Thread Only) — Drop-To-Terrain
+        #region Terrain Sampling (Main Thread Only) - Drop-To-Terrain
 
         /// <summary>
         /// Gets terrain height at an XZ position using WorldGenerator.GetHeight().
@@ -1452,7 +1452,7 @@ namespace VerdantsAscent.Water.Core
 
         #endregion
 
-        #region River/Lake Surface — Simple Drop-To-Terrain
+        #region River/Lake Surface - Simple Drop-To-Terrain
 
         /// <summary>
         /// Height offset above the riverbed for the water surface (meters).
@@ -1640,10 +1640,10 @@ namespace VerdantsAscent.Water.Core
         /// 
         /// For heightmap-detected lakes, the fill level is already set by BCHeightmapWaterDetector.
         /// For vanilla lakes, we determine the fill level dynamically:
-        ///   1. Sample terrain at the center — this is the lake bed
-        ///   2. Sample terrain at each ring point — terrain that rises above center is the bank
-        ///   3. Fill level = lowest bank terrain - margin — fill up to the lip
-        ///   4. Validate flat fill — if water would spill over >25% of banks, skip it
+        ///   1. Sample terrain at the center - this is the lake bed
+        ///   2. Sample terrain at each ring point - terrain that rises above center is the bank
+        ///   3. Fill level = lowest bank terrain - margin - fill up to the lip
+        ///   4. Validate flat fill - if water would spill over >25% of banks, skip it
         ///   5. Only place disks where terrain is below the fill level
         /// 
         /// Lakes, puddles, and springs are only filled if the water level can remain
@@ -1679,7 +1679,7 @@ namespace VerdantsAscent.Water.Core
 
                 // Step 3: Find the bank height by looking at the outermost ring points.
                 // The outermost points (last LakeScanRays entries) represent the lake boundary.
-                // The lowest bank terrain tells us where water would "spill over" — that's the fill level.
+                // The lowest bank terrain tells us where water would "spill over" - that's the fill level.
                 float lowestBankY = float.MaxValue;
                 int outerRingStart = path.Points.Length - LakeScanRays;
                 if (outerRingStart < 1) outerRingStart = 1;
@@ -1704,7 +1704,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 else
                 {
-                    // No clear bank found — this is likely a coastal area at sea level.
+                    // No clear bank found - this is likely a coastal area at sea level.
                     // Use the global water level as fallback.
                     fillLevel = waterLevel;
                 }
@@ -1713,13 +1713,13 @@ namespace VerdantsAscent.Water.Core
                 // (otherwise there's no depression to fill)
                 if (fillLevel <= centerTerrainY + 0.2f)
                 {
-                    // No real depression here — skip this lake entirely
+                    // No real depression here - skip this lake entirely
                     path.Points = new PathPoint[0];
                     return;
                 }
             }
 
-            // Step 4: Validate flat fill — check ALL banks hold the water.
+            // Step 4: Validate flat fill - check ALL banks hold the water.
             // If the fill level would spill over any bank (terrain at bank is below
             // fill level), this isn't a valid containment. Skip unless the spill
             // point connects to a known river/stream (handled via combiner overlap).
@@ -1733,7 +1733,7 @@ namespace VerdantsAscent.Water.Core
                         spillCount++;
                 }
                 // If more than 25% of bank samples are below fill level,
-                // the depression doesn't contain water — skip it.
+                // the depression doesn't contain water - skip it.
                 float spillRatio = (float)spillCount / LakeScanRays;
                 if (spillRatio > 0.25f)
                 {

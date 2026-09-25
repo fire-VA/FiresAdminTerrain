@@ -99,7 +99,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 _drawSpeed = Mathf.Clamp(value, 0.05f, 1f);
                 PlayerPrefs.SetFloat(PREF_DRAW_SPEED, _drawSpeed);
                 PlayerPrefs.Save();
-                FiresLogger.LogInfo($"[TileBrushModes] DrawSpeed → {_drawSpeed:F2}");
+                FiresLogger.LogVerbose($"[TileBrushModes] DrawSpeed → {_drawSpeed:F2}");
             }
         }
 

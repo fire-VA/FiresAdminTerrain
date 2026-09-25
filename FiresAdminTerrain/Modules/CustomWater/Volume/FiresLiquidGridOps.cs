@@ -22,8 +22,8 @@ namespace VerdantsAscent.Water.Core
             AccessTools.FieldRefAccess<LiquidVolume, List<float>>("m_depths");
         internal static readonly AccessTools.FieldRef<LiquidVolume, List<float>> Heights =
             AccessTools.FieldRefAccess<LiquidVolume, List<float>>("m_heights");
-        internal static readonly AccessTools.FieldRef<LiquidVolume, Mutex> MeshDataLock =
-            AccessTools.FieldRefAccess<LiquidVolume, Mutex>("m_meshDataLock");
+        internal static readonly AccessTools.FieldRef<LiquidVolume, object> MeshDataLock =
+            AccessTools.FieldRefAccess<LiquidVolume, object>("m_meshDataLock");
         internal static readonly AccessTools.FieldRef<LiquidVolume, bool> Dirty =
             AccessTools.FieldRefAccess<LiquidVolume, bool>("m_dirty");
         internal static readonly AccessTools.FieldRef<LiquidVolume, bool> NeedsSaving =
@@ -113,7 +113,7 @@ namespace VerdantsAscent.Water.Core
             float r2 = radius * radius;
             fraction = Mathf.Clamp01(fraction);
 
-            mutex.WaitOne();
+            System.Threading.Monitor.Enter(mutex);
             try
             {
                 for (int z = 0; z < num; z++)
@@ -142,7 +142,7 @@ namespace VerdantsAscent.Water.Core
             }
             finally
             {
-                mutex.ReleaseMutex();
+                System.Threading.Monitor.Exit(mutex);
             }
             return removed;
         }

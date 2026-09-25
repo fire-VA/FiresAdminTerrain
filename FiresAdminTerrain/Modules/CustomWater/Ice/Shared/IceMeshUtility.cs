@@ -174,7 +174,7 @@ namespace VerdantsAscent.Water.Ice
         }
 
         /// <summary>
-        /// Projects a point onto the line segment (a?b) and returns the closest point.
+        /// Projects a point onto the line segment (a->b) and returns the closest point.
         /// </summary>
         public static Vector2 ProjectOntoSegment(float px, float pz, float ax, float az, float bx, float bz)
         {

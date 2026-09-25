@@ -45,6 +45,14 @@ namespace VerdantsAscent.Water.Core
 
         public static bool IsRegistered => _registered && _prefab != null;
 
+        // Registered template, for callers that need their OWN spawn shape
+        // rather than Spawn()'s basin-integrated pour (the generated-water
+        // backend seeds its grid directly). Instantiate it with the round-74
+        // pattern — flip the template inactive so the clone is born inactive
+        // at its real position — or the ZDO registers at world origin and
+        // ZNetScene's zone sweep destroys it within a tick.
+        public static GameObject Template => _prefab;
+
         // Values from the vanilla `water_liquid` material dump
         // (Yoink/c4210710/Materials/water_liquid.txt) — used only if the
         // real material asset can't be found at runtime.
@@ -80,7 +88,7 @@ namespace VerdantsAscent.Water.Core
                 && !ZNetScene.instance.m_namedPrefabs.ContainsKey(hash))
             {
                 ZNetScene.instance.m_namedPrefabs[hash] = _prefab;
-                Debug.Log($"[FiresLiquidWater] Re-inserted cached '{PrefabName}' into new ZNetScene dict.");
+                FiresLogger.LogInfo($"[FiresLiquidWater] Re-inserted cached '{PrefabName}' into new ZNetScene dict.");
                 _registered = true;
                 return true;
             }
@@ -133,12 +141,12 @@ namespace VerdantsAscent.Water.Core
                 var source = ZNetScene.instance.GetPrefab(SourcePrefabName);
                 if (source == null)
                 {
-                    Debug.LogError($"[FiresLiquidWater] Neither bundle prefab nor '{SourcePrefabName}' available; cannot register.");
+                    FiresLogger.LogError($"[FiresLiquidWater] Neither bundle prefab nor '{SourcePrefabName}' available; cannot register.");
                     return false;
                 }
                 if (source.GetComponentInChildren<LiquidVolume>(true) == null)
                 {
-                    Debug.LogError($"[FiresLiquidWater] '{SourcePrefabName}' has no LiquidVolume component?!");
+                    FiresLogger.LogError($"[FiresLiquidWater] '{SourcePrefabName}' has no LiquidVolume component?!");
                     return false;
                 }
 
@@ -179,12 +187,12 @@ namespace VerdantsAscent.Water.Core
                     {
                         string oldShader = r.sharedMaterial != null ? r.sharedMaterial.shader?.name : "NULL";
                         r.sharedMaterial = born;
-                        Debug.Log($"[FiresLiquidWater] template renderer '{r.name}' bound {oldShader} → {born.name} ({born.shader?.name}) at registration.");
+                        FiresLogger.LogInfo($"[FiresLiquidWater] template renderer '{r.name}' bound {oldShader} → {born.name} ({born.shader?.name}) at registration.");
                     }
                 }
                 else
                 {
-                    Debug.LogWarning("[FiresLiquidWater] No pour material available at registration — bundle material left as-is (may render magenta).");
+                    FiresLogger.LogWarning("[FiresLiquidWater] No pour material available at registration — bundle material left as-is (may render magenta).");
                 }
             }
 
@@ -214,7 +222,7 @@ namespace VerdantsAscent.Water.Core
             _prefab = clone;
             _registered = true;
 
-            Debug.Log($"[FiresLiquidWater] Registered '{PrefabName}' from {sourceDesc} " +
+            FiresLogger.LogInfo($"[FiresLiquidWater] Registered '{PrefabName}' from {sourceDesc} " +
                 $"(grid width={lv.m_width} scale={lv.m_scale} maxDepth={lv.m_maxDepth} viscocity={lv.m_viscocity} " +
                 $"defaultVolume={lv.m_initialVolume} defaultArea={lv.m_initialArea}).");
             return true;
@@ -253,7 +261,7 @@ namespace VerdantsAscent.Water.Core
                         && mat.shader == liveTarShader
                         && mat.renderQueue >= 2500)
                     {
-                        Debug.Log($"[FiresLiquidWater] Found REAL vanilla 'water_liquid' (live Custom/Tar instance, queue={mat.renderQueue}).");
+                        FiresLogger.LogInfo($"[FiresLiquidWater] Found REAL vanilla 'water_liquid' (live Custom/Tar instance, queue={mat.renderQueue}).");
                         return mat;
                     }
                 }
@@ -269,7 +277,7 @@ namespace VerdantsAscent.Water.Core
             }
             if (rebuildSrc == null || rebuildSrc.shader == null)
             {
-                Debug.LogWarning("[FiresLiquidWater] No live tar material to rebuild from — keeping current look.");
+                FiresLogger.LogWarning("[FiresLiquidWater] No live tar material to rebuild from — keeping current look.");
                 return null;
             }
 
@@ -278,7 +286,7 @@ namespace VerdantsAscent.Water.Core
             if (rebuilt.HasProperty("_Glossiness")) rebuilt.SetFloat("_Glossiness", WATER_LIQUID_GLOSS);
             if (rebuilt.HasProperty("_Metallic")) rebuilt.SetFloat("_Metallic", 0f);
             if (rebuilt.HasProperty("_BumpScale")) rebuilt.SetFloat("_BumpScale", WATER_LIQUID_BUMPSCALE);
-            Debug.Log($"[FiresLiquidWater] Rebuilt water_liquid look from LIVE tar material ({rebuilt.shader?.name} queue={rebuilt.renderQueue}).");
+            FiresLogger.LogInfo($"[FiresLiquidWater] Rebuilt water_liquid look from LIVE tar material ({rebuilt.shader?.name} queue={rebuilt.renderQueue}).");
             return rebuilt;
         }
 
@@ -312,7 +320,7 @@ namespace VerdantsAscent.Water.Core
             if (merge != null)
             {
                 merge.AddSource(center, radius, center.y);
-                Debug.Log($"[FiresLiquidWater] spring at ({center.x:F1},{center.y:F1},{center.z:F1}) MERGED into existing pour '{merge.name}'.");
+                FiresLogger.LogInfo($"[FiresLiquidWater] spring at ({center.x:F1},{center.y:F1},{center.z:F1}) MERGED into existing pour '{merge.name}'.");
                 return merge.gameObject;
             }
             return Spawn(center, radius, 1f, springRate: 1f, bankOffset: bankOffset);
@@ -377,7 +385,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (!IsRegistered && !Ensure())
             {
-                Debug.LogError("[FiresLiquidWater] Spawn failed — prefab not registered.");
+                FiresLogger.LogError("[FiresLiquidWater] Spawn failed — prefab not registered.");
                 return null;
             }
 
@@ -439,7 +447,7 @@ namespace VerdantsAscent.Water.Core
                 5f,
                 Mathf.PI * radius * radius * lvPrefab.m_maxDepth);
             float depth = Mathf.Max(0.5f, deepest);
-            Debug.Log($"[FiresLiquidWater] Basin integration: {wetSamples}/{samples} samples below fill, " +
+            FiresLogger.LogInfo($"[FiresLiquidWater] Basin integration: {wetSamples}/{samples} samples below fill, " +
                 $"basin={basinVolume:F0}m³ deepest={deepest:F1}m → pouring {volume:F0}m³ (×{Mathf.Max(0.1f, volumeMultiplier):F1}).");
 
             // Round-74 — THE DESTROY BUG, caught by the ResetZDO tracer:
@@ -511,7 +519,7 @@ namespace VerdantsAscent.Water.Core
             string zdoInfo = nv != null && nv.GetZDO() != null
                 ? $"zdo={nv.GetZDO().m_uid} zdoPos={nv.GetZDO().GetPosition()}"
                 : "zdo=NONE";
-            Debug.Log($"[FiresLiquidWater] Spawned pour at ({center.x:F1},{groundY:F1},{center.z:F1}) fillY={center.y:F1} | " +
+            FiresLogger.LogInfo($"[FiresLiquidWater] Spawned pour at ({center.x:F1},{groundY:F1},{center.z:F1}) fillY={center.y:F1} | " +
                 $"r={radius:F1} depth={depth:F1} volume={volume:F0}m³ initialArea={area} cells " +
                 $"(grid {lv.m_width}x{lv.m_width} @ {lv.m_scale}m = {lv.m_width * lv.m_scale:F0}m extent) | {zdoInfo}");
             return go;
@@ -546,6 +554,7 @@ namespace VerdantsAscent.Water.Core
                     if (oceanMat.HasProperty(tp) && mat.HasProperty(tp))
                         mat.SetTexture(tp, oceanMat.GetTexture(tp));
             }
+            ApplyFiresWaterNormals(mat);   // ours over vanilla's creased ocean normals
             var hdFoam = GetFiresFoamHD();
             if (hdFoam != null)
             {
@@ -593,6 +602,7 @@ namespace VerdantsAscent.Water.Core
                 // Round-85 — override the pixelated vanilla foam with the HD
                 // baked foam (2K seamless) on all three foam layers; the shader's
                 // per-layer tiling/speed still differentiates them.
+                ApplyFiresWaterNormals(mat);   // ours over vanilla's creased ocean normals
                 var hdFoam = GetFiresFoamHD();
                 if (hdFoam != null)
                 {
@@ -612,13 +622,18 @@ namespace VerdantsAscent.Water.Core
                 // the user can tune in-game; whatever they land on becomes the
                 // baked default.
                 FiresLiquidConfig.Apply(mat);
-                Debug.Log($"[FiresLiquidWater] built Custom/FiresLiquid material (queue={mat.renderQueue}).");
+                FiresLogger.LogInfo($"[FiresLiquidWater] built Custom/FiresLiquid material (queue={mat.renderQueue}).");
                 return mat;
             }
 
-            // Fallback — FiresLiquid not in the bundle yet: clone the FiresWater
-            // ocean wrap with liquid-grid + stencil bypass (round-77/78 path).
-            Debug.LogWarning("[FiresLiquidWater] Custom/FiresLiquid shader not found (old tossinshade bundle?) — falling back to FiresWater wrap.");
+            // Fallback — clone the FiresWater ocean wrap with liquid-grid + stencil bypass
+            // (round-77/78 path). Only a STALE BUNDLE is worth a warning: FiresTossinShade is a
+            // client-only mod, so on a dedicated server the shader is absent by design and a
+            // warning there just sends log triage after a bundle that is fine.
+            if (FiresCore.Services.WaterShaderBridge.HasWrapper)
+                FiresLogger.LogWarning("[FiresLiquidWater] Custom/FiresLiquid missing even though FiresTossinShade is loaded — stale tossinshade bundle? Falling back to FiresWater wrap.");
+            else
+                FiresLogger.LogVerbose("[FiresLiquidWater] FiresTossinShade not loaded (expected on a dedicated server) — using the FiresWater wrap.");
             if (oceanMat == null) return null;
             if (oceanMat.shader == null || !oceanMat.shader.name.Contains("FiresWater")) return null;
             var wrap = new Material(oceanMat) { name = "FiresWater_LiquidPour" };
@@ -724,21 +739,17 @@ namespace VerdantsAscent.Water.Core
             return best;
         }
 
-        // Register live pours (spawned AND restored-from-ZDO) via LiquidVolume.Awake.
-        [HarmonyPatch(typeof(LiquidVolume), "Awake")]
-        private static class LiquidVolume_Awake_RegisterPour
+        // Register live pours (spawned AND restored-from-ZDO), from FAT's one
+        // LiquidVolume.Awake hook (FatVanillaHooks).
+        internal static void OnLiquidVolumeAwake(LiquidVolume volume)
         {
-            [HarmonyPostfix]
-            private static void Postfix(LiquidVolume __instance)
+            try
             {
-                try
-                {
-                    if (__instance != null &&
-                        __instance.transform.root.gameObject.name.StartsWith(PrefabName))
-                        RegisterPour(__instance);
-                }
-                catch { }
+                if (volume != null &&
+                    volume.transform.root.gameObject.name.StartsWith(PrefabName))
+                    RegisterPour(volume);
             }
+            catch { }
         }
 
         // Round-84 — resolve Custom/FiresLiquid. Shader.Find MISSES it: the
@@ -763,7 +774,7 @@ namespace VerdantsAscent.Water.Core
                     {
                         if (sh != null && sh.name == "Custom/FiresLiquid")
                         {
-                            Debug.Log($"[FiresLiquidWater] loaded Custom/FiresLiquid from bundle '{b.name}' (Shader.Find missed it — not referenced).");
+                            FiresLogger.LogInfo($"[FiresLiquidWater] loaded Custom/FiresLiquid from bundle '{b.name}' (Shader.Find missed it — not referenced).");
                             return s_firesLiquidShader = sh;
                         }
                     }
@@ -778,6 +789,49 @@ namespace VerdantsAscent.Water.Core
         // it, so load it explicitly from the loaded bundles. Cached on success
         // (failures aren't cached — the bundle may mount after an early call).
         private static Texture2D s_firesFoamHD;
+        // ── OUR OWN WATER NORMALS ────────────────────────────────────────────
+        // _Normal / _NormalFine were copied from VANILLA's ocean material, the
+        // same way the foam was before FiresFoamHD replaced it — and they carry
+        // the same problem: hard creased lines that read as faceted geometry on
+        // a river surface rather than ripple. water_nrm / water_nrm_detail are
+        // ours (the maps the sandbox water was authored against), shipped in the
+        // tossinshade bundle beside the shaders. Same lookup as the HD foam, and
+        // the same fallback: no bundle texture, keep whatever vanilla gave us.
+        private static Texture2D s_firesWaterNrm, s_firesWaterNrmFine;
+
+        internal static Texture2D GetFiresWaterNormal(bool fine)
+        {
+            if (fine && s_firesWaterNrmFine != null) return s_firesWaterNrmFine;
+            if (!fine && s_firesWaterNrm != null) return s_firesWaterNrm;
+            string want = fine ? "water_nrm_detail" : "water_nrm";
+            foreach (var b in AssetBundle.GetAllLoadedAssetBundles())
+            {
+                if (b == null) continue;
+                try
+                {
+                    foreach (var t in b.LoadAllAssets<Texture2D>())
+                        if (t != null && t.name == want)
+                        {
+                            FiresLogger.LogInfo($"[FiresLiquidWater] loaded water normal '{want}' ({t.width}x{t.height}) from bundle '{b.name}'.");
+                            return fine ? (s_firesWaterNrmFine = t) : (s_firesWaterNrm = t);
+                        }
+                }
+                catch { /* some bundles can't enumerate — skip */ }
+            }
+            return null;
+        }
+
+        // Applied wherever the foam override is, so creation and refresh agree.
+        internal static void ApplyFiresWaterNormals(Material mat)
+        {
+            if (mat == null) return;
+            if (FiresLiquidConfig.UseFiresNormals != null && !FiresLiquidConfig.UseFiresNormals.Value) return;
+            var n = GetFiresWaterNormal(false);
+            var nf = GetFiresWaterNormal(true);
+            if (n != null && mat.HasProperty("_Normal")) mat.SetTexture("_Normal", n);
+            if (nf != null && mat.HasProperty("_NormalFine")) mat.SetTexture("_NormalFine", nf);
+        }
+
         internal static Texture2D GetFiresFoamHD()
         {
             if (s_firesFoamHD != null) return s_firesFoamHD;
@@ -789,7 +843,7 @@ namespace VerdantsAscent.Water.Core
                     foreach (var t in b.LoadAllAssets<Texture2D>())
                         if (t != null && t.name == "FiresFoamHD")
                         {
-                            Debug.Log($"[FiresLiquidWater] loaded HD foam 'FiresFoamHD' ({t.width}x{t.height}) from bundle '{b.name}'.");
+                            FiresLogger.LogInfo($"[FiresLiquidWater] loaded HD foam 'FiresFoamHD' ({t.width}x{t.height}) from bundle '{b.name}'.");
                             return s_firesFoamHD = t;
                         }
                 }
@@ -812,16 +866,16 @@ namespace VerdantsAscent.Water.Core
                     : FindOrBuildWaterLiquidMaterial(go);
                 if (mat == null)
                 {
-                    Debug.LogWarning($"[FiresLiquidWater] ApplyPourMaterial: no {(firesWater ? "FiresWater" : "water_liquid")} material available — keeping current.");
+                    FiresLogger.LogWarning($"[FiresLiquidWater] ApplyPourMaterial: no {(firesWater ? "FiresWater" : "water_liquid")} material available — keeping current.");
                     return;
                 }
                 foreach (var r in go.GetComponentsInChildren<MeshRenderer>(true))
                     r.sharedMaterial = mat;
-                Debug.Log($"[FiresLiquidWater] Pour '{go.name}' skinned with {mat.name} ({mat.shader?.name}) queue={mat.renderQueue}");
+                FiresLogger.LogInfo($"[FiresLiquidWater] Pour '{go.name}' skinned with {mat.name} ({mat.shader?.name}) queue={mat.renderQueue}");
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[FiresLiquidWater] ApplyPourMaterial threw: {ex.Message}");
+                FiresLogger.LogWarning($"[FiresLiquidWater] ApplyPourMaterial threw: {ex.Message}");
             }
         }
 
@@ -839,7 +893,7 @@ namespace VerdantsAscent.Water.Core
                 ApplyPourMaterial(root, UseFiresWaterShader);
                 n++;
             }
-            Debug.Log($"[FiresLiquidWater] ApplyShaderToLivePours firesWater={UseFiresWaterShader} → {n} pour(s)");
+            FiresLogger.LogInfo($"[FiresLiquidWater] ApplyShaderToLivePours firesWater={UseFiresWaterShader} → {n} pour(s)");
             return n;
         }
 
@@ -901,14 +955,6 @@ namespace VerdantsAscent.Water.Core
         {
             [HarmonyPostfix]
             private static void Postfix(LiquidVolume __instance) => ExpandLiquidBounds(__instance);
-        }
-
-        [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-        private static class ZNetScene_Awake_EnsureLiquidWaterPrefab
-        {
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.Last)]
-            private static void Postfix() => Ensure();
         }
     }
 }

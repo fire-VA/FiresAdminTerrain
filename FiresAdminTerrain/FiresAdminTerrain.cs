@@ -1,4 +1,5 @@
-using BepInEx;
+﻿using BepInEx;
+using FiresCore.Sync;
 using HarmonyLib;
 using System;
 using System.Collections;
@@ -28,12 +29,19 @@ namespace VerdantsAscent
     [BepInDependency("org.bepinex.plugins.serversync",     BepInDependency.DependencyFlags.SoftDependency)]
     [BepInDependency("org.bepinex.plugins.worldeditcommands", BepInDependency.DependencyFlags.SoftDependency)]
     [BepInDependency("org.bepinex.plugins.serverdevcommands", BepInDependency.DependencyFlags.SoftDependency)]
-    [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, BepInDependency.DependencyFlags.HardDependency)]
+    // FiresTossinShade owns the water SHADERS/bundle; FAT owns the water SYSTEM
+    // (clock, CalcWave, gen liquid). SOFT, not hard: FAT degrades to vanilla
+    // water material when FTS is absent (WaterMaterialManager). The only
+    // cross-call is via FiresUnifiedCore's WaterShaderBridge (reflection, no
+    // assembly ref), so this attribute is purely load-ordering (FTS Awake
+    // before ours, so the bridge is live when we ask) + Thunderstore metadata.
+    [BepInDependency("com.Fire.FiresTossinShade", BepInDependency.DependencyFlags.SoftDependency)]
+    [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, "0.2.55")]
     public class FiresAdminTerrain : BaseUnityPlugin
     {
         public const string PluginGUID = "com.Fire.FiresAdminTerrain";
         public const string PluginName = "FiresAdminTerrain";
-        public const string PluginVersion = "0.2.199";
+        public const string PluginVersion = "0.2.527";
 
         public static readonly Harmony harmony = new Harmony(PluginGUID);
         public static FiresAdminTerrain Instance { get; private set; }
@@ -61,11 +69,30 @@ namespace VerdantsAscent
             try { VerdantsAscent.Utilities.VAFatBanner.PrintBig(); }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[{PluginName}] VAFatBanner.PrintBig failed: {ex.Message}");
+                FiresLogger.LogWarning($"VAFatBanner.PrintBig failed: {ex.Message}");
             }
 
-            Debug.Log($"[{PluginName}] Awake() entered — version {PluginVersion}");
+            FiresLogger.LogInfo($"Awake() entered — version {PluginVersion}");
             Instance = this;
+
+            // Declared before any world loads, so the offer is ready the moment
+            // a peer connects.
+            try { VerdantsAscent.Terrain.Voxel.FiresWorldGenBase.RegisterCacheSync(); }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"WorldCacheSync registration failed: {ex.Message}");
+            }
+            try { VerdantsAscent.Terrain.Voxel.FiresSkyIslands.RegisterSync(); }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"Sky island set sync registration failed: {ex.Message} — clients will hold "
+                                       + "islands off until their wait times out.");
+            }
+            try { VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.RegisterWearGround(); }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"Wear gate registration failed: {ex.Message} — pieces on voxel ground keep vanilla's wear timing.");
+            }
 
             InstallLogFilter();
 
@@ -84,7 +111,20 @@ namespace VerdantsAscent
 
             ConfigManager.Instance.Initialize(Config);
             VerdantsAscent.Water.Core.FiresLiquidConfig.Bind(Config);   // round-84 FiresLiquid look sliders
+            VerdantsAscent.Water.Core.FiresInlandWaterConfig.Bind(Config);   // per-layer ripple controls for the inland sheet
+            VerdantsAscent.Water.Core.FiresWaterAuthority.Bind(Config); // FAT owns the wave clock + CalcWave (client+dedi)
             VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.Bind(Config); // voxel P0 prototype toggles
+            VerdantsAscent.Terrain.Zones.ZoneModeConfig.Bind(Config);
+            VerdantsAscent.Terrain.Zones.ZoneModeCoreBridge.Register();
+            VerdantsAscent.Terrain.Paint.DistantPaintCache.Bind(Config); // paint on distant-LOD terrain
+
+            ConfigManager.Instance.configPresetToLoad.SettingChanged += (_, __) => ApplySelectedPreset();
+            ConfigManager.Instance.configPresetSaveNow.SettingChanged += (_, __) => SaveNamedPreset();
+            ConfigManager.Instance.configServerPreset.SettingChanged += (_, __) => ApplyServerPreset();
+
+            FiresCore.Config.FiresConfigVisibility.MarkAdvanced(Config, ConfigManager.IsAdvancedTuning);
+            FiresCore.Config.FiresAdminConfigGate.Register(Config,
+                () => ConfigManager.Instance.configAdminOnlyTuning.Value, ConfigManager.IsAdvancedTuning);
 
             configSync = new ConfigSync(PluginGUID)
             {
@@ -95,9 +135,12 @@ namespace VerdantsAscent
             configSync.lockedConfigChanged += ConfigManager.Instance.OnConfigLockChanged;
             configSync.AddLockingConfigEntry(ConfigManager.Instance.configServerAuthority);
             configSync.AddConfigEntry(ConfigManager.Instance.configVerboseLogging);
+            configSync.AddConfigEntry(ConfigManager.Instance.configServerPreset);
+            configSync.AddConfigEntry(ConfigManager.Instance.configAdminOnlyTuning);
             configSync.AddConfigEntry(ConfigManager.Instance.configHeightCacheResolution);
             configSync.AddConfigEntry(ConfigManager.Instance.configHeightCacheSamplesPerFrame);
             configSync.AddConfigEntry(ConfigManager.Instance.configUseNewTilePersistence);
+            VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.RegisterServerAuthority(configSync);
 
             LoadAssets();
 
@@ -105,7 +148,9 @@ namespace VerdantsAscent
             // heightmap/clutter/snow work back into FAT's systems. Without this, Core env boxes still apply the
             // env/skybox atmosphere but do no terrain/biome paint (the dark-crypt case needs no terrain anyway).
             try { FiresCore.Bridge.EnvironmentBoxBridge.Register(new VerdantsAscent.Utilities.EnvironmentBoxTerrainProvider()); }
-            catch (Exception ex) { Debug.LogWarning($"[{PluginName}] env-box provider register failed: {ex.Message}"); }
+            catch (Exception ex) { FiresLogger.LogWarning($"env-box provider register failed: {ex.Message}"); }
+
+            FiresCore.Materials.TerrainMaterialCache.MaterialCaptured += OnTerrainMaterialCaptured;
 
             // Tile-restore batch tracker — starts an infinite polling
             // coroutine that emits the 🪨 TILES banner whenever a wave
@@ -163,48 +208,43 @@ namespace VerdantsAscent
         private void FinishInit()
         {
             bool isDedicatedServer = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
+            FiresCore.Logging.StatusBanner.Register("FAT", VerdantsAscent.Terrain.FatStatus.Line);
+            if (!isDedicatedServer) VerdantsAscent.Terrain.Voxel.FiresWorldMenu.Register();
 
             try
             {
-                if (!isDedicatedServer)
-                {
-                    harmony.PatchAll();
-                }
-                else
-                {
-                    int patched = 0;
-                    int skipped = 0;
-                    var assembly = Assembly.GetExecutingAssembly();
+                int applied = 0;
+                int failed = 0;
+                int skipped = 0;
+                var assembly = Assembly.GetExecutingAssembly();
 
-                    foreach (var type in assembly.GetTypes())
+                foreach (var type in AccessTools.GetTypesFromAssembly(assembly))
+                {
+                    if (isDedicatedServer && IsClientOnlyPatch(type))
                     {
-                        if (IsClientOnlyPatch(type))
-                        {
-                            skipped++;
-                            continue;
-                        }
-
-                        try
-                        {
-                            harmony.CreateClassProcessor(type).Patch();
-                            patched++;
-                        }
-                        catch (Exception ex)
-                        {
-                            if (type.GetCustomAttribute<HarmonyPatch>() != null ||
-                                type.GetCustomAttributes(typeof(HarmonyPatch), true).Length > 0)
-                            {
-                                Debug.LogWarning($"[{PluginName}] Failed to apply Harmony patch {type.FullName}: {ex.Message}");
-                            }
-                        }
+                        skipped++;
+                        continue;
                     }
 
-                    Debug.Log($"[{PluginName}] Dedicated server: patched {patched} types, skipped {skipped} client-only types");
+                    try
+                    {
+                        // HarmonyX returns null for a type without a class-level [HarmonyPatch].
+                        if (harmony.CreateClassProcessor(type).Patch() != null)
+                            applied++;
+                    }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        FiresLogger.LogWarning($"Failed to apply Harmony patch {type.FullName}: {ex.Message}");
+                    }
                 }
+
+                FiresLogger.LogInfo($"Harmony: {applied} patch class(es) applied, {failed} failed"
+                    + (skipped > 0 ? $", {skipped} client-only type(s) skipped on the dedicated server." : "."));
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[{PluginName}] harmony.PatchAll threw an exception: {ex}");
+                FiresLogger.LogError($"harmony.PatchAll threw an exception: {ex}");
             }
 
             // Initialize the legacy biome / paint / terrain RPC systems that
@@ -231,18 +271,18 @@ namespace VerdantsAscent
             // returned without throwing, 0 otherwise. Per-success
             // detail logs are verbose-only — the banner conveys the
             // aggregate count for normal loads.
-            int biomePersistOK = 0, biomePainterOK = 0, snowCmdsOK = 0, iceToolOK = 0, landSnowOK = 0;
+            int biomePersistOK = 0, biomePainterOK = 0, iceToolOK = 0, landSnowOK = 0;
 
             try
             {
                 VerdantsAscent.Terrain.Biome.BiomeFilePersistence.Initialize();
                 biomePersistOK = 1;
                 if (VerdantsAscent.Utilities.VAFatLoadSummary.VerboseEnabled)
-                    Debug.Log($"[{PluginName}] BiomeFilePersistence initialized.");
+                    FiresLogger.LogInfo($"BiomeFilePersistence initialized.");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[{PluginName}] BiomeFilePersistence.Initialize threw: {ex.Message}");
+                FiresLogger.LogError($"BiomeFilePersistence.Initialize threw: {ex.Message}");
             }
 
             if (!isDedicatedServer)
@@ -252,27 +292,11 @@ namespace VerdantsAscent
                     VerdantsAscent.Terrain.Biome.BiomeOverlayPainter.RegisterCommands();
                     biomePainterOK = 1;
                     if (VerdantsAscent.Utilities.VAFatLoadSummary.VerboseEnabled)
-                        Debug.Log($"[{PluginName}] BiomeOverlayPainter console commands registered.");
+                        FiresLogger.LogInfo($"BiomeOverlayPainter console commands registered.");
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[{PluginName}] BiomeOverlayPainter.RegisterCommands threw: {ex.Message}");
-                }
-
-                // D6 — register /snow_* console commands. Previously
-                // SnowCommands.RegisterCommands() existed but was never
-                // called from anywhere; every snow command silently
-                // failed to bind.
-                try
-                {
-                    VerdantsAscent.Terrain.Snow.SnowCommands.RegisterCommands();
-                    snowCmdsOK = 1;
-                    if (VerdantsAscent.Utilities.VAFatLoadSummary.VerboseEnabled)
-                        Debug.Log($"[{PluginName}] SnowCommands console commands registered.");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[{PluginName}] SnowCommands.RegisterCommands threw: {ex.Message}");
+                    FiresLogger.LogError($"BiomeOverlayPainter.RegisterCommands threw: {ex.Message}");
                 }
 
                 // 2026-05-25 round-19: WIRE UP the LandIce / FloatingIce
@@ -289,11 +313,11 @@ namespace VerdantsAscent
                     VerdantsAscent.Water.Tools.IcePlacementTool.Initialize();
                     iceToolOK = 1;
                     if (VerdantsAscent.Utilities.VAFatLoadSummary.VerboseEnabled)
-                        Debug.Log($"[{PluginName}] IcePlacementTool + LandIce/FloatingIce commands registered.");
+                        FiresLogger.LogInfo($"IcePlacementTool + LandIce/FloatingIce commands registered.");
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[{PluginName}] IcePlacementTool.Initialize threw: {ex.Message}");
+                    FiresLogger.LogError($"IcePlacementTool.Initialize threw: {ex.Message}");
                 }
 
                 try
@@ -301,11 +325,11 @@ namespace VerdantsAscent
                     VerdantsAscent.Water.Tools.LandSnowCommands.Initialize();
                     landSnowOK = 1;
                     if (VerdantsAscent.Utilities.VAFatLoadSummary.VerboseEnabled)
-                        Debug.Log($"[{PluginName}] LandSnowCommands registered (terrain-anchor snow, no water).");
+                        FiresLogger.LogInfo($"LandSnowCommands registered (terrain-anchor snow, no water).");
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[{PluginName}] LandSnowCommands.Initialize threw: {ex.Message}");
+                    FiresLogger.LogError($"LandSnowCommands.Initialize threw: {ex.Message}");
                 }
             }
 
@@ -315,11 +339,13 @@ namespace VerdantsAscent
             // box. Per-line details remain available via the verbose
             // gate.
             VerdantsAscent.Utilities.VAFatLoadSummary.EmitCommands(
-                biomePersistence: biomePersistOK,
-                biomePainter: biomePainterOK,
-                snowCmds: snowCmdsOK,
-                iceTool: iceToolOK,
-                landSnow: landSnowOK);
+                dedicated: isDedicatedServer,
+                commandSetsRegistered: biomePainterOK + iceToolOK + landSnowOK,
+                commandSets: 4,
+                biomePersistence: biomePersistOK == 1);
+
+            try { VerdantsAscent.Utilities.FatHelpContent.Register(); }
+            catch (Exception ex) { FiresLogger.LogWarning($"Help registration failed: {ex.Message}"); }
 
             // Compact "ready" banner — small floating island with
             // brand panel. Deferred to WORLD LOAD time (when
@@ -332,27 +358,21 @@ namespace VerdantsAscent
 
         // 📡 RPCs mini-banner — one visual summary of the session's RPC
         // handler registrations (ConfigSync + RegionScrubberRPC +
-        // TileBrushRPC). All three register from their own ZNet.Awake
-        // postfixes; Priority.Last guarantees this postfix runs after
-        // every registration so the counts are real. Replaces the
-        // per-system "Registered N handlers" lines (now verbose-gated).
-        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Awake))]
-        private static class ZNet_Awake_EmitRpcSummary
+        // TileBrushRPC), from the Priority.Last part of FAT's one ZNet.Awake
+        // hook (FatVanillaHooks), after every registration, so the counts are
+        // real. Replaces the per-system "Registered N handlers" lines.
+        internal static void EmitRpcSummary()
         {
-            [HarmonyPriority(Priority.Last)]
-            private static void Postfix()
+            try
             {
-                try
-                {
-                    VerdantsAscent.Utilities.VAFatLoadSummary.EmitRpcs(
-                        configSync: ConfigSync.configSyncs.Count,
-                        scrubber: VerdantsAscent.Terrain.Lifecycle.RegionScrubberRPC.RegisteredHandlers,
-                        tileBrush: TileBrushRPC.RegisteredHandlers);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[{PluginName}] RPC summary banner failed: {ex.Message}");
-                }
+                VerdantsAscent.Utilities.VAFatLoadSummary.EmitRpcs(
+                    configSync: ConfigSync.configSyncs.Contains(Instance.configSync) ? 1 : 0,
+                    scrubber: VerdantsAscent.Terrain.Lifecycle.RegionScrubberRPC.RegisteredHandlers,
+                    tileBrush: TileBrushRPC.RegisteredHandlers);
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"RPC summary banner failed: {ex.Message}");
             }
         }
 
@@ -373,16 +393,70 @@ namespace VerdantsAscent
             try { VerdantsAscent.Utilities.VAFatBanner.Print(); }
             catch (Exception ex)
             {
-                Debug.Log($"[{PluginName}] mod loaded. (banner failed: {ex.Message})");
+                FiresLogger.LogInfo($"mod loaded. (banner failed: {ex.Message})");
             }
+        }
+
+        private bool m_applyingPreset;
+
+        private void ApplySelectedPreset()
+        {
+            if (m_applyingPreset) return;
+            string presetName = ConfigManager.Instance.configPresetToLoad.Value;
+            if (string.IsNullOrEmpty(presetName) || presetName == ConfigManager.NoPresetOption) return;
+
+            m_applyingPreset = true;
+            try
+            {
+                int changed = FiresCore.Config.FiresConfigPresets.ApplyPreset(
+                    ConfigManager.PresetModName, Config, presetName);
+                FiresLogger.LogInfo($"Preset '{presetName}' applied ({changed} setting(s) changed).");
+            }
+            finally
+            {
+                m_applyingPreset = false;
+            }
+        }
+
+        /// <summary>Applies the preset the SERVER names. Skipped on the server itself, where it is authored.</summary>
+        private void ApplyServerPreset()
+        {
+            string presetName = ConfigManager.Instance.configServerPreset.Value;
+            if (string.IsNullOrWhiteSpace(presetName)) return;
+            if (ZNet.instance != null && ZNet.instance.IsServer()) return;
+
+            if (m_applyingPreset) return;
+            m_applyingPreset = true;
+            try
+            {
+                int changed = FiresCore.Config.FiresConfigPresets.ApplyPreset(
+                    ConfigManager.PresetModName, Config, presetName);
+                FiresLogger.LogInfo($"Server preset '{presetName}' applied ({changed} setting(s) changed).");
+            }
+            finally
+            {
+                m_applyingPreset = false;
+            }
+        }
+
+        private void SaveNamedPreset()
+        {
+            if (!ConfigManager.Instance.configPresetSaveNow.Value) return;
+
+            FiresCore.Config.FiresConfigPresets.SaveCurrentValuesAsPreset(
+                ConfigManager.PresetModName, Config, ConfigManager.Instance.configPresetSaveName.Value);
+            ConfigManager.Instance.configPresetSaveNow.Value = false;
         }
 
         private void OnDestroy()
         {
+            FiresCore.Materials.TerrainMaterialCache.MaterialCaptured -= OnTerrainMaterialCaptured;
+            FiresCore.Materials.TerrainMaterialCache.SetShaderOverride(null);
+
             if (assetBundle != null)
             {
                 try { assetBundle.Unload(true); }
-                catch (Exception ex) { Debug.LogError($"[{PluginName}] AssetBundle unload error: {ex}"); }
+                catch (Exception ex) { FiresLogger.LogError($"AssetBundle unload error: {ex}"); }
                 finally { assetBundle = null; }
             }
 
@@ -402,6 +476,16 @@ namespace VerdantsAscent
 
         public AssetBundle GetAssetBundle() => assetBundle;
 
+        // A capture (or va_terrain_recapture) lands after tiles, voxel chunk
+        // views and live FarQuilt tiles already hold the fallback or the old
+        // instance; move them all now so no two instances meet at a border.
+        private static void OnTerrainMaterialCaptured(Material material)
+        {
+            TileMeshRenderer.UpgradeAllRenderersToCachedMaterial();
+            VerdantsAscent.Terrain.Voxel.VoxelWorld.RefreshAllViewMaterials(material);
+            VerdantsAscent.Terrain.Voxel.FarQuilt.RefreshAllTileMaterials(material);
+        }
+
         private void LoadAssets()
         {
             if (assetBundle != null) return;
@@ -411,10 +495,10 @@ namespace VerdantsAscent
                 assetBundle = GetAssetBundleFromResources("adminterrain");
                 if (assetBundle == null)
                 {
-                    Debug.LogWarning($"[{PluginName}] Embedded asset bundle 'adminterrain' not found — terrain/water bundle-dependent features will be unavailable.");
+                    FiresLogger.LogWarning($"Embedded asset bundle 'adminterrain' not found — terrain/water bundle-dependent features will be unavailable.");
                     return;
                 }
-                Debug.Log($"[{PluginName}] Loaded asset bundle: {assetBundle.name}");
+                FiresLogger.LogInfo($"Loaded asset bundle: {assetBundle.name}");
 
                 // The voxel-mesh terrain shader (Custom/FiresVoxelHeightmap):
                 // vanilla layer logic with voxel-proper projection — ceilings
@@ -425,17 +509,17 @@ namespace VerdantsAscent
                 // identical to vanilla by construction).
                 var voxelShader = assetBundle.LoadAsset<Shader>("FiresVoxelHeightmap");
                 if (voxelShader != null)
-                    VerdantsAscent.Terrain.Utilities.TerrainMaterialCache.SetVoxelShader(voxelShader);
+                    FiresCore.Materials.TerrainMaterialCache.SetShaderOverride(voxelShader);
                 else
-                    Debug.LogWarning($"[{PluginName}] Custom/FiresVoxelHeightmap missing from adminterrain bundle — voxel skin stays on the vanilla heightmap shader (top-down projection).");
+                    FiresLogger.LogWarning($"Custom/FiresVoxelHeightmap missing from adminterrain bundle — voxel skin stays on the vanilla heightmap shader (top-down projection).");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[{PluginName}] Asset load failed: {ex}");
+                FiresLogger.LogError($"Asset load failed: {ex}");
             }
         }
 
-        private AssetBundle GetAssetBundleFromResources(string name)
+        internal static AssetBundle GetAssetBundleFromResources(string name)
         {
             var assembly = Assembly.GetExecutingAssembly();
             var resourceName = assembly.GetManifestResourceNames()
@@ -443,14 +527,45 @@ namespace VerdantsAscent
 
             if (resourceName == null)
             {
-                Debug.LogError($"[{PluginName}] No embedded resource ending with '{name}'.");
+                FiresLogger.LogError($"No embedded resource ending with '{name}'.");
                 return null;
             }
 
             using (var stream = assembly.GetManifestResourceStream(resourceName))
             {
-                return AssetBundle.LoadFromStream(stream);
+                if (stream == null) return null;
+                using (var copy = new System.IO.MemoryStream())
+                {
+                    stream.CopyTo(copy);
+                    return AssetBundle.LoadFromMemory(copy.ToArray());
+                }
             }
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

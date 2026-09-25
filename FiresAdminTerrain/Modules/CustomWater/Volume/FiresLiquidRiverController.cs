@@ -94,9 +94,9 @@ namespace VerdantsAscent.Water.Core
             int num = _lv.m_width + 1;
             if (heights.Count != num * num) return;
 
-            mutex.WaitOne();
+            System.Threading.Monitor.Enter(mutex);
             try { Init(num, heights); }
-            finally { mutex.ReleaseMutex(); }
+            finally { System.Threading.Monitor.Exit(mutex); }
             _init = true;
 
             if (!_loggedInit)
@@ -107,7 +107,7 @@ namespace VerdantsAscent.Water.Core
                 // (the ocean material is captured by now, so the texture copy
                 // lands even if the Awake-time pass ran before capture).
                 FiresLiquidWaterPrefab.ApplyFiresLiquidSkin(gameObject);
-                Debug.Log($"[FiresLiquidRiver] init on '{name}' at {transform.position} | grid={num}x{num} sourceCells={src} fillY={m_fillY:F1} bankOffset={m_bankOffset:F1}");
+                FiresLogger.LogInfo($"[FiresLiquidRiver] init on '{name}' at {transform.position} | grid={num}x{num} sourceCells={src} fillY={m_fillY:F1} bankOffset={m_bankOffset:F1}");
             }
         }
 
@@ -177,7 +177,7 @@ namespace VerdantsAscent.Water.Core
                     float maxFill = p0.y + capRel;
                     if (src.fillY > maxFill)
                     {
-                        Debug.LogWarning($"[FiresLiquidRiver] HEALED over-bank source on '{name}': fillY {src.fillY:F1} → {maxFill:F1} (bank cap).");
+                        FiresLogger.LogWarning($"[FiresLiquidRiver] HEALED over-bank source on '{name}': fillY {src.fillY:F1} → {maxFill:F1} (bank cap).");
                         src.fillY = maxFill;
                         _sources[s] = src;
                         healed = true;
@@ -273,18 +273,18 @@ namespace VerdantsAscent.Water.Core
                 var mutex = FiresLiquidGridOps.MeshDataLock(_lv);
                 if (mutex != null)
                 {
-                    mutex.WaitOne();
+                    System.Threading.Monitor.Enter(mutex);
                     try
                     {
                         RecomputeSourceMask();
                         FiresLiquidGridOps.Dirty(_lv) = true;
                         FiresLiquidGridOps.NeedsSaving(_lv) = true;
                     }
-                    finally { mutex.ReleaseMutex(); }
+                    finally { System.Threading.Monitor.Exit(mutex); }
                 }
                 else RecomputeSourceMask();
             }
-            Debug.Log($"[FiresLiquidRiver] merged source #{_sources.Count} at {center} r={radius:F1} fillY={fillY:F1} into '{name}'.");
+            FiresLogger.LogInfo($"[FiresLiquidRiver] merged source #{_sources.Count} at {center} r={radius:F1} fillY={fillY:F1} into '{name}'.");
         }
 
         private void SaveSources()
@@ -326,7 +326,7 @@ namespace VerdantsAscent.Water.Core
                         });
                 }
             }
-            catch (System.Exception ex) { Debug.LogWarning($"[FiresLiquidRiver] LoadSources: {ex.Message}"); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresLiquidRiver] LoadSources: {ex.Message}"); }
         }
 
         private ZNetView Nview() => GetComponentInChildren<ZNetView>(true);
@@ -348,13 +348,49 @@ namespace VerdantsAscent.Water.Core
 
         // Round-84 — freeze/unfreeze the sim. Frozen = the mesh holds its
         // current shape and no flow/overflow runs (SimStep no-ops). Persisted.
+        private static readonly System.Reflection.MethodInfo s_lvSave =
+            AccessTools.Method(typeof(LiquidVolume), "Save");
+
+        // FREEZING MEANS THE SHAPE IS FINAL, SO PERSIST IT NOW.
+        //
+        // Vanilla only writes m_depths to the ZDO from CheckSave, and
+        // m_needsSaving is set in exactly one place: EvenDepth, inside
+        // UpdateLiquid (LiquidVolume:353). Freezing makes our prefix skip
+        // UpdateLiquid entirely — so nothing ever marks the volume dirty again
+        // and the depth grid is NEVER saved.
+        //
+        // On reload HaveSavedData() then finds no s_liquidData, Awake falls
+        // through to InitializeLevels(), and that pours m_initialVolume over a
+        // few cells at the GRID CENTRE. That is the whole "came back drained"
+        // bug: a frozen river restores as a puddle in the middle of its own
+        // channel. It hits hand-frozen springs and auto-poured ones alike, and
+        // the tighter the freeze follows the pour the more certain it is —
+        // m_saveInterval is 4s, so a freeze a few frames after spawning never
+        // had a save to miss.
+        private void ForceSave()
+        {
+            if (_lv == null) return;
+            try
+            {
+                var nv = Nview();
+                if (nv != null && nv.IsValid() && !nv.IsOwner()) nv.ClaimOwnership();
+                FiresLiquidGridOps.NeedsSaving(_lv) = true;
+                s_lvSave?.Invoke(_lv, null);
+            }
+            catch (System.Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresLiquidRiver] force-save on freeze failed: {ex.Message}");
+            }
+        }
+
         public void SetFrozen(bool frozen)
         {
             m_frozen = frozen;
             var nv = Nview();
             if (nv != null && nv.IsValid())
                 nv.GetZDO().Set(FiresLiquidGridOps.ZDO_SPRING_FROZEN, frozen ? 1 : 0);
-            Debug.Log($"[FiresLiquidRiver] '{name}' sim {(frozen ? "FROZEN (mesh held)" : "UNFROZEN (flowing)")}.");
+            if (frozen) ForceSave();
+            FiresLogger.LogInfo($"[FiresLiquidRiver] '{name}' sim {(frozen ? "FROZEN (mesh held)" : "UNFROZEN (flowing)")}.");
         }
 
         // MAIN-THREAD — mark grid cells within `radius` of `centerXZ` as a DAM.
@@ -375,7 +411,7 @@ namespace VerdantsAscent.Water.Core
             float r2 = radius * radius;
             int count = 0;
 
-            mutex.WaitOne();
+            System.Threading.Monitor.Enter(mutex);
             try
             {
                 for (int z = 0; z < num; z++)
@@ -392,10 +428,10 @@ namespace VerdantsAscent.Water.Core
                 FiresLiquidGridOps.Dirty(_lv) = true;
                 FiresLiquidGridOps.NeedsSaving(_lv) = true;
             }
-            finally { mutex.ReleaseMutex(); }
+            finally { System.Threading.Monitor.Exit(mutex); }
 
             if (count > 0) SaveBlocked();
-            Debug.Log($"[FiresLiquidRiver] dam +{count} cells (r={radius:F1}) on '{name}'.");
+            FiresLogger.LogInfo($"[FiresLiquidRiver] dam +{count} cells (r={radius:F1}) on '{name}'.");
             return count;
         }
 
@@ -421,7 +457,7 @@ namespace VerdantsAscent.Water.Core
                 int n = Mathf.Min(_blocked.Length, bytes.Length * 8);
                 for (int i = 0; i < n; i++) _blocked[i] = (bytes[i >> 3] & (1 << (i & 7))) != 0;
             }
-            catch (System.Exception ex) { Debug.LogWarning($"[FiresLiquidRiver] LoadBlocked: {ex.Message}"); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresLiquidRiver] LoadBlocked: {ex.Message}"); }
         }
 
         // WORKER-THREAD — the infinite source: pin every source cell to its
@@ -586,39 +622,35 @@ namespace VerdantsAscent.Water.Core
         }
 
         // ── Re-attach the controller on pours restored from ZDO after a
-        //    world/zone reload. Reads the spring params stamped at spawn.
-        [HarmonyPatch(typeof(LiquidVolume), "Awake")]
-        private static class LiquidVolume_Awake_ReattachRiver
+        //    world/zone reload, from FAT's one LiquidVolume.Awake hook
+        //    (FatVanillaHooks). Reads the spring params stamped at spawn.
+        internal static void ReattachRiver(LiquidVolume volume)
         {
-            [HarmonyPostfix]
-            private static void Postfix(LiquidVolume __instance)
+            try
             {
-                try
-                {
-                    var root = __instance.transform.root.gameObject;
-                    if (!root.name.StartsWith(FiresLiquidWaterPrefab.PrefabName)) return;
-                    if (root.GetComponent<FiresLiquidRiverController>() != null) return;
+                var root = volume.transform.root.gameObject;
+                if (!root.name.StartsWith(FiresLiquidWaterPrefab.PrefabName)) return;
+                if (root.GetComponent<FiresLiquidRiverController>() != null) return;
 
-                    var nview = root.GetComponentInChildren<ZNetView>(true);
-                    var zdo = nview != null && nview.IsValid() ? nview.GetZDO() : null;
-                    if (zdo == null) return;
-                    if (zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_RATE, 0f) <= 0f) return;
+                var nview = root.GetComponentInChildren<ZNetView>(true);
+                var zdo = nview != null && nview.IsValid() ? nview.GetZDO() : null;
+                if (zdo == null) return;
+                if (zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_RATE, 0f) <= 0f) return;
 
-                    var c = root.AddComponent<FiresLiquidRiverController>();
-                    c.m_fillY = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_FILL, root.transform.position.y);
-                    c.m_bankOffset = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_BANKOFFSET, 1f);
-                    c.m_sourceRadius = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_RADIUS, 3f);
-                    var p = root.transform.position;
-                    c.m_sourceCenter = new Vector3(p.x, c.m_fillY, p.z);
-                    // Round-90 — the restored instance wears the TEMPLATE's
-                    // vanilla water_liquid; re-apply our FiresLiquid skin.
-                    FiresLiquidWaterPrefab.ApplyFiresLiquidSkin(root);
-                    Debug.Log($"[FiresLiquidRiver] restored controller on '{root.name}' at {p} fillY={c.m_fillY:F1} bankOffset={c.m_bankOffset:F1} r={c.m_sourceRadius:F1}");
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[FiresLiquidRiver] restore-attach failed: {ex.Message}");
-                }
+                var c = root.AddComponent<FiresLiquidRiverController>();
+                c.m_fillY = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_FILL, root.transform.position.y);
+                c.m_bankOffset = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_BANKOFFSET, 1f);
+                c.m_sourceRadius = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_RADIUS, 3f);
+                var p = root.transform.position;
+                c.m_sourceCenter = new Vector3(p.x, c.m_fillY, p.z);
+                // Round-90 — the restored instance wears the TEMPLATE's
+                // vanilla water_liquid; re-apply our FiresLiquid skin.
+                FiresLiquidWaterPrefab.ApplyFiresLiquidSkin(root);
+                FiresLogger.LogInfo($"[FiresLiquidRiver] restored controller on '{root.name}' at {p} fillY={c.m_fillY:F1} bankOffset={c.m_bankOffset:F1} r={c.m_sourceRadius:F1}");
+            }
+            catch (System.Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresLiquidRiver] restore-attach failed: {ex.Message}");
             }
         }
     }

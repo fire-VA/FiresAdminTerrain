@@ -134,20 +134,15 @@ namespace VerdantsAscent.Utilities
             // `╔` + 26 dashes + `╗`.
             new[] { new Segment("   ╔══════════════════════════╗", Rock) },
 
-            // Brand line. Width accounting:
-            //   `   ║  ` (6) + "🌲 FIRES ADMIN TERRAIN" (22 chars
-            //   .Length, assumes 🌲 renders at 2 visual cells) + `  ║`
-            //   (3) = 31 ✓
-            //
-            // Width math caveat: if a terminal renders 🌲 at 1 visual
-            // cell instead of 2, the right `║` ends up 1 cell short.
-            // Acceptable for a compact banner — same caveat noted in
-            // VAFapLoadSummary.
+            // Brand line. The console advances ONE column for a bare
+            // pictograph (no VS16), however wide the font paints it:
+            //   `   ║  ` (6) + 🌲(1) + ` FIRES ADMIN TERRAIN` (20)
+            //   + `   ║` (4) = 31, matching the frame.
             new[]
             {
                 new Segment("   ║  ", Rock),
                 new Segment("🌲 FIRES ADMIN TERRAIN", Brand),
-                new Segment("  ║", Rock),
+                new Segment("   ║", Rock),
             },
             new[] { new Segment("   ╚══════════════════════════╝", Rock) },
             new Segment[0],
@@ -164,7 +159,7 @@ namespace VerdantsAscent.Utilities
         private static void EmitHeader(string text)
         {
             if (FiresAdminTerrain.Log != null) FiresAdminTerrain.Log.LogInfo(text);
-            else Debug.Log($"[FiresAdminTerrain] {text}");
+            else FiresLogger.LogInfo(text);
         }
 
         public static void Print()
@@ -382,7 +377,7 @@ namespace VerdantsAscent.Utilities
                 {
                     sb.Clear();
                     foreach (var seg in line) sb.Append(seg.Text);
-                    Debug.Log($"[FiresAdminTerrain] {sb}");
+                    FiresLogger.LogInfo(sb.ToString());
                 }
             }
             catch { }
@@ -535,7 +530,7 @@ namespace VerdantsAscent.Utilities
             try
             {
                 foreach (var line in s_bigLines)
-                    Debug.Log($"[FiresAdminTerrain] {line.text}");
+                    FiresLogger.LogInfo(line.text);
             }
             catch { }
         }

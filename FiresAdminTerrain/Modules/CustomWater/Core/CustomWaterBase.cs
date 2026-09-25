@@ -82,7 +82,7 @@ namespace VerdantsAscent.Water.Core
             // Check if ghost mode (no valid ZDO)
             bool isGhost = m_nview == null || m_nview.GetZDO() == null;
 
-            Debug.Log($"[CustomWater] Awake: {gameObject.name}, isGhost={isGhost}, LiquidType={LiquidType}");
+            FiresLogger.LogInfo($"[CustomWater] Awake: {gameObject.name}, isGhost={isGhost}, LiquidType={LiquidType}");
 
             // Setup mesh components
             m_meshFilter = GetComponent<MeshFilter>();
@@ -118,7 +118,7 @@ namespace VerdantsAscent.Water.Core
             if (m_nview != null && m_nview.GetZDO() != null)
             {
                 CustomWaterManager.Register(this);
-                Debug.Log($"[CustomWater] Registered {GetWaterType()} at {transform.position}, Bounds={BoundsSize}");
+                FiresLogger.LogInfo($"[CustomWater] Registered {GetWaterType()} at {transform.position}, Bounds={BoundsSize}");
             }
         }
 
@@ -160,7 +160,7 @@ namespace VerdantsAscent.Water.Core
             if (m_waterMesh != null)
                 Destroy(m_waterMesh);
 
-            Debug.Log($"[CustomWater] OnDestroy: Cleaned up water at {transform.position}");
+            FiresLogger.LogInfo($"[CustomWater] OnDestroy: Cleaned up water at {transform.position}");
         }
 
         protected virtual void Update()
@@ -206,13 +206,13 @@ namespace VerdantsAscent.Water.Core
             // IMPORTANT: Force LiquidType to Water - the Tar effects are caused by wrong liquid type
             if (LiquidType != LiquidType.Water && LiquidType != LiquidType.Tar)
             {
-                Debug.LogWarning($"[CustomWater] Invalid LiquidType {LiquidType}, forcing to Water");
+                FiresLogger.LogWarning($"[CustomWater] Invalid LiquidType {LiquidType}, forcing to Water");
                 LiquidType = LiquidType.Water;
             }
 
             m_waterMaterial = WaterMaterialManager.GetWaterMaterial(LiquidType);
 
-            Debug.Log($"[CustomWater] SetupMaterial: LiquidType={LiquidType}, Material={m_waterMaterial?.name ?? "NULL"}");
+            FiresLogger.LogInfo($"[CustomWater] SetupMaterial: LiquidType={LiquidType}, Material={m_waterMaterial?.name ?? "NULL"}");
 
             if (m_waterMaterial != null)
             {
@@ -253,7 +253,7 @@ namespace VerdantsAscent.Water.Core
                 m_meshRenderer.material.renderQueue = 3000;
                 m_meshRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
 
-                Debug.Log($"[CustomWater] Using fallback material for {gameObject.name}, color={waterColor}");
+                FiresLogger.LogInfo($"[CustomWater] Using fallback material for {gameObject.name}, color={waterColor}");
             }
         }
 
@@ -275,7 +275,7 @@ namespace VerdantsAscent.Water.Core
             {
                 // Fallback to Default if character_trigger doesn't exist
                 layer = 0;
-                Debug.LogWarning("[CustomWater] Layer 'character_trigger' not found, using Default");
+                FiresLogger.LogWarning("[CustomWater] Layer 'character_trigger' not found, using Default");
             }
             m_swimTriggerGO.layer = layer;
 
@@ -299,7 +299,7 @@ namespace VerdantsAscent.Water.Core
             var triggerHandler = m_swimTriggerGO.AddComponent<CustomWaterTrigger>();
             triggerHandler.Initialize(this);
 
-            Debug.Log($"[CustomWater] SetupSwimTrigger: xz=({BoundsSize.x},{BoundsSize.z}), thickness={SWIM_TRIGGER_THICKNESS}, centerY={triggerCenterY:F2}, layer={m_swimTriggerGO.layer}");
+            FiresLogger.LogInfo($"[CustomWater] SetupSwimTrigger: xz=({BoundsSize.x},{BoundsSize.z}), thickness={SWIM_TRIGGER_THICKNESS}, centerY={triggerCenterY:F2}, layer={m_swimTriggerGO.layer}");
         }
 
         #endregion
@@ -348,7 +348,7 @@ namespace VerdantsAscent.Water.Core
                     float rayDist = waterSurface - rayStart.y;
                     if (rayDist > 0f && Physics.Raycast(rayStart, Vector3.up, rayDist, blockingMask))
                     {
-                        // Blocked by terrain � remove from water tracking
+                        // Blocked by terrain - remove from water tracking
                         if (interactable.Decrement(typeToUse) == 0)
                         {
                             interactable.SetLiquidLevel(-10000f, typeToUse, this);
@@ -392,7 +392,7 @@ namespace VerdantsAscent.Water.Core
                 typeToUse = LiquidType.Tar;
             }
 
-            Debug.Log($"[CustomWater] TriggerEnter: {other.name}, using LiquidType={typeToUse} (int={(int)typeToUse}), configured={LiquidType}");
+            FiresLogger.LogInfo($"[CustomWater] TriggerEnter: {other.name}, using LiquidType={typeToUse} (int={(int)typeToUse}), configured={LiquidType}");
 
             // Increment ONLY the water counter (or tar if explicit)
             interactable.Increment(typeToUse);
@@ -429,7 +429,7 @@ namespace VerdantsAscent.Water.Core
                 typeToUse = LiquidType.Tar;
             }
 
-            Debug.Log($"[CustomWater] TriggerExit: {other.name}, using LiquidType={typeToUse} (int={(int)typeToUse})");
+            FiresLogger.LogInfo($"[CustomWater] TriggerExit: {other.name}, using LiquidType={typeToUse} (int={(int)typeToUse})");
 
             // Decrement the same counter we incremented
             if (interactable.Decrement(typeToUse) == 0)
@@ -639,7 +639,7 @@ namespace VerdantsAscent.Water.Core
             m_waterMesh.RecalculateNormals();
             m_waterMesh.RecalculateBounds();
 
-            Debug.Log($"[CustomWater] GenerateSimpleSurfaceMesh: localY={localWaterY:F2}, verts={vertices.Length}");
+            FiresLogger.LogInfo($"[CustomWater] GenerateSimpleSurfaceMesh: localY={localWaterY:F2}, verts={vertices.Length}");
         }
 
         #endregion
@@ -658,6 +658,8 @@ namespace VerdantsAscent.Water.Core
                    $"Type: <color=yellow>{liquidName}</color>\n" +
                    $"In Water: {m_inWater.Count}";
         }
+
+        public float GetHoverOffset() => 0f;
 
         public string GetHoverName() => $"Custom {GetWaterType()}";
 
@@ -697,7 +699,7 @@ namespace VerdantsAscent.Water.Core
                 s_blockingLayerMask = LayerMask.GetMask("terrain", "Default", "static_solid", "piece");
             }
 
-            Debug.Log($"[CustomWaterTrigger] Initialized for {water?.GetWaterType()}, LiquidType={m_liquidType}");
+            FiresLogger.LogInfo($"[CustomWaterTrigger] Initialized for {water?.GetWaterType()}, LiquidType={m_liquidType}");
         }
 
         /// <summary>
@@ -708,7 +710,7 @@ namespace VerdantsAscent.Water.Core
         {
             float distToWater = waterSurfaceY - characterPos.y;
 
-            // If water is close (within 5m above), don't bother checking � allow it
+            // If water is close (within 5m above), don't bother checking - allow it
             if (distToWater <= 5f)
                 return false;
 
@@ -745,7 +747,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     float waterSurface = m_water.GetWaterSurfaceAt(t.position);
                     if (waterSurface > float.MinValue && IsBlockedByTerrain(t.position, waterSurface))
-                        return; // Blocked by terrain � don't enter water
+                        return; // Blocked by terrain - don't enter water
                 }
 
                 // Track before notifying water (in case water is destroyed during callback)
@@ -816,7 +818,7 @@ namespace VerdantsAscent.Water.Core
             m_inWater.Clear();
             m_water = null;
 
-            Debug.Log("[CustomWaterTrigger] OnDestroy: Cleaned up all tracked water interactables");
+            FiresLogger.LogInfo("[CustomWaterTrigger] OnDestroy: Cleaned up all tracked water interactables");
         }
 
         /// <summary>

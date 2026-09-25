@@ -9,6 +9,23 @@ namespace VerdantsAscent.Terrain.Voxel
     // surface, locations and biomes stay valid because we only subtract.
     public enum VoxelWorldMode { Vanilla, VoxelWrap, VoxelOnly }
 
+    // SERVER-OWNER TERRAIN MODE (the one prominent selector, default Off).
+    // Governs how much of the world becomes voxel, so the mod is safe to drop
+    // onto ANY server:
+    //   Off         — dormant. Terrain 100% vanilla; only the admin voxel
+    //                 BRUSH tools work (they never touch un-drawn ground).
+    //   PlacedOnly  — vanilla terrain stays vanilla; a zone converts only where
+    //                 a pickaxe dig or voxel brush edited it or a sky island floats over it.
+    //                 Sky islands only exist under FullVoxel's generator, so
+    //                 today this converts exactly what ZoneReplace does.
+    //   ZoneReplace — vanilla until a pickaxe dig or voxel brush edits a zone;
+    //                 that zone converts to voxel ground identical to vanilla
+    //                 plus the edits. Hoe/cultivator edits never convert.
+    //   FullVoxel   — the complete swap: every near zone wraps with generated
+    //                 caves, river beds and hydrology water, and the Fires
+    //                 world generator runs (still name-gated to Fires* worlds).
+    public enum FiresTerrainMode { Off, PlacedOnly, ZoneReplace, FullVoxel }
+
     // W4 base-generation gate. Auto = worlds named "Fires*" use the Fires
     // generator, everything else stays vanilla (deterministic on every peer
     // with zero network sync — the world name arrives in the handshake).
@@ -25,16 +42,56 @@ namespace VerdantsAscent.Terrain.Voxel
         private const string SW = "VoxelTerrain World";
 
         public static ConfigEntry<bool> Enabled;
+        public static ConfigEntry<bool> ShowToolsInBuildMenu;
         public static ConfigEntry<bool> LogTimings;
         public static ConfigEntry<int> MaxLoadedChunks;
 
         // Stage W master switch — DESIGNED IN FROM THE START (user directive):
-        // the whole-world voxel wrap must always be a config choice. Default
-        // VoxelWrap while we build/test; flips to Vanilla as the safe default
-        // before any public release. The admin BRUSH tools work in BOTH modes
+        // the whole-world voxel wrap must always be a config choice, and
+        // Terrain Mode defaults to Off. The admin BRUSH tools work in every mode
         // (they are sparse, additive and independent of the streamer).
-        public static ConfigEntry<bool> CustomGeneration;   // master: OFF forces 100% vanilla terrain (brush still works)
+        public static ConfigEntry<FiresTerrainMode> TerrainMode;   // THE server-owner selector (Off/PlacedOnly/ZoneReplace/FullVoxel)
+        public static ConfigEntry<bool> CustomGeneration;   // legacy master: OFF forces 100% vanilla (== TerrainMode.Off; kept for back-compat)
         public static ConfigEntry<VoxelWorldMode> WorldMode;
+
+        // ── Derived gates (the whole mod reads these, not the raw entries) ──
+        // The world's profile speaks first, the configuration second (FiresWorldProfile).
+        public static FiresTerrainMode Mode
+            => FiresWorldProfile.Current != null
+                ? FiresWorldProfile.Current.TerrainMode(TerrainMode?.Value ?? FiresTerrainMode.Off)
+                : (TerrainMode?.Value ?? FiresTerrainMode.Off);
+
+        public static VoxelWorldMode WorldKind
+            => FiresWorldProfile.Current != null
+                ? FiresWorldProfile.Current.WorldKind(WorldMode?.Value ?? VoxelWorldMode.VoxelWrap)
+                : (WorldMode?.Value ?? VoxelWorldMode.VoxelWrap);
+        // The streamer runs (meshes voxel content) in every mode except Off.
+        // Legacy CustomGeneration=OFF still forces dormant for existing configs.
+        public static bool StreamerRuns =>
+            Enabled != null && Enabled.Value
+            && (CustomGeneration == null || CustomGeneration.Value)
+            && Mode != FiresTerrainMode.Off;
+        public static bool WrapsAllTerrain => Mode == FiresTerrainMode.FullVoxel;      // auto-wrap near zones
+        public static bool WrapsBrushedZones => Mode == FiresTerrainMode.ZoneReplace
+                                             || Mode == FiresTerrainMode.PlacedOnly;   // wrap voxel-brushed zones
+        public static bool WrapsIslandZones => Mode == FiresTerrainMode.PlacedOnly;    // wrap sky-island zones
+        public static bool GeneratesTerrain => Mode == FiresTerrainMode.FullVoxel;     // Fires worldgen active
+        // Generated features exist only in FullVoxel; a zone converted in any
+        // other mode is exactly the vanilla ground plus brush edits.
+        public static bool GeneratesCaves
+            => WrapsAllTerrain && (FiresWorldProfile.Current?.Caves ?? (GenerateCaves != null && GenerateCaves.Value));
+        // Rivers are the exception: they convert only the zones a channel runs
+        // through (VoxelRiverNetwork.TouchesZone), so they no longer need the
+        // whole-world wrap. ZoneReplace + PlacedOnly carve too.
+        public static bool CarvesRiverBeds
+            => StreamerRuns && (FiresWorldProfile.Current?.Hydrology ?? (HydrologyEnabled != null && HydrologyEnabled.Value));
+        // Only the coarse 20m solve needs the allowance; a Fires world's own 2m
+        // field already knows where its banks are.
+        public static float CoarseBankRelief => BankRelief != null ? BankRelief.Value : 0.4f;
+        public static bool PlacesHydrologyWater
+            => StreamerRuns && (FiresWorldProfile.Current?.Hydrology ?? true) && HydrologyPlaceWater != null && HydrologyPlaceWater.Value;
+        public static bool BuildsSkyIslands
+            => WrapsAllTerrain && (FiresWorldProfile.Current?.SkyIslands ?? (SkyIslands == null || SkyIslands.Value));
         public static ConfigEntry<bool> WrapAllLoaded;
         public static ConfigEntry<float> WrapRadius;
         public static ConfigEntry<bool> GenerateCaves;
@@ -49,19 +106,29 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> CavernBoost;
         public static ConfigEntry<float> EntranceRarity;
         public static ConfigEntry<float> SinkholeRarity;
+        public static ConfigEntry<float> SinkholeSpacing;
         public static ConfigEntry<float> SinkholeRadius;
         public static ConfigEntry<float> SinkholeDepth;
+        public static ConfigEntry<bool> VoxelWater;
+        public static ConfigEntry<bool> LegacyMeshWater;
+        public static ConfigEntry<float> WaterDiagInterval;
+        public static ConfigEntry<float> WaterPaintShoreBlend;
         public static ConfigEntry<float> WaterBankFreeboard;
         public static ConfigEntry<float> WaterMinChannelDepth;
+        // (AutoPourWater, WaterfallBreakStep, WaterMaxSheetDepth, PondKeep,
+        //  MountainPondKeep DELETED — the systems they tuned are gone: gen
+        //  water is mesh-only, the fall/mid-air cuts died with the smooth
+        //  sampler, and the natural-basin keep rolls died with the
+        //  deliberate-depressions doctrine.)
+        public static ConfigEntry<bool> SkyIslands;
+        public static ConfigEntry<float> SkyIslandRarity;
+        public static ConfigEntry<bool> VegWaterEcology;
+        public static ConfigEntry<float> VegTreeWaterClearance;
+        public static ConfigEntry<string> VegTreeNames;
+        public static ConfigEntry<string> VegWaterSinkerNames;
         public static ConfigEntry<bool> CaveContentEnabled;
         public static ConfigEntry<float> CaveContentDensity;
-        public static ConfigEntry<string> CaveMushroomPrefabs;
-        public static ConfigEntry<string> CaveCeilingPrefabs;
-        public static ConfigEntry<string> CaveRockPrefabs;
         public static ConfigEntry<float> CaveRockScale;
-        public static ConfigEntry<string> CaveBonePrefabs;
-        public static ConfigEntry<float> CaveMushroomChance;
-        public static ConfigEntry<float> CaveBoneChance;
         public static ConfigEntry<bool> CaveWaterEnabled;
         public static ConfigEntry<float> CaveWaterChance;
         public static ConfigEntry<float> CaveWaterMinHeadroom;
@@ -88,6 +155,20 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> RiverThreshold;
         public static ConfigEntry<float> RiverMaxDepth;
         public static ConfigEntry<float> SpringSpacing;
+        public static ConfigEntry<float> RiverWidthMin;
+        public static ConfigEntry<float> RiverWidthMax;
+        public static ConfigEntry<float> RiverFreeboard;
+        public static ConfigEntry<float> BankRelief;
+        public static ConfigEntry<float> RiverMaxNewCut;
+        public static ConfigEntry<float> RiverMeander;
+        public static ConfigEntry<float> EstuaryLength;
+        public static ConfigEntry<float> EstuaryFlare;
+        public static ConfigEntry<bool> FrozenWaterIdle;
+        public static ConfigEntry<bool> ChunkCacheEnabled;
+        public static ConfigEntry<float> ChunkCacheSizeMB;
+        public static ConfigEntry<float> WrapHeadlessCap;
+        public static ConfigEntry<float> WrapKeepRadius;
+        public static ConfigEntry<float> VegetationDensityScale;
         public static ConfigEntry<float> ClutterDensityScale;
         public static ConfigEntry<float> GrassRenderDistance;
         public static ConfigEntry<float> ImpostorRadius;
@@ -100,6 +181,51 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static bool _bound;
 
+        // THE SERVER OWNS THE TERRAIN.
+        //
+        // Every entry below feeds the GROUND a peer builds: the mode selectors, the
+        // cave carve, the river/hydrology carve, sky islands and the generator base.
+        // A client holding different values builds a different world from the same
+        // seed — it renders and collides against terrain the server never had, while
+        // the server saves edits and places content against its own. Nothing warns;
+        // it just silently disagrees. So these ride the mod's ConfigSync: a joining
+        // client takes the server's values, and cannot edit them while the server
+        // holds the lock.
+        //
+        // PER-MACHINE settings are deliberately NOT here. Wrap radius, chunk cap,
+        // cache size, mesh budgets, impostors, grass distance, shadows, seam lips,
+        // draw speed, log toggles and the build-menu listing change cost or looks,
+        // never shape — forcing them would make a weak client run the server's
+        // budget for no correctness gain.
+        internal static void RegisterServerAuthority(FiresCore.Sync.ConfigSync sync)
+        {
+            if (sync == null) return;
+            int n = 0;
+            void Own<T>(ConfigEntry<T> entry) { if (entry == null) return; sync.AddConfigEntry(entry); n++; }
+
+            Own(Enabled); Own(TerrainMode); Own(CustomGeneration); Own(WorldMode); Own(WorldGenMode);
+
+            Own(GenerateCaves); Own(CaveMinY); Own(CaveMaxDepth); Own(CaveWidth);
+            Own(CaveFrequency); Own(CaveFrequencyY); Own(CaveSurfacePinch);
+            Own(CavernScale); Own(CavernRarity); Own(CavernBoost); Own(EntranceRarity);
+            Own(SinkholeRarity); Own(SinkholeSpacing); Own(SinkholeRadius); Own(SinkholeDepth);
+
+            Own(VoxelWater); Own(WaterBankFreeboard); Own(WaterMinChannelDepth);
+            Own(HydrologyEnabled); Own(HydrologyPlaceWater);
+            Own(RiverThreshold); Own(RiverMaxDepth); Own(SpringSpacing);
+            Own(RiverWidthMin); Own(RiverWidthMax); Own(RiverFreeboard); Own(BankRelief);
+            Own(RiverMaxNewCut); Own(RiverMeander); Own(EstuaryLength); Own(EstuaryFlare);
+
+            Own(SkyIslands); Own(SkyIslandRarity);
+
+            Own(WorldGenResolution); Own(WorldGenDroplets); Own(WorldGenVahcBase);
+            Own(WorldGenImageBase); Own(WorldGenImageMinY); Own(WorldGenImageMaxY);
+            Own(WorldGenBiomeImage);
+
+            FiresLogger.LogInfo($"[FiresVoxel] {n} terrain-shaping setting(s) are server-owned; a client takes the "
+                                + "server's values on join. Performance and visual settings stay local.");
+        }
+
         public static void Bind(ConfigFile cfg)
         {
             if (_bound || cfg == null) return;
@@ -107,13 +233,64 @@ namespace VerdantsAscent.Terrain.Voxel
 
             Enabled = cfg.Bind(S, "Enabled", true,
                 "Voxel carve/fill tools (P0 prototype — runtime only, NOT persisted yet; relog clears carves).");
+            ShowToolsInBuildMenu = cfg.Bind(S, "Show tools in build menu", true,
+                "List the Fires terrain/water tools on the hammer. They are admin-only regardless; "
+                + "turn this off for a vanilla-looking build menu without giving up admin rights.");
             const string PERF = "VoxelTerrain Performance";
+            // UNDER MEASUREMENT — the first reading (load 12.53ms vs generate
+            // 5.31ms) was contaminated: the timed region included an
+            // File.SetLastAccessTimeUtc LRU touch, i.e. a filesystem metadata
+            // WRITE on every hit. That is fixed (LRU is in memory now), so the
+            // number needs re-taking before density caching is judged.
+            //
+            // Standing caveat regardless of the result: the bottleneck measured
+            // on the dedi was the main-thread APPLY queue (swapped=0 with
+            // chunks sitting in `queued=N`), and neither this nor a mesh cache
+            // touches that — both only make the worker produce FASTER into an
+            // already-backed-up queue.
+            ChunkCacheEnabled = cfg.Bind(PERF, "Chunk cache", true,
+                new ConfigDescription("Cache generated chunk density to disk so revisiting an area skips regeneration entirely. Chunks are otherwise rebuilt from scratch EVERY visit — deterministic, but the cost repeats forever. Keyed by world seed + every cave/river/sinkhole setting, so changing any of them re-derives automatically instead of serving stale terrain. Player edits are never cached."));
+            ChunkCacheSizeMB = cfg.Bind(PERF, "Chunk cache size limit (MB)", 512f,
+                new ConfigDescription("Disk budget for the chunk cache. Oldest-accessed entries are evicted on a background sweep once the store exceeds this. Only Full chunks cost anything (~25% of them); uniform solid/air chunks are a single byte.",
+                    new AcceptableValueRange<float>(64f, 4096f)));
+            FrozenWaterIdle = cfg.Bind(PERF, "Frozen water idles", true,
+                new ConfigDescription("Frozen liquid volumes skip vanilla's per-frame Update — most importantly the once-per-second height refresh of 4,225 blocking main-thread raycasts PER VOLUME. One full pass still runs every ~2s per volume so multiplayer freeze/unfreeze and ZDO changes propagate. OFF = vanilla behavior: every frozen river keeps raycasting forever."));
+            WrapHeadlessCap = cfg.Bind(PERF, "Voxel wrap radius (headless)", 160f,
+                new ConfigDescription("How far (metres) around each PEER a dedicated server voxelises. Headless wraps every loaded zone rather than one player radius, so this cap is what actually bounds server load. THE biggest lever: a 64m zone is ~16 chunks and each must be generated, meshed and APPLIED before the zone can swap. At the old 256 (a 9x9 envelope) the dedi measured zones=44 chunks=654 with swapped=0 pendingSwap=44 — not one zone ever finished, all stuck in the apply queue. Vanilla keeps 3x3 zones active (~96m) plus a distant ring. Clients use 'Wrap Radius' instead.",
+                    new AcceptableValueRange<float>(96f, 512f)));
+            WrapKeepRadius = cfg.Bind(PERF, "Voxel wrap keep radius", 128f,
+                new ConfigDescription("Floor the memory governor may never ease the wrap radius below. In VoxelOnly the voxel collider is the ONLY ground, so a player's own footprint must always stay wrapped — set this too low under memory pressure and players fall through the world. Keep it at or above vanilla's active area (~96m corner).",
+                    new AcceptableValueRange<float>(96f, 256f)));
+            VegetationDensityScale = cfg.Bind(PERF, "Vegetation density scale", 0.7f,
+                new ConfigDescription("Multiplies how many TREES/BUSHES each zone places (ZoneVegetation m_min/m_max). 1 = vanilla, 0.4 = 60% fewer. This is the tree tri budget — the single biggest lever on a forest zone. Pickables, ore and spawners are exempt, so berries and copper keep vanilla counts. Only affects zones generated AFTER the change; already-generated zones keep their trees.",
+                    new AcceptableValueRange<float>(0.02f, 2f)));
             ClutterDensityScale = cfg.Bind(PERF, "Clutter density scale", 0.55f,
-                new ConfigDescription("Multiplies grass/clutter instance count (ClutterSystem m_amountScale). 1 = vanilla; lower = fewer blades = far fewer tris. Hot-reloads on the next patch regen.",
-                    new AcceptableValueRange<float>(0.1f, 1.5f)));
+                new ConfigDescription("Multiplies grass/clutter instance count per patch. 1 = vanilla, 0.5 = half the blades, 0 = none. APPLIES LIVE: changing it clears and regrows the grass around you so the slider is honest (it used to only affect patches built AFTER the change — moving it looked like it did nothing).",
+                    new AcceptableValueRange<float>(0f, 1.5f)));
             GrassRenderDistance = cfg.Bind(PERF, "Grass render distance", 0f,
-                new ConfigDescription("Override grass render distance in metres (ClutterSystem m_distance); grass tris scale with the SQUARE of this. 0 = keep vanilla. Try 60-80 to trim the carpet.",
+                new ConfigDescription("Override grass render distance in metres (ClutterSystem m_distance); grass tris scale with the SQUARE of this. 0 = keep vanilla. Try 60-80 to trim the carpet. Applies live.",
                     new AcceptableValueRange<float>(0f, 160f)));
+            // LIVE RETUNE — the density lever only affects patches built
+            // AFTER the value changes, so without this the slider read as
+            // dead/all-or-nothing: nothing on screen moved until vanilla
+            // happened to rebuild patches. ResetGrass clears every patch and
+            // the spread system regrows them at the new density immediately.
+            System.EventHandler clutterRetune = (_, __) =>
+            {
+                try
+                {
+                    var cam = Utils.GetMainCamera();
+                    var center = cam != null ? cam.transform.position
+                        : (Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : UnityEngine.Vector3.zero);
+                    // Big radius so the whole visible carpet regrows at the new
+                    // density — the slider then reads honestly in place.
+                    if (ClutterSystem.instance != null) ClutterSystem.instance.ResetGrass(center, 512f);
+                }
+                catch (System.Exception ex)
+                { FiresLogger.LogWarning($"[FiresVoxel] clutter retune failed: {ex.Message}"); }
+            };
+            ClutterDensityScale.SettingChanged += clutterRetune;
+            GrassRenderDistance.SettingChanged += clutterRetune;
             ImpostorRadius = cfg.Bind(PERF, "Impostor radius", 2400f,
                 new ConfigDescription("Far billboard trees/rocks draw radius (metres) around the player, all directions.",
                     new AcceptableValueRange<float>(600f, 6000f)));
@@ -133,14 +310,14 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 try { VerdantsAscent.Terrain.Voxel.VoxelWorld.RefreshAllViewShadows(); }
                 catch (System.Exception ex)
-                { UnityEngine.Debug.LogWarning($"[FiresVoxel] terrain shadow refresh failed: {ex.Message}"); }
+                { FiresLogger.LogWarning($"[FiresVoxel] terrain shadow refresh failed: {ex.Message}"); }
             };
 
             MeshAppliesPerFrame = cfg.Bind(PERF, "Mesh applies per frame", 2,
                 new ConfigDescription("How many finished chunk meshes the MAIN THREAD uploads (and colliders it assigns) each frame. Higher = terrain streams in faster, but each apply is a mesh upload on the frame — too high and streaming-in hitches. A headless server renders nothing, so it uses 4x this automatically.",
                     new AcceptableValueRange<int>(1, 16)));
-            MeshBufferBudget = cfg.Bind(PERF, "Mesh buffer budget", 16,
-                new ConfigDescription("Hard ceiling on concurrently-live mesh buffers (~0.6MB each) — the mesh pipeline's memory cap. A worker that can't get one waits for the main thread to return a buffer instead of allocating, so pipeline RAM can never run away (this is what stopped the out-of-memory crashes). Raise it if zones are slow to swap in and you have RAM to spare; a headless server uses 2x this automatically.",
+            MeshBufferBudget = cfg.Bind(PERF, "Mesh buffer budget", 32,
+                new ConfigDescription("Hard ceiling on concurrently-live mesh buffers (~0.6MB each) — the mesh pipeline's memory cap. A worker that can't get one waits for the main thread to return a buffer instead of allocating, so pipeline RAM can never run away (this is what stopped the out-of-memory crashes). 16 measurably starved workers during fast flight (pool pinned 0, starved count climbing) — 32 keeps them meshing ahead for ~10MB more. A headless server uses 2x this automatically.",
                     new AcceptableValueRange<int>(4, 64)));
 
             LogTimings = cfg.Bind(S, "Log timings", false,
@@ -149,6 +326,21 @@ namespace VerdantsAscent.Terrain.Voxel
                 new ConfigDescription("Safety cap on live voxel chunks (32m cubes, ~83KB each). A capped-out brush would skip chunks and leave holes, so brushes warn loudly when the cap bites.",
                     new AcceptableValueRange<int>(16, 8192)));
 
+            TerrainMode = cfg.Bind(SW, "Terrain Mode", FiresTerrainMode.Off,
+                "THE top-level switch for how much of the world becomes voxel — set this and ignore the " +
+                "lower-level toggles.\n" +
+                "• Off — dormant. Terrain stays 100% vanilla; only the admin voxel BRUSH tools work. Safe on any world.\n" +
+                "• PlacedOnly — vanilla terrain untouched; a zone converts to voxel only where a pickaxe dig or voxel brush " +
+                "edited it or a sky island floats over it. Sky islands are only generated in FullVoxel, so " +
+                "this currently converts exactly what ZoneReplace does.\n" +
+                "• ZoneReplace — vanilla until you dig with a pickaxe or use a voxel carve/fill tool in a zone; that zone " +
+                "converts to voxel ground identical to the vanilla ground plus your edits, so you can dig " +
+                "tunnels, caves and overhangs. Hoe and cultivator edits never convert a zone.\n" +
+                "• FullVoxel — the complete swap: every nearby zone wraps to voxel with generated caves, river " +
+                "beds and hydrology water, AND the Fires world generator runs (still limited to worlds named " +
+                "'Fires*'). This is the whole-world terrain replacement.\n" +
+                "Generated caves, river beds and hydrology water only exist in FullVoxel; the other modes keep " +
+                "vanilla's terrain and just convert voxel where you edit.");
             CustomGeneration = cfg.Bind(SW, "Fires Custom Generation", true,
                 "MASTER SWITCH for all whole-world terrain replacement. ON = the World Terrain Mode + World " +
                 "Generation settings below apply (voxel wrap/only + Fires worldgen). OFF = terrain runs 100% " +
@@ -170,7 +362,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 new ConfigDescription("Zones whose center is within this many metres of the player get wrapped (Chebyshev). 160 ≈ 5x5 zones — pushes the voxel↔vanilla frontier past the visible detail range.",
                     new AcceptableValueRange<float>(48f, 320f)));
             GenerateCaves = cfg.Bind(SW, "Generate Caves", true,
-                "Carve deterministic spaghetti-cave networks under the surface of wrapped zones.");
+                "Carve deterministic spaghetti-cave networks under the surface of wrapped zones (FullVoxel only).");
             CaveMinY = cfg.Bind(SW, "Cave Min Y", 34f,
                 new ConfigDescription("No caves below this world height. Default sits just above the y=30 water table — flooded caves come with the voxel-water milestone.",
                     new AcceptableValueRange<float>(-200f, 200f)));
@@ -201,9 +393,12 @@ namespace VerdantsAscent.Terrain.Voxel
             EntranceRarity = cfg.Bind(SW, "Cave Entrance Rarity", 0.58f,
                 new ConfigDescription("Tunnels normally pinch shut near the surface (Cave Surface Pinch) so they stay buried. Where this sparse mask runs high the pinch is released and the tunnel breaks through as a natural entrance. LOWER = more entrances.",
                     new AcceptableValueRange<float>(0.3f, 0.95f)));
-            SinkholeRarity = cfg.Bind(SW, "Sinkhole Rarity", 0.88f,
-                new ConfigDescription("How high the sinkhole mask must run to punch an open vertical drop from the surface into the cave layer. HIGHER = rarer. These are the big open shafts you can fall into.",
-                    new AcceptableValueRange<float>(0.5f, 0.98f)));
+            SinkholeRarity = cfg.Bind(SW, "Sinkhole Rarity", 0.72f,
+                new ConfigDescription("Share of candidate sites that hold NO shaft. HIGHER = rarer: 0.72 leaves roughly one open drop per four spacing cells. These are the big open shafts you can fall into.",
+                    new AcceptableValueRange<float>(0.0f, 0.98f)));
+            SinkholeSpacing = cfg.Bind(SW, "Sinkhole Spacing", 120f,
+                new ConfigDescription("Metres between sinkhole CANDIDATE sites. At most ONE shaft is ever cut per cell of this size, so the roof between sites is never opened — raise it for fewer, more isolated entrances.",
+                    new AcceptableValueRange<float>(32f, 512f)));
             SinkholeRadius = cfg.Bind(SW, "Sinkhole Radius", 6.5f,
                 new ConfigDescription("Widest carve radius at a sinkhole's centre (metres). Tapers to nothing at its rim.",
                     new AcceptableValueRange<float>(3f, 25f)));
@@ -211,36 +406,48 @@ namespace VerdantsAscent.Terrain.Voxel
                 new ConfigDescription("How far below the surface a sinkhole shaft reaches (metres). It must reach the tunnel layer to open into a cave system rather than being a pit.",
                     new AcceptableValueRange<float>(8f, 60f)));
 
+            VoxelWater = cfg.Bind(SW, "Voxel Water", true,
+                new ConfigDescription("CARVE + FILL in one pass: the voxel terrain emits its river/lake water sheet from the SAME reconciled per-column level the bed carve was cut for. Static mesh — no sim, no threads, no raycasts, no settle, no ZDOs; the z-buffer cuts the shoreline against the banks exactly like vanilla's ocean. Swim reads the same field, so seen == swum."));
+            LegacyMeshWater = cfg.Bind(SW, "Legacy Mesh Water", false,
+                new ConfigDescription("OFF (default): generated water comes from vanilla LiquidVolume pours. ON: the old per-zone meshed water field in Modules/VoxelTerrain/LegacyMesh. Two backends drawing the same rivers at once is why work kept splitting — leave this off unless comparing them."));
+            WaterPaintShoreBlend = cfg.Bind(SW, "Water Paint Shore Blend", 2.5f,
+                new ConfigDescription("How far the wet riverbed paint keeps fading ABOVE the waterline, in metres of RISE. The band follows the bank: broad on a shallow slope, tight on a steep one. Raise it for a wider damp margin, 0 for a hard edge at the water.",
+                    new AcceptableValueRange<float>(0f, 12f)));
+            WaterDiagInterval = cfg.Bind(SW, "Water Diagnostic Interval", 45f,
+                new ConfigDescription("Seconds between generated-water diagnostic log lines: which gate dried how many cells, plus an automatic va_water_scan of the bodies around you. 0 = off.",
+                    new AcceptableValueRange<float>(0f, 600f)));
             WaterBankFreeboard = cfg.Bind(SW, "Water Bank Freeboard", 0.45f,
                 new ConfigDescription("How far BELOW the lower bank edge a river/lake surface is seated. This is the WAVE CREST BUDGET, not a cosmetic offset: the mesh is wave-displaced at render time, so a surface seated flush with the bank has its crests break over it and the water climbs the bank. Raise it if you raise wave amplitude; lower it if the water sits visibly too deep in its channel.",
                     new AcceptableValueRange<float>(0f, 2f)));
-            WaterMinChannelDepth = cfg.Bind(SW, "Water Min Channel Depth", 1.1f,
-                new ConfigDescription("Minimum depth of channel carved under generated water. The bank-referenced level drops to meet a low bank, and without deepening the bed to match, that stretch thins out or goes dry and the flow breaks. The voxel bed is re-carved to keep at least this much water over it.",
+            WaterMinChannelDepth = cfg.Bind(SW, "Water Min Channel Depth", 1.5f,
+                new ConfigDescription("How deep the bed is carved under the reconciled water surface. Banks NEVER move with this — only the cut deepens. The sheet/swim sit 0.4m below that surface (bank-relief seat-down), so the actual water column is this minus 0.4: at 1.5 the column is the original 1.1m. Raise for deeper rivers, banks stay put.",
                     new AcceptableValueRange<float>(0f, 4f)));
+            SkyIslands = cfg.Bind(SW, "Sky Islands", true,
+                "Rare floating islands, 200-300m above the local terrain: flat-ish carved top, pointed ridged underside. Pure voxel additions — the map, spawns and vanilla systems never see them. FullVoxel only. Applied when the world loads; existing chunk caches self-invalidate.");
+            SkyIslandRarity = cfg.Bind(SW, "Sky Island Rarity", 0.30f,
+                new ConfigDescription("Chance that each ~1.5km placement cell rolls an island. 0.30 is roughly one island per 5 square km. 0 disables placement.",
+                    new AcceptableValueRange<float>(0f, 1f)));
+            VegWaterEcology = cfg.Bind(SW, "Vegetation Water Ecology", true,
+                "Vegetation placement measures altitude against the LOCAL generated water surface instead of sea level. The whole vanilla shoreline ecology ports to rivers, lakes and swamps: trees keep their distance, vass and waterlilies stand in the shallows, swamp trees wade. Only affects zones generated after the change.");
+            VegTreeWaterClearance = cfg.Bind(SW, "Vegetation Tree Water Clearance", 1f,
+                new ConfigDescription("Extra metres of min-altitude added to tree prefabs, above the local water surface, so trees rarely stand at the very edge of a bank. 0 = vanilla bands only.",
+                    new AcceptableValueRange<float>(0f, 5f)));
+            VegTreeNames = cfg.Bind(SW, "Vegetation Tree Names", "beech,birch,oak,firtree,pinetree,yggashoot",
+                "Prefab name substrings (comma separated, case-insensitive) treated as trees for the water clearance. Swamp trees are deliberately absent — they belong in the water.");
+            VegWaterSinkerNames = cfg.Bind(SW, "Vegetation Water Sinker Names", "stub,log,trunk",
+                "Prefab name substrings allowed to seed INTO shallow water (min altitude lowered to -0.8m vs the local surface): stumps and logs in river beds. Rocks already carry negative bands in vanilla and need no help.");
 
             CaveContentEnabled = cfg.Bind(SW, "Cave Content Enabled", true,
-                "Populate generated caves: mushrooms on floors, hanging roots on ceilings, boulders in the larger caverns. Server-authoritative and placed once per zone (existing spawns are detected, so it never doubles up on a restart).");
+                "Dress generated caves from each biome's tables (section 'VoxelTerrain Cave Content' and one section per biome): pickables, ceiling hangers, rubble, ore nodes, restocking chests and monster spawners. The server places it once per zone and records the zone, so it never doubles up.");
             CaveContentDensity = cfg.Bind(SW, "Cave Content Density", 1f,
                 new ConfigDescription("Scales how much of everything gets placed in caves. 0 = bare caves.",
                     new AcceptableValueRange<float>(0f, 3f)));
-            CaveMushroomPrefabs = cfg.Bind(SW, "Cave Floor Prefabs", "Pickable_Mushroom_yellow",
-                "Comma-separated prefab names scattered on cave FLOORS, in clumps of 1-3. Unknown names are skipped with a warning, so it is safe to list prefabs a given modlist may not have.");
-            CaveCeilingPrefabs = cfg.Bind(SW, "Cave Ceiling Prefabs", "Greydwarf_Root",
-                "Comma-separated prefab names hung from cave CEILINGS and walls. Only placed where the void is tall enough that the player can still pass underneath.");
-            CaveRockPrefabs = cfg.Bind(SW, "Cave Cavern Prefabs", "rock4_forest",
-                "Comma-separated prefab names placed on the floors of the LARGER caverns only (needs real headroom and floor clearance).");
-
             CaveRockScale = cfg.Bind(SW, "Cave Rock Scale", 0.45f,
-                new ConfigDescription("Uniform scale applied to cave boulders. Surface rock prefabs are sized for open terrain and read far too large underground, so they are shrunk to rubble proportions.",
+                new ConfigDescription("Uniform scale applied to cave rubble. Surface rock prefabs are sized for open terrain and read far too large underground, so they are shrunk to rubble proportions.",
                     new AcceptableValueRange<float>(0.15f, 1.5f)));
-            CaveBonePrefabs = cfg.Bind(SW, "Cave Bone Prefabs", "Pickable_ForestCryptRemains01,Pickable_ForestCryptRemains02,Pickable_ForestCryptRandom",
-                "Comma-separated skeletal-remains prefabs scattered sparsely on cave floors for flavour. Unknown names are skipped with a warning.");
-            CaveMushroomChance = cfg.Bind(SW, "Cave Mushroom Chance", 0.10f,
-                new ConfigDescription("Per-candidate chance of a mushroom clump on a cave floor (clumps are 1-3). Lowered from the first pass — they were carpeting the caves.",
-                    new AcceptableValueRange<float>(0f, 1f)));
-            CaveBoneChance = cfg.Bind(SW, "Cave Bone Chance", 0.05f,
-                new ConfigDescription("Per-candidate chance of skeletal remains on a cave floor. Meant to be a rare find, not decoration.",
-                    new AcceptableValueRange<float>(0f, 1f)));
+            CaveContentConfig.Bind(cfg);
+            TreeSeedDrops.Bind(cfg);
+            TreeSaplingPrefabs.Bind(cfg);
 
             CaveWaterEnabled = cfg.Bind(SW, "Cave Water Enabled", true,
                 "Pool water in the lowest point of large caverns. Uses the normal FiresLiquid pour, so it drapes the carved floor, spreads to the bank, and you swim in it exactly as you do in any other water. Where a passage runs below the pool level it floods naturally, which is what produces submerged routes through to dry cave beyond.");
@@ -305,8 +512,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     "2048/10m grid could not represent water narrower than a cell). The hydrology is resolution-" +
                     "independent, so this only changes fidelity + first-gen time (~2.5min at 2m, cached forever after). " +
                     "MUST match on server and all clients (they each generate the world deterministically). Changing " +
-                    "this on an existing Fires world regenerates a DIFFERENT cache — leave it alone once a world exists.",
-                    new AcceptableValueRange<int>(512, 12000)));
+                    "this on an existing Fires world regenerates a DIFFERENT cache — leave it alone once a world exists. " +
+                    "21001 = 1m cells, matching vanilla's own heightmap spacing (the finest that is meaningful), but the " +
+                    "grid is one resident array PER FIELD for the whole world, so 1m costs ~840MB resident and ~1.7GB " +
+                    "as the float array it generates from, per field. The load log prints the exact cost.",
+                    new AcceptableValueRange<int>(512, 21001)));
             WorldGenDroplets = cfg.Bind(SW, "WorldGen Erosion Droplets", 400000,
                 new ConfigDescription("Droplet-erosion budget carving dendritic valley networks into the base grid at " +
                     "first generation, expressed at the 2048 REFERENCE grid — the engine scales it with the cell count " +
@@ -334,12 +544,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 "paths resolve against config/FiresRPGmaker/Debug/Cache; needed on server AND all clients.");
             HydrologyEnabled = cfg.Bind(SW, "Hydrology Enabled", true,
                 "W2 — bake world hydrology at login (flow accumulation over the world heightfield) and CARVE " +
-                "river beds into wrapped voxel terrain. Deterministic from the world seed.");
+                "river beds into wrapped voxel terrain (FullVoxel only). Deterministic from the world seed.");
             HydrologyPlaceWater = cfg.Bind(SW, "Hydrology Place Water", true,
-                "Auto-place water in wrapped zones: bank-following SPRING pours at river headwaters and " +
-                "settling water volumes on ponds. Idempotent (skips where a pour already exists).");
-            RiverThreshold = cfg.Bind(SW, "River Threshold", 260f,
-                new ConfigDescription("Catchment (hydrology cells) required before a river carves. Lower = more/denser streams.",
+                "Auto-place water in wrapped zones (FullVoxel only): bank-following SPRING pours at river " +
+                "headwaters and settling water volumes on ponds. Idempotent (skips where a pour already exists).");
+            RiverThreshold = cfg.Bind(SW, "River Threshold", 90f,
+                new ConfigDescription("Catchment (hydrology CELLS, 400m each) required before a river carves. Lower = more/denser streams. 260 only qualified the handful of valleys vanilla had already cut, which is why a converted world got no new rivers.",
                     new AcceptableValueRange<float>(40f, 4000f)));
             RiverMaxDepth = cfg.Bind(SW, "River Max Depth", 6f,
                 new ConfigDescription("Deepest bed carve (metres) for the largest rivers.",
@@ -347,6 +557,31 @@ namespace VerdantsAscent.Terrain.Voxel
             SpringSpacing = cfg.Bind(SW, "Spring Spacing", 140f,
                 new ConfigDescription("Minimum metres between auto-placed springs.",
                     new AcceptableValueRange<float>(48f, 512f)));
+
+            RiverWidthMin = cfg.Bind(SW, "River Width Min", 5f,
+                new ConfigDescription("Narrowest channel width (metres), at the river threshold — headwater streams.",
+                    new AcceptableValueRange<float>(2f, 20f)));
+            RiverWidthMax = cfg.Bind(SW, "River Width Max", 18f,
+                new ConfigDescription("Widest channel width (metres), for the largest rivers.",
+                    new AcceptableValueRange<float>(6f, 60f)));
+            RiverFreeboard = cfg.Bind(SW, "River Freeboard", 0.5f,
+                new ConfigDescription("Metres the water surface sits below the original ground, so the banks stay visible above the waterline.",
+                    new AcceptableValueRange<float>(0f, 3f)));
+            BankRelief = cfg.Bind(SW, "Coarse Grid Bank Relief", 0.4f,
+                new ConfigDescription("EXTRA metres the generated water surface sits below the level solved from the world grid, ON CONVERTED WORLDS ONLY. That solve runs at 20m while the ground it has to sit in is 1m, so the level it computes can land slightly ABOVE the real bank and the water pokes over the lip. This buys the inaccuracy back as visible bank. Applied at the source, so the carve, the sheet, the shore paint and the swim surface all agree.",
+                    new AcceptableValueRange<float>(0f, 2f)));
+            RiverMaxNewCut = cfg.Bind(SW, "River Max New Cut", 6f,
+                new ConfigDescription("Deepest cut (metres) below the ORIGINAL ground the carve may take to push a channel over dry ground. A reach needing more ends there as a sink instead of trenching through a ridge.",
+                    new AcceptableValueRange<float>(1f, 16f)));
+            RiverMeander = cfg.Bind(SW, "River Meander", 6f,
+                new ConfigDescription("Lateral meander amplitude (metres) along a channel. 0 = follow the solved path exactly.",
+                    new AcceptableValueRange<float>(0f, 20f)));
+            EstuaryLength = cfg.Bind(SW, "Estuary Length", 80f,
+                new ConfigDescription("Length (metres) of the flare where a river meets the ocean; the channel grades to the sea plane over this run.",
+                    new AcceptableValueRange<float>(0f, 300f)));
+            EstuaryFlare = cfg.Bind(SW, "Estuary Flare", 2.5f,
+                new ConfigDescription("Channel width multiplier at a river mouth.",
+                    new AcceptableValueRange<float>(1f, 6f)));
         }
     }
 }

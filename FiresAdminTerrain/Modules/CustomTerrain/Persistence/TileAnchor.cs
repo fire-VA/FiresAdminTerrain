@@ -56,7 +56,7 @@ namespace VerdantsAscent.Terrain.Persistence
             _nview = GetComponent<ZNetView>();
             if (_nview == null || !_nview.IsValid())
             {
-                Debug.LogWarning($"[TileAnchor] Awake @ {transform.position} with invalid ZNetView; disabling.");
+                FiresLogger.LogWarning($"[TileAnchor] Awake @ {transform.position} with invalid ZNetView; disabling.");
                 enabled = false;
                 return;
             }

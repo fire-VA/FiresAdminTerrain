@@ -32,13 +32,13 @@ namespace VerdantsAscent.Async
     /// All heavy main-thread work routes through this scheduler so the mod never
     /// exceeds its frame budget regardless of how many systems are active.
     /// 
-    /// <para><b>Thread Safety:</b> Schedule() is thread-safe — can be called from
+    /// <para><b>Thread Safety:</b> Schedule() is thread-safe - can be called from
     /// background threads. All execution happens on the main thread in Update().</para>
     /// 
     /// <para><b>Budget:</b> Default 5ms per frame. Always processes at least one item
     /// per frame to guarantee forward progress even if a single item exceeds budget.</para>
     /// 
-    /// <para><b>Priority:</b> Four lanes (Critical ? Low). Within a lane, items are
+    /// <para><b>Priority:</b> Four lanes (Critical -> Low). Within a lane, items are
     /// processed FIFO. Higher priority lanes are drained first each frame.</para>
     /// 
     /// Usage:
@@ -77,7 +77,7 @@ namespace VerdantsAscent.Async
 
         /// <summary>
         /// Maximum milliseconds per frame for ALL scheduled mod work.
-        /// Default 5ms — leaves 11ms of a 60fps frame for Valheim + rendering + network.
+        /// Default 5ms - leaves 11ms of a 60fps frame for Valheim + rendering + network.
         /// </summary>
         public static float MaxBudgetMs = 5f;
 
@@ -90,7 +90,7 @@ namespace VerdantsAscent.Async
 
         /// <summary>
         /// Schedules a single action for execution within the frame budget.
-        /// Thread-safe — can be called from background threads.
+        /// Thread-safe - can be called from background threads.
         /// </summary>
         public static void Schedule(WorkPriority priority, Action action)
         {
@@ -123,7 +123,7 @@ namespace VerdantsAscent.Async
 
         /// <summary>
         /// Schedules a coroutine-style IEnumerator whose steps execute within the budget.
-        /// Each yield return becomes a scheduling boundary — the scheduler picks up the
+        /// Each yield return becomes a scheduling boundary - the scheduler picks up the
         /// next step when budget is available.
         /// </summary>
         public static void ScheduleCoroutine(WorkPriority priority, IEnumerator steps,
@@ -214,7 +214,7 @@ namespace VerdantsAscent.Async
 
             if (total == 0)
             {
-                // Nothing to process — reset
+                // Nothing to process - reset
                 for (int lane = 0; lane < LANE_COUNT; lane++)
                 {
                     _localQueues[lane].Clear();
@@ -261,12 +261,12 @@ namespace VerdantsAscent.Async
                         }
                         catch (Exception ex)
                         {
-                            Debug.LogWarning($"[FrameBudgetScheduler] Coroutine step failed: {ex.Message}");
+                            FiresLogger.LogWarning($"[FrameBudgetScheduler] Coroutine step failed: {ex.Message}");
                         }
 
                         if (hasMore)
                         {
-                            // Coroutine has more steps — leave it in the queue for next frame
+                            // Coroutine has more steps - leave it in the queue for next frame
                             // But break out of this item so we respect the yield boundary
                             // (don't advance again this frame)
                             break;
@@ -281,7 +281,7 @@ namespace VerdantsAscent.Async
                             }
                             catch (Exception ex)
                             {
-                                Debug.LogWarning($"[FrameBudgetScheduler] OnComplete failed: {ex.Message}");
+                                FiresLogger.LogWarning($"[FrameBudgetScheduler] OnComplete failed: {ex.Message}");
                             }
                         }
                     }
@@ -294,7 +294,7 @@ namespace VerdantsAscent.Async
                         }
                         catch (Exception ex)
                         {
-                            Debug.LogWarning($"[FrameBudgetScheduler] Action failed: {ex.Message}");
+                            FiresLogger.LogWarning($"[FrameBudgetScheduler] Action failed: {ex.Message}");
                         }
                     }
                     else

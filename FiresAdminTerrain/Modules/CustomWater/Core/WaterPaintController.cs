@@ -182,7 +182,7 @@ namespace VerdantsAscent.Water.Core
 
             _initialized = true;
 
-            Debug.Log($"[WaterPaintController] Initialized at {transform.position}, radius={WaterRadius}, surface={SurfaceY}");
+            FiresLogger.LogInfo($"[WaterPaintController] Initialized at {transform.position}, radius={WaterRadius}, surface={SurfaceY}");
         }
 
         /// <summary>
@@ -216,7 +216,7 @@ namespace VerdantsAscent.Water.Core
                 _combiner?.ForceRegenerate();
             }
 
-            Debug.Log($"[WaterPaintController] Placed at {transform.position}, surface Y={SurfaceY}");
+            FiresLogger.LogInfo($"[WaterPaintController] Placed at {transform.position}, surface Y={SurfaceY}");
         }
 
         /// <summary>
@@ -421,6 +421,8 @@ namespace VerdantsAscent.Water.Core
 
             return text;
         }
+
+        public float GetHoverOffset() => 0f;
 
         public string GetHoverName()
         {

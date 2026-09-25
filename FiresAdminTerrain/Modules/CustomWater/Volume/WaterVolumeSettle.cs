@@ -106,7 +106,7 @@ namespace VerdantsAscent.Water.Core
 
             combiner.StartCoroutine(combiner.SettleVolumeCoroutine(center, radius));
 
-            Debug.Log($"[WaterMeshCombiner] CreateSettlingVolume at {center}, r={radius:F1}, fillY={center.y:F1}, liquid={liquid}");
+            FiresLogger.LogInfo($"[WaterMeshCombiner] CreateSettlingVolume at {center}, r={radius:F1}, fillY={center.y:F1}, liquid={liquid}");
             return combiner;
         }
 
@@ -248,7 +248,7 @@ namespace VerdantsAscent.Water.Core
                 string filterState = _meshFilter == null ? "NULL"
                     : (_meshFilter.sharedMesh == _waterMesh ? "bound" : "UNBOUND");
 
-                Debug.Log($"[WaterVolumeSettle] {stage} | grid={_gridWidth}x{_gridHeight} cell={_cellSize:F2} " +
+                FiresLogger.LogInfo($"[WaterVolumeSettle] {stage} | grid={_gridWidth}x{_gridHeight} cell={_cellSize:F2} " +
                     $"| wet={wet} vol={totalVol:F1}m³ fillY={fillY:F1} terrain=[{minT:F1}..{maxT:F1}] " +
                     $"| mesh verts={meshVerts} tris={meshTris} bounds={_waterMesh?.bounds.size} " +
                     $"| filter={filterState} renderer={rendState} mat={matName} layer={gameObject.layer} pos={transform.position}");
@@ -271,16 +271,16 @@ namespace VerdantsAscent.Water.Core
                     var b = _waterMesh.bounds;
                     meshWorldY = $"[{transform.position.y + b.min.y:F1}..{transform.position.y + b.max.y:F1}]";
                 }
-                Debug.Log($"[WaterVolumeSettle] {stage} CENTER | terrain@center={terC:F2} column@center={colC:F2} " +
+                FiresLogger.LogInfo($"[WaterVolumeSettle] {stage} CENTER | terrain@center={terC:F2} column@center={colC:F2} " +
                     $"surfaceWorldY@center={surC:F2} (ruler fillY={fillY:F2}, diff={surC - fillY:+0.00;-0.00}) " +
                     $"| meshWorldY={meshWorldY} transformY={transform.position.y:F2}");
-                Debug.Log($"[WaterVolumeSettle] {stage} PROBE | {ProbeLedgerAt(transform.position.x, transform.position.z)} " +
+                FiresLogger.LogInfo($"[WaterVolumeSettle] {stage} PROBE | {ProbeLedgerAt(transform.position.x, transform.position.z)} " +
                     $"|| +4x: {ProbeLedgerAt(transform.position.x + 4f, transform.position.z)} " +
                     $"|| +4z: {ProbeLedgerAt(transform.position.x, transform.position.z + 4f)}");
             }
             catch (System.Exception ex)
             {
-                Debug.LogWarning($"[WaterVolumeSettle] diagnostics threw: {ex.Message}");
+                FiresLogger.LogWarning($"[WaterVolumeSettle] diagnostics threw: {ex.Message}");
             }
         }
 
@@ -478,7 +478,7 @@ namespace VerdantsAscent.Water.Core
 
             combiner.StartCoroutine(combiner.SpringFlowCoroutine(center, radius, bankOffset, fillY));
 
-            Debug.Log($"[WaterMeshCombiner] CreateSpring at {center}, r={radius:F1}, bankOffset={bankOffset:F2}, fillY={fillY:F1}, liquid={liquid}");
+            FiresLogger.LogInfo($"[WaterMeshCombiner] CreateSpring at {center}, r={radius:F1}, bankOffset={bankOffset:F2}, fillY={fillY:F1}, liquid={liquid}");
             return combiner;
         }
 
@@ -632,7 +632,7 @@ namespace VerdantsAscent.Water.Core
             EnsureAnchorExists();
             SaveToAnchor();
 
-            Debug.Log($"[WaterMeshCombiner] Spring gelled | bankOffset={bankOffset:F2} | settled in {t:F1}s ({(steadyFrames >= SPRING_STEADY_FRAMES ? "steady-state" : "timeout")})");
+            FiresLogger.LogInfo($"[WaterMeshCombiner] Spring gelled | bankOffset={bankOffset:F2} | settled in {t:F1}s ({(steadyFrames >= SPRING_STEADY_FRAMES ? "steady-state" : "timeout")})");
             LogVolumeDiagnostics("spring GELLED", column, fillY);
         }
 

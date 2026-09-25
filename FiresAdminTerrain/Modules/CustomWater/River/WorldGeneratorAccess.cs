@@ -8,13 +8,13 @@ namespace VerdantsAscent.Water.Core
 {
     /// <summary>
     /// Cached reflection accessors for private WorldGenerator fields and methods.
-    /// These are private in the Valheim assembly — we access them via Harmony's AccessTools.
+    /// These are private in the Valheim assembly - we access them via Harmony's AccessTools.
     /// 
     /// Fields accessed:
-    /// - m_rivers: List&lt;WorldGenerator.River&gt; — generated river paths
-    /// - m_streams: List&lt;WorldGenerator.River&gt; — generated stream paths
-    /// - m_lakes: List&lt;Vector2&gt; — detected lake positions (XZ)
-    /// - m_world: World — the current world data (needed to check m_menu)
+    /// - m_rivers: List&lt;WorldGenerator.River&gt; - generated river paths
+    /// - m_streams: List&lt;WorldGenerator.River&gt; - generated stream paths
+    /// - m_lakes: List&lt;Vector2&gt; - detected lake positions (XZ)
+    /// - m_world: World - the current world data (needed to check m_menu)
     /// 
     /// Methods accessed:
     /// - GetRiverWeight: void(float wx, float wy, out float weight, out float width)
@@ -25,9 +25,9 @@ namespace VerdantsAscent.Water.Core
     /// Better Continents compatibility:
     /// - Detects if BC is loaded and whether HeightmapOverrideAll is active
     /// - When HeightmapOverrideAll = true, terrain has no river channels even though
-    ///   m_rivers data exists — auto water generation should be skipped
+    ///   m_rivers data exists - auto water generation should be skipped
     /// - BC never patches GetRiverWeight(), so our channel detection always works
-    /// - BC can disable rivers (RiversEnabled=false), which empties m_rivers — handled naturally
+    /// - BC can disable rivers (RiversEnabled=false), which empties m_rivers - handled naturally
     /// </summary>
     public static class WorldGeneratorAccess
     {
@@ -62,11 +62,11 @@ namespace VerdantsAscent.Water.Core
             _getRiverWeightMethod = AccessTools.Method(typeof(WorldGenerator), "GetRiverWeight",
                 new[] { typeof(float), typeof(float), typeof(float).MakeByRefType(), typeof(float).MakeByRefType() });
 
-            if (_riversField == null) Debug.LogWarning("[WorldGeneratorAccess] Could not find field m_rivers");
-            if (_streamsField == null) Debug.LogWarning("[WorldGeneratorAccess] Could not find field m_streams");
-            if (_lakesField == null) Debug.LogWarning("[WorldGeneratorAccess] Could not find field m_lakes");
-            if (_worldField == null) Debug.LogWarning("[WorldGeneratorAccess] Could not find field m_world");
-            if (_getRiverWeightMethod == null) Debug.LogWarning("[WorldGeneratorAccess] Could not find method GetRiverWeight(float, float, out float, out float)");
+            if (_riversField == null) FiresLogger.LogWarning("[WorldGeneratorAccess] Could not find field m_rivers");
+            if (_streamsField == null) FiresLogger.LogWarning("[WorldGeneratorAccess] Could not find field m_streams");
+            if (_lakesField == null) FiresLogger.LogWarning("[WorldGeneratorAccess] Could not find field m_lakes");
+            if (_worldField == null) FiresLogger.LogWarning("[WorldGeneratorAccess] Could not find field m_world");
+            if (_getRiverWeightMethod == null) FiresLogger.LogWarning("[WorldGeneratorAccess] Could not find method GetRiverWeight(float, float, out float, out float)");
         }
 
         /// <summary>Gets WorldGenerator.m_rivers (list of river paths between lakes).</summary>
@@ -182,7 +182,7 @@ namespace VerdantsAscent.Water.Core
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[WorldGeneratorAccess] Failed to initialize BC detection: {ex.Message}");
+                FiresLogger.LogWarning($"[WorldGeneratorAccess] Failed to initialize BC detection: {ex.Message}");
                 _bcLoaded = false;
             }
         }
