@@ -122,7 +122,10 @@ namespace VerdantsAscent.Terrain.Voxel
             double msA, msB;
             lock (s_bufferPool) { msA = s_pipeMsApply; msB = s_pipeMsAssign; }
 
-            FiresLogger.LogVerbose($"[FiresVoxelPipe] applies {applied}({rate:0.0}/s; cap {cap}/frame x {fps:0} fps = {cap * fps:0.0}/s ceiling) " +
+            // INFO, not Verbose: this is the line that decides throttle-bound vs cost-bound vs starved, and the
+            // 2026-09-26 traverse produced none of it because FAT verbose was off. Self-throttled to one line per
+            // 15s and skipped entirely when every queue is idle, so it cannot flood the way global verbose does.
+            FiresLogger.LogInfo($"[FiresVoxelPipe] applies {applied}({rate:0.0}/s; cap {cap}/frame x {fps:0} fps = {cap * fps:0.0}/s ceiling) " +
                       $"assigns {assigned} | queues apply={s_applyQueue.Count} assign={s_assignQueue.Count} remesh={s_remeshQueue.Count} generate={s_generateQueue.Count} " +
                       $"| starved {Interlocked.Read(ref s_pipeStarved)} " +
                       $"| buffers alloc={s_buffersAllocated}/{s_maxBuffers} pool={s_bufferPool.Count} " +

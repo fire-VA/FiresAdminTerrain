@@ -112,7 +112,13 @@ namespace VerdantsAscent.Terrain.Voxel
             if (GroundOverride != null) { var v = GroundOverride(wx, wz); if (v.HasValue) { g = v.Value; return true; } g = 0f; return false; }
             return FiresWorldGenBase.TryGetGenGround(wx, wz, out g);
         }
-        internal static void Build(int seed) => Build(seed, null);
+        // Set when the world is full voxel but the Fires generator is NOT running - a vanilla-profiled conversion,
+        // where the ground comes from the vanilla heightmap instead of a generated grid. Both registry paths call
+        // the one-argument Build, so the override has to ride here or it would be wiped to null by the shim and
+        // every island would fail GetGround and never be placed.
+        internal static System.Func<float, float, float?> GroundWhenGeneratorIsOff;
+
+        internal static void Build(int seed) => Build(seed, GroundWhenGeneratorIsOff);
         // Called once per world init, AFTER the packed ground grid exists
         // (island base height rides the local terrain).
         internal static void Build(int seed, System.Func<float, float, float?> groundAt)

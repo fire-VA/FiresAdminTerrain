@@ -1493,19 +1493,35 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float s_blockedLongest;
         private static float s_nextBlockedSummary;
 
+        // WINDOW PEAKS, not one frame's tally. The counters above are rebuilt from scratch on every update, and
+        // this report used to print whichever frame happened to land when the 30s window expired - one frame in
+        // ~1800, the other 1799 discarded by ClearBlockedTally. Queue depths sampled that way cannot tell real
+        // saturation from a momentary spike: the 2026-09-26 traverse emitted pendingGen 0, 0, 0 and 17, which is
+        // four unrelated instants and not a trend. These survive the window, so the line reports its true worst.
+        private static int s_peakZones, s_peakPendingGen, s_peakQueued, s_peakNoView, s_peakNoCollider;
+        private static float s_peakLongest;
+
         // One line for every zone the mesher is behind on, at most every 30s.
         private static void ReportBlocked()
         {
-            if (s_blockedZones == 0) { s_nextBlockedSummary = 0f; return; }
-            if (Time.time < s_nextBlockedSummary)
-            {
-                ClearBlockedTally();
-                return;
-            }
+            FoldBlockedPeaks();
+            if (s_peakZones == 0) { s_nextBlockedSummary = 0f; return; }
+            if (Time.time < s_nextBlockedSummary) return;
             s_nextBlockedSummary = Time.time + BlockedSummarySeconds;
-            FiresLogger.LogWarning($"[FiresVoxel] {s_blockedZones} zone(s) still showing vanilla terrain while their voxel "
-                + $"chunks mesh, longest {s_blockedLongest:F0}s: pendingGen={s_blockedPendingGen} queued={s_blockedQueued} "
-                + $"noView={s_blockedNoView} colliderNotReady={s_blockedNoCollider}.");
+            FiresLogger.LogWarning($"[FiresVoxel] up to {s_peakZones} zone(s) showing vanilla terrain while their voxel "
+                + $"chunks mesh, longest {s_peakLongest:F0}s: peak pendingGen={s_peakPendingGen} queued={s_peakQueued} "
+                + $"noView={s_peakNoView} colliderNotReady={s_peakNoCollider}.");
+            ClearBlockedPeaks();
+        }
+
+        private static void FoldBlockedPeaks()
+        {
+            if (s_blockedZones > s_peakZones) s_peakZones = s_blockedZones;
+            if (s_blockedPendingGen > s_peakPendingGen) s_peakPendingGen = s_blockedPendingGen;
+            if (s_blockedQueued > s_peakQueued) s_peakQueued = s_blockedQueued;
+            if (s_blockedNoView > s_peakNoView) s_peakNoView = s_blockedNoView;
+            if (s_blockedNoCollider > s_peakNoCollider) s_peakNoCollider = s_blockedNoCollider;
+            if (s_blockedLongest > s_peakLongest) s_peakLongest = s_blockedLongest;
             ClearBlockedTally();
         }
 
@@ -1513,6 +1529,12 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             s_blockedZones = s_blockedPendingGen = s_blockedQueued = s_blockedNoView = s_blockedNoCollider = 0;
             s_blockedLongest = 0f;
+        }
+
+        private static void ClearBlockedPeaks()
+        {
+            s_peakZones = s_peakPendingGen = s_peakQueued = s_peakNoView = s_peakNoCollider = 0;
+            s_peakLongest = 0f;
         }
 
         private static void TrySwap(ZoneWrap wrap)

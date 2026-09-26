@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using FiresCore.UI;
@@ -11,8 +12,9 @@ namespace VerdantsAscent.Terrain.Voxel
     // MenuDialog preset for it (name, terrain, one zone at a time, sky islands, rivers and lakes, caves); FiresWorldClone
     // makes the copy and the original is never touched. "As the original" keeps what the world has, so a split is faithful.
     // The copy is made from the row's save (its file name); the dialog and FAT's records use the world's own name, which
-    // a renamed world no longer shares with its file. Full voxel is the Fires generator's terrain, so a world stock
-    // Valheim made offers it greyed, with voxel wrap named instead.
+    // a renamed world no longer shares with its file. Full voxel is offered for any world: on a stock one the vanilla
+    // heightmap sets the ground and the voxel field is built from it, with only the river carve, caves and sky islands
+    // added on top.
     internal static class FiresWorldMenu
     {
         private const string Owner = "FiresAdminTerrain";
@@ -34,13 +36,13 @@ namespace VerdantsAscent.Terrain.Voxel
             if (world == null) yield break;
             string refusal = world.m_dataError != World.SaveDataError.None ? "This world could not be read."
                 : File.Exists(ZoneModeRegistry.RegistryPath(world.m_name)) ? "Already played one zone at a time." : null;
-            string fullVoxelRefusal = refusal ?? (FiresWorldClone.OriginalProfile(world.m_name).Generator == ProfileGenerator.Vanilla
-                ? "Full voxel terrain comes from the Fires generator. Stock Valheim made this world: clone it as voxel wrap."
-                : null);
+            // Full voxel no longer needs the Fires generator. On a stock world it means the vanilla heightmap sets the
+            // ground, the voxel field is built from it, and the river carve, caves and sky islands run on that data -
+            // the world keeps its own shape instead of a new one being generated from the seed.
             // ONE row, not four. The four were presets into this same dialog - each one pre-picked a terrain and
             // then hid the other three choices behind a different right-click, so whichever you took you lost the
             // rest. The dialog already offers all of them, so the preset is "as the original" and every choice is
-            // made in one place. fullVoxelRefusal still applies there, shown on the Terrain row.
+            // made in one place.
             yield return Row("Clone...", refusal, () => ShowCloneDialog(world, "-Copy", KeepOriginal, false));
         }
 
@@ -97,8 +99,19 @@ namespace VerdantsAscent.Terrain.Voxel
                     finished = true;
                     FiresLogger.LogInfo("[FiresWorldGen] " + report);
                     WorldListContextMenu.RefreshWorldList();
-                    UnifiedPopup.Push(new WarningPopup(cloned ? "World cloned" : "Not cloned", report, UnifiedPopup.Pop, localizeText: false));
+                    MainThreadDispatcher.StartRoutine(ShowResultWhenTaskPopupIsGone(cloned, report));
                 }));
+        }
+
+        // The task popup does not leave the stack the moment its work is done: its UpdateRoutine notices
+        // shouldClose on its NEXT tick, and UnifiedPopup pops it after that. Pushing the result straight away put
+        // it ON TOP of a popup that was still there, so closing the result re-showed the finished task - which
+        // relabels the button "Cancel", leaves the result's text on screen, and whose coroutine has already ended,
+        // so vanilla's cancel handler ran StopCoroutine(null) and threw on every click with no way to close it.
+        private static IEnumerator ShowResultWhenTaskPopupIsGone(bool cloned, string report)
+        {
+            while (UnifiedPopup.IsVisible()) yield return null;
+            UnifiedPopup.Push(new WarningPopup(cloned ? "World cloned" : "Not cloned", report, UnifiedPopup.Pop, localizeText: false));
         }
 
         private static bool? Switch(int choice) => choice == SwitchOn ? true : choice == SwitchOff ? false : (bool?)null;

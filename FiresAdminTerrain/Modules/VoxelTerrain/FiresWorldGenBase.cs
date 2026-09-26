@@ -946,6 +946,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (profile.Generator == ProfileGenerator.Vanilla)
                 {
                     FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' is profiled as VANILLA — vanilla generation.");
+                    _vanillaFullVoxelWorld = profile.Terrain == ProfileTerrain.VoxelOnly ? world : null;
                     return;
                 }
                 FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' is profiled as {profile.Generator} — the Fires generator runs.");
@@ -1148,6 +1149,40 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresLogger.LogInfo($"[FiresWorldGen] ACTIVE for '{world.m_name}' seed={world.m_seed} grid={n} half={half:F0} droplets={droplets} " +
                       $"({source}) — world ready in {sw.Elapsed.TotalSeconds:0.0}s | {path}");
             LogWorldReport(world.m_name, world.m_seed);
+        }
+
+        private const float PlayableRadius = 10000f;
+        private const float PlayableRadiusSqr = PlayableRadius * PlayableRadius;
+
+        // Set by the vanilla-profile branch above; consumed from ZNet.Start, which is where the world is actually
+        // loaded. The profile branch runs during world INIT, and WorldGenerator.instance does not exist yet there.
+        private static World _vanillaFullVoxelWorld;
+
+        // A full-voxel world whose HEIGHT comes from vanilla still gets its sky islands, and therefore its caves:
+        // FiresVoxelConfig.GeneratesCaves is only ever read through FiresSkyIslands (HoldsCaves), so no islands
+        // means no caves either. The island set is normally seeded at the END of the Fires generator's init, which
+        // a vanilla-profiled world never reaches - so it is seeded here instead, against vanilla's own heightmap.
+        // GroundOverride exists for exactly this ("lets the offline studio place islands on an IMPORTED world where
+        // the generator isn't Active"), and vanilla's GetHeight answers anywhere, so nothing must be explored first.
+        internal static void SeedSkyIslandsOnVanillaGround()
+        {
+            var world = _vanillaFullVoxelWorld;
+            _vanillaFullVoxelWorld = null;
+            if (world == null) return;
+
+            var generator = WorldGenerator.instance;
+            if (generator == null)
+            {
+                FiresLogger.LogWarning($"[FiresWorldGen] world '{world.m_name}' is full voxel on vanilla height, but "
+                    + "WorldGenerator was not up at ZNet.Start — sky islands (and therefore caves) were NOT seeded.");
+                return;
+            }
+
+            FiresSkyIslands.GroundWhenGeneratorIsOff = (wx, wz) =>
+                wx * wx + wz * wz > PlayableRadiusSqr ? (float?)null : generator.GetHeight(wx, wz);
+            FiresSkyIslands.Initialize(world);
+            FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' is full voxel on VANILLA height — "
+                + $"sky islands seeded from vanilla's heightmap: {FiresSkyIslands.IslandCount} island(s).");
         }
 
         // Basin fills come out of the fill table at SPILL level — a closed

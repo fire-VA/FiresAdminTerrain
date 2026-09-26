@@ -61,14 +61,14 @@ namespace VerdantsAscent.Terrain.Voxel
             s_registered = true;
             new Terminal.ConsoleCommand(CommandName,
                 "Main menu: copy a world under a new name, leaving the original untouched. Usage: " + CommandName
-                + " <world> <new name> [chunks] [heightmap|voxelwrap|voxelonly] [sky=on|off] [rivers=on|off] [caves=on|off]. "
+                + " <world> <new name> [chunks] [vanilla|fires] [heightmap|voxelwrap|voxelonly] [sky=on|off] [rivers=on|off] [caves=on|off]. "
                 + "'chunks' makes the copy one zone at a time: what the world has explored is set aside zone by zone and returns "
                 + "as it was when each zone is opened.",
                 args =>
                 {
                     if (args.Length < 3)
                     {
-                        args.Context.AddString("Usage: " + CommandName + " <world> <new name> [chunks] [heightmap|voxelwrap|voxelonly] "
+                        args.Context.AddString("Usage: " + CommandName + " <world> <new name> [chunks] [vanilla|fires] [heightmap|voxelwrap|voxelonly] "
                             + "[sky=on|off] [rivers=on|off] [caves=on|off]");
                         return;
                     }
@@ -107,15 +107,21 @@ namespace VerdantsAscent.Terrain.Voxel
                     options.Terrain = terrain;
                     continue;
                 }
+                if (Enum.TryParse(word, true, out ProfileGenerator generator) && Enum.IsDefined(typeof(ProfileGenerator), generator))
+                {
+                    options.Generator = generator;
+                    continue;
+                }
                 int eq = word.IndexOf('=');
                 bool? value = eq > 0 ? ParseSwitch(word.Substring(eq + 1)) : null;
                 string key = eq > 0 ? word.Substring(0, eq) : word;
                 if (value.HasValue && key == "sky") { options.SkyIslands = value; continue; }
                 if (value.HasValue && key == "rivers") { options.Hydrology = value; continue; }
                 if (value.HasValue && key == "caves") { options.Caves = value; continue; }
-                problem = $"'{words[i]}' is not an option. Options: chunks, heightmap, voxelwrap, voxelonly, sky=on|off, rivers=on|off, caves=on|off.";
+                problem = $"'{words[i]}' is not an option. Options: chunks, vanilla, fires, heightmap, voxelwrap, voxelonly, sky=on|off, rivers=on|off, caves=on|off.";
                 return false;
             }
+
             return true;
         }
 

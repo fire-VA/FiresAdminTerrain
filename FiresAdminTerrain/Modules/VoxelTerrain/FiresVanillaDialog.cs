@@ -35,6 +35,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private const int ErrorFontSize = 14;
         private const int MinButtons = 2;
         private const float MinTitleFont = 20f;
+        private const string GamepadHintName = "gamepad_hint";
 
         private static readonly Color ErrorInk = new Color(0.72f, 0.19f, 0.14f);
 
@@ -63,7 +64,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool TryBuild(string title, IList<MenuDialog.Field> fields, string okLabel, string cancelLabel)
         {
             var source = FejdStartup.instance != null ? FejdStartup.instance.m_createWorldPanel : null;
-            if (source == null || source.transform.parent == null) return false;
+            if (source == null || source.transform.parent == null)
+                return Refused("FejdStartup has no create-world panel to borrow");
 
             GameObject clone = null;
             try
@@ -71,11 +73,26 @@ namespace VerdantsAscent.Terrain.Voxel
                 clone = UnityEngine.Object.Instantiate(source, source.transform.parent);
                 clone.name = "FiresWorldOptions";
 
+                // The panel drew correctly but nothing in it could be clicked, typed in or ticked. UI that renders and
+                // ignores every control is not a listener problem - a wrong listener fires the WRONG action, not none -
+                // it is the pointer never arriving. Two things can do that to a clone and neither is visible: an
+                // ancestor CanvasGroup with interactable or blocksRaycasts off (vanilla dims the menu behind a panel
+                // that way), and a sibling drawn after us. ignoreParentGroups is the only switch that beats an
+                // ancestor group, and SetAsLastSibling puts us last in our own canvas.
+                clone.transform.SetAsLastSibling();
+                var group = clone.GetComponent<CanvasGroup>() ?? clone.AddComponent<CanvasGroup>();
+                group.alpha = 1f;
+                group.interactable = true;
+                group.blocksRaycasts = true;
+                group.ignoreParentGroups = true;
+
                 var buttons = clone.GetComponentsInChildren<Button>(true);
-                if (buttons.Length < MinButtons) { UnityEngine.Object.Destroy(clone); return false; }
+                if (buttons.Length < MinButtons)
+                { UnityEngine.Object.Destroy(clone); return Refused($"the panel carries {buttons.Length} button(s), needs {MinButtons}"); }
 
                 var host = RowHost(clone);
-                if (host == null) { UnityEngine.Object.Destroy(clone); return false; }
+                if (host == null)
+                { UnityEngine.Object.Destroy(clone); return Refused("no row host inside the panel"); }
 
                 // A cloned Button keeps FejdStartup's SERIALIZED onClick entries, and RemoveAllListeners does not drop
                 // those - only replacing the event object does. Without this, OK would still start a new world.
@@ -119,8 +136,10 @@ namespace VerdantsAscent.Terrain.Voxel
 
                 PlaceButtonsBelow(host, buttons, top + rows.sizeDelta.y + ErrorHeight);
 
+                Enable(clone);
                 clone.SetActive(true);
                 s_panel = clone;
+                Diagnose(clone, buttons);
                 return true;
             }
             catch (Exception ex)
@@ -252,6 +271,61 @@ namespace VerdantsAscent.Terrain.Voxel
                 text.color = source.color;
                 if (source.font != null) text.font = source.font;
             }
+        }
+
+        // Every bail-out used to return false in silence, so a fall back to the Fires panel looked identical to the
+        // feature being off, and the one run that mattered logged nothing at all. Each refusal now says which check
+        // failed.
+        private static bool Refused(string why)
+        {
+            FiresLogger.LogInfo($"[FiresWorldGen] clone dialog: using the Fires panel instead - {why}.");
+            return false;
+        }
+
+        // A cloned vanilla control inherits vanilla's STATE, not just its look - and vanilla ships this panel with its
+        // controls disabled, because the New World button only lights once the name passes the "5 characters minimum"
+        // rule the panel itself advertises. A Selectable with interactable=false draws completely normally and has no
+        // hover transition, which is why Cancel did not light up: the pointer was arriving and the button was refusing
+        // it. BcWorldListMenu hit the same thing cloning m_publicServerToggle and fixes it the same way.
+        //
+        // Applied to every Selectable, including the rows Core just built, so a disabled template cannot leak through
+        // any control. gamepad_hint children are stripped too: they advertise a button that now does something else.
+        private static void Enable(GameObject clone)
+        {
+            foreach (var selectable in clone.GetComponentsInChildren<Selectable>(true))
+                if (selectable != null) selectable.interactable = true;
+
+            foreach (var child in clone.GetComponentsInChildren<Transform>(true))
+                if (child != null && child.name == GamepadHintName) child.gameObject.SetActive(false);
+        }
+
+        // One line, once per open, naming everything that can swallow a click. If the panel is still dead after the
+        // CanvasGroup fix this says which of them did it, instead of another round of guessing: the canvas we actually
+        // landed in and its order, whether anything can raycast into it at all, every ancestor group with its switches,
+        // and whether the buttons themselves believe they are interactable.
+        private static void Diagnose(GameObject clone, Button[] buttons)
+        {
+            var canvas = clone.GetComponentInParent<Canvas>();
+            var raycaster = canvas != null ? canvas.GetComponent<GraphicRaycaster>() : null;
+            var groups = new List<string>();
+            for (var walk = clone.transform; walk != null; walk = walk.parent)
+            {
+                var found = walk.GetComponent<CanvasGroup>();
+                if (found == null) continue;
+                groups.Add($"{walk.name}(a={found.alpha:0.##} int={found.interactable} ray={found.blocksRaycasts}"
+                    + $" ign={found.ignoreParentGroups})");
+            }
+
+            FiresLogger.LogInfo("[FiresWorldGen] clone dialog: "
+                + $"canvas={(canvas != null ? canvas.name : "NONE")} "
+                + $"order={(canvas != null ? canvas.sortingOrder.ToString() : "-")} "
+                + $"override={(canvas != null && canvas.overrideSorting)} "
+                + $"raycaster={(raycaster != null ? (raycaster.enabled ? "on" : "DISABLED") : "MISSING")} "
+                + $"eventsystem={(UnityEngine.EventSystems.EventSystem.current != null)} "
+                + $"sibling={clone.transform.GetSiblingIndex()}/{clone.transform.parent.childCount} "
+                + $"ok={(buttons.Length > 0 && buttons[0].interactable)} "
+                + $"cancel={(buttons.Length > 1 && buttons[1].interactable)} "
+                + $"groups=[{(groups.Count > 0 ? string.Join(", ", groups) : "none")}]");
         }
 
         private static void Relabel(Button button, string label)

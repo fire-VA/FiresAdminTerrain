@@ -290,6 +290,11 @@ namespace VerdantsAscent.Terrain
                 ZoneModeRegistry.SubscribeSeeding();
                 FarQuilt.OnZoneSystemStart();
                 VoxelZoneStreamer.OnZoneSystemStart();
+                // HERE, not ZNet.Start. Measured 2026-09-26 on the dedi: ZNet.Start's postfix runs at log line 642
+                // and FiresWorldGenBase's world-init profile branch at 644, so reading that branch's result from
+                // ZNet.Start reads it two lines too early and silently does nothing.
+                try { global::VerdantsAscent.Terrain.Voxel.FiresWorldGenBase.SeedSkyIslandsOnVanillaGround(); }
+                catch (Exception ex) { FiresLogger.LogError($"[FiresWorldGen] seeding sky islands on vanilla height failed: {ex}"); }
             }
         }
 

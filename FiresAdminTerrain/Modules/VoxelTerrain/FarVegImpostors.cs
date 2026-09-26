@@ -43,6 +43,16 @@ namespace VerdantsAscent.Terrain.Voxel
         private const byte BakeOpaqueAlpha = 90;     // BakeCutoff in bytes (0.35 * 255 = 89.25)
         private const int BakeBleedPasses = 6;
         private const int BATCH = 1023;      // DrawMeshInstanced hard cap
+
+        // Tile-scan throttle. The heading gate is a dot product against the last scanned forward: 0.9995 is
+        // about 1.8 degrees, tight enough that the prebuild cone (already widened by 0.15 over the draw cone)
+        // cannot be swept past before the next scan. The safety interval covers LRU eviction, which creates
+        // work without moving the player or the camera.
+        private const float ScanHeadingCos = 0.9995f;
+        private const float ScanSafetySeconds = 0.5f;
+        private static int s_scanTx = int.MinValue, s_scanTz = int.MinValue;
+        private static Vector2 s_scanFwd = Vector2.zero;
+        private static float s_nextScan;
         private const int TILE_CAP_MIN = 1024;
         private const int TILE_CAP_MAX = 24000;  // memory backstop (~roaming safety)
 
@@ -211,12 +221,35 @@ namespace VerdantsAscent.Terrain.Voxel
         // on the next frame instead of waiting for the player to move or turn.
         public static void MarkDirty() => s_batchesDirty = true;
 
+        // The per-cell body lifted verbatim out of the old triple loop, so the ring walk that replaced it does
+        // exactly the same test in the same order: circular radius disk, else the forward cone, else skip.
+        private static void TryQueueTile(int tx, int tz, Vector3 pp, float rad2, float fwd2, Vector2 fwd, float prebuildCos)
+        {
+            float ex = tx * TILE + TILE * 0.5f - pp.x;
+            float ez = tz * TILE + TILE * 0.5f - pp.z;
+            float ed2 = ex * ex + ez * ez;
+            if (ed2 > rad2)
+            {
+                if (ed2 > fwd2) return;
+                float inv = 1f / Mathf.Sqrt(ed2 > 1e-4f ? ed2 : 1f);
+                if (ex * fwd.x * inv + ez * fwd.y * inv < prebuildCos) return;
+            }
+            var key = new Vector2Int(tx, tz);
+            if (s_tiles.ContainsKey(key) || s_inFlight.Contains(key)) return;
+            s_inFlight.Add(key);
+            s_buildQueue.Enqueue(key);
+        }
+
         public static void Tick()
         {
             s_gen = WorldGenerator.instance;
             if (!Enabled || ZNetScene.instance == null || (!FiresWorldGenBase.Active && s_gen == null))
             {
                 if (s_tiles.Count > 0) { s_tiles.Clear(); s_batchesDirty = true; }
+                // Forget where the scan last ran. Without this, toggling impostors back on while standing
+                // still matches the cached tile and heading, so the first scan waits for the safety interval
+                // and the billboards take up to half a second to reappear.
+                s_scanTx = int.MinValue; s_scanTz = int.MinValue; s_scanFwd = Vector2.zero; s_nextScan = 0f;
                 return;
             }
             var cam = Utils.GetMainCamera();
@@ -245,31 +278,48 @@ namespace VerdantsAscent.Terrain.Voxel
             // 5000+ tiles, blew the LRU cap, and churned). The prebuild cone is
             // a bit wider than the draw cone so tiles are ready before a turn
             // sweeps them into view.
-            if (WorldReady)
+            // ═══ THE SCAN IS THROTTLED; THE DRAW IS NOT ═══════════════════════
+            // Draw batches are already cached and only rebuilt on a tile crossing (see the header), so a
+            // standing player's per-frame cost was ENTIRELY this enumeration - and its result depends on
+            // nothing but the player's tile, the radius config and the camera heading. Standing still and
+            // looking one way, it re-derived the same answer every frame and enqueued nothing.
+            //
+            // Measured 2026-09-25 on the BlueHills rig: StreamerDriver.Update cost 4.1 ms on EVERY one of
+            // 5,076 frames, the second-largest site in the game behind object creation, and this scan is its
+            // unthrottled half (FiresVoxel's own Tick is already behind a 0.25 s gate).
+            //
+            // The periodic re-scan is not belt-and-braces, it is load-bearing: EvictFarTiles can drop a tile
+            // that is still in range, which creates new work with no tile crossing and no turn to trigger on.
+            bool tileMoved = ptx != s_scanTx || ptz != s_scanTz;
+            bool turned = Vector2.Dot(fwd, s_scanFwd) < ScanHeadingCos;
+            bool scanDue = Time.time >= s_nextScan;
+            if (WorldReady && (tileMoved || turned || scanDue))
             {
+                s_scanTx = ptx; s_scanTz = ptz; s_scanFwd = fwd;
+                s_nextScan = Time.time + ScanSafetySeconds;
+
                 float rad2 = radius * radius, fwd2 = fwdRadius * fwdRadius;
                 const float PREBUILD_COS = CONE_COS - 0.15f;
+                // WALK THE RING, DO NOT SCAN THE SQUARE. The old loop iterated (2r+1)^2 cells per ring and
+                // threw away everything not on the perimeter: at the 3000 m forward radius (range 24) that is
+                // 20,825 iterations to visit the 2,401 cells that are actually on a ring - 8.7x the work, and
+                // it ran every frame. Ring order (nearest first) is preserved, which the build queue relies on.
                 for (int ring = 0; ring <= range; ring++)
                 {
-                    for (int dz = -ring; dz <= ring; dz++)
+                    if (ring == 0)
                     {
-                        for (int dx = -ring; dx <= ring; dx++)
-                        {
-                            if (Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dz)) != ring) continue;
-                            float ex = (ptx + dx) * TILE + TILE * 0.5f - pp.x;
-                            float ez = (ptz + dz) * TILE + TILE * 0.5f - pp.z;
-                            float ed2 = ex * ex + ez * ez;
-                            if (ed2 > rad2)
-                            {
-                                if (ed2 > fwd2) continue;
-                                float inv = 1f / Mathf.Sqrt(ed2 > 1e-4f ? ed2 : 1f);
-                                if (ex * fwd.x * inv + ez * fwd.y * inv < PREBUILD_COS) continue;
-                            }
-                            var key = new Vector2Int(ptx + dx, ptz + dz);
-                            if (s_tiles.ContainsKey(key) || s_inFlight.Contains(key)) continue;
-                            s_inFlight.Add(key);
-                            s_buildQueue.Enqueue(key);
-                        }
+                        TryQueueTile(ptx, ptz, pp, rad2, fwd2, fwd, PREBUILD_COS);
+                        continue;
+                    }
+                    for (int dx = -ring; dx <= ring; dx++)
+                    {
+                        TryQueueTile(ptx + dx, ptz - ring, pp, rad2, fwd2, fwd, PREBUILD_COS);
+                        TryQueueTile(ptx + dx, ptz + ring, pp, rad2, fwd2, fwd, PREBUILD_COS);
+                    }
+                    for (int dz = -ring + 1; dz <= ring - 1; dz++)
+                    {
+                        TryQueueTile(ptx - ring, ptz + dz, pp, rad2, fwd2, fwd, PREBUILD_COS);
+                        TryQueueTile(ptx + ring, ptz + dz, pp, rad2, fwd2, fwd, PREBUILD_COS);
                     }
                 }
                 if (!s_buildQueue.IsEmpty) s_wake.Set();

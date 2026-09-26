@@ -286,6 +286,7 @@
     <Compile Include="Modules\VoxelTerrain\LegacyMesh\VoxelWaterSurvey.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelGenLiquid.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelChunkCache.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelCacheSync.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelWaterSurface.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresMinimapRivers.cs" />
     <Compile Include="Modules\VoxelTerrain\AltBiomePointGuard.cs" />

@@ -40,12 +40,18 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Why a world could not be built this way, or null. The Fires generator runs only on voxel terrain, and one zone at
         // a time (its skylands and border rivers) only on stock generation.
+        //
+        // VANILLA + FULL VOXEL IS LEGAL, and is how an existing world is converted: the vanilla heightmap sets the
+        // ground and the voxel field is built from it, then the river carve, caves and sky islands run on that data.
+        // Nothing needed adding for it - FiresWorldGenBase returns early for a Vanilla profile so the Fires height
+        // generator never runs, while WrapsAllTerrain still covers every near zone and GeneratesCaves /
+        // BuildsSkyIslands / CarvesRiverBeds gate on that coverage, not on the generator. Refusing the pair here was
+        // the only thing standing in the way, and it forced a conversion to invent new terrain from the seed instead
+        // of keeping the world's own shape.
         internal string Conflict()
         {
             if (Generator != ProfileGenerator.Vanilla && Terrain == ProfileTerrain.Heightmap)
                 return "The Fires generator builds voxel terrain: choose voxel wrap or full voxel.";
-            if (Generator == ProfileGenerator.Vanilla && Terrain == ProfileTerrain.VoxelOnly)
-                return "Full voxel is built by the Fires generator: with stock Valheim, choose voxel wrap.";
             if (ZoneMode && Generator != ProfileGenerator.Vanilla)
                 return "One zone at a time runs on stock Valheim terrain for now, not on the Fires generator.";
             return null;

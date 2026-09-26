@@ -282,6 +282,36 @@ namespace VerdantsAscent.Terrain.Voxel
         private static string s_root;
         private static string s_key;
         private static bool s_ready;
+
+        // For VoxelCacheSync. The key is the generation-settings hash the root is named after, so two machines
+        // only ever exchange chunks that were generated the same way - a settings change gives a different key,
+        // a different directory, and no chance of a stale chunk crossing the wire.
+        internal static string Root => s_root;
+        internal static string Key => s_key;
+        internal static bool Ready => s_ready;
+
+        internal static int HeaderSize => HeaderBytes;
+        internal static uint HeaderMagic => MAGIC;
+        internal static byte HeaderFormat => FMT;
+
+        /// <summary>The genHash a .vcz on disk was written with, or false when the file is not a readable chunk.</summary>
+        internal static bool TryReadHeaderHash(string path, out uint genHash)
+        {
+            genHash = 0;
+            try
+            {
+                var header = new byte[HeaderBytes];
+                using (var stream = File.OpenRead(path))
+                    if (stream.Read(header, 0, HeaderBytes) != HeaderBytes) return false;
+                if (BitConverter.ToUInt32(header, 0) != MAGIC || header[4] != FMT) return false;
+                genHash = BitConverter.ToUInt32(header, 6);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Where a chunk key lives on disk, for the sync to read and write whole files.</summary>
+        internal static string FilePathFor(Vector3Int key) => PathFor(key);
         private static long s_bytes;             // running size estimate of the store
         private static readonly object s_gate = new object();
         // In-memory LRU stamps, so a cache hit costs no syscall beyond the read.
