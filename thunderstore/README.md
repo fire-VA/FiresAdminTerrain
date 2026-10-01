@@ -11,7 +11,7 @@ Every edit is saved with the world, so every player sees the same ground.
 
 ## Requirements
 
-- **FiresUnifiedCore** 0.2.60 or newer.
+- **FiresUnifiedCore** 0.2.138 or newer.
 - **Install on the server and every client, on the same version.** Nothing stops a mismatch, but a player
   without the mod (or on another version) sees different ground from everyone else. In a one-zone world, a client
   on an older version logs `the server speaks zone protocol N`, and its closed zones won't match the server's.
@@ -21,6 +21,8 @@ Every edit is saved with the world, so every player sees the same ground.
   - **ServerDevcommands**: lets admins run the editing commands on a dedicated server, and its `undo` / `redo`
     also undo terrain brushes.
   - **FiresTossinShade**: the water shaders. Without it, water uses a plainer vanilla look.
+- **Incompatible: Valheim Performance Optimizations** (`dev.ontrigger.vpo`). Fires Admin Terrain cannot be used with it;
+  BepInEx won't load Fires Admin Terrain while VPO is installed.
 
 ## Upgrading from 0.2.382 or earlier
 
@@ -166,8 +168,8 @@ launch flag. It runs on stock Valheim generation for now.
   heightmap. A dialog opens, set up for that choice: the new name, terrain (or as the original), one zone at a
   time, and sky islands, rivers and lakes and caves (as the original, on or off). The original world is never
   touched: the copy gets its own world ID and brings FAT's baked terrain, painted biomes, and cave and island records along.
-- Three rules apply to both: the Fires generator needs voxel terrain; full voxel needs the Fires generator, so stock
-  worlds use voxel wrap; and one zone at a time runs on stock Valheim generation for now.
+- Three rules apply to both: the Fires generator needs voxel terrain; a stock-generated world set to full voxel runs
+  as voxel wrap, its voxel ground built from its own heightmap; and one zone at a time runs on either generator.
 - From the main-menu console:
   `fires_world_clone <world> <new name> [chunks] [heightmap|voxelwrap|voxelonly] [sky=on|off] [rivers=on|off] [caves=on|off]`
 
