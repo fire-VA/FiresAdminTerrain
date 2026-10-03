@@ -18,17 +18,22 @@ namespace VerdantsAscent.Terrain.Zones
         {
             // Chunk blueprints are placed on any voxel world, so their keys answer before the zone-mode gate.
             ZoneModeChunkKeys.ClientTick();
+            BiomePaint.Tick();
             if (!ZoneModeRegistry.ModeActive) return;
             ZoneModeOpening.Tick();
             ZoneModeLandmarks.Tick();
             ZoneModeIslands.Tick();
             ZoneModeBorderWalls.Tick();
             ZoneModeChunkMachines.ServerTick();
+            ZoneModeChunkGenerator.ServerTick();
             ZoneModeHammerChest.ServerTick();
+            ZoneModeCultivatorChest.ServerTick();
+            ZoneModeStartPins.ClientTick();
             ZoneModeSkylands.ServerTick();
             ZoneModeSkylands.ClientTick();
             ZoneModeSeedGhost.ClientTick();
             ZoneModeChunkSpawner.ClientTick();
+            ZoneModeChunkTools.ClientTick();
             ZoneModeSwaps.EnsureIndex();
             ZoneModeEyeOfTheBeholder.ClientTick();
 
@@ -89,6 +94,8 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModeRefusals.SpawnPointsCleared = ZoneModeRefusals.CreatureSpawnsRefused = 0;
 
             s_mainThread.Clear();
+            string syncWaits = ZoneModeBuilderCache.TakeSyncWaitReport();
+            if (syncWaits != null) FiresLogger.LogInfo($"[FiresZones] last {SummaryIntervalSeconds:0}s: {syncWaits}.");
             if (parts.Count == 0) return;
             FiresLogger.LogVerbose($"[FiresZones] last {SummaryIntervalSeconds:0}s —{ZoneModeRegistry.OpenCount} zone(s) open (v{ZoneModeRegistry.Version}); "
                 + string.Join("; ", parts) + ".");
@@ -107,12 +114,18 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModeOpening.Reset();
             ZoneModeBorderWalls.Reset();
             ZoneModeChunkMachines.Reset();
+            ZoneModeChunkGenerator.Reset();
             ZoneModeChunkSpawner.Reset();
             ZoneModeHammerChest.Reset();
+            ZoneModeCultivatorChest.Reset();
+            ZoneModeStartSpawn.Reset();
+            ZoneModeStartPins.Reset();
             ZoneModeSkylands.Reset();
             ZoneModeSeedGhost.Reset();
+            ZoneModeLiftShore.Reset();
             ZoneModeSwaps.Reset();
             ZoneModeEyeOfTheBeholder.Reset();
+            BiomePaint.Reset();
         }
     }
 }

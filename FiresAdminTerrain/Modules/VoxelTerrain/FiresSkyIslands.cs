@@ -39,7 +39,30 @@ namespace VerdantsAscent.Terrain.Voxel
             public float SiteX, SiteZ, SiteY, SiteFlat, SiteReach, SiteClear, SiteYaw;
             public SkylandShape Shape;
             public GroundWaters Waters;
+            // A skyland laid down from a blueprint (ZoneModeSkylandBlueprint) keeps every field above in the frame of the
+            // island it was saved from, so its noise, shape, waters and caves sample exactly what the original's do; this
+            // whole-metre offset carries it to where it stands. Every query that takes or answers a world position
+            // translates at its door. Zero for every island the world grew itself, which then reads exactly as before.
+            public float OffX, OffY, OffZ;
+            // The world a blueprint's skyland grew in (Fire, 2026-09-27: "make them work anywhere"): its noise seed, the
+            // seed its atoll crescents are laid out from, and its biome. A skyland carrying them derives the same shape,
+            // ground, caves and biome in any world. False for every island this world grew, which reads this world's.
+            public bool OwnSeeds;
+            public int NoiseSeed, OwnShapeSeed;
+            public Heightmap.Biome FixedBiome;
         }
+
+        private static bool IsMoved(in Island isl) => isl.OffX != 0f || isl.OffY != 0f || isl.OffZ != 0f;
+
+        // The island's own noise: its world's, when it came from a blueprint saved in another world.
+        private static float N(in Island isl, float x, float y, float z)
+            => isl.OwnSeeds ? VoxelCaveNoise.Noise01(x, y, z, isl.NoiseSeed) : VoxelCaveNoise.Noise01(x, y, z);
+
+        private static int ShapeSeedOf(in Island isl) => isl.OwnSeeds ? isl.OwnShapeSeed : ShapeSeed;
+
+        private static int? NoiseSeedOf(in Island isl) => isl.OwnSeeds ? isl.NoiseSeed : (int?)null;
+        private static float WorldX(in Island isl) => isl.X + isl.OffX;
+        private static float WorldZ(in Island isl) => isl.Z + isl.OffZ;
 
         private static byte KindOf(float h)
             => h < 0.40f ? (byte)0 : h < 0.65f ? (byte)1 : h < 0.85f ? (byte)2 : (byte)3;
@@ -76,17 +99,18 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             int idx = s_islands.Count;
             var derived = isl;
-            derived.Variety = unchecked((int)IslandHash(in isl));
+            derived.Variety = unchecked((int)SourceHash(in isl));
             if (derived.Kind == ShapedKind) derived.Shape = ShapeFor(in derived);
             if (IsSkyland(derived.Kind))
             {
                 derived.Waters = DeriveWaters(in derived);
-                derived.Biome = RollSkylandBiome(in derived);
+                derived.Biome = derived.FixedBiome != Heightmap.Biome.None ? derived.FixedBiome : RollSkylandBiome(in derived);
                 RollSkylandSite(ref derived);
             }
             s_islands.Add(derived);
-            int i0 = Mathf.FloorToInt((isl.X - isl.R - 8f) / INDEX_CELL), i1 = Mathf.FloorToInt((isl.X + isl.R + 8f) / INDEX_CELL);
-            int j0 = Mathf.FloorToInt((isl.Z - isl.R - 8f) / INDEX_CELL), j1 = Mathf.FloorToInt((isl.Z + isl.R + 8f) / INDEX_CELL);
+            float wx = WorldX(in isl), wz = WorldZ(in isl);
+            int i0 = Mathf.FloorToInt((wx - isl.R - 8f) / INDEX_CELL), i1 = Mathf.FloorToInt((wx + isl.R + 8f) / INDEX_CELL);
+            int j0 = Mathf.FloorToInt((wz - isl.R - 8f) / INDEX_CELL), j1 = Mathf.FloorToInt((wz + isl.R + 8f) / INDEX_CELL);
             for (int j = j0; j <= j1; j++)
                 for (int i = i0; i <= i1; i++)
                 {
@@ -110,7 +134,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool GetGround(float wx, float wz, out float g)
         {
             if (GroundOverride != null) { var v = GroundOverride(wx, wz); if (v.HasValue) { g = v.Value; return true; } g = 0f; return false; }
-            return FiresWorldGenBase.TryGetGenGround(wx, wz, out g);
+            return FiresWorldGenBase.TryGetGenGroundReal(wx, wz, out g);
         }
         // Set when the world is full voxel but the Fires generator is NOT running - a vanilla-profiled conversion,
         // where the ground comes from the vanilla heightmap instead of a generated grid. Both registry paths call
@@ -230,9 +254,9 @@ namespace VerdantsAscent.Terrain.Voxel
                                 }
                             }
                             if (pr > 0f && FiresWorldGenBase.Active
-                                && (FiresWorldGenBase.IsWetAt(ppx, ppz)
-                                 || FiresWorldGenBase.IsWetAt(ppx + pr, ppz) || FiresWorldGenBase.IsWetAt(ppx - pr, ppz)
-                                 || FiresWorldGenBase.IsWetAt(ppx, ppz + pr) || FiresWorldGenBase.IsWetAt(ppx, ppz - pr)))
+                                && (FiresWorldGenBase.IsWetAtReal(ppx, ppz)
+                                 || FiresWorldGenBase.IsWetAtReal(ppx + pr, ppz) || FiresWorldGenBase.IsWetAtReal(ppx - pr, ppz)
+                                 || FiresWorldGenBase.IsWetAtReal(ppx, ppz + pr) || FiresWorldGenBase.IsWetAtReal(ppx, ppz - pr)))
                                 pr = 0f;
                             if (pr > 0f)
                             {
@@ -310,12 +334,14 @@ namespace VerdantsAscent.Terrain.Voxel
                     for (int k = 0; k < list.Count; k++)
                     {
                         var isl = s_islands[list[k]];
-                        float nx = Mathf.Clamp(isl.X, x0, x1) - isl.X;
-                        float nz = Mathf.Clamp(isl.Z, z0, z1) - isl.Z;
+                        float cx = WorldX(in isl), cz = WorldZ(in isl);
+                        float nx = Mathf.Clamp(cx, x0, x1) - cx;
+                        float nz = Mathf.Clamp(cz, z0, z1) - cz;
                         if (nx * nx + nz * nz > isl.R * isl.R) continue;
                         any = true;
-                        if (isl.Bot < botY) botY = isl.Bot;
-                        float top = isl.Top + ReliefCeiling(in isl);
+                        float bot = isl.Bot + isl.OffY;
+                        if (bot < botY) botY = bot;
+                        float top = isl.Top + ReliefCeiling(in isl) + isl.OffY;
                         if (top > topY) topY = top;
                     }
                 }
@@ -346,8 +372,9 @@ namespace VerdantsAscent.Terrain.Voxel
                         var isl = s_islands[list[k]];
                         // Same circle-vs-rect test TryGetBand uses, so the signature
                         // covers exactly the islands that shape this column.
-                        float nx = Mathf.Clamp(isl.X, x0, x1) - isl.X;
-                        float nz = Mathf.Clamp(isl.Z, z0, z1) - isl.Z;
+                        float cx = WorldX(in isl), cz = WorldZ(in isl);
+                        float nx = Mathf.Clamp(cx, x0, x1) - cx;
+                        float nz = Mathf.Clamp(cz, z0, z1) - cz;
                         if (nx * nx + nz * nz > isl.R * isl.R) continue;
                         sum += IslandHash(in isl) + SiteSignature(in isl);
                     }
@@ -355,9 +382,29 @@ namespace VerdantsAscent.Terrain.Voxel
             return sum;
         }
 
-        // Every field that shapes the island's density, by bit pattern. Never 0,
-        // so a present island always moves the sum it is added to.
+        // The island's identity: its source fields, and where a placed copy stands. The offset is mixed in only when there is
+        // one, so every island the world grew keeps the id its dressing record and chunk hashes were written under.
         private static uint IslandHash(in Island isl)
+        {
+            uint h = SourceHash(in isl);
+            if (!IsMoved(in isl) && !isl.OwnSeeds) return h;
+            h = (h ^ (uint)isl.OffX.GetHashCode()) * 16777619u;
+            h = (h ^ (uint)isl.OffY.GetHashCode()) * 16777619u;
+            h = (h ^ (uint)isl.OffZ.GetHashCode()) * 16777619u;
+            if (isl.OwnSeeds)
+            {
+                h = (h ^ (uint)isl.NoiseSeed) * 16777619u;
+                h = (h ^ (uint)isl.OwnShapeSeed) * 16777619u;
+                h = (h ^ (uint)isl.FixedBiome) * 16777619u;
+            }
+            return h == 0u ? 1u : h;
+        }
+
+        // Every field that shapes the island's density, by bit pattern. Never 0,
+        // so a present island always moves the sum it is added to. A placed copy
+        // shares it with the island it was saved from, so it derives the same
+        // variety, shape, waters and biome.
+        private static uint SourceHash(in Island isl)
         {
             uint h = 2166136261u;
             h = (h ^ (uint)isl.X.GetHashCode()) * 16777619u;
@@ -397,7 +444,7 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int k = 0; k < list.Count; k++)
             {
                 var isl = s_islands[list[k]];
-                if (Covers(in isl, wx, wz)) return true;
+                if (Covers(in isl, wx - isl.OffX, wz - isl.OffZ)) return true;
             }
             return false;
         }
@@ -406,8 +453,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // Surface sampling for the offline studio's island MESH (not used in game).
         internal static int SurfaceCount => s_islands.Count;
         internal static void SurfaceInfo(int i, out float x, out float z, out float r, out float baseY, out byte kind)
-        { var isl = s_islands[i]; x = isl.X; z = isl.Z; r = isl.R; baseY = isl.BaseY; kind = isl.Kind; }
-        internal static float SurfaceY(int i, float wx, float wz) { var isl = s_islands[i]; return TopAt(in isl, wx, wz); }
+        { var isl = s_islands[i]; x = WorldX(in isl); z = WorldZ(in isl); r = isl.R; baseY = isl.BaseY + isl.OffY; kind = isl.Kind; }
+        internal static float SurfaceY(int i, float wx, float wz) { var isl = s_islands[i]; return TopAt(in isl, wx - isl.OffX, wz - isl.OffZ) + isl.OffY; }
 
         internal static void Snapshot(List<Vector3> outPos, List<float> outR, List<string> outKind)
         {
@@ -415,10 +462,32 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int i = 0; i < s_islands.Count; i++)
             {
                 var isl = s_islands[i];
-                outPos.Add(new Vector3(isl.X, isl.Top, isl.Z));
+                outPos.Add(new Vector3(WorldX(in isl), isl.Top + isl.OffY, WorldZ(in isl)));
                 outR.Add(isl.R);
                 outKind.Add(KindName(isl.Kind));
             }
+        }
+
+        // The island nearest `near`: its world centre on its top surface, and its radius (admintools_test's ISLAND place).
+        internal static bool TryNearestTop(Vector3 near, out Vector3 top, out float radius)
+        {
+            top = default;
+            radius = 0f;
+            int best = -1;
+            float bestSqr = float.MaxValue;
+            for (int i = 0; i < s_islands.Count; i++)
+            {
+                var candidate = s_islands[i];
+                float dx = WorldX(in candidate) - near.x, dz = WorldZ(in candidate) - near.z;
+                if (dx * dx + dz * dz >= bestSqr) continue;
+                bestSqr = dx * dx + dz * dz;
+                best = i;
+            }
+            if (best < 0) return false;
+            var isl = s_islands[best];
+            top = new Vector3(WorldX(in isl), TopAt(in isl, isl.X, isl.Z) + isl.OffY, WorldZ(in isl));
+            radius = isl.R;
+            return true;
         }
 
         // Console listing (va_skyislands): nearest first so the user can fly
@@ -432,16 +501,17 @@ namespace VerdantsAscent.Terrain.Voxel
             order.Sort((a, b) =>
             {
                 var ia = s_islands[a]; var ib = s_islands[b];
-                float da = (ia.X - p.x) * (ia.X - p.x) + (ia.Z - p.z) * (ia.Z - p.z);
-                float db = (ib.X - p.x) * (ib.X - p.x) + (ib.Z - p.z) * (ib.Z - p.z);
-                return da.CompareTo(db);
+                float ax = WorldX(in ia) - p.x, az = WorldZ(in ia) - p.z, bx = WorldX(in ib) - p.x, bz = WorldZ(in ib) - p.z;
+                return (ax * ax + az * az).CompareTo(bx * bx + bz * bz);
             });
             ctx.AddString($"va_skyislands: {s_islands.Count} island(s); nearest first:");
             for (int k = 0; k < Mathf.Min(8, order.Count); k++)
             {
                 var isl = s_islands[order[k]];
-                float dist = Mathf.Sqrt((isl.X - p.x) * (isl.X - p.x) + (isl.Z - p.z) * (isl.Z - p.z));
-                ctx.AddString($"  {dist / 1000f:0.0}km  x={isl.X:0} z={isl.Z:0}  topY~{isl.Top:0}  R={isl.R:0}m  [{KindName(isl.Kind)}]");
+                float x = WorldX(in isl), z = WorldZ(in isl);
+                float dist = Mathf.Sqrt((x - p.x) * (x - p.x) + (z - p.z) * (z - p.z));
+                ctx.AddString($"  {dist / 1000f:0.0}km  x={x:0} z={z:0}  topY~{isl.Top + isl.OffY:0}  R={isl.R:0}m  [{KindName(isl.Kind)}]"
+                              + (IsMoved(in isl) ? " placed" : ""));
             }
         }
 
@@ -467,13 +537,13 @@ namespace VerdantsAscent.Terrain.Voxel
             float dx = wx - isl.X, dz = wz - isl.Z;
             float rr = Mathf.Sqrt(dx * dx + dz * dz) / isl.R;
             if (rr > 1f) rr = 1f;
-            float n1 = VoxelCaveNoise.Noise01(wx * 0.045f, isl.Seed, wz * 0.045f);
-            float hills = (VoxelCaveNoise.Noise01(wx * 0.018f, isl.Seed + 7f, wz * 0.018f) - 0.5f)
+            float n1 = N(in isl, wx * 0.045f, isl.Seed, wz * 0.045f);
+            float hills = (N(in isl, wx * 0.018f, isl.Seed + 7f, wz * 0.018f) - 0.5f)
                           * Mathf.Min(12f, isl.R * 0.10f) * 2f;
             if (isl.Kind == 1)
             {
                 // A real peak — up to ~0.46R tall, ridged.
-                float n3 = VoxelCaveNoise.Noise01(wx * 0.03f, isl.Seed + 91f, wz * 0.03f);
+                float n3 = N(in isl, wx * 0.03f, isl.Seed + 91f, wz * 0.03f);
                 return isl.BaseY + isl.R * (0.26f + 0.20f * n3) * Mathf.Pow(1f - rr, 1.35f)
                        + hills * 0.5f + (n1 - 0.5f) * 2.2f;
             }
@@ -495,8 +565,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 rr = Mathf.Clamp01(isl.Shape.Sample(wx, wz, out width));
                 size = isl.Shape.HeartWidth;
             }
-            float n1 = VoxelCaveNoise.Noise01(wx * 0.045f, isl.Seed, wz * 0.045f);
-            float hills = (VoxelCaveNoise.Noise01(wx * 0.018f, isl.Seed + 7f, wz * 0.018f) - 0.5f) * Mathf.Min(12f, size * 0.10f) * 2f;
+            float n1 = N(in isl, wx * 0.045f, isl.Seed, wz * 0.045f);
+            float hills = (N(in isl, wx * 0.018f, isl.Seed + 7f, wz * 0.018f) - 0.5f) * Mathf.Min(12f, size * 0.10f) * 2f;
             float dome = isl.Shape != null ? width * ShapedDomeShare : isl.R * 0.10f;
             return isl.BaseY + dome * (1f - rr * rr) + hills * 0.6f + (n1 - 0.5f) * 1.6f - RimRoll(in isl, wx, wz, rr, width);
         }
@@ -531,17 +601,26 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int k = 0; k < list.Count; k++)
             {
                 var isl = s_islands[list[k]];
-                if (GroundWaterAt(in isl, wx, wz, out float ground, out _) && ground > level) level = ground;
-                if (isl.PondLvl <= 0f) continue;
-                float pdx = wx - isl.PondX, pdz = wz - isl.PondZ;
-                if (pdx * pdx + pdz * pdz < isl.PondR * isl.PondR)
-                {
-                    if (isl.PondLvl > level) level = isl.PondLvl;
-                    continue;
-                }
-                float rl = RillLevelAt(in isl, wx, wz, out _);
-                if (rl > level) level = rl;
+                if (IslandWaterAt(in isl, wx, wz, out float own) && own > level) level = own;
             }
+            return level > 0f;
+        }
+
+        // One skyland's own water over a world point (its ponds and rivers, crater pond and rill), as a world height.
+        private static bool IslandWaterAt(in Island isl, float wx, float wz, out float level)
+        {
+            level = 0f;
+            float sx = wx - isl.OffX, sz = wz - isl.OffZ;
+            if (GroundWaterAt(in isl, sx, sz, out float ground, out _)) level = ground + isl.OffY;
+            if (isl.PondLvl <= 0f) return level > 0f;
+            float pdx = sx - isl.PondX, pdz = sz - isl.PondZ;
+            if (pdx * pdx + pdz * pdz < isl.PondR * isl.PondR)
+            {
+                level = Mathf.Max(level, isl.PondLvl + isl.OffY);
+                return level > 0f;
+            }
+            float rl = RillLevelAt(in isl, sx, sz, out _);
+            if (rl > 0f) level = Mathf.Max(level, rl + isl.OffY);
             return level > 0f;
         }
 
@@ -555,27 +634,28 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int k = 0; k < list.Count; k++)
             {
                 var isl = s_islands[list[k]];
-                if (GroundWaterAt(in isl, wx, wz, out float ground, out float groundDepth) && ground > level)
+                float sx = wx - isl.OffX, sz = wz - isl.OffZ;
+                if (GroundWaterAt(in isl, sx, sz, out float ground, out float groundDepth) && ground + isl.OffY > level)
                 {
-                    level = ground;
+                    level = ground + isl.OffY;
                     depth = groundDepth;
                 }
                 if (isl.PondLvl <= 0f) continue;
-                float pdx = wx - isl.PondX, pdz = wz - isl.PondZ;
+                float pdx = sx - isl.PondX, pdz = sz - isl.PondZ;
                 float pr2 = pdx * pdx + pdz * pdz, pondR2 = isl.PondR * isl.PondR;
                 if (pr2 < pondR2)
                 {
-                    if (isl.PondLvl > level)
+                    if (isl.PondLvl + isl.OffY > level)
                     {
-                        level = isl.PondLvl;
+                        level = isl.PondLvl + isl.OffY;
                         depth = 0.7f + 1.3f * (1f - pr2 / pondR2);
                     }
                     continue;
                 }
-                float rl = RillLevelAt(in isl, wx, wz, out float bed);
-                if (rl > level)
+                float rl = RillLevelAt(in isl, sx, sz, out float bed);
+                if (rl > 0f && rl + isl.OffY > level)
                 {
-                    level = rl;
+                    level = rl + isl.OffY;
                     depth = rl - bed;
                 }
             }
@@ -603,11 +683,21 @@ namespace VerdantsAscent.Terrain.Voxel
                         // An island spans several index cells; only its HOME
                         // cell emits, so no duplicates across the loop.
                         var isl = s_islands[list[k]];
-                        if (Mathf.FloorToInt(isl.X / INDEX_CELL) != i
-                            || Mathf.FloorToInt(isl.Z / INDEX_CELL) != j) continue;
-                        CollectIslandProps(in isl, x0, z0, x1, z1, pos, rot, name);
+                        if (Mathf.FloorToInt(WorldX(in isl) / INDEX_CELL) != i
+                            || Mathf.FloorToInt(WorldZ(in isl) / INDEX_CELL) != j) continue;
+                        int first = pos.Count;
+                        CollectIslandProps(in isl, x0 - isl.OffX, z0 - isl.OffZ, x1 - isl.OffX, z1 - isl.OffZ, pos, rot, name);
+                        ShiftOut(in isl, pos, first);
                     }
                 }
+        }
+
+        // Points a query collected in an island's source frame, carried to where the island stands.
+        private static void ShiftOut(in Island isl, List<Vector3> points, int first)
+        {
+            if (!IsMoved(in isl)) return;
+            var offset = new Vector3(isl.OffX, isl.OffY, isl.OffZ);
+            for (int n = first; n < points.Count; n++) points[n] += offset;
         }
 
         private static void CollectIslandProps(in Island isl, float x0, float z0, float x1, float z1,
@@ -644,7 +734,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float pz = isl.Z + Mathf.Sin(a) * rr * isl.R;
                 if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue;
                 float top = TopAt(in isl, px, pz);
-                float n2b = VoxelCaveNoise.Noise01(px * 0.07f + 31f, isl.Seed + 57f, pz * 0.07f);
+                float n2b = N(in isl, px * 0.07f + 31f, isl.Seed + 57f, pz * 0.07f);
                 float depthB = Mathf.Min(isl.MaxDepth, isl.R * (0.35f + 0.5f * n2b) * Mathf.Pow(1f - rr, 0.55f));
                 float bottom = top - Mathf.Max(2.5f, depthB);
                 float roll = Hash(k, 37, hseed, 19);
@@ -699,101 +789,126 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int k = 0; k < list.Count; k++)
             {
                 var isl = s_islands[list[k]];
-                if (IsSkyland(isl.Kind))
-                {
-                    if (!CachedColumn(list[k], in isl, wx, wz, out float skyTop, out float skyBottom, out float skySide)) continue;
-                    float sky = SkylandDensity(in isl, wx, wy, wz, skyTop, skyBottom, skySide);
-                    if (sky > best) best = sky;
-                    continue;
-                }
-                float dx = wx - isl.X, dz = wz - isl.Z;
-                float rr = Mathf.Sqrt(dx * dx + dz * dz) / isl.R;
-                if (rr >= 0.999f) continue;
-                // ARCHETYPES (user spec): rolling plains, MINI-MOUNTAIN peaks,
-                // CRATER bowls, and GROTTO hollows.
-                float top = TopAt(in isl, wx, wz);
-
-                // POND BOWL — a flat-bedded basin dug through the top noise
-                // (grottos pool inside the cavity instead, handled below).
-                // A raised lip rings open-top ponds so noise dips beside the
-                // bowl can never read as a leak.
-                if (isl.PondLvl > 0f && isl.Kind != 3)
-                {
-                    float pdx = wx - isl.PondX, pdz = wz - isl.PondZ;
-                    float pd = Mathf.Sqrt(pdx * pdx + pdz * pdz);
-                    if (pd < isl.PondR)
-                    {
-                        float rp = pd / isl.PondR;
-                        float bedP = isl.PondLvl - (0.7f + 1.3f * (1f - rp * rp));
-                        if (top > bedP) top = bedP;
-                    }
-                    else if (pd < isl.PondR + 2.5f)
-                    {
-                        float lip = isl.PondLvl + 0.5f;
-                        if (top < lip) top = lip;
-                    }
-                }
-                // OUTLET RILL — a narrow stepped channel from the pond toward
-                // the rim, banks held above its water line.
-                float rlvl = RillLevelAt(in isl, wx, wz, out float rbed);
-                if (rlvl > 0f)
-                {
-                    if (top > rbed) top = rbed;
-                }
-                else if (!float.IsNaN(isl.RillAng))
-                {
-                    float dxr = Mathf.Cos(isl.RillAng), dzr = Mathf.Sin(isl.RillAng);
-                    float rx = wx - isl.PondX, rz = wz - isl.PondZ;
-                    float along = rx * dxr + rz * dzr;
-                    float perp = Mathf.Abs(rx * dzr - rz * dxr);
-                    if (along > isl.PondR * 0.6f + 1f && along < isl.RillLen && perp < 3.4f)
-                    {
-                        float t = Mathf.Clamp01((along - isl.PondR * 0.6f) / Mathf.Max(1f, isl.RillLen - isl.PondR * 0.6f));
-                        float bank = Mathf.Lerp(isl.PondLvl, isl.RillEndLvl, t) + 0.45f;
-                        if (top < bank) top = bank;
-                    }
-                }
-
-                // Underside: depth tapers from the EDGE (pow 0.55 grows fast
-                // off the rim — kills the thin brim band the 1.35 curve left)
-                // and is strongly randomized so no two bellies match.
-                float n2 = VoxelCaveNoise.Noise01(wx * 0.07f + 31f, isl.Seed + 57f, wz * 0.07f);
-                // MaxDepth clamps the belly on LOW floaters (30m band) so an
-                // island never buries its underside into the terrain.
-                float depth = Mathf.Min(isl.MaxDepth,
-                    isl.R * (0.35f + 0.5f * n2) * Mathf.Pow(1f - rr, 0.55f));
-                float bottom = top - Mathf.Max(2.5f, depth);
-                float d =Mathf.Min(Mathf.Min(top - wy, wy - bottom), (1f - rr) * isl.R * 0.9f);
-                if (isl.Kind == 3)
-                {
-                    // GROTTO — an ellipsoid hollow bitten into the body,
-                    // offset so its mouth breaches the rim/underside. The
-                    // cavity stops at the pond bed so the floor pools water,
-                    // and a RAMP TUNNEL from the top surface gives a walkable
-                    // way in (the cavity's own breach stays as a second
-                    // mouth where it happens to open).
-                    float gx2 = isl.X + Mathf.Cos(isl.Seed) * isl.R * 0.35f;
-                    float gz2 = isl.Z + Mathf.Sin(isl.Seed) * isl.R * 0.35f;
-                    float gy = isl.BaseY - Mathf.Min(isl.MaxDepth, isl.R * 0.25f) * 0.5f;
-                    float pondBed = isl.PondLvl > 0f ? isl.PondLvl - 1.5f : float.MinValue;
-                    float ex = (wx - gx2) / (isl.R * 0.45f);
-                    float ey = (wy - gy) / Mathf.Max(4f, isl.R * 0.16f);
-                    float ez = (wz - gz2) / (isl.R * 0.45f);
-                    float cav = 1f - Mathf.Sqrt(ex * ex + ey * ey + ez * ez);
-                    if (cav > 0f && wy > pondBed) d = Mathf.Min(d, -cav * 6f);
-                    // entrance ramp: surface mouth on the cavity's own bearing
-                    float mAng = isl.Seed;
-                    float mx = isl.X + Mathf.Cos(mAng) * isl.R * 0.68f;
-                    float mz = isl.Z + Mathf.Sin(mAng) * isl.R * 0.68f;
-                    float my = TopAt(in isl, mx, mz) + 1.0f;
-                    float rampR = Mathf.Max(2.6f, isl.R * 0.055f);
-                    float ds = DistToSegment(wx, wy, wz, mx, my, mz, gx2, gy + 1.5f, gz2);
-                    if (ds < rampR && wy > pondBed)
-                        d = Mathf.Min(d, -(rampR - ds) * 1.2f);
-                }
+                float d = IslandDensity(list[k], in isl, wx, wy, wz, wx - isl.OffX, wy - isl.OffY, wz - isl.OffZ);
                 if (d > best) best = d;
             }
             return best;
+        }
+
+        // One island's density at a world point, (sx, sy, sz) being that point in the island's source frame; the world
+        // column only keys the column cache.
+        private static float IslandDensity(int index, in Island isl, float wx, float wy, float wz, float sx, float sy, float sz)
+        {
+            const float Outside = -1000f;
+            if (IsSkyland(isl.Kind))
+            {
+                if (!CachedColumn(index, in isl, wx, wz, sx, sz, out float skyTop, out float skyBottom, out float skySide)) return Outside;
+                return SkylandDensity(in isl, sx, sy, sz, skyTop, skyBottom, skySide);
+            }
+            return LegacyDensity(in isl, sx, sy, sz);
+        }
+
+        // A disc island of the original four kinds (rolling, mountain, crater, grotto), in its source frame.
+        private static float LegacyDensity(in Island isl, float wx, float wy, float wz)
+        {
+            const float Outside = -1000f;
+            float dx = wx - isl.X, dz = wz - isl.Z;
+            float rr = Mathf.Sqrt(dx * dx + dz * dz) / isl.R;
+            if (rr >= 0.999f) return Outside;
+            // ARCHETYPES (user spec): rolling plains, MINI-MOUNTAIN peaks,
+            // CRATER bowls, and GROTTO hollows.
+            float top = TopAt(in isl, wx, wz);
+
+            // POND BOWL — a flat-bedded basin dug through the top noise
+            // (grottos pool inside the cavity instead, handled below).
+            // A raised lip rings open-top ponds so noise dips beside the
+            // bowl can never read as a leak.
+            if (isl.PondLvl > 0f && isl.Kind != 3)
+            {
+                float pdx = wx - isl.PondX, pdz = wz - isl.PondZ;
+                float pd = Mathf.Sqrt(pdx * pdx + pdz * pdz);
+                // THE RIM IS A RAMP, NOT A STEP - the same shape RiverBed uses at a bank.
+                // The bed ends at PondLvl-0.7 and the lip sits at PondLvl+0.5, so carving them as
+                // two branches put a 1.2 m vertical wall at exactly pd == PondR with no horizontal
+                // run at all. Surface Nets meshing a one-cell cliff emits triangles thinner than
+                // MinCollidableTriangleArea, PhysX rejects the bake, and the chunk ends up DRAWN
+                // but not collidable - the layer that could be seen and fallen through.
+                // Rivers never had this because RiverBed climbs out continuously.
+                float rimBed = isl.PondLvl - 0.7f;                 // bed height where the bowl meets the rim
+                float lipTop = isl.PondLvl + 0.5f;
+                if (pd < isl.PondR)
+                {
+                    float rp = pd / isl.PondR;
+                    float bedP = isl.PondLvl - (0.7f + 1.3f * (1f - rp * rp));
+                    if (top > bedP) top = bedP;
+                }
+                else if (pd < isl.PondR + PondRim)
+                {
+                    // Continuous with the bed at pd == PondR, reaching the lip across the rim band.
+                    float t = (pd - isl.PondR) / PondRim;
+                    float ramp = Mathf.Lerp(rimBed, lipTop, t * t * (3f - 2f * t));
+                    if (top < ramp) top = ramp;
+                }
+            }
+            // OUTLET RILL — a narrow stepped channel from the pond toward
+            // the rim, banks held above its water line.
+            float rlvl = RillLevelAt(in isl, wx, wz, out float rbed);
+            if (rlvl > 0f)
+            {
+                if (top > rbed) top = rbed;
+            }
+            else if (!float.IsNaN(isl.RillAng))
+            {
+                float dxr = Mathf.Cos(isl.RillAng), dzr = Mathf.Sin(isl.RillAng);
+                float rx = wx - isl.PondX, rz = wz - isl.PondZ;
+                float along = rx * dxr + rz * dzr;
+                float perp = Mathf.Abs(rx * dzr - rz * dxr);
+                if (along > isl.PondR * 0.6f + 1f && along < isl.RillLen && perp < 3.4f)
+                {
+                    float t = Mathf.Clamp01((along - isl.PondR * 0.6f) / Mathf.Max(1f, isl.RillLen - isl.PondR * 0.6f));
+                    float bank = Mathf.Lerp(isl.PondLvl, isl.RillEndLvl, t) + 0.45f;
+                    if (top < bank) top = bank;
+                }
+            }
+
+            // Underside: depth tapers from the EDGE (pow 0.55 grows fast
+            // off the rim — kills the thin brim band the 1.35 curve left)
+            // and is strongly randomized so no two bellies match.
+            float n2 = N(in isl, wx * 0.07f + 31f, isl.Seed + 57f, wz * 0.07f);
+            // MaxDepth clamps the belly on LOW floaters (30m band) so an
+            // island never buries its underside into the terrain.
+            float depth = Mathf.Min(isl.MaxDepth,
+                isl.R * (0.35f + 0.5f * n2) * Mathf.Pow(1f - rr, 0.55f));
+            float bottom = top - Mathf.Max(2.5f, depth);
+            float d =Mathf.Min(Mathf.Min(top - wy, wy - bottom), (1f - rr) * isl.R * 0.9f);
+            if (isl.Kind == 3)
+            {
+                // GROTTO — an ellipsoid hollow bitten into the body,
+                // offset so its mouth breaches the rim/underside. The
+                // cavity stops at the pond bed so the floor pools water,
+                // and a RAMP TUNNEL from the top surface gives a walkable
+                // way in (the cavity's own breach stays as a second
+                // mouth where it happens to open).
+                float gx2 = isl.X + Mathf.Cos(isl.Seed) * isl.R * 0.35f;
+                float gz2 = isl.Z + Mathf.Sin(isl.Seed) * isl.R * 0.35f;
+                float gy = isl.BaseY - Mathf.Min(isl.MaxDepth, isl.R * 0.25f) * 0.5f;
+                float pondBed = isl.PondLvl > 0f ? isl.PondLvl - 1.5f : float.MinValue;
+                float ex = (wx - gx2) / (isl.R * 0.45f);
+                float ey = (wy - gy) / Mathf.Max(4f, isl.R * 0.16f);
+                float ez = (wz - gz2) / (isl.R * 0.45f);
+                float cav = 1f - Mathf.Sqrt(ex * ex + ey * ey + ez * ez);
+                if (cav > 0f && wy > pondBed) d = Mathf.Min(d, -cav * 6f);
+                // entrance ramp: surface mouth on the cavity's own bearing
+                float mAng = isl.Seed;
+                float mx = isl.X + Mathf.Cos(mAng) * isl.R * 0.68f;
+                float mz = isl.Z + Mathf.Sin(mAng) * isl.R * 0.68f;
+                float my = TopAt(in isl, mx, mz) + 1.0f;
+                float rampR = Mathf.Max(2.6f, isl.R * 0.055f);
+                float ds = DistToSegment(wx, wy, wz, mx, my, mz, gx2, gy + 1.5f, gz2);
+                if (ds < rampR && wy > pondBed)
+                    d = Mathf.Min(d, -(rampR - ds) * 1.2f);
+            }
+            return d;
         }
     }
 }

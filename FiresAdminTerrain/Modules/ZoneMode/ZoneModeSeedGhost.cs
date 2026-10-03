@@ -61,10 +61,22 @@ namespace VerdantsAscent.Terrain.Zones
                 s_sourceKnown = true;
                 BuildFlat(zone, BiomeColor(seed.Tier.Biome), valid);
             }
+            else if (ZoneModePark.TryGetParked(zone, out var parked) && ZoneModePark.SeedMatches(seed, zone, parked))
+            {
+                s_sourceKnown = true;
+                if (parked.Swapped) BuildMesh(zone, parked.Source, parked.Shift, valid);
+                else BuildMesh(zone, zone, default, valid);
+            }
+            else if (seed.RestoresOnly)
+            {
+                s_sourceKnown = true;
+                BuildMesh(zone, zone, default, valid);
+            }
             else
             {
-                s_sourceKnown = ZoneModeSwaps.TryChooseSource(zone, seed.Tier.Biome, out var source, out _);
-                BuildMesh(zone, s_sourceKnown ? source : zone, valid);
+                s_sourceKnown = ZoneModeSwaps.TryChooseSource(zone, seed.Tier.Biome, out var source, out bool faithful);
+                var shift = s_sourceKnown && !faithful ? new ZoneShift(ZoneModeLift.Choose(zone, source, default, out _), 0f, 0f) : default;
+                BuildMesh(zone, s_sourceKnown ? source : zone, shift, valid);
             }
             s_ghost.SetActive(true);
             s_visible = true;
@@ -92,14 +104,17 @@ namespace VerdantsAscent.Terrain.Zones
 
         // The ghost stands over `zone` in the shape of `source`'s land: the land a strike will raise there, blended
         // from the source's four corner biomes the way vanilla builds a zone heightmap.
-        private static void BuildMesh(Vector2s zone, Vector2s source, bool valid)
+        // The land `source` shows at `zone`, moved by `shift` (ZoneModeLift's lift, a location's slide). Sea-covered ground
+        // shows water at the lifted sea, or at y30 when the land was lowered.
+        private static void BuildMesh(Vector2s zone, Vector2s source, in ZoneShift shift, bool valid)
         {
             s_verts.Clear();
             s_colors.Clear();
             s_tris.Clear();
             float size = ZoneOpenSet.ZoneSize;
             float x0 = zone.x * size - size * 0.5f, z0 = zone.y * size - size * 0.5f, step = size / Cells;
-            float shiftX = (source.x - zone.x) * size, shiftZ = (source.y - zone.y) * size;
+            float shiftX = (source.x - zone.x) * size + shift.Dx, shiftZ = (source.y - zone.y) * size + shift.Dz;
+            float lift = shift.Lift, sea = FiresWaterfalls.SeaLevel + Mathf.Max(0f, lift);
             var generator = WorldGenerator.instance;
             ZoneModeGate.EnterPlanning();
             try
@@ -114,10 +129,10 @@ namespace VerdantsAscent.Terrain.Zones
                     for (int i = 0; i <= Cells; i++)
                     {
                         float x = x0 + i * step, z = z0 + j * step;
-                        float ground = corners != null ? SourceHeight(generator, corners, x + shiftX, z + shiftZ, i, j) : FiresWaterfalls.SeaLevel;
-                        bool wet = ground < FiresWaterfalls.SeaLevel;
+                        float ground = (corners != null ? SourceHeight(generator, corners, x + shiftX, z + shiftZ, i, j) : FiresWaterfalls.SeaLevel) + lift;
+                        bool wet = ground < sea;
                         var biome = generator != null ? generator.GetBiome(x + shiftX, z + shiftZ) : Heightmap.Biome.Meadows;
-                        s_verts.Add(new Vector3(x, (wet ? FiresWaterfalls.SeaLevel + WaterLift : ground) + Lift, z));
+                        s_verts.Add(new Vector3(x, (wet ? sea + WaterLift : ground) + Lift, z));
                         s_colors.Add(Tint(wet ? new Color32(40, 110, 170, Alpha) : BiomeColor(biome), valid));
                     }
             }

@@ -26,6 +26,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const string CmdStatus = "fires_zones";
         private const string CmdOpen = "fires_zones_open";
         private const string CmdVerify = "fires_zones_verify";
+        private const string CmdUndoChunk = "fires_zones_undo";
         private const string CmdDump = "fires_zones_dump";
         private const string CmdChunkSave = "fires_chunk_save";
         private const string CmdChunkList = "fires_chunk_list";
@@ -88,7 +89,7 @@ namespace VerdantsAscent.Terrain.Zones
                     Vector2s zone = args.Args.Length >= 4 && int.TryParse(args.Args[2], out int zx) && int.TryParse(args.Args[3], out int zy)
                         ? new Vector2s(zx, zy)
                         : ZoneSystem.GetZone(Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : Vector3.zero);
-                    ZoneModeChunkBlueprint.TrySave(zone, args.Args[1], overwrite, out string report);
+                    ZoneModeChunkBlueprint.TrySave(zone, args.Args[1], overwrite, null, out string report);
                     args.Context.AddString("[Zones] " + report);
                     FiresLogger.LogInfo("[FiresZones] " + report);
                 });
@@ -160,6 +161,42 @@ namespace VerdantsAscent.Terrain.Zones
                         return;
                     }
                     ZoneModeOpening.RequestAdminOpen(args.Context, zone, force);
+                });
+
+            // UNDO A WRONG SEED. Two steps, because "parked" and "closed" are separate states and the
+            // chunk only becomes visible again once BOTH are true: bring the set-aside chunk back to
+            // parked, then close the zone so the replacement land is gone and it can be planted again.
+            // The actual restoring is the ordinary matching-seed path - this just puts the world back
+            // into the state where that path applies.
+            new Terminal.ConsoleCommand(CmdUndoChunk,
+                "Admin: undo a chunk overwritten by the wrong seed. Brings the set-aside chunk back and closes the "
+                + "zone so you can plant the matching seed. With no arguments, the zone you are looking at. Usage: "
+                + CmdUndoChunk + " [x y]",
+                args =>
+                {
+                    if (!ZoneModeRegistry.ModeActive)
+                    {
+                        args.Context.AddString("[Zones] Only a one-zone-at-a-time world sets chunks aside.");
+                        return;
+                    }
+                    Vector2s zone;
+                    if (args.Args.Length >= 3 && int.TryParse(args.Args[1], out int ux) && int.TryParse(args.Args[2], out int uy))
+                        zone = new Vector2s(ux, uy);
+                    else if (!TryGetLookedAtZone(out zone))
+                    {
+                        args.Context.AddString("[Zones] Look at the zone you want back, or give it: " + CmdUndoChunk + " x y");
+                        return;
+                    }
+
+                    if (!ZoneModePark.TryRecoverOverridden(zone, out string report))
+                    {
+                        args.Context.AddString("[Zones] " + report);
+                        return;
+                    }
+                    // Closing is what removes the land that was raised over it. Without this the zone stays
+                    // open with the wrong biome in it and the recovered chunk would never be seen.
+                    ZoneModeOpening.Close(new[] { zone }, "undo of an overwritten chunk");
+                    args.Context.AddString("[Zones] " + report);
                 });
 
             new Terminal.ConsoleCommand(CmdVerify,

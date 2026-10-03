@@ -45,7 +45,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Time.time < s_nextTick) return;
             s_nextTick = Time.time + TickSeconds;
             if (ZNet.instance == null || !ZNet.instance.IsServer() || ZDOMan.instance == null || ZNetScene.instance == null) return;
-            if (!CaveContentConfig.PickablesRestock || ZNet.World == null) return;
+            if (!CaveContentConfig.PickablesRestock || ZNet.World == null || !VoxelCaveRecord.Bound) return;
 
             long now = CaveRestockClock.NowMilliseconds();
             int started = 0, returned = 0;
@@ -53,7 +53,8 @@ namespace VerdantsAscent.Terrain.Voxel
             s_scratch.AddRange(VoxelCaveRecord.Pickables);
             foreach (var item in s_scratch)
             {
-                var zdo = item.Id.IsNone() ? null : ZDOMan.instance.GetZDO(item.Id);
+                if (!VoxelCaveRecord.InOpenZone(item.Position)) continue;
+                var zdo = VoxelCaveRecord.Resolve(item);
                 if (item.RestockAtMs == 0)
                 {
                     if (zdo != null && !zdo.GetBool(ZDOVars.s_picked)) continue;
@@ -68,7 +69,6 @@ namespace VerdantsAscent.Terrain.Voxel
                 VoxelCaveRecord.MarkDirty();
                 returned++;
             }
-            VoxelCaveRecord.SaveIfDirty();
             if (returned > 0)
                 FiresLogger.LogInfo($"[FiresVoxel] cave pickables: {returned} back at their spots"
                     + (started > 0 ? $"; {started} newly picked start their clock" : "") + ".");

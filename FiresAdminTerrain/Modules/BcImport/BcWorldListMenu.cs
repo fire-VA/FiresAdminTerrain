@@ -25,10 +25,21 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             if (world == null) yield break;
             string name = string.IsNullOrEmpty(world.m_worldName) ? world.m_name : world.m_worldName;
+            // ONE row, not two. "Clone..." and "Convert to Valheim 1.0..." were separate entries that both
+            // cloned the world and both offered the same terrain options, and between them a normal world
+            // could be refused by BOTH: Convert wanted BetterContinents data the world did not have, and
+            // Clone greyed out for its own reasons. So the menu offered a world two ways to do nothing.
+            //
+            // This row takes every world. BetterContinents data is an EXTRA the converter carries across
+            // when it is there, not a precondition for using it - the clone, the 1.0 save format and the
+            // terrain options are the same work either way. Only a world the game itself cannot read is
+            // refused, and "already converted" is kept because re-converting one is genuinely a no-op.
             string refusal = world.m_dataError != World.SaveDataError.None
                 ? "This world could not be read."
-                : BcConvert.CanConvert(name, out BcSaveLocation _, out string reason) ? null : reason;
-            var row = ContextMenuItem.Row("Convert to Valheim 1.0...", () => BcConvertDialog.Open(world), refusal == null);
+                : BcWorldData.Exists(name, out BcSaveLocation existing)
+                    ? $"'{name}' is already converted ({existing.Path})."
+                    : null;
+            var row = ContextMenuItem.Row("Convert...", () => BcConvertDialog.Open(world), refusal == null);
             row.Tooltip = refusal;
             yield return row;
         }
@@ -125,14 +136,29 @@ namespace VerdantsAscent.Terrain.BcImport
                 return false;
             }
 
-            bool canConvert = BcConvert.CanConvert(_sourceName, out BcSaveLocation source, out string reason);
-            topic.text = "Convert to Valheim 1.0";
-            body.text = canConvert
-                ? $"'{_sourceName}' carries BetterContinents data:\n{source.Path}\n\n"
+            // The BetterContinents line is now an EXTRA the world may or may not have, not the reason the dialog
+            // exists. A plain world - pre-1.0 or post-1.0 - gets the same clone, the same 1.0 save format and the
+            // same terrain options, so it gets the same dialog with that one line left out rather than a refusal
+            // where the explanation used to be.
+            bool hasBc = BcSaveLocator.TryLocate(_sourceName, out BcSaveLocation source);
+
+            // Every readable world can convert now; the only thing that makes it pointless is a world that
+            // already IS converted. The row greys that case out, so this is normally true - it stays computed
+            // rather than hardcoded so opening the dialog directly still shows the right buttons.
+            bool canConvert = !BcWorldData.Exists(_sourceName, out BcSaveLocation already);
+            if (!canConvert)
+                source = already;
+
+            topic.text = "Convert";
+            body.text = !canConvert
+                ? $"'{_sourceName}' is already converted ({source.Path})."
+                : (hasBc ? $"'{_sourceName}' carries BetterContinents data:\n{source.Path}\n\n" : string.Empty)
                     + "Converting CLONES the world first and converts the copy. This original is never modified - "
-                    + "open it afterwards and it is exactly what it was.\n\n"
-                    + "With nothing ticked below, the copy is the same map on stock Valheim terrain."
-                : reason;
+                    + "open it afterwards and it is exactly what it was. Items from mods that are not installed now "
+                    + "do not carry into the copy (Valheim drops them as it loads it); the original keeps them.\n\n"
+                    + (hasBc
+                        ? "With nothing ticked below, the copy is the same map on stock Valheim terrain."
+                        : "With nothing ticked below, the copy is the same world in the Valheim 1.0 save format.");
 
             // The panel is sized to its CONTENT, not grown by a guess. The body is the variable part - a long save
             // path wraps to three lines on one world and one line on another - so it is measured at the width it
@@ -371,8 +397,26 @@ namespace VerdantsAscent.Terrain.BcImport
             FiresLogger.LogInfo($"[BcImport] {report}");
             if (!converted) return;
 
-            SaveSystem.InvalidateCache(SaveDataType.World);
+            ShowAndSelect(cloneName);
             if (toVoxel) StartCoroutine(BakeToVoxel(cloneName, report));
+        }
+
+        private static readonly AccessTools.FieldRef<FejdStartup, World> SelectedWorldRef =
+            AccessTools.FieldRefAccess<FejdStartup, World>("m_world");
+
+        // The new world was missing from Select World until the menu was left and re-entered (Fire, 2026-09-27): the save
+        // cache was dropped but vanilla's list was never rebuilt. Rebuild it now with the copy selected, so Start plays it.
+        private static void ShowAndSelect(string worldName)
+        {
+            SaveSystem.InvalidateCache(SaveDataType.World);
+            var fejd = FejdStartup.instance;
+            if (fejd == null) return;
+            List<World> worlds = SaveSystem.GetWorldList();
+            World made = worlds?.Find(world => world != null && (world.m_worldName == worldName || world.m_name == worldName));
+            if (made != null) SelectedWorldRef(fejd) = made;
+            WorldListContextMenu.RefreshWorldList();
+            FiresLogger.LogInfo($"[BcImport] world list refreshed; '{worldName}' "
+                + (made != null ? "is selected, so Start plays it." : "was not found in the list to select."));
         }
 
         private IEnumerator BakeToVoxel(string cloneName, string cloneReport)

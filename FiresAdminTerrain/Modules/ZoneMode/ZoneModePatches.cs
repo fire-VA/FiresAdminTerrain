@@ -34,12 +34,6 @@ namespace VerdantsAscent.Terrain.Zones
         }
     }
 
-    [HarmonyPatch(typeof(ZNet), "OnDestroy")]
-    internal static class ZoneMode_ZNet_OnDestroy
-    {
-        private static void Postfix() => ZoneModeRegistry.OnWorldTeardown();
-    }
-
     [HarmonyPatch(typeof(ZoneSystem), nameof(ZoneSystem.Load))]
     internal static class ZoneMode_ZoneSystem_Load
     {
@@ -57,40 +51,32 @@ namespace VerdantsAscent.Terrain.Zones
     }
 
     // A dedicated server has no creation popup: `-fireszones` on its command line makes a world it
-    // creates from scratch a zone-mode world. An existing world is never converted.
-    [HarmonyPatch(typeof(World), nameof(World.GetCreateWorld))]
-    internal static class ZoneMode_World_GetCreateWorld
+    // creates from scratch a zone-mode world, unless the world has a profile chosen for it, which
+    // decides on its own. An existing world is never converted. Called from FAT's one
+    // World.GetCreateWorld hook (FatVanillaHooks), after the load guard.
+    internal static class ZoneModeNewWorld
     {
-        private static void Prefix(string name, out bool __state)
+        internal static void AfterCreateWorld(World world, bool existed)
         {
-            __state = SaveSystem.TryGetSaveByName(name, SaveDataType.World, out var save) && !save.IsDeleted;
-        }
-
-        private static void Postfix(World __result, bool __state)
-        {
-            if (__state || __result == null || !ZoneModeRegistry.LaunchFlagPresent()) return;
-            if (ZoneModeRegistry.CreateForNewWorld(__result, out string path))
-                FiresLogger.LogInfo($"[FiresZones] {ZoneModeRegistry.LaunchFlag}: created '{__result.m_name}' as a ONE ZONE AT A "
+            if (existed || world == null || !ZoneModeRegistry.LaunchFlagPresent()) return;
+            var profile = Voxel.FiresWorldProfile.Read(world.m_name);
+            if (!ZoneModeRegistry.LaunchFlagDecides(profile))
+            {
+                FiresLogger.LogInfo($"[FiresZones] {ZoneModeRegistry.LaunchFlag}: '{world.m_name}' has its own profile "
+                    + $"({profile.Describe()}), which decides: " + (profile.ZoneMode ? "one zone at a time." : "the whole world."));
+                return;
+            }
+            if (ZoneModeRegistry.CreateForNewWorld(world, out string path))
+                FiresLogger.LogInfo($"[FiresZones] {ZoneModeRegistry.LaunchFlag}: created '{world.m_name}' as a ONE ZONE AT A "
                     + $"TIME world ({path}).");
             else
                 FiresLogger.LogError($"[FiresZones] {ZoneModeRegistry.LaunchFlag}: could not write the zone registry for "
-                    + $"'{__result.m_name}' — it will run as a normal world.");
+                    + $"'{world.m_name}' — it will run as a normal world.");
         }
     }
 
     // ── Planning scopes: these passes must read the real world ─────────────
-    [HarmonyPatch(typeof(AltBiomeWorldData), nameof(AltBiomeWorldData.VerifyBiomeData))]
-    internal static class ZoneMode_AltBiome_VerifyBiomeData
-    {
-        private static void Prefix() => ZoneModeGate.EnterPlanning();
-
-        private static Exception Finalizer(Exception __exception)
-        {
-            ZoneModeGate.ExitPlanning();
-            return __exception;
-        }
-    }
-
+    // VerifyBiomeData's scope lives in FatVanillaHooks, beside the join sync's biome grid on the same method.
     [HarmonyPatch(typeof(AltBiomeWorldData), nameof(AltBiomeWorldData.GenerateBiomePoints))]
     internal static class ZoneMode_AltBiome_GenerateBiomePoints
     {
@@ -201,6 +187,35 @@ namespace VerdantsAscent.Terrain.Zones
             DroppedStale = 0;
             return dropped;
         }
+
+        // A synchronous heightmap request that found its build ready returns in microseconds; anything slower blocked
+        // the main thread while the builder thread worked.
+        private static readonly long BlockedWaitTicks = Stopwatch.Frequency / 10000;
+        private static int s_syncRequests;
+        private static int s_syncBlocked;
+        private static long s_syncBlockedTicks;
+        private static long s_syncWorstTicks;
+
+        internal static void RecordSyncRequest(long elapsedTicks)
+        {
+            s_syncRequests++;
+            if (elapsedTicks < BlockedWaitTicks) return;
+            s_syncBlocked++;
+            s_syncBlockedTicks += elapsedTicks;
+            if (elapsedTicks > s_syncWorstTicks) s_syncWorstTicks = elapsedTicks;
+        }
+
+        internal static string TakeSyncWaitReport()
+        {
+            string report = s_syncBlocked == 0 ? null
+                : $"{s_syncRequests} synchronous heightmap request(s), {s_syncBlocked} blocked the main thread for "
+                    + $"{TicksToMs(s_syncBlockedTicks):F1} ms in total (worst {TicksToMs(s_syncWorstTicks):F1} ms) waiting on the builder thread";
+            s_syncRequests = s_syncBlocked = 0;
+            s_syncBlockedTicks = s_syncWorstTicks = 0;
+            return report;
+        }
+
+        private static double TicksToMs(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
     }
 
     [HarmonyPatch(typeof(HeightmapBuilder), nameof(HeightmapBuilder.IsTerrainReady),
@@ -210,10 +225,18 @@ namespace VerdantsAscent.Terrain.Zones
         private static void Prefix(HeightmapBuilder __instance) => ZoneModeBuilderCache.DropStaleBuilds(__instance);
     }
 
-    [HarmonyPatch(typeof(HeightmapBuilder), "RequestTerrain")]
-    internal static class ZoneMode_HeightmapBuilder_RequestTerrain
+    // RequestTerrainSync spins on the private RequestTerrain (50,000+ calls/s) until the builder thread delivers, so the
+    // stale drop runs once per request here instead of on every spin, where it re-took the builder's own lock.
+    [HarmonyPatch(typeof(HeightmapBuilder), nameof(HeightmapBuilder.RequestTerrainSync))]
+    internal static class ZoneMode_HeightmapBuilder_RequestTerrainSync
     {
-        private static void Prefix(HeightmapBuilder __instance) => ZoneModeBuilderCache.DropStaleBuilds(__instance);
+        private static void Prefix(HeightmapBuilder __instance, out long __state)
+        {
+            ZoneModeBuilderCache.DropStaleBuilds(__instance);
+            __state = Stopwatch.GetTimestamp();
+        }
+
+        private static void Postfix(long __state) => ZoneModeBuilderCache.RecordSyncRequest(Stopwatch.GetTimestamp() - __state);
     }
 
     // ── Minimap: gated through the samplers; this only reports the result ──

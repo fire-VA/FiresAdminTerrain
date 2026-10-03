@@ -167,10 +167,12 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int i = 0; i < s_islands.Count; i++)
             {
                 var isl = s_islands[i];
-                float dist = Vector2.Distance(new Vector2(center.x, center.z), new Vector2(isl.X, isl.Z));
+                float x = WorldX(in isl), z = WorldZ(in isl);
+                float dist = Vector2.Distance(new Vector2(center.x, center.z), new Vector2(x, z));
                 if (dist > radius) continue;
-                lines.Add($"  [{i}] {KindName(isl.Kind),-8} ({isl.X:0},{isl.BaseY:0},{isl.Z:0}) r={isl.R:0} "
-                          + $"{dist:0}m away" + (authority ? (IsPlaced(in isl) ? " PLACED" : " unplaced") : ""));
+                lines.Add($"  [{i}] {KindName(isl.Kind),-8} ({x:0},{isl.BaseY + isl.OffY:0},{z:0}) r={isl.R:0} "
+                          + $"{dist:0}m away" + (authority ? (IsPlaced(in isl) ? " PLACED" : " unplaced") : "")
+                          + (IsMoved(in isl) ? " (from a blueprint)" : ""));
                 shown++;
             }
             lines.Insert(0, radius >= MaxListRadius
@@ -183,8 +185,9 @@ namespace VerdantsAscent.Terrain.Voxel
         // Server-only truth: a client's generated-zone set is empty.
         private static bool IsPlaced(in Island isl)
         {
-            var zmin = ZoneSystem.GetZone(new Vector3(isl.X - isl.R, 0f, isl.Z - isl.R));
-            var zmax = ZoneSystem.GetZone(new Vector3(isl.X + isl.R, 0f, isl.Z + isl.R));
+            float x = WorldX(in isl), z = WorldZ(in isl);
+            var zmin = ZoneSystem.GetZone(new Vector3(x - isl.R, 0f, z - isl.R));
+            var zmax = ZoneSystem.GetZone(new Vector3(x + isl.R, 0f, z + isl.R));
             for (int zz = zmin.y; zz <= zmax.y; zz++)
                 for (int zx = zmin.x; zx <= zmax.x; zx++)
                     if (VoxelZoneStreamer.IsZoneGenerated(new Vector2s(zx, zz))) return true;
@@ -285,7 +288,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int removedPlaced = 0;
                     next.RemoveAll(isl =>
                     {
-                        float d = Vector2.Distance(new Vector2(center.x, center.z), new Vector2(isl.X, isl.Z));
+                        float d = Vector2.Distance(new Vector2(center.x, center.z), new Vector2(WorldX(in isl), WorldZ(in isl)));
                         if (d > radius) return false;
                         if (IsPlaced(in isl)) removedPlaced++;
                         return true;
@@ -357,7 +360,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             foreach (var other in others)
             {
-                float dx = candidate.X - other.X, dz = candidate.Z - other.Z;
+                float dx = WorldX(in candidate) - WorldX(in other), dz = WorldZ(in candidate) - WorldZ(in other);
                 float reach = candidate.R + other.R;
                 if (dx * dx + dz * dz < reach * reach) return true;
             }

@@ -116,6 +116,11 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> WaterPaintShoreBlend;
         public static ConfigEntry<float> WaterBankFreeboard;
         public static ConfigEntry<float> WaterMinChannelDepth;
+        public static ConfigEntry<bool> WaterfallMist;
+        public static ConfigEntry<float> WaterfallMistRange;
+        private const float DefaultWaterfallMistRange = 200f;
+        public static bool WaterfallMistOn => WaterfallMist == null || WaterfallMist.Value;
+        public static float WaterfallMistRangeMetres => WaterfallMistRange != null ? WaterfallMistRange.Value : DefaultWaterfallMistRange;
         // (AutoPourWater, WaterfallBreakStep, WaterMaxSheetDepth, PondKeep,
         //  MountainPondKeep DELETED — the systems they tuned are gone: gen
         //  water is mesh-only, the fall/mid-air cuts died with the smooth
@@ -124,6 +129,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<bool> SkyIslands;
         public static ConfigEntry<float> SkyIslandRarity;
         public static ConfigEntry<bool> VegWaterEcology;
+        public static ConfigEntry<bool> FaithfulBakeWater;
         public static ConfigEntry<float> VegTreeWaterClearance;
         public static ConfigEntry<string> VegTreeNames;
         public static ConfigEntry<string> VegWaterSinkerNames;
@@ -168,8 +174,13 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<bool> ChunkCacheEnabled;
         public static ConfigEntry<float> ChunkCacheSizeMB;
         public static ConfigEntry<float> WrapHeadlessCap;
+        public static ConfigEntry<bool> ServerBuildsCollision;
+        // A dedicated server meshes voxel colliders: always in VoxelOnly, and in VoxelWrap unless switched off (Fire, 2026-09-29).
+        internal static bool ServerCollides => WorldKind == VoxelWorldMode.VoxelOnly || ServerBuildsCollision == null || ServerBuildsCollision.Value;
         public static ConfigEntry<float> WrapKeepRadius;
         public static ConfigEntry<float> VegetationDensityScale;
+        public static ConfigEntry<bool> VegetationWarmUp;
+        public static ConfigEntry<bool> BakeReadAhead;
         public static ConfigEntry<float> ClutterDensityScale;
         public static ConfigEntry<float> GrassRenderDistance;
         public static ConfigEntry<bool> ImpostorsEnabled;
@@ -260,12 +271,27 @@ namespace VerdantsAscent.Terrain.Voxel
             WrapHeadlessCap = cfg.Bind(PERF, "Voxel wrap radius (headless)", 160f,
                 new ConfigDescription("How far (metres) around each PEER a dedicated server voxelises. Headless wraps every loaded zone rather than one player radius, so this cap is what actually bounds server load. THE biggest lever: a 64m zone is ~16 chunks and each must be generated, meshed and APPLIED before the zone can swap. At the old 256 (a 9x9 envelope) the dedi measured zones=44 chunks=654 with swapped=0 pendingSwap=44 — not one zone ever finished, all stuck in the apply queue. Vanilla keeps 3x3 zones active (~96m) plus a distant ring. Clients use 'Wrap Radius' instead.",
                     new AcceptableValueRange<float>(96f, 512f)));
+            ServerBuildsCollision = cfg.Bind(PERF, "Server builds voxel collision", true,
+                new ConfigDescription("Dedicated server in World Terrain Mode VoxelWrap: mesh voxel COLLIDERS (no renderers) for the zones "
+                    + "around each peer and hide vanilla's heightmap collider there, so what the server simulates (creatures, drops, "
+                    + "physics) stands on the voxel ground - caves, carved rivers and every player edit - as the clients do. Off = the "
+                    + "server keeps voxel data only and its physics stands on vanilla's ground (FAT 0.2.651 and older). VoxelOnly always "
+                    + "builds them. Bounded by 'Voxel wrap radius (headless)'."));
             WrapKeepRadius = cfg.Bind(PERF, "Voxel wrap keep radius", 128f,
                 new ConfigDescription("Floor the memory governor may never ease the wrap radius below. In VoxelOnly the voxel collider is the ONLY ground, so a player's own footprint must always stay wrapped — set this too low under memory pressure and players fall through the world. Keep it at or above vanilla's active area (~96m corner).",
                     new AcceptableValueRange<float>(96f, 256f)));
             VegetationDensityScale = cfg.Bind(PERF, "Vegetation density scale", 0.7f,
                 new ConfigDescription("Multiplies how many TREES/BUSHES each zone places (ZoneVegetation m_min/m_max). 1 = vanilla, 0.4 = 60% fewer. This is the tree tri budget — the single biggest lever on a forest zone. Pickables, ore and spawners are exempt, so berries and copper keep vanilla counts. Only affects zones generated AFTER the change; already-generated zones keep their trees.",
                     new AcceptableValueRange<float>(0.02f, 2f)));
+            VegetationWarmUp = cfg.Bind(PERF, "Warm vegetation on the server", true,
+                "Dedicated server only: after the world loads, make and discard one of each vegetation prefab (one a frame), so the "
+                + "first tree or rock of each kind a player's exploration spawns does not stall the server (the first Beech1 cost "
+                + "about 0.45 s, mostly waiting on disk). Off = vanilla behaviour.");
+            BakeReadAhead = cfg.Bind(PERF, "Read the terrain cache ahead on join", true,
+                "A studio-baked world's terrain cache (hundreds of MB) is read on a worker during the join and the server holds "
+                + "PeerInfo until the client says it is done, so the join's main-thread freeze is seconds shorter. Per machine: on "
+                + "a server it means 'wait for the client's report', on a client 'read ahead and report'. Off on both = the join "
+                + "reads the cache inside PeerInfo, as before FAT 0.2.617.");
             ClutterDensityScale = cfg.Bind(PERF, "Clutter density scale", 0.55f,
                 new ConfigDescription("Multiplies grass/clutter instance count per patch. 1 = vanilla, 0.5 = half the blades, 0 = none. APPLIES LIVE: changing it clears and regrows the grass around you so the slider is honest (it used to only affect patches built AFTER the change — moving it looked like it did nothing).",
                     new AcceptableValueRange<float>(0f, 1.5f)));
@@ -453,6 +479,11 @@ namespace VerdantsAscent.Terrain.Voxel
             WaterMinChannelDepth = cfg.Bind(SW, "Water Min Channel Depth", 1.5f,
                 new ConfigDescription("How deep the bed is carved under the reconciled water surface. Banks NEVER move with this — only the cut deepens. The sheet/swim sit 0.4m below that surface (bank-relief seat-down), so the actual water column is this minus 0.4: at 1.5 the column is the original 1.1m. Raise for deeper rivers, banks stay put.",
                     new AcceptableValueRange<float>(0f, 4f)));
+            WaterfallMist = cfg.Bind(SW, "Waterfall Mist", true,
+                "Mist at every waterfall: spray off the lip, a cloud where the water lands on rock or water (with a faint rainbow when the sun is behind you), and the cloud a skyland fall turns into where it thins out in mid-air. Applies at once.");
+            WaterfallMistRange = cfg.Bind(SW, "Waterfall Mist Range", DefaultWaterfallMistRange,
+                new ConfigDescription("Waterfall mist runs only within this many metres of the camera. Applies at once.",
+                    new AcceptableValueRange<float>(50f, 600f)));
             SkyIslands = cfg.Bind(SW, "Sky Islands", true,
                 "Rare floating islands, 200-300m above the local terrain: flat-ish carved top, pointed ridged underside. Pure voxel additions — the map, spawns and vanilla systems never see them. FullVoxel only. Applied when the world loads; existing chunk caches self-invalidate.");
             SkyIslandRarity = cfg.Bind(SW, "Sky Island Rarity", 0.30f,
@@ -460,6 +491,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     new AcceptableValueRange<float>(0f, 1f)));
             VegWaterEcology = cfg.Bind(SW, "Vegetation Water Ecology", true,
                 "Vegetation placement measures altitude against the LOCAL generated water surface instead of sea level. The whole vanilla shoreline ecology ports to rivers, lakes and swamps: trees keep their distance, vass and waterlilies stand in the shallows, swamp trees wade. Only affects zones generated after the change.");
+            FaithfulBakeWater = cfg.Bind(SW, "Faithful Bake Water", false,
+                "TEST (Fire 10-01, gated until proven): a FAITHFUL studio bake (such as ATomTest) also builds the smooth water surface from its own baked water, so its rivers and lakes are stored, swum, carved to their channel depth and grown on like any generated world's. Off = the bake's inland water stays unqueryable (only the sea). Read when the world loads; set it the same on the server and every client.");
             VegTreeWaterClearance = cfg.Bind(SW, "Vegetation Tree Water Clearance", 1f,
                 new ConfigDescription("Extra metres of min-altitude added to tree prefabs, above the local water surface, so trees rarely stand at the very edge of a bank. 0 = vanilla bands only.",
                     new AcceptableValueRange<float>(0f, 5f)));

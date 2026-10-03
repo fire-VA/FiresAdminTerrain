@@ -13,6 +13,16 @@ namespace VerdantsAscent.Performance
     {
         private const float ProbeStartHeight = 500f;
         private const float ProbeDistance = 1000f;
+        private const float VoxelReach = 40f, VoxelBelowTolerance = 0.2f;
+        // 0.2.691 shipped the measurement with this OFF (the baseline [lead] asked to see fail); ON since 0.2.692.
+        private const bool CorrectToVoxel = true;
+        private static bool s_voxelLogged;
+        // Grass candidates moved down onto the voxel surface this session (read by clutterfloat_test).
+        internal static int s_voxelCorrected;
+        // 0.2.693: GetGroundInfo failures by reason (clutterfloat_test): no terrain-layer hit, or a hit on a collider that
+        // resolves to no heightmap (and its name, the last one).
+        internal static int s_noHit, s_unresolved;
+        internal static string s_lastUnresolved = "";
 
         private static readonly AccessTools.FieldRef<ClutterSystem, int> s_placeRayMask =
             AccessTools.FieldRefAccess<ClutterSystem, int>("m_placeRayMask");
@@ -28,7 +38,7 @@ namespace VerdantsAscent.Performance
             __result = false;
 
             if (!Physics.Raycast(p + Vector3.up * ProbeStartHeight, Vector3.down, out RaycastHit hit, ProbeDistance, s_placeRayMask(__instance)))
-                return false;
+                { s_noHit++; return false; }
 
             // A one-zone-at-a-time skyland puts a second surface over the ground. Grass only draws near the
             // camera, so it goes on the surface the camera is at: the ground while the camera is below the
@@ -41,7 +51,27 @@ namespace VerdantsAscent.Performance
 
             Heightmap ground = ResolveHeightmap(hit.collider, hit.point, out bool isTerrainTile);
             if (ground == null)
-                return false;
+                { s_unresolved++; s_lastUnresolved = hit.collider != null ? hit.collider.name : "?"; return false; }
+
+            // 0.2.691 (Fire 10-01, HR5b: "grass floating over the leveled terrain at the original terrain height"): in a zone
+            // already swapped to voxel ground, a ray that lands on anything but a voxel collider (vanilla's heightmap
+            // collider still enabled, a tile, a stray terrain-layer mesh) while the voxel surface in that column lies lower
+            // is not the ground the player stands on. Grass goes on the voxel surface there instead.
+            if (CorrectToVoxel && VoxelWorld.ChunkCount > 0 && hit.collider.GetComponent<VoxelChunkView>() == null
+                && VoxelZoneStreamer.IsZoneSolid(ZoneSystem.GetZone(hit.point))
+                && VoxelWorld.TrySampleSurfaceY(hit.point.x, hit.point.z, hit.point.y + 0.5f, hit.point.y - VoxelReach, out float voxelY, out _)
+                && voxelY < hit.point.y - VoxelBelowTolerance)
+            {
+                hit.point = new Vector3(hit.point.x, voxelY, hit.point.z);
+                s_voxelCorrected++;
+                if (!s_voxelLogged && FiresLogger.DebugEnabled)
+                {
+                    s_voxelLogged = true;
+                    FiresLogger.LogDebug($"[FiresVoxel] clutter: a grass candidate at ({hit.point.x:0}, {hit.point.z:0}) hit '{hit.collider.name}' "
+                        + $"(not a voxel collider) {hit.point.y - voxelY:0.0} m above the voxel ground in a voxel zone; grass is placed on the voxel ground. "
+                        + "First of this session (count in clutterfloat_test).");
+                }
+            }
 
             point = hit.point;
             normal = hit.normal;

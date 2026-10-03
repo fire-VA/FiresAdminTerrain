@@ -407,6 +407,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 Mix(FiresVoxelConfig.EstuaryFlare?.Value ?? 0f);
                 MixB(FiresVoxelConfig.CarvesRiverBeds);
                 MixI(FiresWaterGuards.Hash);
+                // A faithful bake's chunks store water only with Faithful Bake Water on. Mixed in only then, so every other
+                // world (and a faithful one with it off) keeps its key and its cache.
+                if (FiresWorldGenBase.LoadedFaithful && FiresWorldGenBase.FaithfulBakeWaterOn) MixI(0x46425731);   // 'FBW1'
 
                 return ((uint)h).ToString("x8");
             }
@@ -426,6 +429,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_ready = false;
                 s_root = null;
                 s_key = null;
+                s_generation++;
+                s_measured = false;
             }
             lock (s_access) s_access.Clear();
         }
@@ -452,11 +457,17 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_key = BuildKey();
                     s_root = Path.Combine(Path.Combine(baseDir, worldName), s_key);
                     Directory.CreateDirectory(s_root);
-                    s_bytes = MeasureStore(s_root);
+                    // Measuring the store walks every cached file and the prune deletes whole directories: on the
+                    // dedi that was 565 ms of a 624 ms main-thread stall as a client joined (R29a, [lead] 10-01). Both
+                    // run on the thread pool; the cache is usable at once, and the LRU sweep waits for the measure.
+                    s_bytes = 0;
+                    s_measured = false;
+                    int generation = ++s_generation;
+                    string root = s_root, key = s_key, worldDir = Path.Combine(baseDir, worldName);
                     s_ready = true;
-                    FiresLogger.LogInfo($"[FiresVoxelCache] ready — key={s_key} world='{worldName}' " +
-                              $"existing={s_bytes / (1024f * 1024f):0.0}MB cap={CapBytes / (1024f * 1024f):0}MB");
-                    PruneOldKeys(Path.Combine(baseDir, worldName), s_key);
+                    FiresLogger.LogInfo($"[FiresVoxelCache] ready — key={s_key} world='{worldName}' cap={CapBytes / (1024f * 1024f):0}MB; "
+                        + "measuring the store in the background.");
+                    ThreadPool.QueueUserWorkItem(_ => MeasureInBackground(generation, root, worldDir, key));
                 }
                 catch (Exception ex)
                 {
@@ -464,6 +475,25 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_ready = false; s_root = null;
                 }
             }
+        }
+
+        // Bumped by every EnsureReady and Reset, so a measure that finishes after its world was dropped adds nothing.
+        private static int s_generation;
+        private static volatile bool s_measured;
+
+        // Stores made while this runs may be counted twice (once by Store, once here); the estimate errs high, and the
+        // first sweep sets the exact size.
+        private static void MeasureInBackground(int generation, string root, string worldDir, string key)
+        {
+            PruneOldKeys(worldDir, key);
+            long n = MeasureStore(root);
+            lock (s_gate)
+            {
+                if (generation != s_generation) return;
+                s_bytes += n;
+                s_measured = true;
+            }
+            FiresLogger.LogInfo($"[FiresVoxelCache] store measured: existing={n / (1024f * 1024f):0.0}MB.");
         }
 
         private static long MeasureStore(string root)
@@ -629,7 +659,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             if (Time.time < s_nextSweep) return;
             s_nextSweep = Time.time + 30f;
-            if (s_bytes <= CapBytes) return;
+            if (!s_measured || s_bytes <= CapBytes) return;
             ThreadPool.QueueUserWorkItem(_ => Sweep());
         }
 

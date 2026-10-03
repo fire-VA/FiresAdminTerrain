@@ -43,6 +43,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float s_next;
         private static float s_nextStatus;
         private static bool s_gridWasUnready;
+        private static readonly List<Vector3> s_recolourVerts = new List<Vector3>(NEAR_VERTS * NEAR_VERTS);
+        private static readonly List<Color32> s_recolourCols = new List<Color32>(NEAR_VERTS * NEAR_VERTS);
 
         // Vanilla's overworld render group flipped (interior entered or left).
         // The distant LOD it stands in for is a Heightmap, so it follows the
@@ -497,7 +499,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // the lod and the near field agree at the handoff and
                     // biome boundaries wear the same 64m gradients.
                     cols[i] = wg != null
-                        ? BiomeCornerBlend.Sample(wx, wz)
+                        ? FatSeasons.Winterize(Zones.BiomePaint.Tint(BiomeCornerBlend.Sample(wx, wz), wx, wz), wx, wz)
                         : new Color32(0, 0, 0, 0);
                 }
             }
@@ -617,6 +619,26 @@ namespace VerdantsAscent.Terrain.Voxel
             s_tiles[key] = tile;
             UpdateVisibility(key, tile, c, near);
             return true;
+        }
+
+        // Vedr seasons: live tiles take the new snow biomes in place (pooled tiles recolour when rebuilt).
+        internal static void RecolourForSeason()
+        {
+            if (WorldGenerator.instance == null) return;
+            foreach (var kv in s_tiles)
+            {
+                var t = kv.Value;
+                if (t == null || t.Go == null || t.Mesh == null) continue;
+                Vector3 origin = t.Go.transform.position;
+                t.Mesh.GetVertices(s_recolourVerts);
+                s_recolourCols.Clear();
+                foreach (var v in s_recolourVerts)
+                {
+                    float wx = origin.x + v.x, wz = origin.z + v.z;
+                    s_recolourCols.Add(FatSeasons.Winterize(Zones.BiomePaint.Tint(BiomeCornerBlend.Sample(wx, wz), wx, wz), wx, wz));
+                }
+                t.Mesh.SetColors(s_recolourCols);
+            }
         }
 
         private static void Release(Vector3Int key)

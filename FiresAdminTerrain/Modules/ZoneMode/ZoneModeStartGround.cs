@@ -53,7 +53,7 @@ namespace VerdantsAscent.Terrain.Zones
                     continue;
                 }
                 if (ZoneModeChunkMachines.IsProtected(zdo)) continue;
-                if (ZoneModeBuilds.IsBuilt(zdo)) Add(s_builds, zdo.GetPosition());
+                if (ZoneModeBuilds.IsPlaced(zdo)) Add(s_builds, zdo.GetPosition());
                 else if (IsObstacle(prefab)) Add(s_objects, zdo.GetPosition());
             }
             s_found.Clear();

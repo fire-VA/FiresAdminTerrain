@@ -56,6 +56,9 @@ namespace VerdantsAscent.Performance
             public bool MidType;            // true = InstanceIndex/RngState are live
             public UnityEngine.Random.State RngState;   // RNG snapshot for deterministic mid-type resume
             public float EnqueuedAt;        // queue→done latency accounting
+            // ClutterSystem.m_waterLevel while the GenerateVegPatch hook held the patch: the water-ecology move is
+            // restored before this builder runs.
+            public float WaterLevel;
         }
 
         private static readonly Dictionary<Vector2Int, Builder> s_builders =
@@ -171,6 +174,7 @@ namespace VerdantsAscent.Performance
                 Biomes = biomes,
                 ClutterIndex = 0,
                 EnqueuedAt = Time.unscaledTime,
+                WaterLevel = cs.m_waterLevel,
             };
             s_winQueued++;
 
@@ -197,7 +201,7 @@ namespace VerdantsAscent.Performance
             // gates all generation on this; we gate the deferred fill the same way.
             Camera cam = Utils.GetMainCamera();
             if (cam == null) return;
-            if (Heightmap.HaveQueuedRebuild(cam.transform.position, cs.m_distance)) { s_winStarved++; return; }
+            if (Heightmap.HaveQueuedRebuild(cam.transform.position, cs.m_distance)) { s_winStarved++; s_starvedTotal++; return; }
             s_winFrames++;
 
             var grassRoot = (GameObject) f_grassRoot.GetValue(cs);
@@ -267,7 +271,7 @@ namespace VerdantsAscent.Performance
             // floor at vanilla density was tens of millions of tris.
             float densityScale = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.ClutterDensityScale?.Value ?? 1f;
             float amountScale = cs.m_amountScale * densityScale;
-            float waterLevel = cs.m_waterLevel;
+            float waterLevel = b.WaterLevel;
             float lodCap = cs.m_distance - cs.m_grassPatchSize / 2f;
 
             while (b.ClutterIndex < count)
@@ -300,6 +304,8 @@ namespace VerdantsAscent.Performance
             Stopwatch sw)
         {
             if (!c.m_enabled || (b.Biomes & c.m_biome) == Heightmap.Biome.None) return true;
+            // 0.2.693: a patch with no voxel edit anchor within reach skips the per-candidate edit lookup.
+            bool patchNearEdits = global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.HasEditsXZ(b.Center.x, b.Center.z, b.HalfSize * 1.5f);
 
             InstanceRenderer instanceRenderer = null;
             if (b.MidType && b.InstanceIndex > 0)
@@ -346,41 +352,52 @@ namespace VerdantsAscent.Performance
                     UnityEngine.Random.Range(center.x - halfSize, center.x + halfSize), 0f,
                     UnityEngine.Random.Range(center.z - halfSize, center.z + halfSize));
                 float rotY = UnityEngine.Random.Range(0, 360);
+                // 0.2.693 (Fire 10-01: "no more grass over edited terrain at all"): which vanilla gate refuses each candidate,
+                // split by whether it stands on voxel-EDITED ground (a VAVoxel edit anchor's chunk). Read by clutterfloat_test.
+                bool edited = patchNearEdits && global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.HasEditsXZ(pos.x, pos.z, 0f);
 
                 if (c.m_inForest)
                 {
                     float ff = WorldGenerator.GetForestFactor(pos);
-                    if (ff < c.m_forestTresholdMin || ff > c.m_forestTresholdMax) continue;
+                    if (ff < c.m_forestTresholdMin || ff > c.m_forestTresholdMax) { GateCount(edited, Gate.Forest); continue; }
                 }
                 if (c.m_fractalScale > 0f)
                 {
                     float fb = Utils.Fbm(pos * 0.01f * c.m_fractalScale + fractalOffset, 3, 1.6f, 0.7f);
-                    if (fb < c.m_fractalTresholdMin || fb > c.m_fractalTresholdMax) continue;
+                    if (fb < c.m_fractalTresholdMin || fb > c.m_fractalTresholdMax) { GateCount(edited, Gate.Fractal); continue; }
                 }
 
-                if (!cs.GetGroundInfo(pos, out Vector3 point, out Vector3 normal, out Heightmap hmap, out Heightmap.Biome biome)
-                    || (c.m_biome & biome) == Heightmap.Biome.None)
-                    continue;
+                if (!cs.GetGroundInfo(pos, out Vector3 point, out Vector3 normal, out Heightmap hmap, out Heightmap.Biome biome))
+                { GateCount(edited, Gate.NoGround); continue; }
+                // 0.2.694: from here on, "edited" is the ground itself, off the generated height (FatGroundProbe.IsGroundEdited).
+                edited = global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.IsGroundEdited(point.x, point.z, point.y);
+                if ((c.m_biome & biome) == Heightmap.Biome.None) { GateCount(edited, Gate.Biome); continue; }
 
                 float alt = point.y - waterLevel;
-                if (alt < c.m_minAlt || alt > c.m_maxAlt || normal.y < cosMaxTilt || normal.y > cosMinTilt)
-                    continue;
+                if (alt < c.m_minAlt || alt > c.m_maxAlt) { GateCount(edited, Gate.Altitude); continue; }
+                if (normal.y < cosMaxTilt || normal.y > cosMinTilt) { GateCount(edited, Gate.Tilt); continue; }
 
                 if (c.m_minOceanDepth != c.m_maxOceanDepth)
                 {
+                    // Vanilla's ocean depth is the ZONE's depth under the sea (Heightmap.UpdateCornerDepths: max(0, 30 - height)
+                    // at the heightmap's four corners, lerped). It keeps a clutter such as instanced_waterlilies (ocean depth
+                    // 0..1) out of the open sea, and it reads 0 at an inland pond, which is right as it is. 0.2.662-0.2.676
+                    // replaced it with the pond's local depth, which refused every lily deep enough for its altitude band
+                    // (bed 3.2-4.5 m under the surface): removed in 0.2.677 (R47, 10-01).
                     float od = hmap.GetOceanDepth(pos);
-                    if (od < c.m_minOceanDepth || od > c.m_maxOceanDepth) continue;
+                    if (od < c.m_minOceanDepth || od > c.m_maxOceanDepth) { GateCount(edited, Gate.OceanDepth); continue; }
                 }
                 if (c.m_minVegetation != c.m_maxVegetation)
                 {
                     float vm = hmap.GetVegetationMask(point);
-                    if (vm > c.m_maxVegetation || vm < c.m_minVegetation) continue;
+                    if (vm > c.m_maxVegetation || vm < c.m_minVegetation) { GateCount(edited, Gate.VegetationMask); continue; }
                 }
                 if (!c.m_onCleared || !c.m_onUncleared)
                 {
                     bool cleared = hmap.IsCleared(point);
-                    if ((c.m_onCleared && !cleared) || (c.m_onUncleared & cleared)) continue;
+                    if ((c.m_onCleared && !cleared) || (c.m_onUncleared & cleared)) { GateCount(edited, Gate.Cleared); continue; }
                 }
+                GateCount(edited, Gate.Placed);
 
                 pos = point;
                 if (c.m_snapToWater) pos.y = waterLevel;
@@ -413,6 +430,32 @@ namespace VerdantsAscent.Performance
             return true;
         }
 
+        // ── 0.2.693: the gate census (Fire 10-01, bare grass over edited ground) ─────────────────────────────────────
+        internal enum Gate { Forest, Fractal, NoGround, Biome, Altitude, Tilt, OceanDepth, VegetationMask, Cleared, Placed }
+        private static readonly int[] s_gateEdited = new int[10], s_gatePlain = new int[10];
+
+        private static void GateCount(bool edited, Gate g) { if (edited) s_gateEdited[(int)g]++; else s_gatePlain[(int)g]++; }
+
+        // "placed N of M (P %); refused: gate xN, …" for candidates on edited / plain ground since the last reset.
+        internal static string GateCensus(bool edited)
+        {
+            var a = edited ? s_gateEdited : s_gatePlain;
+            int total = 0;
+            for (int i = 0; i < a.Length; i++) total += a[i];
+            if (total == 0) return "no candidates";
+            int placed = a[(int)Gate.Placed];
+            var parts = new List<string>();
+            for (int i = 0; i < a.Length; i++)
+                if (i != (int)Gate.Placed && a[i] > 0) parts.Add($"{(Gate)i} x{a[i]}");
+            return $"placed {placed} of {total} ({100f * placed / total:0} %); refused: {(parts.Count > 0 ? string.Join(", ", parts) : "none")}";
+        }
+
+        // 0.2.693: builders waiting, and frames the fill was held back by a queued heightmap rebuild (since the census reset).
+        internal static int s_starvedTotal;
+        internal static int BuildersPending => s_builders.Count;
+
+        internal static void ResetGateCensus() { s_starvedTotal = 0; System.Array.Clear(s_gateEdited, 0, s_gateEdited.Length); System.Array.Clear(s_gatePlain, 0, s_gatePlain.Length); }
+
         internal static void OnClearAll() => s_builders.Clear();
         internal static void OnAwake() => s_builders.Clear();
 
@@ -423,7 +466,11 @@ namespace VerdantsAscent.Performance
         private static class LateUpdate_Patch
         {
             [HarmonyPostfix]
-            private static void Postfix(ClutterSystem __instance) => OnLateUpdatePostfix(__instance);
+            private static void Postfix(ClutterSystem __instance)
+            {
+                VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.RebuildWhenWaterKnown(__instance);
+                OnLateUpdatePostfix(__instance);
+            }
         }
 
         [HarmonyPatch(typeof(ClutterSystem), "ClearAll")]
@@ -437,7 +484,11 @@ namespace VerdantsAscent.Performance
         private static class Awake_Patch
         {
             [HarmonyPostfix]
-            private static void Postfix() => OnAwake();
+            private static void Postfix()
+            {
+                OnAwake();
+                VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.ForgetWater();
+            }
         }
     }
 }

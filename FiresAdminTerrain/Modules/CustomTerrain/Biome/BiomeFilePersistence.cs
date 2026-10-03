@@ -201,23 +201,25 @@ namespace VerdantsAscent.Terrain.Biome
                     return;
                 }
 
-                using (var fs = new FileStream(path, FileMode.Create))
-                using (var gzip = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionMode.Compress))
-                using (var writer = new BinaryWriter(gzip))
+                FiresCore.IO.AtomicFile.Write(path, stream =>
                 {
-                    // Write header
-                    writer.Write(MAGIC_HEADER);
-                    writer.Write(FILE_VERSION);
-                    writer.Write(_serverBiomeCache.Count);
-
-                    // Write each paint
-                    foreach (var kvp in _serverBiomeCache)
+                    using (var gzip = new System.IO.Compression.GZipStream(stream, System.IO.Compression.CompressionMode.Compress, leaveOpen: true))
+                    using (var writer = new BinaryWriter(gzip))
                     {
-                        byte[] entryData = kvp.Value.Serialize();
-                        writer.Write(entryData.Length);
-                        writer.Write(entryData);
+                        // Write header
+                        writer.Write(MAGIC_HEADER);
+                        writer.Write(FILE_VERSION);
+                        writer.Write(_serverBiomeCache.Count);
+
+                        // Write each paint
+                        foreach (var kvp in _serverBiomeCache)
+                        {
+                            byte[] entryData = kvp.Value.Serialize();
+                            writer.Write(entryData.Length);
+                            writer.Write(entryData);
+                        }
                     }
-                }
+                });
 
                 FiresLogger.LogInfo($"[BiomeFilePersistence] Saved {_serverBiomeCache.Count} biome paints to {path}");
             }

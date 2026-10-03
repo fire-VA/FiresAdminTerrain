@@ -10,6 +10,7 @@ namespace VerdantsAscent.Terrain.BcImport
         BesideWorldMeta,
         KeptByPortUpgrade,
         FatRecordsFolder,
+        ReceivedFromServer,
     }
 
     internal struct BcSaveLocation

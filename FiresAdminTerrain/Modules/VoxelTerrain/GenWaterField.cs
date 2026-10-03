@@ -42,9 +42,25 @@ namespace VerdantsAscent.Terrain.Voxel
         // here so the streamer never has to know there are two sources.
         public static bool TouchesZone(Vector2s zone)
         {
-            if (Zones.ZoneModeRegistry.TryGetSource(zone, out var source)) zone = source;
-            return VoxelRiverNetwork.TouchesZone(zone) || VoxelLakeBasins.TouchesZone(zone);
+            var shift = Zones.ZoneModeRegistry.ShiftOf(zone);
+            if (shift.Lift > 0f) return true;
+            if (!Zones.ZoneModeRegistry.TryGetSource(zone, out var source)) return SourceTouches(zone);
+            if (!shift.Slides) return SourceTouches(source);
+            // A location seed's source square is slid to centre its location, so it spans up to four source zones.
+            var centre = ZoneSystem.GetZonePos(source) + new Vector3(shift.Dx, 0f, shift.Dz);
+            float reach = ZoneSystem.c_ZoneSizeHalf - SourceCornerInset;
+            for (int corner = 0; corner < SourceCorners; corner++)
+            {
+                var at = centre + new Vector3((corner & 1) == 0 ? -reach : reach, 0f, (corner & 2) == 0 ? -reach : reach);
+                if (SourceTouches(ZoneSystem.GetZone(at))) return true;
+            }
+            return false;
         }
+
+        private const int SourceCorners = 4;
+        private const float SourceCornerInset = 0.1f;
+
+        private static bool SourceTouches(Vector2s zone) => VoxelRiverNetwork.TouchesZone(zone) || VoxelLakeBasins.TouchesZone(zone);
 
         // Server-side placement asks this before choosing ground: true once this machine knows the world's generated
         // water. A Fires world knows it with its generator and a world with none planned knows it at once; otherwise the
@@ -69,8 +85,29 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryWaterSurfaceSmooth(float wx, float wz, out float level, out float depth)
         {
             if (FiresWorldGenBase.Active) return FiresWorldGenBase.TryGetWaterSurfaceSmooth(wx, wz, out level, out depth);
-            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz);
+            // A chunk raised with other land (ZoneModeLift) carries its source's water up with it: channels and bowls
+            // rise by the lift, and the ground its source had under the sea holds the lifted sea.
+            bool sea = Zones.ZoneModeGate.TryLiftedSea(wx, wz, out float seaLevel, out float seaFloor);
+            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz, out float lift);
+            if (TryHydrologySurface(wx, wz, out level, out depth))
+            {
+                level += lift;
+                if (!sea || level >= seaLevel) return true;
+            }
+            if (!sea)
+            {
+                level = float.MinValue;
+                depth = 0f;
+                return false;
+            }
+            level = seaLevel;
+            depth = seaLevel - seaFloor;
+            return depth > 0f;
+        }
 
+        // The channels and still water of the hydrology solve at a point already moved to its source.
+        private static bool TryHydrologySurface(float wx, float wz, out float level, out float depth)
+        {
             level = float.MinValue;
             depth = 0f;
             if (!VoxelHydrology.Ready) return false;
@@ -107,8 +144,10 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGround(float wx, float wz, out float g)
         {
             if (FiresWorldGenBase.Active) return FiresWorldGenBase.TryGetGenGround(wx, wz, out g);
-            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz);
-            return VoxelHydrology.TryGroundAt(wx, wz, out g);
+            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz, out float lift);
+            if (!VoxelHydrology.TryGroundAt(wx, wz, out g)) return false;
+            g += lift;
+            return true;
         }
 
         public static byte BiomeCodeAt(float wx, float wz)
@@ -129,10 +168,15 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // A lifted chunk's sea (ZoneModeLift) is still water: swamp water on swamp land, a lake elsewhere.
         public static byte WaterClassAt(float wx, float wz)
         {
             if (FiresWorldGenBase.Active) return FiresWorldGenBase.WaterClassAt(wx, wz);
-            return TryNearestWet(wx, wz, 0.5f, out byte cls, out _, out _) ? cls : FiresWorldGenBase.WC_NONE;
+            if (TryNearestWet(wx, wz, 0.5f, out byte cls, out _, out _)) return cls;
+            if (!Zones.ZoneModeGate.IsLiftedSeaAt(wx, wz)) return FiresWorldGenBase.WC_NONE;
+            return WorldGenerator.instance != null && WorldGenerator.instance.GetBiome(wx, wz) == Heightmap.Biome.Swamp
+                ? FiresWorldGenBase.WC_SWAMP
+                : FiresWorldGenBase.WC_LAKE;
         }
 
         private static byte CodeFor(Heightmap.Biome b)
@@ -156,7 +200,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // its class, its water level and the distance to its wet edge. The
         // generator answers from its 2m field; the vanilla side answers from the
         // channel geometry (distance to the wet edge is what the carve query
-        // already measures) and the still-water grid.
+        // already measures) and the still-water grid. A swapped zone's channels and bowls are its source's, raised or
+        // lowered with its land (ZoneModeLift).
         public static bool TryNearestWet(float wx, float wz, float reach,
             out byte cls, out float level, out float dist)
         {
@@ -164,6 +209,7 @@ namespace VerdantsAscent.Terrain.Voxel
             level = float.MinValue;
             dist = float.MaxValue;
             if (!VoxelHydrology.Ready) return false;
+            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz, out float lift);
 
             if (VoxelRiverNetwork.TryWetInfo(wx, wz, reach, out float chanLvl, out float chanDist, out float halfWidth, out _))
             {
@@ -182,7 +228,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 dist = stillDist;
             }
 
-            return level > float.MinValue + 1f && dist <= reach;
+            if (level <= float.MinValue + 1f || dist > reach) return false;
+            level += lift;
+            return true;
         }
     }
 }

@@ -42,7 +42,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     classWater++;
                     if (c == WC_SWAMP) swampClass++;   // marshes are judged on what RENDERS, never on the plan's placed count
                     float wx = -_half + (x + 0.5f) * c4, wz = -_half + (z + 0.5f) * c4;
-                    if (!TryGetWaterSurfaceSmooth(wx, wz, out float fieldLvl, out _))
+                    if (!TryGetWaterSurfaceSmoothReal(wx, wz, out float fieldLvl, out _))
                     {
                         fieldDry++;
                         if (c == WC_RIVER || c == WC_STREAM || c == WC_WATERFALL) riverDry++; else stillDry++;

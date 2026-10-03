@@ -105,6 +105,7 @@ namespace VerdantsAscent.Terrain.Zones
             {
                 var neighbour = new Vector2s(zone.x + (i == 0 ? 1 : i == 1 ? -1 : 0), zone.y + (i == 2 ? 1 : i == 3 ? -1 : 0));
                 if (!ZoneModeRegistry.IsOpen(neighbour) || !ZoneModeRegistry.TryGetSource(neighbour, out var theirs)) continue;
+                if (ZoneModeRegistry.ShiftOf(neighbour).Slides) continue;
                 var continued = new Vector2s(theirs.x + (zone.x - neighbour.x), theirs.y + (zone.y - neighbour.y));
                 if (!ZoneOpenSet.InRange(continued.x, continued.y)) continue;
                 ZoneModeChunkTiers.ZoneTier(continued, out var continuedBiome);
@@ -150,10 +151,14 @@ namespace VerdantsAscent.Terrain.Zones
         // Otherwise the source is a zone holding a planned instance of it (through its own source when that zone was
         // itself swapped), the one nearest the seed-hashed aim point, and `instance` is that location moved into
         // `zone`. A zone kept for a boss altar, a progression location or a one-per-world place refuses the seed.
-        internal static bool TryChooseLocationSource(Vector2s zone, string location, out Vector2s source, out bool faithful,
-            out ZoneSystem.LocationInstance instance, out string refusal)
+        // The location stands at the zone's centre (Fire, 2026-09-27: "A location seed centres its location in the chunk"):
+        // the source square is the 64 m square round the location's real spot, which is `source` (the zone holding that
+        // spot) slid by `centring`, so the location and everything it levels stay whole inside the zone.
+        internal static bool TryChooseLocationSource(Vector2s zone, string location, out Vector2s source, out ZoneShift centring,
+            out bool faithful, out ZoneSystem.LocationInstance instance, out string refusal)
         {
             source = zone;
+            centring = default;
             faithful = false;
             instance = default;
             refusal = null;
@@ -177,12 +182,14 @@ namespace VerdantsAscent.Terrain.Zones
             long best = long.MaxValue;
             var bestAt = zone;
             bool found = false;
+            var centre = ZoneSystem.GetZonePos(zone);
             foreach (var pair in instances)
             {
                 var candidate = pair.Value;
                 if (candidate.m_location == null || NameOf(candidate.m_location) != location) continue;
                 var at = pair.Key;
-                var real = ZoneModeRegistry.TryGetSource(at, out var theirs) ? theirs : at;
+                var spot = RealSpot(at, candidate.m_position);
+                var real = ZoneSystem.GetZone(spot);
                 if (real.x == zone.x && real.y == zone.y) continue;
                 long dx = at.x - targetX, dy = at.y - targetY;
                 long distance = dx * dx + dy * dy;
@@ -190,11 +197,12 @@ namespace VerdantsAscent.Terrain.Zones
                 best = distance;
                 bestAt = at;
                 source = real;
+                var realCentre = ZoneSystem.GetZonePos(real);
+                centring = new ZoneShift(0f, spot.x - realCentre.x, spot.z - realCentre.z);
                 instance = new ZoneSystem.LocationInstance
                 {
                     m_location = candidate.m_location,
-                    m_position = candidate.m_position
-                        + new Vector3((zone.x - at.x) * ZoneOpenSet.ZoneSize, 0f, (zone.y - at.y) * ZoneOpenSet.ZoneSize),
+                    m_position = new Vector3(centre.x, candidate.m_position.y, centre.z),
                     m_placed = false,
                 };
                 found = true;
@@ -271,6 +279,15 @@ namespace VerdantsAscent.Terrain.Zones
                 if (__state == null) return;
                 foreach (var pair in __state) __instance.m_locationInstances[pair.Key] = pair.Value;
             }
+        }
+
+        // Where a location planned in zone `at` stands in the real world: its own spot, or, when `at` shows other land,
+        // the spot of that land its instance was moved onto (the source zone, slid by that zone's centring).
+        private static Vector3 RealSpot(Vector2s at, Vector3 position)
+        {
+            if (!ZoneModeRegistry.TryGetSource(at, out var theirs)) return position;
+            var shift = ZoneModeRegistry.ShiftOf(at);
+            return position + new Vector3((theirs.x - at.x) * ZoneOpenSet.ZoneSize + shift.Dx, 0f, (theirs.y - at.y) * ZoneOpenSet.ZoneSize + shift.Dz);
         }
 
         internal static bool MustStay(ZoneSystem.ZoneLocation location)

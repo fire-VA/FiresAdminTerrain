@@ -14,11 +14,15 @@ namespace VerdantsAscent.Terrain.Zones
     {
         internal const string RpcZoneState = "FiresAdminTerrain_ZoneState";
 
+        // FAT's one ZNet.OnNewConnection hook: the zone state here, and the BetterContinents join sync, which on a server
+        // holds the peer's PeerInfo until the world's terrain data has reached it.
         [HarmonyPatch(typeof(ZNet), "OnNewConnection")]
-        private static class RegisterOnClient
+        private static class RegisterOnConnection
         {
             private static void Postfix(ZNet __instance, ZNetPeer peer)
             {
+                try { BcImport.BcJoinSync.OnNewConnection(__instance, peer); }
+                catch (Exception ex) { FiresLogger.LogError($"[BcImport] join sync could not be set up for a connection: {ex.Message}"); }
                 if (__instance.IsServer() || peer?.m_rpc == null) return;
                 peer.m_rpc.Register<ZPackage>(RpcZoneState, (rpc, pkg) => ZoneModeRegistry.ReceiveHandshake(pkg));
             }
@@ -32,10 +36,11 @@ namespace VerdantsAscent.Terrain.Zones
                 if (!__instance.IsServer() || rpc == null) return;
                 try
                 {
-                    var pkg = ZoneModeRegistry.BuildHandshake(out string summary);
+                    var pkg = ZoneModeRegistry.HandshakeFor(out string summary, out bool reused);
                     rpc.Invoke(RpcZoneState, pkg);
                     if (ZoneModeRegistry.ModeActive)
-                        FiresLogger.LogInfo($"[FiresZones] handshake: sent zone state ({summary}) ahead of PeerInfo.");
+                        FiresLogger.LogInfo($"[FiresZones] handshake: sent zone state ({summary}) ahead of PeerInfo"
+                            + (reused ? ", the same package as the last joining peer's." : ", built for this zone state."));
                 }
                 catch (Exception ex)
                 {

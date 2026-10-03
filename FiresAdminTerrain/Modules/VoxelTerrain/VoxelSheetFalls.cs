@@ -16,6 +16,15 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float SoundMinLength = 1.5f;
         private const float SoundMinWidth = 2f;
         private const int SoundsPerChunk = 3;
+        private const float SkylandLevelMatch = 0.01f;
+        private const float SkylandStepReach = 20f;
+        private const float SkylandReportSeconds = 10f;
+        private const int MistSitesPerChunk = 3;
+
+        private static readonly List<FiresWaterfallMist.Site> s_mistSites = new List<FiresWaterfallMist.Site>(16);
+
+        private static int s_skylandSheets, s_skylandKept, s_skylandBuried;
+        private static float s_nextSkylandReport;
 
         private struct Lip
         {
@@ -41,6 +50,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var material = FiresWaterfalls.Material;
             if (material == null || water == null) return 0;
             CollectLips(buf);
+            ReportSkylands();
             if (s_lips.Count == 0)
             {
                 if (falls != null) falls.SetActive(false);
@@ -51,6 +61,7 @@ namespace VerdantsAscent.Terrain.Voxel
             System.Array.Clear(s_used, 0, s_lips.Count);
             FiresWaterfalls.BeginMesh();
             s_candidates.Clear();
+            s_mistSites.Clear();
             int curtains = 0;
             for (int pass = 0; pass < 2; pass++)
             {
@@ -73,7 +84,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 var renderer = falls.AddComponent<MeshRenderer>();
                 renderer.shadowCastingMode = ShadowCastingMode.Off;
                 renderer.receiveShadows = false;
-                renderer.sharedMaterial = material;
+                renderer.sharedMaterials = FiresWaterfalls.Materials;
                 VoxelRenderGroup.Apply(renderer);
             }
             int vertices = FiresWaterfalls.EndMesh(mesh);
@@ -83,17 +94,24 @@ namespace VerdantsAscent.Terrain.Voxel
             s_sites.Clear();
             for (int i = 0; i < s_candidates.Count && i < SoundsPerChunk; i++) s_sites.Add(s_candidates[i].Value);
             FiresWaterfalls.SetSounds(falls.transform, s_sites);
+
+            s_mistSites.Sort((a, b) => (b.Drop * b.Width).CompareTo(a.Drop * a.Width));
+            if (s_mistSites.Count > MistSitesPerChunk) s_mistSites.RemoveRange(MistSitesPerChunk, s_mistSites.Count - MistSitesPerChunk);
+            FiresWaterfallMist.SetEmitters(falls.transform, s_mistSites);
             return vertices;
         }
 
         // Every column of this chunk whose water stands above a neighbour: a lower wet column by StepMin, or dry
         // ground by DropMin. Its outward direction is the drop-weighted mean of those neighbours' directions, and it
-        // falls into the lowest water it borders, else onto the lowest ground.
+        // falls into the lowest water it borders, else onto the lowest ground. Skyland water only steps down into its
+        // own lower water: see IsSkylandWater.
         private static void CollectLips(MeshBuffers buf)
         {
             s_lips.Clear();
             System.Array.Clear(s_lipAt, 0, s_lipAt.Length);
             int S = VoxelChunk.SAMPLES, C = VoxelChunk.CELLS;
+            bool skyChunk = FiresSkyIslands.ChunkOverlaps(new Vector3(buf.OriginX, buf.OriginY, buf.OriginZ));
+            bool skylandSheet = false;
             for (int lz = 0; lz < C; lz++)
             {
                 for (int lx = 0; lx < C; lx++)
@@ -101,6 +119,10 @@ namespace VerdantsAscent.Terrain.Voxel
                     int i = (lx + 1) + S * (lz + 1);
                     float hi = buf.WaterLvl[i];
                     if (hi <= 0f) continue;
+                    bool skyland = skyChunk && IsSkylandWater(buf, lx, lz, hi);
+                    if (skyland && !OwnsLevel(buf, hi)) continue;
+                    skylandSheet |= skyland;
+                    bool buried = false;
                     Vector3 outward = Vector3.zero;
                     float target = float.MaxValue;
                     bool toWater = false;
@@ -115,6 +137,11 @@ namespace VerdantsAscent.Terrain.Voxel
                             float floor = water ? lo : buf.Ground[n];
                             float drop = hi - floor;
                             if (drop < (water ? StepMin : DropMin)) continue;
+                            if (skyland && (!water || drop > SkylandStepReach))
+                            {
+                                buried = true;
+                                continue;
+                            }
                             outward += new Vector3(dx, 0f, dz).normalized * drop;
                             if (water)
                             {
@@ -124,11 +151,41 @@ namespace VerdantsAscent.Terrain.Voxel
                             else if (!toWater && floor < target) target = floor;
                         }
                     }
-                    if (outward.sqrMagnitude < 1e-4f) continue;
+                    if (outward.sqrMagnitude < 1e-4f)
+                    {
+                        if (buried) s_skylandBuried++;
+                        continue;
+                    }
+                    if (skyland) s_skylandKept++;
                     s_lips.Add(new Lip { X = lx, Z = lz, Level = hi, Target = target, Outward = outward.normalized, ToWater = toWater });
                     s_lipAt[i] = s_lips.Count;
                 }
             }
+            if (skylandSheet) s_skylandSheets++;
+        }
+
+        // Water the store took from a zone skyland's own ponds and rivers. The store's ground under it is the world far
+        // below, so every bank looked like a cliff and hung a curtain out of the rock. It leaves the skyland only at a
+        // river or rill mouth, where ZoneModeSkylands hangs the skyland's own fall.
+        private static bool IsSkylandWater(MeshBuffers buf, int lx, int lz, float level)
+        {
+            float wx = buf.OriginX + lx, wz = buf.OriginZ + lz;
+            return FiresSkyIslands.WaterLevelAt(wx, wz, out float island) && Mathf.Abs(island - level) < SkylandLevelMatch
+                && FiresSkyIslands.TrySkylandTopAt(new Vector3(wx, level, wz), out _);
+        }
+
+        // Skyland water is stored in every chunk of the skyland's height band; only the chunk the level lies in hangs its
+        // falls, so stacked chunks never draw the same curtain twice.
+        private static bool OwnsLevel(MeshBuffers buf, float level)
+            => level >= buf.OriginY && level < buf.OriginY + VoxelChunk.CELLS;
+
+        private static void ReportSkylands()
+        {
+            if (s_skylandSheets == 0 || Time.realtimeSinceStartup < s_nextSkylandReport) return;
+            s_nextSkylandReport = Time.realtimeSinceStartup + SkylandReportSeconds;
+            FiresLogger.LogInfo($"[FiresWaterfall] skyland water in {s_skylandSheets} chunk sheet(s): drew {s_skylandKept} step lip(s) into "
+                + $"lower water, buried {s_skylandBuried} bank/rim edge(s) (a skyland spills only at its mouth falls).");
+            s_skylandSheets = s_skylandKept = s_skylandBuried = 0;
         }
 
         // Lips that continue this one: 8-connected, facing roughly the same way (so the two sides of a pool never join).
@@ -184,16 +241,26 @@ namespace VerdantsAscent.Terrain.Voxel
         private static Vector3 Centre(MeshBuffers buf, in Lip lip)
             => new Vector3(buf.OriginX + lip.X + 0.5f, 0f, buf.OriginZ + lip.Z + 0.5f);
 
-        private static void AddColumn(MeshBuffers buf, in Lip lip, Vector3 shift)
+        private static void AddColumn(MeshBuffers buf, in Lip lip, Vector3 shift, Vector3 outward)
         {
             s_columns.Add(new FiresWaterfalls.Column
             {
-                Base = Centre(buf, lip) + lip.Outward * 0.5f + shift,
+                Base = Centre(buf, lip) + outward * 0.5f + shift,
                 LipY = lip.Level,
                 FallLength = lip.Level - lip.Target + (lip.ToWater ? FiresWaterfalls.PlungeDepth : GroundPlunge),
-                Outward = lip.Outward,
+                Outward = outward,
                 OntoGround = !lip.ToWater,
             });
+        }
+
+        // A lip cell's outward direction averaged with its neighbours along the path: cell-to-cell steps of 45 degrees
+        // folded the curtain's front face into flat panels.
+        private static Vector3 SmoothedOutward(int k)
+        {
+            Vector3 sum = s_lips[s_path[k]].Outward;
+            if (k > 0) sum += s_lips[s_path[k - 1]].Outward;
+            if (k < s_path.Count - 1) sum += s_lips[s_path[k + 1]].Outward;
+            return sum.sqrMagnitude > 1e-4f ? sum.normalized : s_lips[s_path[k]].Outward;
         }
 
         // One curtain for the path in s_path, with half-metre caps at both ends so a one-cell lip is still a curtain.
@@ -213,22 +280,24 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var lip = s_lips[s_path[0]];
                 var across = new Vector3(-lip.Outward.z, 0f, lip.Outward.x);
-                AddColumn(buf, lip, -across * 0.5f);
-                AddColumn(buf, lip, across * 0.5f);
+                AddColumn(buf, lip, -across * 0.5f, lip.Outward);
+                AddColumn(buf, lip, across * 0.5f, lip.Outward);
             }
             else
             {
+                int lastK = s_path.Count - 1;
                 var first = s_lips[s_path[0]];
                 var second = s_lips[s_path[1]];
-                AddColumn(buf, first, (Centre(buf, first) - Centre(buf, second)).normalized * 0.5f);
-                foreach (int i in s_path) AddColumn(buf, s_lips[i], Vector3.zero);
-                var last = s_lips[s_path[s_path.Count - 1]];
-                var beforeLast = s_lips[s_path[s_path.Count - 2]];
-                AddColumn(buf, last, (Centre(buf, last) - Centre(buf, beforeLast)).normalized * 0.5f);
+                AddColumn(buf, first, (Centre(buf, first) - Centre(buf, second)).normalized * 0.5f, SmoothedOutward(0));
+                for (int k = 0; k <= lastK; k++) AddColumn(buf, s_lips[s_path[k]], Vector3.zero, SmoothedOutward(k));
+                var last = s_lips[s_path[lastK]];
+                var beforeLast = s_lips[s_path[lastK - 1]];
+                AddColumn(buf, last, (Centre(buf, last) - Centre(buf, beforeLast)).normalized * 0.5f, SmoothedOutward(lastK));
             }
 
             float seed = Mathf.Repeat(buf.KeyX * 13.7f + buf.KeyZ * 7.3f + buf.OriginY * 0.19f + index * 3.1f, 97f);
-            FiresWaterfalls.AppendCurtain(s_columns, mean, FiresWaterfalls.EdgeLipOut, 0f, seed, FiresWaterfalls.TerrainProfile);
+            if (FiresWaterfalls.AppendCurtain(s_columns, mean, FiresWaterfalls.EdgeLipOut, 0f, seed, FiresWaterfalls.TerrainProfile))
+                s_mistSites.Add(FiresWaterfalls.LastSite);
             float width = s_columns.Count - 1;
             if (longest >= SoundMinLength && width >= SoundMinWidth)
                 s_candidates.Add(new KeyValuePair<float, Vector3>(longest, FiresWaterfalls.SoundSite(s_columns, mean)));

@@ -112,9 +112,6 @@ namespace VerdantsAscent.Terrain.Persistence
                     // destroyed-but-fake-null anchors from the previous session.
                     // New anchors will register fresh on their Awake.
                     TileAnchorRegistry.ScrubFakeNulls();
-                    // Re-run TileHammerCompat in case IH was reloaded too.
-                    try { TileHammerCompat.Initialize(); }
-                    catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileHammerCompat.Initialize threw — {ex}"); }
                     try { WecTerrainBridge.Initialize(); }
                     catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] WecTerrainBridge.Initialize threw - {ex}"); }
                     FiresLogger.LogVerbose("[TileAnchorPrefab] Ensure: SUCCESS via session-change reinsert.");
@@ -134,8 +131,12 @@ namespace VerdantsAscent.Terrain.Persistence
             int beforeListCount = ZNetScene.instance.m_prefabs?.Count ?? -1;
             FiresLogger.LogVerbose($"[TileAnchorPrefab] Ensure: starting | hash={hash} | dict={beforeDictCount} list={beforeListCount}");
 
+            // ZNetScene.Awake's "tile anchor" step is 146-215 ms of one join frame (R42); this says which part.
+            var steps = new StepTimes();
+
             // ── Step 1: scrub pre-existing fake-nulls left by other mods ──
             ScrubFakeNulls("pre-register");
+            steps.Lap("scrub");
 
             // ── Step 2: idempotency check ─────────────────────────────────
             if (ZNetScene.instance.m_namedPrefabs.TryGetValue(hash, out var existing) && existing != null)
@@ -151,10 +152,12 @@ namespace VerdantsAscent.Terrain.Persistence
             // ── Step 3: load source prefab from bundle ────────────────────
             GameObject source = LoadSourcePrefab();
             if (source == null) return false;
+            steps.Lap("bundle load");
 
             // ── Step 4: clone + configure + validate ──────────────────────
             var clone = CloneAndPrepare(source);
             if (clone == null) return false;
+            steps.Lap("clone");
 
             // ── Step 5: register in m_namedPrefabs only ───────────────────
             ZNetScene.instance.m_namedPrefabs[hash] = clone;
@@ -162,6 +165,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             // ── Step 6: scrub again — paranoia + race compensation ────────
             ScrubFakeNulls("post-register");
+            steps.Lap("scrub again");
 
             // ── Step 7: validate our entry survived the scrub ─────────────
             if (!ValidateRegistration(hash))
@@ -172,29 +176,23 @@ namespace VerdantsAscent.Terrain.Persistence
 
             // ── Step 8: clear IH's sprite cache so it rebuilds clean ──────
             ClearInfinityHammerSpriteCache("post-register");
+            steps.Lap("validate + IH sprite cache");
 
             _prefab = clone;
             _registered = true;
             FiresLogger.LogVerbose($"[TileAnchorPrefab] Ensure: SUCCESS — VATile fully registered and IH cache cleared.");
             EmitRegistrationSummary();
+            steps.Lap("summary");
 
-            // IH ruler-snap patch must be initialized HERE, not from
-            // FiresAdminTerrain.FinishInit. Plugins load alphabetically and
-            // 'FiresAdminTerrain' loads BEFORE 'Infinity Hammer' — so at
-            // FinishInit time the IH assembly isn't in AppDomain yet and
-            // TileHammerCompat.Initialize silently no-ops with "IH not loaded".
-            // ZNetScene.Awake (where this Ensure runs) fires AFTER every
-            // plugin has loaded, so IH detection works.
-            try { TileHammerCompat.Initialize(); }
-            catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileHammerCompat.Initialize threw — {ex}"); }
+            // TileHammerCompat (IH's ruler snapped onto 2D tiles) and TileBrushDrag (the tile brush tools) are not started: the 2D
+            // tile layer is retired (Fire, 2026-09-29). The prefab itself stays registered so saved anchors still load and can
+            // be purged.
 
-            // Same load-order reason as TileHammerCompat: World Edit Commands sorts
-            // after FiresAdminTerrain, so its assembly only exists by ZNetScene.Awake.
+            // World Edit Commands sorts after FiresAdminTerrain, so its assembly only exists by ZNetScene.Awake. The bridge
+            // stays for its voxel-world refusal of `void`; its tile route is off (WecTerrainBridge.IsTargetingTile).
             try { WecTerrainBridge.Initialize(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] WecTerrainBridge.Initialize threw - {ex}"); }
-
-            try { TileBrushDrag.EnsureAttached(); }
-            catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] TileBrushDrag.EnsureAttached threw — {ex}"); }
+            steps.Lap("WEC bridge");
 
             // Round-W-1 — water brush drag pump. Same DontDestroyOnLoad
             // attach as the terrain drag handler, so the water brush
@@ -205,6 +203,8 @@ namespace VerdantsAscent.Terrain.Persistence
             // Round-57 — IH ruler ring tint (green=terrain, blue=water).
             try { VerdantsAscent.Terrain.Lifecycle.RulerColorDriver.EnsureAttached(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] RulerColorDriver.EnsureAttached threw — {ex}"); }
+            steps.Lap("drag + ruler");
+            FiresLogger.LogInfo($"[TileAnchorPrefab] tile anchor steps: {steps}.");
 
             return true;
         }

@@ -24,6 +24,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (mode == ZoneSystem.SpawnMode.Client) return;   // vanilla parity: server/ghost place, clients receive
             if (!FiresSkyIslands.Enabled || ZNetScene.instance == null || Zones.ZoneModeRegistry.ModeActive) return;
+            if (Zones.BiomePaint.Regrowing) return;   // a painted circle re-grows its ground only; the zone's props stand
             FiresSkyIslands.CollectProps(zoneCenterPos.x - 32f, zoneCenterPos.z - 32f,
                 zoneCenterPos.x + 32f, zoneCenterPos.z + 32f, s_pos, s_rot, s_name);
             if (s_pos.Count == 0) return;

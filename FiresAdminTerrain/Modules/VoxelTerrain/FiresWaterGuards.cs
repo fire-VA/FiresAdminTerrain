@@ -76,7 +76,10 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // Server, once the save's objects are loaded and before anything is parked: a world with no guards yet gets them
-        // from what stands in it now, parked zones included, and keeps them.
+        // from what stands in it now, parked zones included, and keeps them. On a converted world an owner-less placed piece
+        // counts too: its town may have no creators (SanctuaryAshlands had none in its whole start area) and water must still
+        // keep off it (Fire, 2026-09-27). Owner-less pieces inside a placed location are left to that location's guard: on
+        // CratersAshlands every placed piece was 952,954, most of them ruins and decor the map spreads everywhere.
         internal static void OnWorldLoaded()
         {
             var net = ZNet.instance;
@@ -85,16 +88,26 @@ namespace VerdantsAscent.Terrain.Voxel
             if (FiresWorldProfile.Current?.Hydrology == false) return;
             var clock = Stopwatch.StartNew();
             var mask = new bool[Res * Res];
+            bool converted = Zones.ZoneModePark.Converted;
+            int leftToLocations = 0;
+            bool guards(ZDO zdo)
+            {
+                if (Zones.ZoneModeBuilds.IsBuilt(zdo)) return true;
+                if (!converted || !Zones.ZoneModeBuilds.IsPlaced(zdo)) return false;
+                if (!InsidePlacedLocation(zdo.GetPosition())) return true;
+                leftToLocations++;
+                return false;
+            }
             int builds = 0;
             foreach (var zdo in ObjectsByIdRef(ZDOMan.instance).Values)
             {
-                if (!Zones.ZoneModeBuilds.IsBuilt(zdo)) continue;
+                if (!guards(zdo)) continue;
                 Mark(mask, zdo.GetPosition(), BuildMargin);
                 builds++;
             }
             builds += Zones.ZoneModePark.ForEachParkedObject(zdo =>
             {
-                if (!Zones.ZoneModeBuilds.IsBuilt(zdo)) return false;
+                if (!guards(zdo)) return false;
                 Mark(mask, zdo.GetPosition(), BuildMargin);
                 return true;
             });
@@ -107,8 +120,30 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             Adopt(Pack(mask), builds, locations);
             Save(world);
-            FiresLogger.LogInfo($"[FiresVoxel] water guards frozen for '{world.m_name}': {Describe()} ({clock.ElapsedMilliseconds} ms). "
+            FiresLogger.LogInfo($"[FiresVoxel] water guards frozen for '{world.m_name}': {Describe()} ({clock.ElapsedMilliseconds} ms"
+                + (converted ? $"; a converted world, so placed pieces count owner or not, except {leftToLocations:N0} owner-less "
+                    + "piece(s) inside placed locations, which their location's guard already covers" : "") + "). "
                 + "Generated rivers, lakes, ponds and springs keep off them for good.");
+        }
+
+        // A location's own guard reaches its exterior radius plus a margin, so an owner-less piece inside it (a ruin's wall,
+        // a village's hut) is already kept dry. A location can reach into the next zone, hence the zone and its 8 neighbours.
+        private static bool InsidePlacedLocation(Vector3 point)
+        {
+            var instances = ZoneSystem.instance.m_locationInstances;
+            Vector2s zone = ZoneSystem.GetZone(point);
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if (!instances.TryGetValue(new Vector2s(zone.x + dx, zone.y + dy), out var instance)) continue;
+                    if (!instance.m_placed || instance.m_location == null) continue;
+                    float reach = instance.m_location.m_exteriorRadius + LocationMargin;
+                    float x = point.x - instance.m_position.x, z = point.z - instance.m_position.z;
+                    if (x * x + z * z <= reach * reach) return true;
+                }
+            }
+            return false;
         }
 
         // Every hydrology cell a disc of `radius` around the point reaches. The grid is the source land's, so a point in a
@@ -241,17 +276,20 @@ namespace VerdantsAscent.Terrain.Voxel
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                using (var writer = new BinaryWriter(File.Create(path)))
+                FiresCore.IO.AtomicFile.Write(path, stream =>
                 {
-                    writer.Write(FileMagic);
-                    writer.Write(FileFormat);
-                    writer.Write(world.m_uid);
-                    writer.Write(Res);
-                    writer.Write(s_builds);
-                    writer.Write(s_locations);
-                    writer.Write(s_packed.Length);
-                    writer.Write(s_packed);
-                }
+                    using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+                    {
+                        writer.Write(FileMagic);
+                        writer.Write(FileFormat);
+                        writer.Write(world.m_uid);
+                        writer.Write(Res);
+                        writer.Write(s_builds);
+                        writer.Write(s_locations);
+                        writer.Write(s_packed.Length);
+                        writer.Write(s_packed);
+                    }
+                });
             }
             catch (Exception ex) { FiresLogger.LogError($"[FiresVoxel] could not write {Path.GetFileName(path)}: {ex.Message}"); }
         }

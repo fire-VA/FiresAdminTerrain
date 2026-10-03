@@ -27,6 +27,12 @@ namespace VerdantsAscent.Terrain.Voxel
         internal DateTime CreatedUtc = DateTime.UtcNow;
 
         private static FiresWorldProfile s_current;
+        private bool _fromFile;
+
+        // Read from the world's own file and chosen for it (New World, a clone, a test's setup), not inferred from a
+        // machine's config: such a profile says whether the world is one zone at a time, and the -fireszones launch flag
+        // never overrules it (R22 2026-09-28: the rig's flag turned a whole-world ATomTest into a zone-mode world).
+        internal bool Chosen => _fromFile && Source != InferredSource && Source != FromRecordsSource;
 
         internal static FiresWorldProfile Current => s_current;
 
@@ -38,8 +44,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal FiresWorldProfile Copy() => (FiresWorldProfile)MemberwiseClone();
 
-        // Why a world could not be built this way, or null. The Fires generator runs only on voxel terrain, and one zone at
-        // a time (its skylands and border rivers) only on stock generation.
+        // Why a world could not be built this way, or null. The Fires generator runs only on voxel terrain. One zone at a
+        // time runs on either generator: the Fires generator's own samplers ask the zone gate first (ZoneModeGate.
+        // SamplerSeesClosed), so its far view, map, water and voxel ground keep closed zones as sea (Fire, 2026-09-27).
         //
         // VANILLA + FULL VOXEL IS LEGAL, and is how an existing world is converted: the vanilla heightmap sets the
         // ground and the voxel field is built from it, then the river carve, caves and sky islands run on that data.
@@ -52,8 +59,6 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (Generator != ProfileGenerator.Vanilla && Terrain == ProfileTerrain.Heightmap)
                 return "The Fires generator builds voxel terrain: choose voxel wrap or full voxel.";
-            if (ZoneMode && Generator != ProfileGenerator.Vanilla)
-                return "One zone at a time runs on stock Valheim terrain for now, not on the Fires generator.";
             return null;
         }
 
@@ -184,7 +189,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 string path = PathFor(worldName);
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllLines(path, new List<string>
+                FiresCore.IO.AtomicFile.WriteAllText(path, string.Join(Environment.NewLine, new List<string>
                 {
                     $"version={Version}",
                     $"generator={Generator.ToString().ToLowerInvariant()}",
@@ -198,7 +203,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     $"vahcbase={VahcBase}",
                     $"source={Source}",
                     $"created={CreatedUtc.ToString("O", CultureInfo.InvariantCulture)}",
-                });
+                }) + Environment.NewLine);
                 return true;
             }
             catch (Exception ex)
@@ -214,7 +219,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 string path = PathFor(worldName);
                 if (!File.Exists(path)) return null;
-                var profile = new FiresWorldProfile();
+                var profile = new FiresWorldProfile { _fromFile = true };
                 foreach (var raw in File.ReadAllLines(path))
                 {
                     int eq = raw.IndexOf('=');

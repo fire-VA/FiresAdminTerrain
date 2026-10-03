@@ -14,10 +14,27 @@ namespace VerdantsAscent.Terrain.Voxel
     // caves). Done creates the world with them as its profile (FiresWorldProfile), which the dedicated server and every
     // client follow on every load. FiresWorldProfile.Conflict() holds Done and says why in red; an amber line says what
     // this installation's own config switches off here. Vanilla's panel keeps its own controls; it only grows to fit.
+    //
+    // Opened from Select World's "From Gaea..." button (FiresGaeaWorldButton) the same panel is in GAEA MODE: one more row
+    // on top takes the Gaea export folder, the generator is Fires (a bake is a Fires world), and Done first has World Gen
+    // Studio import and bake the folder (FiresGaeaStudio, behind a cancelable progress popup), then creates the world
+    // exactly as Done always does. Tools\GAEA_WORLD_BUTTON.md.
     [HarmonyPatch]
     internal static class FiresNewWorldOptions
     {
         private const int MinWorldNameLength = 5;
+        private const string GaeaFolderName = "GaeaFolder";
+        private const string GaeaFolderLabel = "Gaea folder";
+        private const string GaeaFolderPlaceholder = "the Gaea export folder";
+        private const int GaeaFolderCharacterLimit = 260;
+        private const string GaeaPeakName = "GaeaPeak";
+        private const string GaeaPeakLabel = "Tallest peak (y)";
+        private const string GaeaSizeName = "GaeaWorldSize";
+        private const string GaeaSizeLabel = "World size (m)";
+        private const int GaeaNumberCharacterLimit = 6;
+        private const int GaeaRowCount = 3;
+        private const string GaeaFailedHeader = "Gaea import failed";
+        private const string GaeaNote = "World Gen Studio imports this folder and bakes the world first; that takes a minute or two.";
         private const string ContainerName = "FiresWorldOptions";
         private const string SeedLabelName = "seed";
         private const int FiresGenerator = 1;
@@ -55,6 +72,26 @@ namespace VerdantsAscent.Terrain.Voxel
         private static string s_conflict;
         private static string s_newName;
         private static FiresWorldProfile s_pendingProfile;
+        private static RectTransform s_panel;
+        private static TMP_InputField s_gaeaFolder;
+        private static TMP_InputField s_gaeaPeak;
+        private static TMP_InputField s_gaeaSize;
+        private static readonly List<GameObject> s_gaeaRow = new List<GameObject>();
+        private static readonly List<KeyValuePair<RectTransform, float>> s_laidOut = new List<KeyValuePair<RectTransform, float>>();
+        private static bool s_openingGaea;
+        private static bool s_gaea;
+        private static bool s_gaeaBaked;
+        private static bool s_layoutGaea;
+
+        private static float RowStep => RowHeight + RowGap;
+
+        // Select World's "From Gaea..." button: New World, with the Gaea folder row and a Done that imports it first.
+        internal static void OpenForGaea(FejdStartup fejd)
+        {
+            s_openingGaea = true;
+            try { fejd.OnWorldNew(); }
+            finally { s_openingGaea = false; }
+        }
 
         [HarmonyPatch(typeof(FejdStartup), nameof(FejdStartup.OnWorldNew))]
         [HarmonyPostfix]
@@ -62,8 +99,15 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (s_container == null) Build(__instance);
             if (s_container == null) return;
+            s_gaea = s_openingGaea && s_gaeaFolder != null;
+            s_gaeaBaked = false;
             ResetToDefaults();
+            ApplyGaeaLayout(s_gaea);
         }
+
+        [HarmonyPatch(typeof(FejdStartup), nameof(FejdStartup.OnNewWorldBack))]
+        [HarmonyPostfix]
+        private static void LeaveGaeaMode() => s_gaea = false;
 
         // Vanilla re-enables Done every frame once the name is long enough, so a conflict disables it again after that.
         [HarmonyPatch(typeof(FejdStartup), "Update")]
@@ -76,7 +120,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         [HarmonyPatch(typeof(FejdStartup), nameof(FejdStartup.OnNewWorldDone))]
         [HarmonyPrefix]
-        private static bool ReadOptions(FejdStartup __instance)
+        private static bool ReadOptions(FejdStartup __instance, bool forceLocal)
         {
             s_pendingProfile = null;
             string name = __instance.m_newWorldName.text ?? "";
@@ -84,8 +128,49 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_newName == null || s_container == null) return true;
             var profile = ChosenProfile();
             if (profile.Conflict() != null) return false;
+            if (s_gaea && !s_gaeaBaked)
+            {
+                if (GaeaProblem() == null) BakeFromGaea(__instance, name, forceLocal);
+                return false;
+            }
             s_pendingProfile = profile;
             return true;
+        }
+
+        // The Studio imports and bakes on its own thread behind a cancelable popup; once the bake is installed Done runs
+        // again, and this time creates the world.
+        private static void BakeFromGaea(FejdStartup fejd, string name, bool forceLocal)
+        {
+            if (!FiresGaeaStudio.Available)
+            {
+                UnifiedPopup.Push(new WarningPopup(GaeaFailedHeader, "World Gen Studio is not available here.", UnifiedPopup.Pop, localizeText: false));
+                return;
+            }
+            FiresGaeaStudio.PeakProblem(s_gaeaPeak.text, out float peakY);
+            FiresGaeaStudio.WorldSizeProblem(s_gaeaSize.text, out float worldSize);
+            var job = FiresGaeaStudio.Start(s_gaeaFolder.text, name, peakY, worldSize);
+            UnifiedPopup.Push(new CancelableTaskPopup(
+                () => $"Making '{name}' from Gaea",
+                () => $"{job.Stage}... {job.Clock.Elapsed.TotalSeconds:0} s",
+                () => job.Finished,
+                () =>
+                {
+                    FiresGaeaStudio.Cancel(job);
+                    UnifiedPopup.Pop();
+                }));
+            fejd.StartCoroutine(CreateWhenBaked(fejd, job, forceLocal));
+        }
+
+        private static System.Collections.IEnumerator CreateWhenBaked(FejdStartup fejd, FiresGaeaStudio.Job job, bool forceLocal)
+        {
+            while (!job.Finished) yield return null;
+            if (job.Failure != null)
+            {
+                if (!job.Cancelled) UnifiedPopup.Push(new WarningPopup(GaeaFailedHeader, job.Failure, UnifiedPopup.Pop, localizeText: false));
+                yield break;
+            }
+            s_gaeaBaked = true;
+            fejd.OnNewWorldDone(forceLocal);
         }
 
         // A deleted world's records under this name go first, then the rows become the new world's profile, and one zone
@@ -99,6 +184,8 @@ namespace VerdantsAscent.Terrain.Voxel
             var world = CreatedWorldRef(__instance);
             if (world == null || world.m_name != name || !World.HaveWorld(name)) return;
             s_newName = null;
+            s_gaea = false;
+            s_gaeaBaked = false;
             var profile = s_pendingProfile;
             s_pendingProfile = null;
             FiresWorldRecords.ClearLeftovers(name);
@@ -125,6 +212,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 FiresLogger.LogWarning("[FiresWorldGen] New World's panel is not laid out as expected; its world options are not shown.");
                 return;
             }
+            s_laidOut.Clear();
+            s_gaeaRow.Clear();
+            s_gaeaFolder = null;
+            s_gaeaPeak = null;
+            s_gaeaSize = null;
+            s_layoutGaea = false;
+            s_panel = panel;
             var template = panel.Find(SeedLabelName)?.GetComponent<TMP_Text>();
             bool offerZones = ZoneModeConfig.OfferAtWorldCreation == null || ZoneModeConfig.OfferAtWorldCreation.Value;
             int rows = offerZones ? 6 : 5;
@@ -171,8 +265,87 @@ namespace VerdantsAscent.Terrain.Voxel
             s_status = UIBuilderHelper.CreateLabel(Cell("Status", labelLeft, fieldRight, statusCenter, StatusHeight), "Text", "",
                 StatusFontSize, NoteInk, Vector2.zero, Vector2.one, TextAlignmentOptions.Center);
             s_status.raycastTarget = false;
+            BuildGaeaRows(fejd, template, labelLeft, labelRight, fieldLeft, fieldRight, top);
             FiresLogger.LogInfo("[FiresWorldGen] New World shows the world options (generator, terrain"
                 + (offerZones ? ", one zone at a time" : "") + ", sky islands, rivers and lakes, caves).");
+        }
+
+        // Gaea mode's extra top rows: the export folder, the tallest peak and the world size, each in a copy of vanilla's own
+        // name field. Hidden until Gaea mode, when ApplyGaeaLayout makes room for them.
+        private static void BuildGaeaRows(FejdStartup fejd, TMP_Text template, float labelLeft, float labelRight, float fieldLeft,
+            float fieldRight, float top)
+        {
+            int mark = s_laidOut.Count;
+            float raise = GaeaRowCount * RowStep * 0.5f;
+            s_gaeaFolder = GaeaInput(fejd, template, GaeaFolderName, GaeaFolderLabel, labelLeft, labelRight, fieldLeft, fieldRight,
+                RowCenter(top, 0) + raise, TMP_InputField.ContentType.Standard, GaeaFolderCharacterLimit, GaeaFolderPlaceholder, "");
+            s_gaeaPeak = GaeaInput(fejd, template, GaeaPeakName, GaeaPeakLabel, labelLeft, labelRight, fieldLeft, fieldRight,
+                RowCenter(top, 1) + raise, TMP_InputField.ContentType.DecimalNumber, GaeaNumberCharacterLimit, "",
+                FiresGaeaStudio.DefaultPeakY.ToString("0", System.Globalization.CultureInfo.InvariantCulture));
+            s_gaeaSize = GaeaInput(fejd, template, GaeaSizeName, GaeaSizeLabel, labelLeft, labelRight, fieldLeft, fieldRight,
+                RowCenter(top, 2) + raise, TMP_InputField.ContentType.DecimalNumber, GaeaNumberCharacterLimit, "",
+                FiresGaeaStudio.DefaultWorldSize.ToString("0", System.Globalization.CultureInfo.InvariantCulture));
+            for (int i = mark; i < s_laidOut.Count; i++) s_gaeaRow.Add(s_laidOut[i].Key.gameObject);
+            s_laidOut.RemoveRange(mark, s_laidOut.Count - mark);
+            foreach (var part in s_gaeaRow) part.SetActive(false);
+        }
+
+        private static TMP_InputField GaeaInput(FejdStartup fejd, TMP_Text template, string name, string label, float labelLeft,
+            float labelRight, float fieldLeft, float fieldRight, float centerY, TMP_InputField.ContentType contentType, int limit,
+            string placeholderText, string text)
+        {
+            var field = Object.Instantiate(fejd.m_newWorldName.gameObject, Cell(name, fieldLeft, fieldRight, centerY)).GetComponent<TMP_InputField>();
+            var rect = (RectTransform)field.transform;
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.offsetMin = rect.offsetMax = Vector2.zero;
+            field.name = name;
+            foreach (var localize in field.GetComponentsInChildren<Localize>(true)) Object.Destroy(localize);
+            field.onValueChanged = new TMP_InputField.OnChangeEvent();
+            field.onEndEdit = new TMP_InputField.SubmitEvent();
+            field.onSubmit = new TMP_InputField.SubmitEvent();
+            field.onSelect = new TMP_InputField.SelectionEvent();
+            field.onDeselect = new TMP_InputField.SelectionEvent();
+            field.characterLimit = limit;
+            field.contentType = contentType;
+            field.text = text;
+            if (field.placeholder is TMP_Text placeholder) placeholder.text = placeholderText;
+            field.onValueChanged.AddListener(_ => Refresh());
+            Label(template, label, labelLeft, labelRight, centerY);
+            return field;
+        }
+
+        // Why the Gaea rows can't be imported yet, or null.
+        private static string GaeaProblem()
+            => FiresGaeaStudio.FolderProblem(s_gaeaFolder.text)
+               ?? FiresGaeaStudio.PeakProblem(s_gaeaPeak.text, out _)
+               ?? FiresGaeaStudio.WorldSizeProblem(s_gaeaSize.text, out _);
+
+        // Gaea mode shows its rows on top: the panel grows by them (Grow keeps Seed above and the buttons below), the
+        // container grows with it, and every other row keeps its place under them. The generator is Fires there.
+        private static void ApplyGaeaLayout(bool gaea)
+        {
+            if (gaea != s_layoutGaea)
+            {
+                float rows = GaeaRowCount * RowStep;
+                float delta = gaea ? rows : -rows;
+                Grow(s_panel, delta, s_container.localPosition.y);
+                s_container.sizeDelta += new Vector2(0f, delta);
+                s_container.anchoredPosition += new Vector2(0f, delta * 0.5f);
+                s_layoutGaea = gaea;
+                float shift = gaea ? -rows * 0.5f : 0f;
+                foreach (var laid in s_laidOut)
+                    laid.Key.anchoredPosition = new Vector2(laid.Key.anchoredPosition.x, laid.Value + shift);
+            }
+            foreach (var part in s_gaeaRow) part.SetActive(gaea);
+            s_generator.interactable = !gaea;
+            if (gaea)
+            {
+                s_generator.SetValueWithoutNotify(FiresGenerator);
+                if (s_terrain.value == HeightmapChoice) s_terrain.SetValueWithoutNotify(VoxelWrapChoice);
+            }
+            Refresh();
         }
 
         // Grows the panel by `height` around its pivot. Children above `split` stay with the top edge and those below with
@@ -205,6 +378,7 @@ namespace VerdantsAscent.Terrain.Voxel
             cell.pivot = new Vector2(0.5f, 0.5f);
             cell.sizeDelta = new Vector2(right - left, height);
             cell.anchoredPosition = new Vector2((left + right) * 0.5f, centerY);
+            s_laidOut.Add(new KeyValuePair<RectTransform, float>(cell, centerY));
             return cell;
         }
 
@@ -254,9 +428,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void Refresh()
         {
             var profile = ChosenProfile();
-            s_conflict = profile.Conflict();
+            s_conflict = profile.Conflict() ?? (s_gaea && s_gaeaFolder != null ? GaeaProblem() : null);
             s_status.color = s_conflict != null ? ConflictInk : NoteInk;
-            s_status.text = s_conflict ?? LocalNote(profile) ?? "";
+            s_status.text = s_conflict ?? LocalNote(profile) ?? (s_gaea ? GaeaNote : "");
         }
 
         // What this installation's own config switches off for the chosen world; the world keeps its choices elsewhere.

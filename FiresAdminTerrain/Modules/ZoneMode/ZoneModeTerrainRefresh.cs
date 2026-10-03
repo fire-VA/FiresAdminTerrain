@@ -55,12 +55,17 @@ namespace VerdantsAscent.Terrain.Zones
                 heightmap.Poke(0, false);
                 zoneMaps++;
             }
-            int lods = ForceLodRebuild();
-            string map = RedrawWorldMap();
+            int lods = Headless ? 0 : ForceLodRebuild();
+            string map = Headless ? ", " + HeadlessNote : RedrawWorldMap();
             FiresLogger.LogInfo($"[FiresZones] terrain refreshed ({reason}): {zoneMaps} zone heightmap(s) rebuilt, "
                 + $"{lodMaps} distant-LOD heightmap(s) re-requested across {lods} LOD system(s)"
                 + map + $" in {clock.ElapsedMilliseconds} ms.");
         }
+
+        // A server with no graphics device draws nothing: its minimap, grass and distant LOD are never seen, so a refresh
+        // leaves them alone there ([perf], 23:1x: a 2048 x 2048 minimap upload on the dedi during every zone open).
+        private const string HeadlessNote = "no minimap, grass or distant LOD on a server without graphics";
+        private static bool Headless => SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
 
         // A minimap that has not drawn yet has no textures (Minimap.Start makes them), and a converted world seeds before
         // that. Its first draw sees the zones as they are then: FiresMinimapCache drops a cached map from another zone view.
@@ -123,12 +128,15 @@ namespace VerdantsAscent.Terrain.Zones
                 rebuilt++;
             }
 
-            var clutter = ClutterSystem.instance;
-            if (clutter != null)
-                foreach (var zone in opened) clutter.ResetGrass(ZoneSystem.GetZonePos(zone), GrassResetRadius);
-
-            int lods = ForceLodRebuildIfNear(opened);
-            int pixels = RedrawMinimapZones(affected);
+            int lods = 0, pixels = 0;
+            if (!Headless)
+            {
+                var clutter = ClutterSystem.instance;
+                if (clutter != null)
+                    foreach (var zone in opened) clutter.ResetGrass(ZoneSystem.GetZonePos(zone), GrassResetRadius);
+                lods = ForceLodRebuildIfNear(opened);
+                pixels = RedrawMinimapZones(affected);
+            }
 
             // On voxel terrain the heightmap is only the data source: the zone is really on
             // screen once the voxel streamer's in-place rewrap has swapped in.
@@ -144,7 +152,8 @@ namespace VerdantsAscent.Terrain.Zones
 
             FiresLogger.LogInfo($"[FiresZones] terrain rebuilt for {opened.Count} opened zone(s): {rebuilt} loaded heightmap(s) "
                 + $"swapped (builds ready in {prewarmMs:0} ms{(allReady ? "" : ", some timed out and were built in place")}), "
-                + $"{(lods > 0 ? "distant LOD re-requested, " : "")}{pixels} minimap pixel(s) redrawn, voxel terrain "
+                + (Headless ? HeadlessNote + ", " : $"{(lods > 0 ? "distant LOD re-requested, " : "")}{pixels} minimap pixel(s) redrawn, ")
+                + "voxel terrain "
                 + (voxelSettled ? "current" : $"still rewrapping after {VoxelSettleTimeoutSeconds:0}s")
                 + $", {clock.ElapsedMilliseconds} ms total.");
             onDone?.Invoke();

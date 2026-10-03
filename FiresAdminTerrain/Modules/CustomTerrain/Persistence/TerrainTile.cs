@@ -139,6 +139,8 @@ namespace VerdantsAscent.Terrain.Persistence
         // op API. Cheap when called repeatedly — TileMeshRenderer reuses buffers.
         public void NotifyMutated()
         {
+            // The 2D tile layer is retired: a loaded tile draws nothing and has no collider (it only waits to be purged).
+            if (TileAnchor.Retired) return;
             if (_meshRenderer == null) _meshRenderer = GetComponent<TileMeshRenderer>();
             if (_meshRenderer == null)
             {
@@ -173,6 +175,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         private void EnsureMeshRenderer()
         {
+            if (TileAnchor.Retired) return;   // no mesh, no collider: nothing floats over the ground (Fire, 2026-09-29)
             if (_meshRenderer != null) return;
             _meshRenderer = GetComponent<TileMeshRenderer>();
             if (_meshRenderer == null)
@@ -317,6 +320,18 @@ namespace VerdantsAscent.Terrain.Persistence
             int idx = j * TerrainTileCodec.VERTEX_GRID_SIZE + i;
             if (!HeightModified[idx]) return false;
             height = Heights[idx];
+            return true;
+        }
+
+        // The brushed paint at a world position, when the nearest vertex was painted (admintools_test reads it back).
+        public bool TrySamplePaintAtWorld(Vector3 worldPos, out Color32 color)
+        {
+            color = default;
+            if (Paint == null || PaintModified == null) return false;
+            if (!TryWorldToVertex(worldPos, out int i, out int j)) return false;
+            int idx = j * TerrainTileCodec.VERTEX_GRID_SIZE + i;
+            if (!PaintModified[idx]) return false;
+            color = Paint[idx];
             return true;
         }
     }

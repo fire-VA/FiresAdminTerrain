@@ -4,8 +4,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Everything the Chunk Hammer fires, as ammo: one biome seed per chunk generator, and the location seeds forged from
-    // them, where the pair of biome seeds picks the location. A unique seed also costs a location seed and copies a
+    // Everything the Chunk Hammer fires, as ammo: the plain Chunk Seed, one biome seed per chunk generator, and the
+    // location seeds forged from the biome seeds, where the pair of biome seeds picks the location. A unique seed also costs a location seed and copies a
     // one-per-world location, so those can repeat. Names, descriptions and every recipe live here; the bundle carries
     // only the looks.
     internal sealed class ChunkSeed
@@ -41,16 +41,23 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal bool IsLocation => Location != null;
 
-        internal string Land => IsLocation ? $"land holding {Title}" : $"{Tier.Title} land";
+        // The plain Chunk Seed: it brings a zone back as the world made it and can never raise other land over it.
+        internal bool RestoresOnly => !IsLocation && Tier.RestoresOnly;
+
+        internal string Land => IsLocation ? $"land holding {Title}" : RestoresOnly ? "the land the world made there" : $"{Tier.Title} land";
         internal bool Unique => Ingredient != null;
 
         internal string Description
         {
             get
             {
+                if (RestoresOnly)
+                    return "Chunk Hammer ammo. Strike closed land beside open land and that chunk comes back as the world made "
+                        + "it: its own land, and anything that stood there before. It never raises other land. "
+                        + $"Made by the {ZoneModeChunkTiers.Starter.MachineName}.";
                 if (!IsLocation)
                     return $"Chunk Hammer ammo. Strike closed land beside open land to raise a {Tier.Title} chunk there. "
-                        + $"Made by the {Tier.MachineName}.";
+                        + $"Made by the {ZoneModeChunkTiers.Starter.MachineName}.";
                 string text = $"Chunk Hammer ammo. Raises a chunk holding {Title}, on land copied from a place this world "
                     + "planned one.";
                 if (Unique) text += " A one-of-a-kind place: the world keeps any it already has, and this makes another.";
@@ -372,13 +379,19 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // Chunk recipes appear only in zone-mode worlds, and the Chunk Hammer's only after its owner has held one: the
-        // first comes from a chest in a cave beneath the starting land.
+        // first comes from a chest in a cave beneath the starting land. The Chaos Hammer carries every admin terrain
+        // tool, so it is an admin's recipe in any world and nobody else's (Fire, 2026-09-27).
         [HarmonyPatch(typeof(Player), nameof(Player.HaveRequirements), new[] { typeof(Recipe), typeof(bool), typeof(int), typeof(int) })]
         private static class Player_HaveRequirements_ChunkRecipes
         {
             private static void Postfix(Player __instance, Recipe recipe, bool discover, ref bool __result)
             {
                 if (!__result || recipe == null || !s_ours.Contains(recipe)) return;
+                if (recipe.m_item != null && recipe.m_item.name == ZoneModePrefabs.ChaosHammerPrefab)
+                {
+                    if (!FiresCore.Sync.AdminSyncing.IsLocalAdmin()) __result = false;
+                    return;
+                }
                 if (!ZoneModeRegistry.ModeActive) { __result = false; return; }
                 if (discover && recipe.m_item != null && recipe.m_item.name == ZoneModePrefabs.ChunkHammerPrefab
                     && !__instance.IsMaterialKnown(recipe.m_item.m_itemData.m_shared.m_name))

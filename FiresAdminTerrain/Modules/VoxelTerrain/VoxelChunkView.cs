@@ -21,6 +21,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private MeshRenderer _renderer;
         private MeshCollider _collider;
         private Mesh _mesh;
+        private Color32[] _seasonFreeColors;
+        private int _seasonFreeCount;
 
         // True from apply→bake dispatch until the baked collider is assigned —
         // the pipeline defers re-applies so the mesh is never mutated while
@@ -49,7 +51,18 @@ namespace VerdantsAscent.Terrain.Voxel
         internal void RefreshRenderVisibility()
         {
             bool overworldVisible = VoxelRenderGroup.OverworldVisible;
-            if (_renderer != null) _renderer.enabled = VertexCount > 0 && !RenderSuppressed && overworldVisible;
+            // NEVER DRAW A SURFACE YOU CANNOT STAND ON. When HasCollidableTriangle rejects a surface as
+            // sliver-only the collider is cleared but the render mesh keeps its triangles, so the chunk
+            // draws ground that nothing can collide with - a visible layer the player falls straight
+            // through. Reported on sky islands whose water carve leaves a thin, nearly-flat surface,
+            // which is exactly the shape the 0.002 area test throws out.
+            //
+            // Hiding it is the honest half of the trade: a hole where the sliver was is obviously wrong
+            // and gets fixed, whereas solid-looking ground that is not solid reads as a physics bug and
+            // costs an hour every time. The mesher keeping the surface out of the buffer in the first
+            // place is the real fix; this stops it lying in the meantime.
+            if (_renderer != null)
+                _renderer.enabled = VertexCount > 0 && !_surfaceNotCollidable && !RenderSuppressed && overworldVisible;
             if (_waterRenderer != null) _waterRenderer.enabled = overworldVisible;
             if (_iceRenderer != null) _iceRenderer.enabled = overworldVisible;
         }
@@ -130,6 +143,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 _mesh.Clear(false);
                 _collider.sharedMesh = null;
+                _surfaceNotCollidable = false;   // no surface at all is not a sliver surface
                 ColliderReady = true;   // nothing to collide with — ready by definition
                 ApplyGenWater(buf);     // an all-air/solid layer can still OWN the sheet band
                 RefreshRenderVisibility();
@@ -157,7 +171,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 _mesh.SetTangents(buf.Tangents);
                 _mesh.SetUVs(0, buf.Uvs);
                 _mesh.SetUVs(1, buf.Uv1);   // UV1.x = per-vertex inland waterline (FiresVoxelHeightmap reads v.texcoord1.x)
-                _mesh.SetColors(buf.Colors);
+                Zones.BiomePaint.TintVoxel(buf.Colors, buf.Verts);   // turned ground, at render time only
+                KeepSeasonFreeColors(buf.Colors);
+                _mesh.SetColors(FatSeasons.RenderColors(buf.Colors, buf.Verts));
             }
             }
             using (TrisMarker().Auto()) _mesh.SetTriangles(buf.Tris, 0, calculateBounds: true);
@@ -169,6 +185,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (_renderer.sharedMaterial != mat) _renderer.sharedMaterial = mat;
             }
             bool collidable = HasCollidableTriangle(buf);
+            _surfaceNotCollidable = !collidable;
             if (!collidable)
             {
                 _collider.sharedMesh = null;
@@ -181,9 +198,31 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private const float MinCollidableTriangleArea = 0.002f;
+
+        // Vedr seasons: the mesher's colours are the true biome colours; winter is added only for the renderer, and the
+        // season-free copy lets a season change recolour this mesh without remeshing or rebaking its collider.
+        internal Vector3 WorldCentre => _mesh != null ? _mesh.bounds.center : transform.position;
+
+        private void KeepSeasonFreeColors(System.Collections.Generic.List<Color32> colors)
+        {
+            if (!FatSeasons.Tracking) return;
+            if (_seasonFreeColors == null || _seasonFreeColors.Length < colors.Count) _seasonFreeColors = new Color32[colors.Count];
+            colors.CopyTo(_seasonFreeColors);
+            _seasonFreeCount = colors.Count;
+        }
+
+        internal void RecolourForSeason()
+        {
+            if (_renderer == null || _seasonFreeColors == null || _seasonFreeCount != _mesh.vertexCount) return;
+            _mesh.SetColors(FatSeasons.RenderColors(_seasonFreeColors, _seasonFreeCount, _mesh));
+        }
         private const float MinCollidableCrossSqr = 4f * MinCollidableTriangleArea * MinCollidableTriangleArea;
 
         private bool _reportedSliverOnlySurface;
+
+        // Set by ApplyBuffers when the surface is sliver-only, so the renderer gate can keep it hidden.
+        // Reset on every apply, because a chunk that was slivers can become real ground on the next edit.
+        private bool _surfaceNotCollidable;
 
         private static bool HasCollidableTriangle(MeshBuffers buf)
         {
@@ -252,6 +291,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 _collider.sharedMesh = _mesh;
             }
             ColliderReady = true;
+            FatClutterRegrow.Collider(_collider.bounds);   // 0.2.690/0.2.693: the grass over this chunk re-rolls on its new surface (vanilla's ResetGrass after an edit)
+            // 0.2.689 ([lead] RIDEg pit): when a dedicated server's voxel collider is (re)built, at Debug.
+            if (ZNet.instance != null && ZNet.instance.IsDedicated() && FiresLogger.DebugEnabled)
+                FiresLogger.LogDebug($"[FiresVoxel] server collider built: '{name}' at ({_collider.bounds.center.x:F0},{_collider.bounds.center.y:F0},{_collider.bounds.center.z:F0}), "
+                    + $"{VertexCount} vertices, t {Time.time:F1}.");
         }
 
         // Made on first use, never in a field initializer — a marker built before the profiler subsystem is up is a
@@ -355,55 +399,9 @@ namespace VerdantsAscent.Terrain.Voxel
         // The sheet material in use, so the look config can re-apply live.
         internal static Material CurrentSheetMaterial => s_sheetMat;
 
-        // Shader.Find misses a bundle shader nothing references yet, so fall back
-        // to walking the loaded bundles — the same resolve FiresLiquidWaterPrefab
-        // uses for Custom/FiresLiquid.
-        private static Shader FindShaderAnywhere(string name)
-        {
-            var s = Shader.Find(name);
-            if (s != null) return s;
-            var sh = FindBundleAsset<Shader>(name.Substring(name.LastIndexOf('/') + 1), out string bundle);
-            if (sh != null && sh.name == name)
-            {
-                FiresLogger.LogInfo($"[FiresVoxelWater] loaded {name} from bundle '{bundle}'.");
-                return sh;
-            }
-            return null;
-        }
-
-        // One named asset from whichever loaded bundle lists it. Reading asset names is cheap; the old
-        // LoadAllAssets over every loaded bundle, the vanilla one included, cost ~860 ms in one frame.
-        private static T FindBundleAsset<T>(string fileName, out string bundle) where T : UnityEngine.Object
-        {
-            bundle = null;
-            foreach (var b in AssetBundle.GetAllLoadedAssetBundles())
-            {
-                if (b == null || b.isStreamedSceneAssetBundle) continue;
-                string[] paths;
-                try { paths = b.GetAllAssetNames(); }
-                catch { continue; }
-                foreach (var path in paths)
-                {
-                    if (!string.Equals(System.IO.Path.GetFileNameWithoutExtension(path), fileName, System.StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    T asset = null;
-                    try { asset = b.LoadAsset<T>(path); }
-                    catch { }
-                    if (asset == null) continue;
-                    bundle = b.name;
-                    return asset;
-                }
-            }
-            return null;
-        }
-
-
-        // OUR OWN RIPPLE MAPS. water_nrm / water_nrm_detail are the sandbox's
-        // water normals, shipped in the same tossinshade bundle as the shader
-        // they were authored against. Borrowing Valheim's liquid normals worked,
-        // but these are the maps the port was tuned with, so the surface reads
-        // the way it does in the sandbox. Falls back to the donor when absent.
-        private static Texture FindTextureAnywhere(string name) => FindBundleAsset<Texture>(name, out _);
+        // OUR OWN RIPPLE MAPS. water_nrm / water_nrm_detail are the sandbox's water normals, shipped in Core's shader
+        // bundle beside the shader they were authored against (FiresShaderBroker). Borrowing Valheim's liquid normals
+        // worked, but these are the maps the port was tuned with. Falls back to the donor when absent.
         private static void CopyTex(Material from, Material to, string src, string dst)
         {
             if (from.HasProperty(src) && to.HasProperty(dst)) to.SetTexture(dst, from.GetTexture(src));
@@ -418,18 +416,18 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_sheetMat = VerdantsAscent.Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
                     break;
                 // 3 — Custom/FiresInlandWater: the ported sandbox inland shader
-                // (built-in RP port, same tossinshade bundle). Purpose-built for
+                // (built-in RP port, from Core's shader bundle). Purpose-built for
                 // shallow water — depth-driven HARDWARE alpha instead of the
                 // ocean's opaque screen-space refraction, and no shared globals
                 // with the ocean. Mode 0 (Custom/FiresLiquid) is untouched and
                 // remains the default, so this is a live A/B.
                 case 3:
                 {
-                    var inland = FindShaderAnywhere("Custom/FiresInlandWater");
+                    var inland = FiresCore.Materials.FiresShaderBroker.Get("Custom/FiresInlandWater");
                     if (inland == null)
                     {
-                        FiresLogger.LogWarning("[FiresVoxelWater] Custom/FiresInlandWater not found — is the FiresTossinShade " +
-                                               "bundle current? Falling back to the FiresLiquid sheet material.");
+                        FiresLogger.LogWarning("[FiresVoxelWater] Custom/FiresInlandWater is not live (Core's shader bundle " +
+                                               "lacks it); falling back to the FiresLiquid sheet material.");
                         s_sheetMat = VerdantsAscent.Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
                         break;
                     }
@@ -447,8 +445,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         // is the hard geometric look. _FoamTex happens to share a name
                         // and was the only map that ever arrived.
                         // Ours first, the donor only where ours is missing.
-                        var nrm = FindTextureAnywhere("water_nrm");
-                        var nrmD = FindTextureAnywhere("water_nrm_detail");
+                        var nrm = FiresCore.Materials.FiresShaderBroker.GetTexture("water_nrm");
+                        var nrmD = FiresCore.Materials.FiresShaderBroker.GetTexture("water_nrm_detail");
                         if (nrm != null) im.SetTexture("_BumpMap", nrm); else CopyTex(donor, im, "_Normal", "_BumpMap");
                         if (nrmD != null) im.SetTexture("_DetailBump", nrmD); else CopyTex(donor, im, "_NormalFine", "_DetailBump");
                         CopyTex(donor, im, "_FoamTex", "_FoamTex");
@@ -1014,7 +1012,8 @@ namespace VerdantsAscent.Terrain.Voxel
                                || FiresWorldGenBase.WaterClassAt(wx0 + 0.5f, wz0 + 4.5f)
                                   == FiresWorldGenBase.WC_FROZEN
                                || FiresWorldGenBase.WaterClassAt(wx0 + 0.5f, wz0 - 3.5f)
-                                  == FiresWorldGenBase.WC_FROZEN;
+                                  == FiresWorldGenBase.WC_FROZEN
+                               || FiresWorldGenBase.SeasonalFrozenAt(wx0 + 0.5f, wz0 + 0.5f);
                     if (frozen)
                     {
                         float sw00 = buf.WaterLvl[(x + 1) + S * (z + 1)];

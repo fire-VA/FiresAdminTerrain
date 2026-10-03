@@ -2433,11 +2433,10 @@ namespace VerdantsAscent.Water.Core
                 string worldName = ZNet.instance.GetWorldName();
                 if (!string.IsNullOrEmpty(worldName))
                 {
-                    // Construct path similar to Valheim's world save path
-                    string basePath = System.IO.Path.Combine(
-                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile),
-                        "AppData", "LocalLow", "IronGate", "Valheim", "worlds_local"
-                    );
+                    // Vanilla's own world save root (honours -savedir; on a plain client it is the same LocalLow\IronGate\
+                    // Valheim\worlds_local this used to build by hand from the user profile, so saved data stays put). A public
+                    // mod's files stay inside the game's and Valheim's own folders (Fire, 2026-09-29).
+                    string basePath = SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local);
                     return System.IO.Path.Combine(basePath, worldName);
                 }
             }

@@ -21,6 +21,10 @@ namespace VerdantsAscent.Terrain.Voxel
         private static int s_seed;
         public static void SetSeed(int worldSeed) => s_seed = worldSeed;
 
+        // The world's seed, for a skyland blueprint to carry: a skyland raised in another world samples the noise of the
+        // world it grew in (FiresSkyIslands.Placed.cs), through the seeded overloads below.
+        public static int Seed => s_seed;
+
         // Per-cell sinkhole veto cache. CarveSdf runs per VOXEL, but the site
         // and its wet test are per CELL, so without a cache the water field
         // would be sampled nine times for every voxel in the column. Chunk
@@ -42,12 +46,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 // Centre plus a ring at the rim + margin: a shaft must clear the
                 // channel entirely, not merely miss its centreline.
                 float m = radius * 1.6f + 4f;
-                if (FiresWorldGenBase.IsWetAt(sx, sz)) t_sinkWet = true;
+                if (FiresWorldGenBase.IsWetAtReal(sx, sz)) t_sinkWet = true;
                 else
                     for (int k = 0; k < 8 && !t_sinkWet; k++)
                     {
                         float a = k * (Mathf.PI * 2f / 8f);
-                        if (FiresWorldGenBase.IsWetAt(sx + Mathf.Cos(a) * m, sz + Mathf.Sin(a) * m))
+                        if (FiresWorldGenBase.IsWetAtReal(sx + Mathf.Cos(a) * m, sz + Mathf.Sin(a) * m))
                             t_sinkWet = true;
                     }
             }
@@ -68,17 +72,19 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!FiresWorldGenBase.Active) return false;
             t_entCX = cx; t_entCZ = cz; t_entValid = true;
             float sx = (cx + 0.5f) * 4f, sz = (cz + 0.5f) * 4f;
-            t_entWet = FiresWorldGenBase.IsWetAt(sx, sz)
-                || FiresWorldGenBase.IsWetAt(sx + 10f, sz) || FiresWorldGenBase.IsWetAt(sx - 10f, sz)
-                || FiresWorldGenBase.IsWetAt(sx, sz + 10f) || FiresWorldGenBase.IsWetAt(sx, sz - 10f);
+            t_entWet = FiresWorldGenBase.IsWetAtReal(sx, sz)
+                || FiresWorldGenBase.IsWetAtReal(sx + 10f, sz) || FiresWorldGenBase.IsWetAtReal(sx - 10f, sz)
+                || FiresWorldGenBase.IsWetAtReal(sx, sz + 10f) || FiresWorldGenBase.IsWetAtReal(sx, sz - 10f);
             return t_entWet;
         }
 
-        private static float Hash(int x, int y, int z)
+        private static float Hash(int x, int y, int z) => Hash(x, y, z, s_seed);
+
+        private static float Hash(int x, int y, int z, int seed)
         {
             unchecked
             {
-                int h = s_seed;
+                int h = seed;
                 h = h * 374761393 + x * 668265263;
                 h = (h ^ (h >> 13)) * 1274126177;
                 h += y * 974711;
@@ -90,7 +96,9 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // Trilinear value noise with smoothstep fades.
-        private static float Noise(float x, float y, float z)
+        private static float Noise(float x, float y, float z) => Noise(x, y, z, s_seed);
+
+        private static float Noise(float x, float y, float z, int seed)
         {
             int x0 = Mathf.FloorToInt(x), y0 = Mathf.FloorToInt(y), z0 = Mathf.FloorToInt(z);
             float fx = x - x0, fy = y - y0, fz = z - z0;
@@ -98,10 +106,10 @@ namespace VerdantsAscent.Terrain.Voxel
             fy = fy * fy * (3f - 2f * fy);
             fz = fz * fz * (3f - 2f * fz);
 
-            float c000 = Hash(x0, y0, z0), c100 = Hash(x0 + 1, y0, z0);
-            float c010 = Hash(x0, y0 + 1, z0), c110 = Hash(x0 + 1, y0 + 1, z0);
-            float c001 = Hash(x0, y0, z0 + 1), c101 = Hash(x0 + 1, y0, z0 + 1);
-            float c011 = Hash(x0, y0 + 1, z0 + 1), c111 = Hash(x0 + 1, y0 + 1, z0 + 1);
+            float c000 = Hash(x0, y0, z0, seed), c100 = Hash(x0 + 1, y0, z0, seed);
+            float c010 = Hash(x0, y0 + 1, z0, seed), c110 = Hash(x0 + 1, y0 + 1, z0, seed);
+            float c001 = Hash(x0, y0, z0 + 1, seed), c101 = Hash(x0 + 1, y0, z0 + 1, seed);
+            float c011 = Hash(x0, y0 + 1, z0 + 1, seed), c111 = Hash(x0 + 1, y0 + 1, z0 + 1, seed);
 
             float x00 = c000 + (c100 - c000) * fx;
             float x10 = c010 + (c110 - c010) * fx;
@@ -116,21 +124,28 @@ namespace VerdantsAscent.Terrain.Voxel
         // erosion detail, undercuts) — same seed, same guarantees.
         public static float Noise01(float x, float y, float z) => Noise(x, y, z);
 
+        public static float Noise01(float x, float y, float z, int seed) => Noise(x, y, z, seed);
+
         // Carve SDF at a world position (metres, > 0 inside a tunnel): the noise
         // caves, unioned with a chunk world's guaranteed start cave.
         public static float CarveSdf(float wx, float wy, float wz, float depthBelowSurface, bool sinkholes = true)
         {
-            float carve = CarveNoise(wx, wy, wz, depthBelowSurface, sinkholes);
+            float carve = CarveNoise(wx, wy, wz, depthBelowSurface, sinkholes, s_seed, true);
             float start = Zones.ZoneModeStartCave.Carve(wx, wy, wz);
             return start > carve ? Mathf.Min(start, 12f) : carve;
         }
+
+        // The caves of another world's seed, for a skyland raised from a blueprint saved there: its tunnels and caverns
+        // only. This world's start cave and its river vetoes belong to this world's ground, not to the island.
+        public static float CarveSdf(float wx, float wy, float wz, float depthBelowSurface, int seed)
+            => CarveNoise(wx, wy, wz, depthBelowSurface, false, seed, false);
 
         // depthBelowSurface pinches tunnels shut approaching the surface so
         // most stay buried and a few break through as natural entrances.
         // Gates: only above CaveMinY (W1 keeps caves above the y30 water
         // table — flooded caves need the tier-2 water mesh first) and within
         // CaveMaxDepth of the surface (no bottomless voids).
-        private static float CarveNoise(float wx, float wy, float wz, float depthBelowSurface, bool sinkholes)
+        private static float CarveNoise(float wx, float wy, float wz, float depthBelowSurface, bool sinkholes, int seed, bool worldVetoes)
         {
             if (wy < FiresVoxelConfig.CaveMinY.Value) return -10f;
 
@@ -166,8 +181,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // and end up touching its neighbour's shaft.
                 float inset = Mathf.Clamp01((radius * 1.5f) / spacing);
                 float span = Mathf.Max(0f, 1f - inset * 2f);
-                float sxw = (cx + inset + span * Hash(cx, 90002, cz)) * spacing;
-                float szw = (cz + inset + span * Hash(cx, 90003, cz)) * spacing;
+                float sxw = (cx + inset + span * Hash(cx, 90002, cz, seed)) * spacing;
+                float szw = (cz + inset + span * Hash(cx, 90003, cz, seed)) * spacing;
                 // NEVER UNDER A RIVER. A shaft that opens in a bed drains the
                 // channel into the cave layer and leaves the holes punched
                 // straight through the riverbed. Skips the SHAFT only — tunnels
@@ -175,14 +190,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 // deterministic per cell so the test is cached per cell per
                 // thread; the field reads are immutable load-time arrays and
                 // therefore worker-safe.
-                if (Hash(cx, 90001, cz) >= FiresVoxelConfig.SinkholeRarity.Value
-                    && !SinkholeSiteWet(cx, cz, sxw, szw, radius))
+                if (Hash(cx, 90001, cz, seed) >= FiresVoxelConfig.SinkholeRarity.Value
+                    && (!worldVetoes || !SinkholeSiteWet(cx, cz, sxw, szw, radius)))
                 {
                     float ddx = wx - sxw, ddz = wz - szw;
                     float dist = Mathf.Sqrt(ddx * ddx + ddz * ddz);
                     // Radial falloff: 1 at the site, 0 at the rim. Wobble the rim
                     // a little so the mouth is not a machined circle.
-                    float wob = 0.82f + 0.36f * Noise(wx * 0.09f, 613.1f, wz * 0.09f);
+                    float wob = 0.82f + 0.36f * Noise(wx * 0.09f, 613.1f, wz * 0.09f, seed);
                     float t = dist >= radius * wob ? 0f : 1f - dist / (radius * wob);
                     // FUNNEL, not a column. Narrow at the lip and opening out as
                     // it descends, so the cave ROOF survives everywhere except
@@ -216,11 +231,11 @@ namespace VerdantsAscent.Terrain.Voxel
             float pinch = Mathf.Clamp01(depthBelowSurface / FiresVoxelConfig.CaveSurfacePinch.Value);
             float eThresh = FiresVoxelConfig.EntranceRarity.Value;
             float ef = f * 0.35f;
-            float ent = Noise(wx * ef + 913.1f, 3.21f, wz * ef + 285.7f);
+            float ent = Noise(wx * ef + 913.1f, 3.21f, wz * ef + 285.7f, seed);
             // NEVER release the pinch under water: an entrance in a riverbed
             // is a drain hole, exactly like the vetoed shafts. Tunnels still
             // run below — they just keep their roof.
-            if (ent > eThresh && !EntranceColumnWet(wx, wz))
+            if (ent > eThresh && (!worldVetoes || !EntranceColumnWet(wx, wz)))
             {
                 float e = (ent - eThresh) / Mathf.Max(1f - eThresh, 1e-4f);
                 pinch = Mathf.Lerp(pinch, 1f, Mathf.SmoothStep(0f, 1f, e));
@@ -235,7 +250,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // instead of running at one gauge forever.
             float cThresh = FiresVoxelConfig.CavernRarity.Value;
             float cf = f * FiresVoxelConfig.CavernScale.Value;
-            float ch = Noise(wx * cf + 411.2f, wy * cf * 0.6f + 88.5f, wz * cf + 77.4f);
+            float ch = Noise(wx * cf + 411.2f, wy * cf * 0.6f + 88.5f, wz * cf + 77.4f, seed);
             if (ch > cThresh)
             {
                 float c = (ch - cThresh) / Mathf.Max(1f - cThresh, 1e-4f);
@@ -245,8 +260,8 @@ namespace VerdantsAscent.Terrain.Voxel
             if (width <= 0.002f) return Mathf.Clamp(sinkhole, -10f, 12f);
 
             float fy = FiresVoxelConfig.CaveFrequencyY.Value;
-            float n1 = Mathf.Abs(Noise(wx * f, wy * fy, wz * f) - 0.5f);
-            float n2 = Mathf.Abs(Noise((wx + 137.7f) * f * 1.31f, (wy - 91.3f) * fy * 1.27f, (wz + 53.9f) * f * 1.31f) - 0.5f);
+            float n1 = Mathf.Abs(Noise(wx * f, wy * fy, wz * f, seed) - 0.5f);
+            float n2 = Mathf.Abs(Noise((wx + 137.7f) * f * 1.31f, (wy - 91.3f) * fy * 1.27f, (wz + 53.9f) * f * 1.31f, seed) - 0.5f);
             float m = Mathf.Max(n1, n2);
 
             // noise-units → metres: value-noise gradient ≈ 0.5·freq per metre,

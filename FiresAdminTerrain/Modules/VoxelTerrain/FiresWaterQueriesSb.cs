@@ -96,7 +96,18 @@ namespace VerdantsAscent.Terrain.Voxel
             float ground = g00 * (1f - fx) * (1f - fz) + g10 * fx * (1f - fz) + g01 * (1f - fx) * fz + g11 * fx * fz;
             // SIGNED: + where gen cut down, − where gen built up. NO CLAMP — see the header. Subtracting this
             // from SurfaceElev reproduces `ground` (_gridS) exactly, so the voxel mesh IS the gen grid.
-            return SampleFinalMeters(wx, wz) - ground;
+            return SampleFinalMetersReal(wx, wz) - ground;
+        }
+
+        // Zone mode's door, as in FiresWorldGenBase.SampleBiome: closed zones hold no generated water.
+        public static bool TryGetWaterSurfaceSmooth(float wx, float wz, out float level, out float depth)
+        {
+            float tx = wx, tz = wz;
+            if (!Zones.ZoneModeGate.SamplerSeesClosed(ref wx, ref wz))
+                return Zones.ZoneModeGate.LiftWater(tx, tz, TryGetWaterSurfaceSmoothReal(wx, wz, out level, out depth), ref level, ref depth);
+            level = 0f;
+            depth = 0f;
+            return false;
         }
 
         // ── PLAYER WATER EDITS OVERLAY ───────────────────────────────────────
@@ -107,13 +118,13 @@ namespace VerdantsAscent.Terrain.Voxel
         // never a double layer. Byte-identical to the gen field when the player has made no water edits
         // (Active == false → the immediate passthrough). NOTE the gen-water BAKE inside VoxelChunk reads the
         // PURE variant (TryGetWaterSurfaceGen) so a transient edit never contaminates the cached _genWater.
-        public static bool TryGetWaterSurfaceSmooth(float wx, float wz, out float level, out float depth)
+        internal static bool TryGetWaterSurfaceSmoothReal(float wx, float wz, out float level, out float depth)
         {
             s_wsCalls++;                                                  // see WaterQueryCallReport
             bool wet = TryGetWaterSurfaceGen(wx, wz, out level, out depth);
             if (!FiresWaterEdits.Active || !FiresWaterEdits.TryGet(wx, wz, out float pl, out bool removed)) return wet;
             if (removed) { level = 0f; depth = 0f; return false; }              // erased → dry (drops gen water here too)
-            float ground = wet ? level - depth : (TryGetGenGround(wx, wz, out float gg) ? gg : pl - 0.1f);
+            float ground = wet ? level - depth : (TryGetGenGroundReal(wx, wz, out float gg) ? gg : pl - 0.1f);
             level = pl;                                                          // fills were already max-merged at write time
             depth = Mathf.Max(0.05f, pl - ground);
             return pl > ground + 0.01f;                                         // painted below the local ground → terrain clips it (dry)
@@ -314,7 +325,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             const float RING_M = 16f;   // how far out to look for a wall
             const float WALL_M = 12f;   // ground this far above the surface is a wall, not a bank
-            if (!TryGetWaterSurfaceSmooth(wx, wz, out float lvl, out _)) return false;
+            if (!TryGetWaterSurfaceSmoothReal(wx, wz, out float lvl, out _)) return false;
 
             // ═══ A CANYON HAS TWO WALLS. ONE IS A HILLSIDE. ══════════════════════════════════════════════
             // (user, 2026-08-31, on a map full of pins in flat lake country: "clearly something is wrong
@@ -335,17 +346,31 @@ namespace VerdantsAscent.Terrain.Voxel
                 bool wallA = false, wallB = false;
                 for (int r = 4; r <= (int)RING_M && !(wallA && wallB); r += 4)
                 {
-                    if (!wallA && TryGetGenGround(wx + cx * r, wz + cz * r, out float ga) && ga - lvl >= WALL_M) wallA = true;
-                    if (!wallB && TryGetGenGround(wx - cx * r, wz - cz * r, out float gb) && gb - lvl >= WALL_M) wallB = true;
+                    if (!wallA && TryGetGenGroundReal(wx + cx * r, wz + cz * r, out float ga) && ga - lvl >= WALL_M) wallA = true;
+                    if (!wallB && TryGetGenGroundReal(wx - cx * r, wz - cz * r, out float gb) && gb - lvl >= WALL_M) wallB = true;
                 }
                 if (wallA && wallB) return true;
             }
             return false;
         }
 
+        private static readonly System.Func<float, float, float> s_genGroundReal = GenGroundOrFinal;
+
+        private static float GenGroundOrFinal(float wx, float wz)
+            => TryGetGenGroundReal(wx, wz, out float ground) ? ground : SampleFinalMetersReal(wx, wz);
+
+        public static bool TryGetGenGround(float wx, float wz, out float ground)
+        {
+            float tx = wx, tz = wz;
+            if (Zones.ZoneModeGate.TryClosedHeight(ref wx, ref wz, s_genGroundReal, out ground)) return true;
+            if (!TryGetGenGroundReal(wx, wz, out ground)) return false;
+            ground = Zones.ZoneModeGate.Lifted(tx, tz, ground);
+            return true;
+        }
+
         // Full-res GENERATED ground (bilinear) — the pure field, no brush
         // edits. Cheap enough for per-cell gates at view apply.
-        public static bool TryGetGenGround(float wx, float wz, out float ground)
+        internal static bool TryGetGenGroundReal(float wx, float wz, out float ground)
         {
             ground = 0f;
             var g = _gridS;
@@ -372,10 +397,10 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TrySurfaceNormal(float wx, float wy, float wz, out Vector3 normal)
         {
             normal = Vector3.up;
-            if (!TryGetGenGround(wx, wz, out float g) || System.Math.Abs(wy - g) > 1.5f) return false;
+            if (!TryGetGenGroundReal(wx, wz, out float g) || System.Math.Abs(wy - g) > 1.5f) return false;
             const float e = 2f;   // central-difference radius (m); wider = smoother
-            if (!TryGetGenGround(wx - e, wz, out float hxm) || !TryGetGenGround(wx + e, wz, out float hxp)
-             || !TryGetGenGround(wx, wz - e, out float hzm) || !TryGetGenGround(wx, wz + e, out float hzp)) return false;
+            if (!TryGetGenGroundReal(wx - e, wz, out float hxm) || !TryGetGenGroundReal(wx + e, wz, out float hxp)
+             || !TryGetGenGroundReal(wx, wz - e, out float hzm) || !TryGetGenGroundReal(wx, wz + e, out float hzp)) return false;
             normal = new Vector3(-(hxp - hxm) / (2f * e), 1f, -(hzp - hzm) / (2f * e)).normalized;
             return true;
         }
@@ -411,7 +436,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetSurfaceDescent(float wx, float wz, float radius, out Vector2 dir)
         {
             dir = Vector2.zero;
-            if (!TryGetWaterSurfaceSmooth(wx, wz, out float here, out _) || here <= 0f) return false;
+            if (!TryGetWaterSurfaceSmoothReal(wx, wz, out float here, out _) || here <= 0f) return false;
             // ESCALATING BASELINE — the whole point, and the reason a single radius was not enough.
             // A pool immediately below a rapid genuinely IS flat: over 24 m its surface does not measurably
             // drop, so the near ring finds nothing and the old code fell back to the broken bed gradient.
@@ -448,7 +473,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 float a = k * (6.2831853f / N);
                 float dx = Mathf.Cos(a), dz = Mathf.Sin(a);
-                if (!TryGetWaterSurfaceSmooth(wx + dx * radius, wz + dz * radius, out float lv, out _) || lv <= 0f)
+                if (!TryGetWaterSurfaceSmoothReal(wx + dx * radius, wz + dz * radius, out float lv, out _) || lv <= 0f)
                     continue;
                 float rise = lv - here;
                 if (rise <= 1e-4f) continue;
@@ -472,7 +497,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 float a = k * (6.2831853f / N);
                 float dx = Mathf.Cos(a), dz = Mathf.Sin(a);
-                if (!TryGetWaterSurfaceSmooth(wx + dx * radius, wz + dz * radius, out float lv, out _) || lv <= 0f)
+                if (!TryGetWaterSurfaceSmoothReal(wx + dx * radius, wz + dz * radius, out float lv, out _) || lv <= 0f)
                     continue;                       // dry, or off the sheet — not part of this water
                 float drop = here - lv;
                 if (drop <= 1e-4f) continue;        // level or uphill in that direction: contributes nothing
@@ -485,24 +510,27 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         public static Vector2 GenFlowAt(float wx, float wz)
+            => Zones.ZoneModeGate.SamplerSeesClosed(ref wx, ref wz) ? Vector2.zero : GenFlowAtReal(wx, wz);
+
+        internal static Vector2 GenFlowAtReal(float wx, float wz)
         {
-            if (!TryGetWaterSurfaceSmooth(wx, wz, out float hC, out float depthC) || hC <= 0f)
+            if (!TryGetWaterSurfaceSmoothReal(wx, wz, out float hC, out float depthC) || hC <= 0f)
                 return Vector2.zero;
             Vector2 fl = Vector2.zero;
-            if (TryGetWaterSurfaceSmooth(wx - 1f, wz, out float hXm, out _) && hXm > 0f
-                && TryGetWaterSurfaceSmooth(wx + 1f, wz, out float hXp, out _) && hXp > 0f
-                && TryGetWaterSurfaceSmooth(wx, wz - 1f, out float hZm, out _) && hZm > 0f
-                && TryGetWaterSurfaceSmooth(wx, wz + 1f, out float hZp, out _) && hZp > 0f)
+            if (TryGetWaterSurfaceSmoothReal(wx - 1f, wz, out float hXm, out _) && hXm > 0f
+                && TryGetWaterSurfaceSmoothReal(wx + 1f, wz, out float hXp, out _) && hXp > 0f
+                && TryGetWaterSurfaceSmoothReal(wx, wz - 1f, out float hZm, out _) && hZm > 0f
+                && TryGetWaterSurfaceSmoothReal(wx, wz + 1f, out float hZp, out _) && hZp > 0f)
                 fl = new Vector2((hXm - hXp) * 0.5f, (hZm - hZp) * 0.5f);
 
-            byte cls = WaterClassAt(wx, wz);
+            byte cls = WaterClassAtReal(wx, wz);
             if (cls == WC_RIVER || cls == WC_STREAM)
             {
                 float smag = fl.magnitude;
                 const float DRIFT = 0.025f;
                 if (smag < DRIFT
-                    && TryGetGenGround(wx - 3f, wz, out float bxm) && TryGetGenGround(wx + 3f, wz, out float bxp)
-                    && TryGetGenGround(wx, wz - 3f, out float bzm) && TryGetGenGround(wx, wz + 3f, out float bzp))
+                    && TryGetGenGroundReal(wx - 3f, wz, out float bxm) && TryGetGenGroundReal(wx + 3f, wz, out float bxp)
+                    && TryGetGenGroundReal(wx, wz - 3f, out float bzm) && TryGetGenGroundReal(wx, wz + 3f, out float bzp))
                 {
                     var bed = new Vector2((bxm - bxp) * (1f / 6f), (bzm - bzp) * (1f / 6f));
                     float bmag = bed.magnitude;
@@ -776,7 +804,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     //    the base of a waterfall drop (we already tag WC_WATERFALL
                     //    lips). Stamp ~2 cells downstream: aeration~1, a dip, locked.
                     //    Reversed surface flow is the shader's job (from aeration~1). ──
-                    if (lspd > 1e-4f && WaterClassAt(wcx, wcz) == WC_WATERFALL)
+                    if (lspd > 1e-4f && WaterClassAtReal(wcx, wcz) == WC_WATERFALL)
                     {
                         float ux0 = lfx / lspd, uz0 = lfz / lspd;
                         int bx = gx + (int)Mathf.Round(ux0 * 2f), bz = gz + (int)Mathf.Round(uz0 * 2f);
@@ -784,7 +812,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         {
                             int bi = bz * n + bx;
                             if (rm[bi] != 0 && (w[bi] - g[bi]) * UNPACK > WET
-                                && WaterClassAt(-half + bx * cell, -half + bz * cell) != WC_WATERFALL)
+                                && WaterClassAtReal(-half + bx * cell, -half + bz * cell) != WC_WATERFALL)
                             { StampDist(acc, bi, -BACK_DIP, BACK_AER, 0f, 1f); waterfalls++; }
                         }
                     }
@@ -813,7 +841,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                         if (wetN < 4) continue;                             // too little surrounding flow → a plain bank
 
-                        var fl = GenFlowAt(-half + bestX * cell, -half + bestZ * cell);
+                        var fl = GenFlowAtReal(-half + bestX * cell, -half + bestZ * cell);
                         float spd = fl.magnitude;
                         if (spd < 1e-4f) continue;                          // no current → collar only (already done)
                         float ux = fl.x / spd, uz = fl.y / spd;            // unit downstream
@@ -933,42 +961,58 @@ namespace VerdantsAscent.Terrain.Voxel
                       $"{collars} collar cell(s) → {acc.Count} cell(s) resident (~{(acc.Count * 12L) / 1024} KB).");
         }
 
-        // ── SEASONAL FREEZE (P1) ─────────────────────────────────────────
-        // Lakes / ponds / swamp freeze in winter and thaw in warm seasons,
-        // EDGE-in / CENTRE-out from ONE monotone field (water DEPTH) swept by a
-        // season-driven ice REACH: a still-water cell is frozen when its water
-        // is shallower than the ice reaches, so shallow shores freeze first (as
-        // the reach rises) and the deep centre thaws first (as it falls) — the
-        // same field gives both, and the ice/water boundary is a depth contour
-        // (the marching-squares front the shader draws). Pure function of
-        // position + the world clock (FiresSeason, via FiresFeltTemp), so it is
-        // MP-consistent and the season scrub stays exact. Constants tunable.
-        public const float FreezeStartC = 1f;         // felt °C where shore ice begins
-        public const float FreezeFullC = -10f;        // felt °C where the ice reaches its deepest
-        public const float MaxSeasonalIceDepthM = 4f; // deepest water that freezes over at full winter
+        // SEASONAL FREEZE. Still water (lake, pond, swamp) is frozen when its water is no deeper than the ice REACH, so
+        // shallow shores freeze first as winter sets in and the deep centre thaws first in spring; the ice/water boundary
+        // is a depth contour. The reach comes from Vedr's calendar through FatSeasons (always 0 without Vedr), so every
+        // peer agrees. The one authority the chunk ice sheet, the far water and the swim test read.
+        public const float MaxSeasonalIceDepthM = 4f;
+        private const float StillWaterProbeM = 4f;
 
-        // Ice REACH (m of water depth the ice covers) at this still-water spot
-        // right now — location + season aware (cold biomes freeze deep, temperate
-        // get a shore rim in deep winter, warm never freeze). 0 = open water.
         public static float SeasonalIceReachM(float wx, float wz)
         {
-            byte cls = WaterClassAt(wx, wz);
-            if (cls != WC_LAKE && cls != WC_POND && cls != WC_SWAMP && cls != WC_FROZEN) return 0f;
-            if (!TryGetGenGround(wx, wz, out float g)) return 0f;
-            float felt = FiresClimate.SampleT(wx, wz);
-            float t = Mathf.Clamp01((FreezeStartC - felt) / (FreezeStartC - FreezeFullC));
-            return MaxSeasonalIceDepthM * (t * t * (3f - 2f * t));   // smoothstep — reach eases in/out over the season
+            float reach = FatSeasons.IceReachAt(wx, wz);
+            return reach > 0f && StillWaterNear(wx, wz) ? reach : 0f;
         }
 
-        // Is this still-water cell frozen over NOW? Frozen ⟺ its water is no
-        // deeper than the current ice reach. The single authority the ice
-        // collider (P3) and swim/walk read; the shader draws its own smooth
-        // front from baked depth + the season temp global (P2 contract).
         public static bool SeasonalFrozenAt(float wx, float wz)
+        {
+            float tx = wx, tz = wz;
+            return !Zones.ZoneModeGate.SamplerSeesClosed(ref wx, ref wz) && (SeasonalFrozenAtReal(wx, wz) || LiftedSeaFrozenAt(tx, tz));
+        }
+
+        // A lifted chunk's sea freezes like a lake (Fire, 2026-09-27, [seasons]' popup): the same depth contour as
+        // SeasonalFrozenAtReal, read at the chunk itself, so its own biome decides the winter. A dry cell beside that sea
+        // is the sheet's buried skirt and freezes with it.
+        private static bool LiftedSeaFrozenAt(float wx, float wz)
+        {
+            float reach = FatSeasons.IceReachAt(wx, wz);
+            if (reach <= 0f) return false;
+            if (Zones.ZoneModeGate.TryLiftedSea(wx, wz, out float level, out float floor)) return level - floor <= reach;
+            return Zones.ZoneModeGate.IsLiftedSeaAt(wx + StillWaterProbeM, wz) || Zones.ZoneModeGate.IsLiftedSeaAt(wx - StillWaterProbeM, wz)
+                || Zones.ZoneModeGate.IsLiftedSeaAt(wx, wz + StillWaterProbeM) || Zones.ZoneModeGate.IsLiftedSeaAt(wx, wz - StillWaterProbeM);
+        }
+
+        // A dry cell next to still water is the sheet's buried skirt: it freezes with the water it borders.
+        internal static bool SeasonalFrozenAtReal(float wx, float wz)
         {
             float reach = SeasonalIceReachM(wx, wz);
             if (reach <= 0f) return false;
-            return TryGetWaterSurfaceSmooth(wx, wz, out _, out float depth) && depth > 0f && depth <= reach;
+            return !TryGetWaterSurfaceSmoothReal(wx, wz, out _, out float depth) || depth <= reach;
+        }
+
+        // Classes live on an 8m grid, so a shore quad often lands in an unclassified block: any still-water block within
+        // 4m claims it. The ice sheet's own flatness test still keeps sloped channels liquid.
+        private static bool StillWaterNear(float wx, float wz)
+            => IsStillWater(WaterClassAtReal(wx, wz))
+            || IsStillWater(WaterClassAtReal(wx + StillWaterProbeM, wz)) || IsStillWater(WaterClassAtReal(wx - StillWaterProbeM, wz))
+            || IsStillWater(WaterClassAtReal(wx, wz + StillWaterProbeM)) || IsStillWater(WaterClassAtReal(wx, wz - StillWaterProbeM));
+
+        private static bool IsStillWater(byte cls) => cls == WC_LAKE || cls == WC_POND || cls == WC_SWAMP;
+
+        public static bool IsWaterCorridorAt(float wx, float wz)
+        {
+            float tx = wx, tz = wz;
+            return !Zones.ZoneModeGate.SamplerSeesClosed(ref wx, ref wz) && (IsWaterCorridorAtReal(wx, wz) || Zones.ZoneModeGate.IsLiftedSeaAt(tx, tz));
         }
 
         // Fine water meshing: may fine-resolution water spread into this cell.
@@ -976,7 +1020,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // (bed/bank/spine mask) or anything the coarse field already calls
         // wet. The 1m flood stays inside this footprint while the real crest
         // line decides the actual water edge.
-        public static bool IsWaterCorridorAt(float wx, float wz)
+        internal static bool IsWaterCorridorAtReal(float wx, float wz)
         {
             // WET cells only. The raw mask footprint covers entire valley
             // floors (the carve's over-wide bed marking) — treating it as

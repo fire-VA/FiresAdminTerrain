@@ -3,76 +3,108 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // One chunk generator and one chunk seed per biome, in progression order. A generator makes one seed from any
-    // two different items of its biome's list, 50 of each, or from 100 each of the previous tier's basic pair; the
-    // Meadows generator takes every biome's list. A seed raises any closed zone beside open land as its own biome's
-    // land. Meadows is buildable from the start; every later generator appears after the previous biome's boss.
+    // The recipes of the one Chunk Generator (Tools\CHUNK_GENERATOR.md), in progression order: the plain Chunk Seed,
+    // which only ever brings a zone back as the world made it (Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md), and one seed per
+    // biome, which raises its biome over any closed zone beside open land. A full load of fuel makes two plain seeds or
+    // one biome seed. The plain recipe burns any biome's materials; a biome recipe burns its own biome's and every later
+    // biome's, and is learned when the previous boss falls. The tier also names the old per-biome generator prefab its
+    // recipe replaces, which ZoneModeChunkGenerator swaps for the one machine wherever a world still holds one.
     internal sealed class ChunkTier
     {
+        private const string MachinePrefix = "FiresChunkMachine_";
+        private const string SpawnerPrefix = "FiresChunkSpawner_";
+        private const int PlainSeedsPerBatch = 2;
+        private const int BiomeSeedsPerBatch = 1;
+
         internal readonly int Level;
         internal readonly string Id;
         internal readonly string Title;
-        internal readonly string BasicA;
-        internal readonly string BasicB;
         internal readonly string[] Inputs;
         internal readonly string BossKey;
         internal readonly KeyValuePair<string, int>[] Cost;
+        internal readonly string MachinePrefab;
+        internal readonly string SpawnerPrefab;
+        internal readonly string MachineName;
+        internal readonly string SpawnerName;
+        internal readonly bool RestoresOnly;
 
-        internal ChunkTier(int level, string id, string title, string basicA, string basicB, string[] inputs, string bossKey,
-            params KeyValuePair<string, int>[] cost)
+        internal ChunkTier(int level, string id, string title, string[] inputs, string bossKey)
+            : this(level, id, title, inputs, bossKey, MachinePrefix + id, SpawnerPrefix + id,
+                title + " Chunk Generator", title + " Chunk Seed", false, null)
+        {
+        }
+
+        private ChunkTier(int level, string id, string title, string[] inputs, string bossKey, string machinePrefab,
+            string spawnerPrefab, string machineName, string spawnerName, bool restoresOnly, KeyValuePair<string, int>[] cost)
         {
             Level = level;
             Id = id;
             Title = title;
-            BasicA = basicA;
-            BasicB = basicB;
             Inputs = inputs;
             BossKey = bossKey;
             Cost = cost;
+            MachinePrefab = machinePrefab;
+            SpawnerPrefab = spawnerPrefab;
+            MachineName = machineName;
+            SpawnerName = spawnerName;
+            RestoresOnly = restoresOnly;
         }
 
-        internal string MachinePrefab => "FiresChunkMachine_" + Id;
-        internal string SpawnerPrefab => "FiresChunkSpawner_" + Id;
-        internal string MachineName => Title + " Chunk Generator";
-        internal string SpawnerName => Title + " Chunk Seed";
+        // The one machine keeps the prefab id every world's starter was placed with, so each starter stays where it is.
+        internal static ChunkTier Plain(int level, KeyValuePair<string, int>[] cost)
+            => new ChunkTier(level, "Plain", "Chunk", null, null, MachinePrefix + "Meadows", SpawnerPrefix + "Plain",
+                "Chunk Generator", "Chunk Seed", true, cost);
+
+        // The Meadows recipe's old generator had moved to a new prefab id when its first id went to the plain generator.
+        internal static ChunkTier Moved(int level, string id, string title, string machineId, string[] inputs, string bossKey)
+            => new ChunkTier(level, id, title, inputs, bossKey, MachinePrefix + machineId, SpawnerPrefix + id,
+                title + " Chunk Generator", title + " Chunk Seed", false, null);
+
         internal Heightmap.Biome Biome => ZoneModeChunkTiers.TierBiome(Level);
+
+        internal int SeedsPerBatch => RestoresOnly ? PlainSeedsPerBatch : BiomeSeedsPerBatch;
+
+        internal string RecipeName => SpawnerName;
     }
 
     internal static class ZoneModeChunkTiers
     {
-        internal const int PairAmount = 50;
-        internal const int DoubleAmount = 100;
+        internal const int BatchFuel = 100;
         private const float SampleOffset = 24f;
+        private const int PlainLevel = -1;
 
         // The item lists are the user-approved recipe draft (Tools\FAT_ZONE_MODE_PLAN.md), with every ID taken from
-        // the 1.0 data in Tools\ZONE_MODE_BIOME_DATA.md.
+        // the 1.0 data in Tools\ZONE_MODE_BIOME_DATA.md. No item is in two lists.
         internal static readonly ChunkTier[] All =
         {
-            new ChunkTier(0, "Meadows", "Meadows", "Stone", "Wood",
+            ChunkTier.Plain(PlainLevel, new[] { Cost("Stone", 20), Cost("Wood", 10) }),
+            ChunkTier.Moved(0, "Meadows", "Meadows", "MeadowsBiome",
                 new[] { "Stone", "Wood", "Flint", "Raspberry", "RawMeat", "NeckTail", "BeechSeeds", "Dandelion" },
-                null, Cost("Stone", 20), Cost("Wood", 10)),
-            new ChunkTier(1, "BlackForest", "Black Forest", "RoundLog", "CopperOre",
+                "defeated_eikthyr"),
+            new ChunkTier(1, "BlackForest", "Black Forest",
                 new[] { "RoundLog", "CopperOre", "TinOre", "GreydwarfEye", "TrollHide", "Blueberries", "PineCone", "AncientSeed", "BjornPaw" },
-                "defeated_eikthyr", Cost("Stone", 30), Cost("RoundLog", 10)),
-            new ChunkTier(2, "Swamp", "Swamp", "IronScrap", "ElderBark",
+                "defeated_eikthyr"),
+            new ChunkTier(2, "Swamp", "Swamp",
                 new[] { "IronScrap", "ElderBark", "Guck", "Bloodbag", "Ooze", "WitheredBone", "Chain", "Root", "TurnipSeeds", "WrithanRoots" },
-                "defeated_gdking", Cost("Stone", 30), Cost("ElderBark", 10)),
-            new ChunkTier(3, "Mountain", "Mountain", "SilverOre", "Obsidian",
+                "defeated_gdking"),
+            new ChunkTier(3, "Mountain", "Mountain",
                 new[] { "SilverOre", "Obsidian", "WolfPelt", "WolfFang", "FreezeGland", "Crystal", "OnionSeeds", "WolfHairBundle" },
-                "defeated_bonemass", Cost("Stone", 30), Cost("Obsidian", 10)),
-            new ChunkTier(4, "Plains", "Plains", "BlackMetalScrap", "Flax",
+                "defeated_bonemass"),
+            new ChunkTier(4, "Plains", "Plains",
                 new[] { "BlackMetalScrap", "Flax", "Barley", "LoxPelt", "Needle", "Cloudberry", "Tar", "UndeadBjornRibcage" },
-                "defeated_dragon", Cost("Stone", 30), Cost("Tar", 10)),
-            new ChunkTier(5, "Mistlands", "Mistlands", "YggdrasilWood", "BlackMarble",
+                "defeated_dragon"),
+            new ChunkTier(5, "Mistlands", "Mistlands",
                 new[] { "YggdrasilWood", "BlackMarble", "Softtissue", "Carapace", "Sap", "MushroomMagecap", "MushroomJotunPuffs", "Bilebag", "ScaleHide" },
-                "defeated_goblinking", Cost("BlackMarble", 20), Cost("YggdrasilWood", 10)),
-            new ChunkTier(6, "Ashlands", "Ashlands", "Blackwood", "Grausten",
+                "defeated_goblinking"),
+            new ChunkTier(6, "Ashlands", "Ashlands",
                 new[] { "Blackwood", "Grausten", "FlametalOreNew", "CharredBone", "AskHide", "MorgenSinew", "SulfurStone", "ProustitePowder", "Vineberry", "Fiddleheadfern" },
-                "defeated_queen", Cost("Grausten", 20), Cost("Blackwood", 10)),
-            new ChunkTier(7, "DeepNorth", "Deep North", "Frostwood", "GoldOre",
+                "defeated_queen"),
+            new ChunkTier(7, "DeepNorth", "Deep North",
                 new[] { "Frostwood", "GoldOre", "Ice", "MooseHide", "SealHide", "NornThread", "Lingonberry", "KaleSeeds", "FrostCore" },
-                "defeated_fader", Cost("Grausten", 30), Cost("FlametalNew", 10)),
+                "defeated_fader"),
         };
+
+        private static readonly Dictionary<string, int> s_itemLevel = new Dictionary<string, int>();
 
         private static KeyValuePair<string, int> Cost(string item, int amount) => new KeyValuePair<string, int>(item, amount);
 
@@ -82,35 +114,40 @@ namespace VerdantsAscent.Terrain.Zones
             return null;
         }
 
-        // Items this tier's generator accepts: its own list for the 50 + 50 recipe (every tier's list for Meadows),
-        // plus the previous tier's basic pair for the 100 + 100 recipe.
-        internal static IEnumerable<string> AcceptedInputs(ChunkTier tier)
+        // A saved recipe id that no longer exists falls back to the plain recipe, as a machine with none does.
+        internal static ChunkTier ByRecipeId(string id)
         {
-            var seen = new HashSet<string>();
-            foreach (var list in PairLists(tier))
-                foreach (var item in list)
-                    if (seen.Add(item)) yield return item;
-            var previous = ByLevel(tier.Level - 1);
-            if (previous == null) yield break;
-            if (seen.Add(previous.BasicA)) yield return previous.BasicA;
-            if (seen.Add(previous.BasicB)) yield return previous.BasicB;
+            if (!string.IsNullOrEmpty(id))
+                foreach (var tier in All) if (tier.Id == id) return tier;
+            return Starter;
         }
 
-        internal static IEnumerable<string[]> PairLists(ChunkTier tier)
+        // Everything a recipe burns: every biome's list for the plain recipe; the recipe's own list and every later
+        // biome's for a biome recipe.
+        internal static IEnumerable<string> Burns(ChunkTier tier)
         {
-            if (tier.Level != Starter.Level) { yield return tier.Inputs; yield break; }
-            foreach (var any in All) yield return any.Inputs;
+            foreach (var list in All)
+                if (list.Inputs != null && (tier.RestoresOnly || list.Level >= tier.Level))
+                    foreach (var item in list.Inputs) yield return item;
         }
 
-        internal static ChunkTier Starter => All[0];
-
-        internal static bool TryByMachineName(string pieceName, out ChunkTier tier)
+        internal static bool Burns(ChunkTier tier, string item)
         {
-            foreach (var candidate in All)
-                if (candidate.MachineName == pieceName) { tier = candidate; return true; }
-            tier = null;
-            return false;
+            int level = ItemLevel(item);
+            return level >= 0 && (tier.RestoresOnly || level >= tier.Level);
         }
+
+        // The biome tier whose list holds the item, or -1.
+        internal static int ItemLevel(string item)
+        {
+            if (s_itemLevel.Count == 0)
+                foreach (var tier in All)
+                    if (tier.Inputs != null)
+                        foreach (var input in tier.Inputs) s_itemLevel[input] = tier.Level;
+            return item != null && s_itemLevel.TryGetValue(item, out int level) ? level : -1;
+        }
+
+        internal static ChunkTier Starter => ByLevel(PlainLevel);
 
         internal static int BiomeTier(Heightmap.Biome biome)
         {

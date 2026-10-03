@@ -17,6 +17,12 @@ namespace VerdantsAscent
 
         public static void LogVerbose(string message) => Log.Verbose(message);
 
+        // 0.2.695 (Fire 10-01: "put them as debug logs and set our configs to see them"): per-event diagnostics, shown at
+        // Core's [Logging] Log Level = Debug (FiresLog.Debug, Core 0.2.279+); the rig runs at Debug.
+        public static bool DebugEnabled => FiresLogLevel.DebugOn;
+
+        public static void LogDebug(string message) => Log.Debug(message);
+
         public static void LogWarning(string message) => Log.Warning(message);
 
         public static void LogError(string message) => Log.Error(message);

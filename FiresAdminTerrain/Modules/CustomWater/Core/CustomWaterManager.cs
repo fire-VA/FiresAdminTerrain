@@ -244,8 +244,8 @@ namespace VerdantsAscent.Water.Core
         {
             var disk = new WaterDisk(position, radius, maxDepth, liquidType);
 
-            // Register with combiner system
-            WaterMeshCombiner.GetOrCreateCombinerFor(disk);
+            // Register with combiner system, through the server so it persists (0.2.681, see Place)
+            Place(disk);
 
             FiresLogger.LogVerbose($"[CustomWaterManager] Created water disk at {position}, radius={radius}");
             return disk;
@@ -277,9 +277,25 @@ namespace VerdantsAscent.Water.Core
         public static WaterDisk CreateDiskOfType(Vector3 position, float radius, float maxDepth, CustomLiquidType liquid)
         {
             var disk = new WaterDisk(position, radius, maxDepth, liquid);
-            WaterMeshCombiner.GetOrCreateCombinerFor(disk);
+            Place(disk);
             FiresLogger.LogVerbose($"[CustomWaterManager] Created {liquid} disk at {position}, radius={radius}");
             return disk;
+        }
+
+        // 0.2.681 ([lead] HR3, 10-01: the H8 va_pool pond was gone after a reload, its bed still carved). Only the server
+        // persists water (WaterMeshCombiner.PerformDebouncedSave / SaveToAnchor return on a client), and these factories
+        // built the combiner locally only, so a disk placed by a client of a dedicated server was never sent to the server:
+        // not saved (the dedi's WaterCache\HomesteadTest_water.bin was an empty 30-byte header) and never seen by other
+        // players. They now go through WaterOperationRPC like WaterPlacementTool: applied locally, sent to the server, which
+        // saves it to its anchor + cache and broadcasts it. Without a running world the old local-only path stays.
+        private static void Place(WaterDisk disk)
+        {
+            if (ZNet.instance == null || ZRoutedRpc.instance == null)
+            {
+                WaterMeshCombiner.GetOrCreateCombinerFor(disk);
+                return;
+            }
+            WaterOperationRPC.RequestCreateWaterWithCustomType(disk.Position, disk, disk.CustomLiquidType);
         }
 
         #endregion

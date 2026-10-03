@@ -91,17 +91,23 @@ namespace VerdantsAscent.Terrain.Zones
             player.Message(MessageHud.MessageType.Center, message);
         }
 
-        [HarmonyPatch(typeof(Player), "UpdatePlacementGhost")]
-        private static class RedGhostOverClosedZone
+        // From FAT's one Player.UpdatePlacementGhost hook (FatVanillaHooks).
+        internal static void RedGhostOverClosedZone(Player player)
         {
-            private static void Postfix(Player __instance)
-            {
-                if (!ZoneModeGate.Active || __instance != Player.m_localPlayer) return;
-                var ghost = PlacementGhostRef(__instance);
-                if (ghost == null || !ghost.activeSelf || !GhostRefused(ghost, out _)) return;
-                PlacementStatusRef(__instance) = Player.PlacementStatus.NoBuildZone;
-                SetPlacementGhostValid(__instance, false);
-            }
+            if (!ZoneModeGate.Active || player != Player.m_localPlayer) return;
+            var ghost = PlacementGhostRef(player);
+            if (ghost == null || !ghost.activeSelf || !GhostRefused(ghost, out _)) return;
+            RefuseGhost(player, Player.PlacementStatus.NoBuildZone);
+        }
+
+        internal static GameObject PlacementGhost(Player player) => PlacementGhostRef(player);
+
+        internal static Player.PlacementStatus PlacementStatus(Player player) => PlacementStatusRef(player);
+
+        internal static void RefuseGhost(Player player, Player.PlacementStatus status)
+        {
+            PlacementStatusRef(player) = status;
+            SetPlacementGhostValid(player, false);
         }
 
         // Called from FAT's one Player.TryPlacePiece hook (VoxelToolPieces).
@@ -132,19 +138,16 @@ namespace VerdantsAscent.Terrain.Zones
             return false;
         }
 
-        [HarmonyPatch(typeof(Player), nameof(Player.TeleportTo))]
-        private static class RefuseTeleportIntoClosedZone
+        // The prefix of FAT's one Player.TeleportTo hook (FatVanillaHooks, 0.2.697): false refuses the teleport.
+        internal static bool AllowTeleport(Player __instance, Vector3 pos, ref bool __result)
         {
-            private static bool Prefix(Player __instance, Vector3 pos, ref bool __result)
-            {
-                if (!ZoneModeGate.Active || !IsClosedAt(pos)) return true;
-                TeleportsRefused++;
-                FiresLogger.LogInfo($"[FiresZones] refused a teleport to ({pos.x:0},{pos.z:0}) — zone "
-                    + $"({ZoneSystem.GetZone(pos).x},{ZoneSystem.GetZone(pos).y}) is closed.");
-                if (__instance == Player.m_localPlayer) TellLocalPlayer(TeleportMessage);
-                __result = false;
-                return false;
-            }
+            if (!ZoneModeGate.Active || !IsClosedAt(pos)) return true;
+            TeleportsRefused++;
+            FiresLogger.LogInfo($"[FiresZones] refused a teleport to ({pos.x:0},{pos.z:0}) — zone "
+                + $"({ZoneSystem.GetZone(pos).x},{ZoneSystem.GetZone(pos).y}) is closed.");
+            if (__instance == Player.m_localPlayer) TellLocalPlayer(TeleportMessage);
+            __result = false;
+            return false;
         }
 
         [HarmonyPatch(typeof(Game), "FindSpawnPoint")]

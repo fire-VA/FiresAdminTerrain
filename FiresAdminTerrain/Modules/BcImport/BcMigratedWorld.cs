@@ -11,19 +11,42 @@ namespace VerdantsAscent.Terrain.BcImport
     // Spec: Docs/BETTERCONTINENTS_IMPORT.md
     internal static class BcMigratedWorld
     {
+        // What the last world load found and how long it took, for worldgen_test (FatWorldgenTest).
+        internal sealed class LoadFacts
+        {
+            internal string Source = "none";
+            internal int FileFormat;
+            internal bool RestoredInBands;
+            internal int BandedMaps;
+            internal int PngMaps;
+            internal bool Ready;
+            internal long ReadMs;
+            internal long DecodeMs;
+        }
+
         private static string _worldName;
         private static BcWorldGen _generator;
         private static bool _checked;
+        private static BcSaveLocation? _ownData;
+        private static LoadFacts _lastLoad = new LoadFacts();
+
+        internal static LoadFacts LastLoad => _lastLoad;
 
         public static bool Active => _generator != null;
         public static BcWorldGen Generator => _generator;
         public static string WorldName => _worldName;
+
+        /// <summary>Where this server's own migrated data lives, for BcJoinSync to hand to joining clients; null when
+        /// this world is not a migrated BetterContinents world or this machine is a client.</summary>
+        public static BcSaveLocation? ServerDataLocation => _generator != null ? _ownData : null;
 
         public static void Reset()
         {
             _worldName = null;
             _generator = null;
             _checked = false;
+            _ownData = null;
+            _lastLoad = new LoadFacts();
         }
 
         /// <summary>Runs from FAT's one WorldGenerator.Initialize hook. Menu terrain has no world file, and a
@@ -49,13 +72,18 @@ namespace VerdantsAscent.Terrain.BcImport
             {
                 // Loading a world NEVER converts it. A world is only migrated by an explicit Convert, which clones
                 // it first (BcConvert), so an original can never be changed by opening it.
-                BcWorldSettings settings = LoadOwnCopy(worldName);
+                var clock = Stopwatch.StartNew();
+                bool joinedClient = ZNet.instance != null && !ZNet.instance.IsServer();
+                BcWorldSettings settings = joinedClient ? SettingsFromServer(worldName) : LoadOwnCopy(worldName);
                 if (settings == null)
                 {
-                    WarnIfUnconverted(worldName);
+                    if (!joinedClient) WarnIfUnconverted(worldName);
                     return;
                 }
                 if (!settings.EnabledForThisWorld) return;
+                long readMs = clock.ElapsedMilliseconds;
+                BcWorldData.CountImages(settings, out _lastLoad.BandedMaps, out _lastLoad.PngMaps);
+                _lastLoad.ReadMs = readMs;
 
                 if (!BcImageMaps.TryDecode(settings, out BcDecodedMaps maps, out string decodeFailure))
                 {
@@ -63,12 +91,18 @@ namespace VerdantsAscent.Terrain.BcImport
                         + $"reproduced: {decodeFailure}");
                     return;
                 }
+                long decodeMs = clock.ElapsedMilliseconds - readMs;
+                _lastLoad.DecodeMs = decodeMs;
 
                 _generator = new BcWorldGen(settings, maps, world.m_seed);
+                _lastLoad.Ready = true;
+                long buildMs = clock.ElapsedMilliseconds - readMs - decodeMs;
                 BcMapReport.Log(worldName, settings, maps, _generator);
+                long reportMs = clock.ElapsedMilliseconds - readMs - decodeMs - buildMs;
                 FiresLogger.LogInfo($"[BcImport] '{worldName}' generates as a BetterContinents world: settings v{settings.Version}, "
                     + $"{BcWorldGen.VariantFor(settings)} base height, world {settings.WorldSize} + edge {settings.EdgeSize}, "
-                    + $"seed {world.m_seed}.");
+                    + $"seed {world.m_seed}. Ready in {clock.ElapsedMilliseconds} ms: read {readMs}, decode {decodeMs}, "
+                    + $"generator {buildMs}, map report {reportMs}.");
             }
             catch (Exception ex)
             {
@@ -78,10 +112,50 @@ namespace VerdantsAscent.Terrain.BcImport
             }
         }
 
+        /// <summary>A joined client builds the world the server builds: from the data the server announced at join
+        /// (BcJoinSync), vanilla when it said the world has none, and never from a local copy of a same-named world. Only
+        /// a server too old to announce anything leaves the client to its own copy.</summary>
+        private static BcWorldSettings SettingsFromServer(string worldName)
+        {
+            switch (BcJoinSync.Answer(out string cachedPath))
+            {
+                case BcJoinSync.ServerAnswer.NotBetterContinents:
+                    return null;
+                case BcJoinSync.ServerAnswer.Data:
+                    var received = new BcSaveLocation
+                    {
+                        Path = cachedPath, Source = FileHelpers.FileSource.Local, Kind = BcSaveKind.ReceivedFromServer,
+                    };
+                    if (BcWorldData.TryRead(received, out BcWorldSettings settings, out _lastLoad.FileFormat, out string failure))
+                    {
+                        _lastLoad.Source = "the server's data (join sync)";
+                        return settings;
+                    }
+                    FiresLogger.LogError($"[BcImport] '{worldName}': the server's BetterContinents data arrived but could not be read "
+                        + $"({failure}), so this game draws vanilla terrain that will not match the server's.");
+                    return null;
+                case BcJoinSync.ServerAnswer.Failed:
+                    FiresLogger.LogError($"[BcImport] '{worldName}': the server's BetterContinents data did not arrive intact, so this "
+                        + "game draws vanilla terrain that will not match the server's. Rejoin to fetch it again.");
+                    return null;
+                default:
+                    FiresLogger.LogWarning($"[BcImport] '{worldName}': the server announced no BetterContinents data (a FAT without "
+                        + "join sync?), so this game reads its own copy if it has one.");
+                    return LoadOwnCopy(worldName);
+            }
+        }
+
         private static BcWorldSettings LoadOwnCopy(string worldName)
         {
             if (!BcWorldData.Exists(worldName, out BcSaveLocation own)) return null;
-            if (BcWorldData.TryRead(own, out BcWorldSettings settings, out string failure)) return settings;
+            _ownData = own;
+            if (BcWorldData.TryRead(own, out BcWorldSettings settings, out _lastLoad.FileFormat, out string failure))
+            {
+                _lastLoad.Source = $"its own file ({own.Kind})";
+                _lastLoad.RestoredInBands = BcWorldData.StoreInBands(worldName, own, settings);
+                return settings;
+            }
+            _ownData = null;
 
             FiresLogger.LogError($"[BcImport] '{worldName}': FAT's own migrated data is unreadable and is being ignored "
                 + $"rather than guessed at: {failure}");
@@ -99,10 +173,14 @@ namespace VerdantsAscent.Terrain.BcImport
                 + "never touches this original.");
         }
 
+        // Counted without a lock: an estimate for PregenerationTiming's line, which only reads it around main-thread passes.
+        internal static int BaseHeightSamples;
+
         public static bool TryGetBaseHeight(float wx, float wy, float offset0, float offset1, float minMountainDistance, out float height)
         {
             height = 0f;
             if (_generator == null) return false;
+            BaseHeightSamples++;
             height = _generator.GetBaseHeight(wx, wy, offset0, offset1, minMountainDistance);
             return true;
         }

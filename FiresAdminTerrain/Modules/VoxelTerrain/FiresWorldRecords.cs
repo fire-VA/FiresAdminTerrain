@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using VerdantsAscent.Terrain.Zones;
 
@@ -34,7 +35,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 ReportCleared(Path.GetFileName(path), worldName);
             }
             string park = ZoneModePark.FolderFor(worldName);
-            foreach (string folder in new[] { park, park + ".rejected", park + ".staging" })
+            var leftovers = new List<string> { park };
+            if (Directory.Exists(Folder)) leftovers.AddRange(Directory.GetDirectories(Folder, Path.GetFileName(park) + ".*"));
+            foreach (string folder in leftovers)
             {
                 if (!Directory.Exists(folder)) continue;
                 Directory.Delete(folder, true);

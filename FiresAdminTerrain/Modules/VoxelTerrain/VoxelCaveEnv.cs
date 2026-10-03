@@ -99,8 +99,13 @@ namespace VerdantsAscent.Terrain.Voxel
         private void OnDestroy()
         {
             ApplyCameraClip(false);
-            if (_forcedByUs && EnvMan.instance != null)
+            // 0.2.701 ([ghost] for [worldgen], the lead 10-02): at quit the root goes with the plugin while the scene's EnvMan and its
+            // lights are being torn down, and SetForceEnvironment runs EnvMan.FixedUpdate -> SetEnv on them ("NullReferenceException
+            // at EnvMan.SetEnv", every quit with the cave env on); the env goes with the scene then. A plugin reload mid-game still
+            // releases it.
+            if (_forcedByUs && EnvMan.instance != null && !FiresAdminTerrain.ApplicationQuitting)
                 EnvMan.instance.SetForceEnvironment(string.Empty);
+            _forcedByUs = false;
         }
 
         public static void EnsureAttached()

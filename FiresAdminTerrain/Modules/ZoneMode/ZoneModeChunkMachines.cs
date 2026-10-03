@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using FiresCore.Pieces;
 using HarmonyLib;
 using UnityEngine;
 using VerdantsAscent.Modules.Utilities;
@@ -8,16 +7,12 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Chunk generators: prefabs baked in the "fireszones" bundle (ZoneModePrefabs), wired per tier here and listed on
-    // the hammer. A generator burns no fuel: it takes any item of its recipes, counts each processed item in its ZDO,
-    // and turns out a seed whenever the counts complete a recipe (ZoneModeChunkTiers). The world's starter generator
-    // (Meadows) is placed by the server beside the StartTemple once that zone's ground is built, on natural ground
-    // (ZoneModeStartGround: never a path, a field, a paved road or among builds); it cannot be damaged, worn or removed,
-    // and the server puts it back within a minute if it is ever missing.
+    // The world's starter Chunk Generator (the machine itself is ZoneModeChunkGenerator). The server places it beside
+    // the StartTemple once that zone's ground is built, on natural ground (ZoneModeStartGround: never a path, a field, a
+    // paved road or among builds), or on a converted map where the player stands (Tools\FAT_START_ITEMS.md). It cannot
+    // be damaged, worn or removed, and the server puts it back within a minute if it is ever missing.
     internal static class ZoneModeChunkMachines
     {
-        private const float SecondsPerUnit = 2f;
-        private const int QueueSize = 100;
         private const float StarterCheckSeconds = 10f;
         private const float StarterRecheckSeconds = 60f;
         private const int MaxStarterReplacements = 2;
@@ -33,16 +28,9 @@ namespace VerdantsAscent.Terrain.Zones
         private const int StarterSurveyZones = 2;
 
         private static readonly int StarterHash = "fires_chunk_starter".GetStableHashCode();
-        private static readonly int CountsHash = "fires_chunk_counts".GetStableHashCode();
 
         internal static readonly AccessTools.FieldRef<ZDOMan, List<ZDO>[]> ObjectsBySector =
             AccessTools.FieldRefAccess<ZDOMan, List<ZDO>[]>("m_objectsBySector");
-
-        private static readonly Dictionary<string, GameObject> s_machines = new Dictionary<string, GameObject>();
-        private static readonly Dictionary<int, ChunkTier> s_tierByMachine = new Dictionary<int, ChunkTier>();
-        private static readonly Dictionary<int, string[]> s_pairItems = new Dictionary<int, string[]>();
-        private static readonly HashSet<string> s_reportedMissing = new HashSet<string>();
-        private static int s_starterPrefabHash;
 
         private static bool s_starterSettled;
         private static float s_nextStarterCheck;
@@ -50,308 +38,6 @@ namespace VerdantsAscent.Terrain.Zones
         private static string s_starterRefusal;
 
         internal static string StarterStatus => s_starterSettled ? "starter stands" : "starter missing";
-
-        // ── Registration (called from FAT's existing ZNetScene.Awake / ObjectDB.Awake hooks) ─────────
-        internal static void OnZNetSceneAwake()
-        {
-            try
-            {
-                ZoneModePrefabs.RegisterInScene(ZNetScene.instance);
-                WireMachines();
-                RegisterInObjectDB(ObjectDB.instance);
-            }
-            catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] chunk generator registration (ZNetScene) threw: {ex.Message}"); }
-        }
-
-        internal static void OnObjectDBAwake(ObjectDB db)
-        {
-            if (HammerPieces.IsMainMenuObjectDB(db)) return;
-            try
-            {
-                WireMachines();
-                RegisterInObjectDB(db);
-            }
-            catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] chunk generator registration (ObjectDB) threw: {ex.Message}"); }
-        }
-
-        private static void WireMachines()
-        {
-            foreach (var tier in ZoneModeChunkTiers.All)
-            {
-                if (!ZoneModePrefabs.TryGet(tier.MachinePrefab, out var machine)) continue;
-                s_tierByMachine[tier.MachinePrefab.GetStableHashCode()] = tier;
-                if (tier.Level == ZoneModeChunkTiers.Starter.Level) s_starterPrefabHash = tier.MachinePrefab.GetStableHashCode();
-                if (WireMachine(machine, tier))
-                {
-                    ZoneModeRavenHints.RetargetGuidePoint(machine);
-                    s_machines[tier.MachinePrefab] = machine;
-                }
-                else s_machines.Remove(tier.MachinePrefab);
-            }
-        }
-
-        // Everything a tier decides about its generator: what it takes in, how fast and how much it holds, what it costs
-        // to build and what its description says. A tier whose seed or build cost this game lacks stays off the hammer;
-        // inputs this game lacks are only left out of the recipe.
-        private static bool WireMachine(GameObject machine, ChunkTier tier)
-        {
-            if (!ZoneModePrefabs.TryGet(tier.SpawnerPrefab, out var seedPrefab)) return false;
-            var seed = seedPrefab.GetComponent<ItemDrop>();
-            var conversion = new List<Smelter.ItemConversion>();
-            foreach (string name in ZoneModeChunkTiers.AcceptedInputs(tier))
-            {
-                var item = FindItem(name, tier);
-                if (item != null) conversion.Add(new Smelter.ItemConversion { m_from = item, m_to = seed });
-            }
-            var requirements = new List<Piece.Requirement>();
-            foreach (var cost in tier.Cost)
-            {
-                var item = FindItem(cost.Key, tier);
-                if (item == null) return false;
-                requirements.Add(new Piece.Requirement { m_resItem = item, m_amount = cost.Value, m_recover = true });
-            }
-            if (seed == null || conversion.Count < 2) return false;
-
-            var smelter = machine.GetComponent<Smelter>();
-            smelter.m_fuelItem = null;
-            smelter.m_maxFuel = 0;
-            smelter.m_fuelPerProduct = 0;
-            smelter.m_maxOre = QueueSize;
-            smelter.m_secPerProduct = SecondsPerUnit;
-            smelter.m_spawnStack = false;
-            smelter.m_conversion = conversion;
-            if (smelter.m_addWoodSwitch != null)
-            {
-                if (smelter.m_addWoodSwitch.gameObject != machine) smelter.m_addWoodSwitch.gameObject.SetActive(false);
-                smelter.m_addWoodSwitch = null;
-            }
-
-            var piece = machine.GetComponent<Piece>();
-            piece.m_description = MachineDescription(tier);
-            piece.m_resources = requirements.ToArray();
-            return true;
-        }
-
-        private static string MachineDescription(ChunkTier tier)
-        {
-            if (tier.Level == ZoneModeChunkTiers.Starter.Level)
-                return $"Feed it any two different materials from any biome, {ZoneModeChunkTiers.PairAmount} of each, and it "
-                    + $"turns out a {tier.SpawnerName}. It burns no fuel.";
-            var names = new List<string>();
-            foreach (string item in tier.Inputs) names.Add(ItemName(item));
-            string text = $"Feed it any two different {tier.Title} materials, {ZoneModeChunkTiers.PairAmount} of each";
-            var previous = ZoneModeChunkTiers.ByLevel(tier.Level - 1);
-            if (previous != null)
-                text += $", or {ZoneModeChunkTiers.DoubleAmount} each of {ItemName(previous.BasicA)} and {ItemName(previous.BasicB)}";
-            return text + $", and it turns out a {tier.SpawnerName}. It burns no fuel. {tier.Title} materials: {string.Join(", ", names)}.";
-        }
-
-        private static string ItemName(string prefab)
-        {
-            var shared = ObjectDB.instance?.GetItemPrefab(prefab)?.GetComponent<ItemDrop>()?.m_itemData?.m_shared;
-            return shared != null ? shared.m_name : prefab;
-        }
-
-        private static void RegisterInObjectDB(ObjectDB db)
-        {
-            if (db == null || db.m_items == null || db.m_items.Count == 0) return;
-            ZoneModePrefabs.RegisterItems(db);
-            ZoneModeSeeds.Register(db);
-            var table = HammerPieces.HammerTable();
-            if (table == null) return;
-            foreach (var tier in ZoneModeChunkTiers.All)
-                if (s_machines.TryGetValue(tier.MachinePrefab, out var machine))
-                    HammerPieces.AddToTable(table, machine);
-        }
-
-        private static GameObject FindPrefab(string name)
-        {
-            var scene = ZNetScene.instance;
-            var fromScene = scene != null ? scene.GetPrefab(name) : null;
-            if (fromScene != null) return fromScene;
-            var db = ObjectDB.instance;
-            if (db == null) return null;
-            var item = db.GetItemPrefab(name);
-            if (item != null) return item;
-            var table = db.GetItemPrefab("Hammer")?.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_buildPieces;
-            if (table != null)
-                foreach (var piece in table.m_pieces)
-                    if (piece != null && piece.name == name) return piece;
-            return null;
-        }
-
-        private static ItemDrop FindItem(string name, ChunkTier tier)
-        {
-            var drop = FindPrefab(name)?.GetComponent<ItemDrop>();
-            if (drop == null && ObjectDB.instance != null && ObjectDB.instance.m_items.Count > 0 && s_reportedMissing.Add(tier.Id + ":" + name))
-                FiresLogger.LogWarning($"[FiresZones] {tier.MachineName}: item '{name}' does not exist in this game — that tier is left out.");
-            return drop;
-        }
-
-        // ── Recipes: every processed item is counted; completed recipes turn into seeds ─────────────
-        [HarmonyPatch(typeof(Smelter), "Spawn")]
-        private static class Smelter_Spawn_ChunkMachine
-        {
-            private static bool Prefix(Smelter __instance, string ore, int stack)
-            {
-                var zdo = ZdoOf(__instance);
-                if (zdo == null || !s_tierByMachine.TryGetValue(zdo.GetPrefab(), out var tier)) return true;
-                var counts = ReadCounts(zdo);
-                counts.TryGetValue(ore, out int had);
-                counts[ore] = had + stack;
-                int made = 0;
-                while (TryCompleteRecipe(tier, counts)) made++;
-                WriteCounts(zdo, counts);
-                if (made > 0) SpawnSeeds(__instance, zdo, tier, made);
-                return false;
-            }
-        }
-
-        // One seed from any two different items of the tier's pair list at PairAmount each (the two with the most
-        // counted), otherwise from DoubleAmount each of the previous tier's basic pair.
-        private static bool TryCompleteRecipe(ChunkTier tier, SortedDictionary<string, int> counts)
-        {
-            string first = null, second = null;
-            int firstCount = 0, secondCount = 0;
-            foreach (string item in PairItems(tier))
-            {
-                counts.TryGetValue(item, out int count);
-                if (count < ZoneModeChunkTiers.PairAmount) continue;
-                if (count > firstCount)
-                {
-                    second = first;
-                    secondCount = firstCount;
-                    first = item;
-                    firstCount = count;
-                }
-                else if (count > secondCount)
-                {
-                    second = item;
-                    secondCount = count;
-                }
-            }
-            if (first != null && second != null)
-            {
-                counts[first] -= ZoneModeChunkTiers.PairAmount;
-                counts[second] -= ZoneModeChunkTiers.PairAmount;
-                return true;
-            }
-            var previous = ZoneModeChunkTiers.ByLevel(tier.Level - 1);
-            if (previous == null) return false;
-            counts.TryGetValue(previous.BasicA, out int a);
-            counts.TryGetValue(previous.BasicB, out int b);
-            if (a < ZoneModeChunkTiers.DoubleAmount || b < ZoneModeChunkTiers.DoubleAmount) return false;
-            counts[previous.BasicA] = a - ZoneModeChunkTiers.DoubleAmount;
-            counts[previous.BasicB] = b - ZoneModeChunkTiers.DoubleAmount;
-            return true;
-        }
-
-        private static string[] PairItems(ChunkTier tier)
-        {
-            if (s_pairItems.TryGetValue(tier.Level, out var items)) return items;
-            var list = new List<string>();
-            foreach (var pairList in ZoneModeChunkTiers.PairLists(tier))
-                foreach (string item in pairList)
-                    if (!list.Contains(item)) list.Add(item);
-            return s_pairItems[tier.Level] = list.ToArray();
-        }
-
-        private static SortedDictionary<string, int> ReadCounts(ZDO zdo)
-        {
-            var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
-            foreach (string entry in zdo.GetString(CountsHash, "").Split(';'))
-            {
-                int colon = entry.LastIndexOf(':');
-                if (colon <= 0 || !int.TryParse(entry.Substring(colon + 1), out int count) || count <= 0) continue;
-                counts[entry.Substring(0, colon)] = count;
-            }
-            return counts;
-        }
-
-        private static void WriteCounts(ZDO zdo, SortedDictionary<string, int> counts)
-        {
-            var parts = new List<string>();
-            foreach (var pair in counts)
-                if (pair.Value > 0) parts.Add(pair.Key + ":" + pair.Value);
-            zdo.Set(CountsHash, string.Join(";", parts));
-        }
-
-        // As vanilla turns out a product: the produce effect, then the seeds at the output point.
-        private static void SpawnSeeds(Smelter smelter, ZDO zdo, ChunkTier tier, int count)
-        {
-            if (!ZoneModePrefabs.TryGet(tier.SpawnerPrefab, out var prefab)) return;
-            smelter.m_produceEffects.Create(smelter.transform.position, smelter.transform.rotation);
-            var at = smelter.m_outputPoint != null ? smelter.m_outputPoint : smelter.transform;
-            var drop = UnityEngine.Object.Instantiate(prefab, at.position, at.rotation).GetComponent<ItemDrop>();
-            drop.m_itemData.m_stack = count;
-            ItemDrop.OnCreateNew(drop, (zdo.GetBool(ZDOVars.s_cheatedQueued) || zdo.GetBool(ZDOVars.s_cheated)) & !PlayerProfile.s_bypassCheatChecks);
-        }
-
-        [HarmonyPatch(typeof(Smelter), "OnHoverAddOre")]
-        private static class Smelter_OnHoverAddOre_ChunkMachine
-        {
-            private static void Postfix(Smelter __instance, ref string __result)
-            {
-                var zdo = ZdoOf(__instance);
-                if (zdo == null || !s_tierByMachine.TryGetValue(zdo.GetPrefab(), out var tier)) return;
-                ZoneModeRavenHints.ShowGenerator(Player.m_localPlayer);
-                var parts = new List<string>();
-                var previous = ZoneModeChunkTiers.ByLevel(tier.Level - 1);
-                foreach (var pair in ReadCounts(zdo))
-                {
-                    bool doubled = previous != null && Array.IndexOf(PairItems(tier), pair.Key) < 0
-                        && (pair.Key == previous.BasicA || pair.Key == previous.BasicB);
-                    int need = doubled ? ZoneModeChunkTiers.DoubleAmount : ZoneModeChunkTiers.PairAmount;
-                    parts.Add($"{Localization.instance.Localize(ItemName(pair.Key))} {pair.Value}/{need}");
-                }
-                if (parts.Count > 0) __result += "\nCounted toward the next seed: " + string.Join(", ", parts);
-            }
-        }
-
-        // A generator taken down hands back every counted item that has not become a seed yet.
-        [HarmonyPatch(typeof(Smelter), "OnDestroyed")]
-        private static class Smelter_OnDestroyed_ChunkMachine
-        {
-            private static void Postfix(Smelter __instance)
-            {
-                var nview = __instance.GetComponent<ZNetView>();
-                var zdo = ZdoOf(__instance);
-                if (zdo == null || !nview.IsOwner() || !s_tierByMachine.ContainsKey(zdo.GetPrefab())) return;
-                foreach (var pair in ReadCounts(zdo)) DropItems(pair.Key, pair.Value, __instance.transform.position);
-                zdo.Set(CountsHash, "");
-            }
-        }
-
-        private static void DropItems(string prefabName, int amount, Vector3 at)
-        {
-            var prefab = ObjectDB.instance?.GetItemPrefab(prefabName);
-            var shared = prefab?.GetComponent<ItemDrop>()?.m_itemData?.m_shared;
-            if (shared == null) return;
-            int max = Mathf.Max(1, shared.m_maxStackSize);
-            while (amount > 0)
-            {
-                int stack = Mathf.Min(amount, max);
-                amount -= stack;
-                var drop = UnityEngine.Object.Instantiate(prefab, at + Vector3.up + UnityEngine.Random.insideUnitSphere * 0.3f,
-                    Quaternion.Euler(0f, UnityEngine.Random.Range(0, 360), 0f)).GetComponent<ItemDrop>();
-                drop.m_itemData.m_stack = stack;
-                ItemDrop.OnCreateNew(drop);
-            }
-        }
-
-        // Machines exist only in zone-mode worlds; each later tier is learned once the previous biome's boss
-        // has fallen in this world (its global key), so the recipe shows up the way vanilla recipes do.
-        [HarmonyPatch(typeof(Player), nameof(Player.HaveRequirements), new[] { typeof(Piece), typeof(Player.RequirementMode) })]
-        private static class Player_HaveRequirements_ChunkTiers
-        {
-            private static void Postfix(Piece piece, ref bool __result)
-            {
-                if (!__result || piece == null || !ZoneModeChunkTiers.TryByMachineName(piece.m_name, out var tier)) return;
-                if (!ZoneModeRegistry.ModeActive) { __result = false; return; }
-                if (tier.BossKey != null && (ZoneSystem.instance == null || !ZoneSystem.instance.GetGlobalKey(tier.BossKey)))
-                    __result = false;
-            }
-        }
 
         // ── The starter machine cannot be worn, damaged or removed ──────────────────────────────────
         private static ZDO ZdoOf(Component component)
@@ -363,14 +49,16 @@ namespace VerdantsAscent.Terrain.Zones
         internal static bool IsStarter(Component component) => IsStarter(ZdoOf(component));
 
         internal static bool IsStarter(ZDO zdo)
-            => zdo != null && s_starterPrefabHash != 0 && zdo.GetPrefab() == s_starterPrefabHash && zdo.GetBool(StarterHash, false);
+            => zdo != null && ZoneModeChunkGenerator.PrefabHash != 0 && zdo.GetPrefab() == ZoneModeChunkGenerator.PrefabHash
+               && zdo.GetBool(StarterHash, false);
 
         // The pieces a chunk world cannot lose: the starter generator and the first Chunk Hammer's chest. They take no
         // wear, no damage, no removal and no destruction.
         internal static bool IsProtected(Component component) => IsProtected(ZdoOf(component));
 
         internal static bool IsProtected(ZDO zdo)
-            => zdo != null && (zdo.GetBool(ZoneModeHammerChest.HammerChestHash, false) || IsStarter(zdo));
+            => zdo != null && (zdo.GetBool(ZoneModeHammerChest.HammerChestHash, false)
+                               || zdo.GetBool(ZoneModeCultivatorChest.CultivatorChestHash, false) || IsStarter(zdo));
 
         [HarmonyPatch(typeof(WearNTear), "Awake")]
         private static class WearNTear_Awake_StarterMachine
@@ -410,7 +98,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (net == null || !net.IsServer() || ZDOMan.instance == null || ZoneSystem.instance == null) return;
             if (!ZoneModeRegistry.Seeded || !ZoneModeRegistry.WorldLoaded) return;
             var tier = ZoneModeChunkTiers.Starter;
-            if (!s_machines.TryGetValue(tier.MachinePrefab, out var prefab)) return;
+            if (!ZoneModeChunkGenerator.TryGetPrefab(out var prefab)) return;
 
             var starters = FindStarters(tier);
             if (starters.Count > 0)
@@ -434,15 +122,278 @@ namespace VerdantsAscent.Terrain.Zones
                 FiresLogger.LogWarning($"[FiresZones] the starter {tier.MachineName} is gone from the world; placing it again.");
             }
 
-            if (!TryChooseStarterSpot(out var position, out var rotation, out var zone)) return;
+            ZDO replaces = null;
+            string where = "beside the StartTemple on unpainted ground clear of builds";
+            Vector3 position;
+            Quaternion rotation;
+            Vector2s zone;
+            if (ZoneModePark.Converted)
+            {
+                if (!TryChooseConvertedSpot(out position, out rotation, out replaces, out where)) return;
+                zone = ZoneSystem.GetZone(position);
+            }
+            else if (!TryChooseStarterSpot(out position, out rotation, out zone)) return;
             if (!VoxelZoneStreamer.IsZoneGenerated(zone)) return;
+            if (replaces != null) RetireSmelter(replaces);
             var created = NetworkObjectHelper.CreateZdo(prefab, position, rotation);
             if (created == null) return;
             created.Set(StarterHash, true);
             s_starterSettled = true;
+            ZoneModeStartPins.Changed();
             FiresLogger.LogInfo($"[FiresZones] placed the indestructible starter {tier.MachineName} at "
-                + $"({position.x:0},{position.y:0},{position.z:0}) in zone ({zone.x},{zone.y}), beside the StartTemple on unpainted "
-                + "ground clear of builds.");
+                + $"({position.x:0},{position.y:0},{position.z:0}) in zone ({zone.x},{zone.y}), {where}.");
+        }
+
+        // ── Converted maps (Fire, 2026-09-27, Tools\FAT_START_ITEMS.md) ─────────────────────────────
+        // The start is the player's own town, so the starter goes where the player really stands: when two or more of
+        // the player's smelters stand within StartAreaReach zones of the start (Fire's popup 20:5x: "Search 1-2 zones
+        // out", parked zones included), the one nearest the spawn becomes the starter (the generator is a restyled
+        // smelter, so it fits the spot); beside a lone smelter otherwise; else on the nearest spot a player can stand at
+        // the spawn's height, build floors included, off the StartTemple itself. Only when none of those exists does the
+        // fresh-world rule apply. When the nearest smelter stands in a parked zone, that zone opens as part of the start
+        // and the choice waits for it to return with its pieces.
+        private const string SmelterQueueKey = "item";
+        private const int StartAreaReach = 2;
+        // Half the space the machine needs round its spot: nothing solid (a trunk, a rock, a wall) may stand in it.
+        private const float StarterSpace = 1.4f;
+        private const int SmeltersToSwap = 2;
+        private static readonly float[] SmelterSides = { 2.6f, 3.4f };
+        private static readonly float[] SmelterBearings = { 90f, -90f, 180f, 0f };
+        private const float DropSpread = 0.8f;
+        private const float DropLift = 0.5f;
+
+        private static bool TryChooseConvertedSpot(out Vector3 position, out Quaternion rotation, out ZDO replaces, out string where)
+        {
+            position = default;
+            rotation = Quaternion.identity;
+            replaces = null;
+            where = null;
+            if (!ZoneSystem.instance.FindClosestLocation("StartTemple", Vector3.zero, out var temple)) return false;
+            if (!ZoneModeStartSpawn.TryGet(temple.m_position, out var spawn))
+            {
+                NoteStarterRefusal("waiting for the first player to stand at the start of this converted map, to place the starter where they stand");
+                return false;
+            }
+            var smelters = StartAreaSmelters(temple.m_position, spawn);
+            var parked = ParkedSmelters(temple.m_position, spawn);
+            if (parked.Count > 0 && (smelters.Count == 0
+                || ZoneModeStartSpots.FlatDistanceSquared(parked[0].Position, spawn) < ZoneModeStartSpots.FlatDistanceSquared(smelters[0].GetPosition(), spawn)))
+            {
+                var zone = parked[0].Zone;
+                if (!ZoneModeRegistry.IsOpen(zone))
+                    ZoneModeOpening.Open(new[] { zone }, ZoneOpenReason.Start, 0L, $"the start: the player's {parked[0].Prefab} nearest the spawn stands there");
+                NoteStarterRefusal($"waiting for parked zone ({zone.x},{zone.y}) to return with the player's {parked[0].Prefab}, the smelter nearest the spawn");
+                return false;
+            }
+            int total = smelters.Count + parked.Count;
+            if (smelters.Count > 0 && total >= SmeltersToSwap)
+            {
+                replaces = smelters[0];
+                position = replaces.GetPosition();
+                rotation = replaces.GetRotation();
+                where = $"in place of the player's smelter nearest the spawn ({total - 1} other smelter(s) stay)";
+                return true;
+            }
+            if (smelters.Count == 1 && TryBesideSmelter(smelters[0], out position))
+            {
+                rotation = smelters[0].GetRotation();
+                where = $"beside the player's smelter near the spawn, {ZoneModeStartSpots.LastSupport}";
+                return true;
+            }
+            bool chestPlaced = ZoneModeHammerChest.TryGetSpot(out var chest);
+            if (ZoneModeStartSpots.TryRingSpot(spawn, ZoneModeStartSpots.SpawnMinRing, ZoneModeStartSpots.PastTemple(ZoneModeStartSpots.SpawnMaxRing),
+                    ZoneModeStartSpots.SpawnRingStep, out position, StarterSpace, chest, chestPlaced ? ZoneModeStartSpots.ObjectsApart : 0f))
+            {
+                var face = spawn - position;
+                face.y = 0f;
+                rotation = face.sqrMagnitude > 0.01f ? Quaternion.LookRotation(face.normalized) : Quaternion.identity;
+                where = $"{Mathf.Sqrt(ZoneModeStartSpots.FlatDistanceSquared(position, spawn)):0} m from the spawn, {ZoneModeStartSpots.LastSupport}"
+                    + (chestPlaced ? $", {Mathf.Sqrt(ZoneModeStartSpots.FlatDistanceSquared(position, chest)):0} m from the hammer chest" : "")
+                    + $" ({ZoneModeStartSpots.LastRefusals} nearer the spawn)";
+                return true;
+            }
+            string refusals = ZoneModeStartSpots.LastRefusals;
+            if (!TryChooseStarterSpot(out position, out rotation, out _)) return false;
+            where = $"on the natural ground nearest the StartTemple: nothing within {ZoneModeStartSpots.SpawnMaxRing:0} m of the spawn could hold it ({refusals})";
+            return true;
+        }
+
+        // One smelter or smelting station for the log, live or parked.
+        private struct Candidate
+        {
+            internal string Prefab;
+            internal Vector2s Zone;
+            internal Vector3 Position;
+            internal bool Parked;
+        }
+
+        // The player's smelters in the open zones within StartAreaReach of the start, at any height, nearest the spawn
+        // first (Fire, 2026-09-27: "scanning the entire spawned chunks"). A converted town's carry no creator, so any
+        // placed smelter piece counts (ZoneModeBuilds.IsPlaced). Any placed piece whose prefab is named for a smelter
+        // counts: vanilla's own, and a modded or decorative one (SanctuaryAshlands, 2026-09-27: the exact "smelter" search
+        // found neither of its two). The log names each, live or parked, and every other smelting station there (any
+        // piece whose prefab carries a Smelter: kilns, blast furnaces, refineries, windmills, spinning wheels, modded
+        // furnaces), which never becomes the starter.
+        private static List<ZDO> StartAreaSmelters(Vector3 temple, Vector3 spawn)
+        {
+            var start = ZoneSystem.GetZone(temple);
+            var near = new List<ZDO>();
+            var found = new List<ZDO>();
+            for (int dz = -StartAreaReach; dz <= StartAreaReach; dz++)
+                for (int dx = -StartAreaReach; dx <= StartAreaReach; dx++)
+                {
+                    var zone = new Vector2s(start.x + dx, start.y + dz);
+                    if (!ZoneModeRegistry.IsOpen(zone)) continue;
+                    found.Clear();
+                    ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(0, 0), found);
+                    foreach (var zdo in found)
+                    {
+                        if (zdo == null || !ZoneModeBuilds.IsPlaced(zdo) || IsStarter(zdo)) continue;
+                        if (IsSmelterPrefab(zdo.GetPrefab())) near.Add(zdo);
+                        else if (!s_smeltersLogged && IsSmeltingStation(zdo.GetPrefab())) s_stations.Add(Live(zdo));
+                    }
+                }
+            near.Sort((a, b) => ZoneModeStartSpots.FlatDistanceSquared(a.GetPosition(), spawn).CompareTo(ZoneModeStartSpots.FlatDistanceSquared(b.GetPosition(), spawn)));
+            if (!s_smeltersLogged) LogSmelters(near, ParkedSmelters(temple, spawn), start, spawn);
+            return near;
+        }
+
+        // The player's smelters in PARKED zones within StartAreaReach of the start, read once a session through the
+        // park's own reader (ZoneModePark.TryReadZone), nearest the spawn first. A zone that has returned since drops out.
+        private static List<Candidate> s_parkedSmelters;
+        private static readonly List<Candidate> s_stations = new List<Candidate>();
+
+        private static List<Candidate> ParkedSmelters(Vector3 temple, Vector3 spawn)
+        {
+            if (s_parkedSmelters == null)
+            {
+                s_parkedSmelters = new List<Candidate>();
+                var start = ZoneSystem.GetZone(temple);
+                for (int dz = -StartAreaReach; dz <= StartAreaReach; dz++)
+                    for (int dx = -StartAreaReach; dx <= StartAreaReach; dx++)
+                    {
+                        var zone = new Vector2s(start.x + dx, start.y + dz);
+                        if (!ZoneModePark.TryGetParked(zone, out _)) continue;
+                        ZoneModePark.TryReadZone(zone, (zdo, portal) =>
+                        {
+                            if (!ZoneModeBuilds.IsPlaced(zdo)) return;
+                            bool smelter = IsSmelterPrefab(zdo.GetPrefab());
+                            if (!smelter && !IsSmeltingStation(zdo.GetPrefab())) return;
+                            var candidate = new Candidate { Prefab = PrefabName(zdo), Zone = zone, Position = zdo.GetPosition(), Parked = true };
+                            if (smelter) s_parkedSmelters.Add(candidate);
+                            else s_stations.Add(candidate);
+                        });
+                    }
+                s_parkedSmelters.Sort((a, b) => ZoneModeStartSpots.FlatDistanceSquared(a.Position, spawn).CompareTo(ZoneModeStartSpots.FlatDistanceSquared(b.Position, spawn)));
+            }
+            return s_parkedSmelters.FindAll(candidate => ZoneModePark.TryGetParked(candidate.Zone, out _));
+        }
+
+        private static Candidate Live(ZDO zdo)
+            => new Candidate { Prefab = PrefabName(zdo), Zone = ZoneSystem.GetZone(zdo.GetPosition()), Position = zdo.GetPosition() };
+
+        private static readonly Dictionary<int, bool> s_stationByPrefab = new Dictionary<int, bool>();
+
+        private static bool IsSmeltingStation(int prefabHash)
+        {
+            if (s_stationByPrefab.TryGetValue(prefabHash, out bool station)) return station;
+            var prefab = ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(prefabHash) : null;
+            station = prefab != null && prefab.GetComponentInChildren<Smelter>(true) != null;
+            s_stationByPrefab[prefabHash] = station;
+            return station;
+        }
+
+        private const string SmelterWord = "smelter";
+        private static readonly Dictionary<int, bool> s_smelterByPrefab = new Dictionary<int, bool>();
+
+        private static bool IsSmelterPrefab(int prefabHash)
+        {
+            if (s_smelterByPrefab.TryGetValue(prefabHash, out bool smelter)) return smelter;
+            var prefab = ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(prefabHash) : null;
+            smelter = prefab != null && prefab.name.IndexOf(SmelterWord, StringComparison.OrdinalIgnoreCase) >= 0;
+            s_smelterByPrefab[prefabHash] = smelter;
+            return smelter;
+        }
+
+        private static string PrefabName(ZDO zdo)
+        {
+            var prefab = ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(zdo.GetPrefab()) : null;
+            return prefab != null ? prefab.name : zdo.GetPrefab().ToString();
+        }
+
+        private static bool s_smeltersLogged;
+
+        private static void LogSmelters(List<ZDO> live, List<Candidate> parked, Vector2s start, Vector3 spawn)
+        {
+            s_smeltersLogged = true;
+            var smelters = new List<Candidate>();
+            foreach (var zdo in live) smelters.Add(Live(zdo));
+            smelters.AddRange(parked);
+            int span = StartAreaReach * 2 + 1;
+            FiresLogger.LogInfo($"[FiresZones] smelters within {StartAreaReach} zone(s) of ({start.x},{start.y}) ({span}x{span}, open and parked): "
+                + $"{Listed(smelters, spawn)}. Other smelting stations there (never the starter): {Listed(s_stations, spawn)}.");
+        }
+
+        private static string Listed(List<Candidate> pieces, Vector3 spawn)
+        {
+            if (pieces.Count == 0) return "none";
+            var lines = new List<string>();
+            foreach (var piece in pieces)
+                lines.Add($"{piece.Prefab} in zone ({piece.Zone.x},{piece.Zone.y}) ({(piece.Parked ? "parked" : "live")}) at "
+                    + $"({piece.Position.x:0},{piece.Position.y:0},{piece.Position.z:0}), "
+                    + $"{Mathf.Sqrt(ZoneModeStartSpots.FlatDistanceSquared(piece.Position, spawn)):0} m from the spawn");
+            return $"{lines.Count}: " + string.Join("; ", lines);
+        }
+
+        private static bool TryBesideSmelter(ZDO smelter, out Vector3 at)
+        {
+            var origin = smelter.GetPosition();
+            var rotation = smelter.GetRotation();
+            foreach (float bearing in SmelterBearings)
+                foreach (float distance in SmelterSides)
+                    if (ZoneModeStartSpots.TryStandingSpot(origin + rotation * (Quaternion.Euler(0f, bearing, 0f) * Vector3.forward * distance),
+                            StarterSpace, out at))
+                        return true;
+            at = default;
+            return false;
+        }
+
+        // The smelter the starter replaces goes the way vanilla removes an object; its coal, its queued ore and its
+        // finished bars are left on the ground where it stood, as tearing it down would.
+        private static void RetireSmelter(ZDO smelter)
+        {
+            var at = smelter.GetPosition();
+            int dropped = 0;
+            var smelterPrefab = ZNetScene.instance.GetPrefab(smelter.GetPrefab());
+            var component = smelterPrefab != null ? smelterPrefab.GetComponent<Smelter>() : null;
+            if (component != null && component.m_fuelItem != null)
+                dropped += Drop(component.m_fuelItem.gameObject, Mathf.FloorToInt(smelter.GetFloat(ZDOVars.s_fuel)), at);
+            int queued = smelter.GetInt(ZDOVars.s_queued);
+            for (int i = 0; i < queued; i++) dropped += Drop(ObjectDB.instance.GetItemPrefab(smelter.GetString(SmelterQueueKey + i)), 1, at);
+            dropped += Drop(ObjectDB.instance.GetItemPrefab(smelter.GetString(ZDOVars.s_spawnOre)), smelter.GetInt(ZDOVars.s_spawnAmount), at);
+            smelter.SetOwner(ZDOMan.GetSessionID());
+            ZDOMan.instance.DestroyZDO(smelter);
+            FiresLogger.LogInfo($"[FiresZones] the player's smelter at ({at.x:0},{at.y:0},{at.z:0}) becomes the starter Chunk Generator; "
+                + $"{dropped} item(s) it held lie on the ground beside it.");
+        }
+
+        private static int Drop(GameObject item, int amount, Vector3 at)
+        {
+            var drop = item != null ? item.GetComponent<ItemDrop>() : null;
+            if (drop == null || amount <= 0) return 0;
+            int left = amount, placed = 0;
+            int stackSize = Mathf.Max(1, drop.m_itemData.m_shared.m_maxStackSize);
+            while (left > 0)
+            {
+                int stack = Mathf.Min(left, stackSize);
+                var offset = new Vector3(UnityEngine.Random.Range(-DropSpread, DropSpread), DropLift, UnityEngine.Random.Range(-DropSpread, DropSpread));
+                var zdo = NetworkObjectHelper.CreateZdo(item, at + offset, Quaternion.identity);
+                if (zdo == null) break;
+                zdo.Set(ZDOVars.s_stack, stack);
+                left -= stack;
+                placed += stack;
+            }
+            return placed;
         }
 
         internal static bool TryGetStarter(out Vector3 position, out Quaternion rotation)
@@ -567,6 +518,9 @@ namespace VerdantsAscent.Terrain.Zones
         {
             s_starterSettled = false;
             s_nextStarterCheck = 0f;
+            s_smeltersLogged = false;
+            s_parkedSmelters = null;
+            s_stations.Clear();
             s_starterReplacements = 0;
             s_starterRefusal = null;
         }

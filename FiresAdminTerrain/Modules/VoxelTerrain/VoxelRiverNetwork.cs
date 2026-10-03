@@ -501,9 +501,13 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             carvedY = groundY;
             surfaceY = float.MinValue;
-            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz);
+            // A lifted chunk (ZoneModeLift) carries its channels up with its ground: the bed and surface are its source's.
+            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz, out float lift);
             if (VoxelVanillaRivers.HandoffAt(wx, wz) >= 1f) return false;
-            return Query(wx, wz, groundY, out carvedY, out surfaceY) && carvedY < groundY;
+            bool carved = Query(wx, wz, groundY - lift, out carvedY, out surfaceY);
+            carvedY += lift;
+            if (surfaceY > float.MinValue) surfaceY += lift;
+            return carved && carvedY < groundY;
         }
 
         // Water surface only — for water placement and swim queries.

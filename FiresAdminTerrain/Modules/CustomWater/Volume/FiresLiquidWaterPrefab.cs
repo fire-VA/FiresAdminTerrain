@@ -626,14 +626,10 @@ namespace VerdantsAscent.Water.Core
                 return mat;
             }
 
-            // Fallback — clone the FiresWater ocean wrap with liquid-grid + stencil bypass
-            // (round-77/78 path). Only a STALE BUNDLE is worth a warning: FiresTossinShade is a
-            // client-only mod, so on a dedicated server the shader is absent by design and a
-            // warning there just sends log triage after a bundle that is fine.
-            if (FiresCore.Services.WaterShaderBridge.HasWrapper)
-                FiresLogger.LogWarning("[FiresLiquidWater] Custom/FiresLiquid missing even though FiresTossinShade is loaded — stale tossinshade bundle? Falling back to FiresWater wrap.");
-            else
-                FiresLogger.LogVerbose("[FiresLiquidWater] FiresTossinShade not loaded (expected on a dedicated server) — using the FiresWater wrap.");
+            // Fallback — clone the FiresWater ocean wrap with liquid-grid + stencil bypass (round-77/78 path). The
+            // broker already warned if Core's shader bundle lacks Custom/FiresLiquid; on a dedicated server there is no
+            // GPU and the shader is absent by design.
+            FiresLogger.LogVerbose("[FiresLiquidWater] Custom/FiresLiquid is not live here — using the FiresWater wrap.");
             if (oceanMat == null) return null;
             if (oceanMat.shader == null || !oceanMat.shader.name.Contains("FiresWater")) return null;
             var wrap = new Material(oceanMat) { name = "FiresWater_LiquidPour" };
@@ -752,74 +748,13 @@ namespace VerdantsAscent.Water.Core
             catch { }
         }
 
-        // Round-84 — resolve Custom/FiresLiquid. Shader.Find MISSES it: the
-        // shader ships in the tossinshade bundle but nothing REFERENCES it (no
-        // material/scene), so Unity never registers it for Find (FiresWater is
-        // found only because FTS's ocean material references it). Load it
-        // explicitly from the loaded bundle instead. Cached on first success.
-        private static Shader s_firesLiquidShader;
-        private static Shader GetFiresLiquidShader()
-        {
-            if (s_firesLiquidShader != null) return s_firesLiquidShader;
-
-            var s = Shader.Find("Custom/FiresLiquid");
-            if (s != null) return s_firesLiquidShader = s;
-
-            foreach (var b in AssetBundle.GetAllLoadedAssetBundles())
-            {
-                if (b == null) continue;
-                try
-                {
-                    foreach (var sh in b.LoadAllAssets<Shader>())
-                    {
-                        if (sh != null && sh.name == "Custom/FiresLiquid")
-                        {
-                            FiresLogger.LogInfo($"[FiresLiquidWater] loaded Custom/FiresLiquid from bundle '{b.name}' (Shader.Find missed it — not referenced).");
-                            return s_firesLiquidShader = sh;
-                        }
-                    }
-                }
-                catch { /* some bundles can't enumerate — skip */ }
-            }
-            return null;
-        }
-
-        // Round-85 — the HD foam texture (FiresFoamHD, baked 2K seamless) ships
-        // in the tossinshade bundle. Like Custom/FiresLiquid nothing references
-        // it, so load it explicitly from the loaded bundles. Cached on success
-        // (failures aren't cached — the bundle may mount after an early call).
-        private static Texture2D s_firesFoamHD;
-        // ── OUR OWN WATER NORMALS ────────────────────────────────────────────
-        // _Normal / _NormalFine were copied from VANILLA's ocean material, the
-        // same way the foam was before FiresFoamHD replaced it — and they carry
-        // the same problem: hard creased lines that read as faceted geometry on
-        // a river surface rather than ripple. water_nrm / water_nrm_detail are
-        // ours (the maps the sandbox water was authored against), shipped in the
-        // tossinshade bundle beside the shaders. Same lookup as the HD foam, and
-        // the same fallback: no bundle texture, keep whatever vanilla gave us.
-        private static Texture2D s_firesWaterNrm, s_firesWaterNrmFine;
+        // Custom/FiresLiquid, the HD foam (FiresFoamHD, 2K seamless) and our own water normals (water_nrm /
+        // water_nrm_detail, the maps the sandbox water was authored against; vanilla's ocean normals read as creased
+        // geometry on a river) all ship in Core's shader bundle, so FAT's water no longer depends on FiresTossinShade.
+        private static Shader GetFiresLiquidShader() => FiresCore.Materials.FiresShaderBroker.Get("Custom/FiresLiquid");
 
         internal static Texture2D GetFiresWaterNormal(bool fine)
-        {
-            if (fine && s_firesWaterNrmFine != null) return s_firesWaterNrmFine;
-            if (!fine && s_firesWaterNrm != null) return s_firesWaterNrm;
-            string want = fine ? "water_nrm_detail" : "water_nrm";
-            foreach (var b in AssetBundle.GetAllLoadedAssetBundles())
-            {
-                if (b == null) continue;
-                try
-                {
-                    foreach (var t in b.LoadAllAssets<Texture2D>())
-                        if (t != null && t.name == want)
-                        {
-                            FiresLogger.LogInfo($"[FiresLiquidWater] loaded water normal '{want}' ({t.width}x{t.height}) from bundle '{b.name}'.");
-                            return fine ? (s_firesWaterNrmFine = t) : (s_firesWaterNrm = t);
-                        }
-                }
-                catch { /* some bundles can't enumerate — skip */ }
-            }
-            return null;
-        }
+            => FiresCore.Materials.FiresShaderBroker.GetTexture(fine ? "water_nrm_detail" : "water_nrm");
 
         // Applied wherever the foam override is, so creation and refresh agree.
         internal static void ApplyFiresWaterNormals(Material mat)
@@ -832,25 +767,7 @@ namespace VerdantsAscent.Water.Core
             if (nf != null && mat.HasProperty("_NormalFine")) mat.SetTexture("_NormalFine", nf);
         }
 
-        internal static Texture2D GetFiresFoamHD()
-        {
-            if (s_firesFoamHD != null) return s_firesFoamHD;
-            foreach (var b in AssetBundle.GetAllLoadedAssetBundles())
-            {
-                if (b == null) continue;
-                try
-                {
-                    foreach (var t in b.LoadAllAssets<Texture2D>())
-                        if (t != null && t.name == "FiresFoamHD")
-                        {
-                            FiresLogger.LogInfo($"[FiresLiquidWater] loaded HD foam 'FiresFoamHD' ({t.width}x{t.height}) from bundle '{b.name}'.");
-                            return s_firesFoamHD = t;
-                        }
-                }
-                catch { /* some bundles can't enumerate — skip */ }
-            }
-            return null;
-        }
+        internal static Texture2D GetFiresFoamHD() => FiresCore.Materials.FiresShaderBroker.GetTexture("FiresFoamHD");
 
         // Round-90 — restored springs (ZNetScene re-instantiates the TEMPLATE,
         // which wears vanilla water_liquid) must re-apply the FiresLiquid skin.

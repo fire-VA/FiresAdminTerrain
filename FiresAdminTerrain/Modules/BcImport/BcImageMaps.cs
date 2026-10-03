@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using System.Threading.Tasks;
 using UnityEngine;
 using VerdantsAscent.Terrain.Voxel;
 
@@ -42,19 +43,22 @@ namespace VerdantsAscent.Terrain.BcImport
             { "mountain", new Color32(0, 255, 0, 0) },
         };
 
+        /// <summary>The float maps are independent PNGs, so they decode side by side on worker threads.</summary>
         public static bool TryDecode(BcWorldSettings settings, out BcDecodedMaps maps, out string failure)
         {
             maps = new BcDecodedMaps();
             failure = null;
+            var decoded = maps;
             try
             {
-                maps.Height = DecodeFloatMap(settings.HeightMap);
-                maps.Rough = DecodeFloatMap(settings.RoughMap);
-                maps.Flat = DecodeFloatMap(settings.FlatMap);
-                maps.Forest = DecodeFloatMap(settings.ForestMap);
-                maps.Heat = DecodeFloatMap(settings.HeatMap);
-                maps.Lava = DecodeFloatMap(settings.LavaMap);
-                maps.Moss = DecodeFloatMap(settings.MossMap);
+                Parallel.Invoke(
+                    () => decoded.Height = DecodeFloatMap(settings.HeightMap),
+                    () => decoded.Rough = DecodeFloatMap(settings.RoughMap),
+                    () => decoded.Flat = DecodeFloatMap(settings.FlatMap),
+                    () => decoded.Forest = DecodeFloatMap(settings.ForestMap),
+                    () => decoded.Heat = DecodeFloatMap(settings.HeatMap),
+                    () => decoded.Lava = DecodeFloatMap(settings.LavaMap),
+                    () => decoded.Moss = DecodeFloatMap(settings.MossMap));
                 maps.Terrain = DecodeColorMap(settings.TerrainMap, DefaultTerrainColors, TerrainGrounds);
                 maps.Paint = DecodeColorMap(settings.PaintMap, "", null);
                 maps.Biome = settings.BiomeIndexMap != null
@@ -68,38 +72,64 @@ namespace VerdantsAscent.Terrain.BcImport
             catch (Exception ex)
             {
                 maps = null;
-                failure = $"{ex.GetType().Name}: {ex.Message}";
+                Exception cause = ex is AggregateException aggregate ? aggregate.Flatten().InnerExceptions[0] : ex;
+                failure = $"{cause.GetType().Name}: {cause.Message}";
                 return false;
             }
         }
 
         /// <summary>BC asks ImageSharp for L16, or La16 when HeightMapAlpha is set - and ImageSharp's La16 is
         /// EIGHT bits of luminance, so an alpha heightmap really is quantised to 256 steps.</summary>
+        // Every value is one of 256 or 65,536 levels, so a map keeps the LEVEL (2 bytes) and one shared table turns it into
+        // the float BC computes, by the same division, bit for bit. Rows decode straight into the levels, so an 8192² map
+        // costs 128 MB kept instead of 256 MB kept plus a 128 MB raw copy and three copies of its compressed bytes
+        // (a join allocated ~3 GB, [perf] 2026-09-27). A banded image hands over its rows from several threads at once, and
+        // each call writes only its own row of levels.
         private static BcFloatMap DecodeFloatMap(BcMapImage image)
         {
             if (image == null || image.Data == null || image.Data.Length == 0) return null;
 
-            byte[] raw = FiresPng.DecodeRaw(image.Data, out int width, out int height, out int bitDepth, out int channels);
+            var pixels = new BcMapPixels(image.Data);
+            int width = pixels.Width, height = pixels.Height, bitDepth = pixels.BitDepth, channels = pixels.Channels;
             RequireSquare(width, height, image);
             RejectSixteenBitGreyAlpha(bitDepth, channels, image);
 
-            var values = new float[width * height];
+            bool eightBitLevels = image.Legacy8BitRed || image.HasAlphaChannel;
+            var levels = new ushort[width * height];
             int stride = channels * (bitDepth / EightBit);
-            for (int row = 0; row < height; row++)
+            bool plainGrey = !eightBitLevels && channels == GreyChannels;
+            pixels.DecodeRows((sourceRow, raw) =>
             {
-                int sourceRow = (height - 1 - row) * width * stride;
-                int targetRow = row * width;
-                for (int column = 0; column < width; column++)
-                {
-                    int at = sourceRow + column * stride;
-                    values[targetRow + column] = image.Legacy8BitRed
-                        ? RedChannel01(raw, at, bitDepth)
-                        : image.HasAlphaChannel
-                            ? EightBitLuminance(raw, at, bitDepth, channels) / (float)byte.MaxValue
-                            : SixteenBitLuminance(raw, at, bitDepth, channels) / (float)ushort.MaxValue;
-                }
-            }
-            return new BcFloatMap { Values = values, Size = width };
+                int targetRow = (height - 1 - sourceRow) * width;
+                if (plainGrey && bitDepth == SixteenBit) SixteenBitGreyRow(raw, levels, targetRow, width);
+                else if (plainGrey) EightBitGreyRow(raw, levels, targetRow, width);
+                else
+                    for (int column = 0; column < width; column++)
+                    {
+                        int at = column * stride;
+                        levels[targetRow + column] = image.Legacy8BitRed
+                            ? RedChannel8(raw, at, bitDepth)
+                            : image.HasAlphaChannel
+                                ? EightBitLuminance(raw, at, bitDepth, channels)
+                                : SixteenBitLuminance(raw, at, bitDepth, channels);
+                    }
+            });
+            return new BcFloatMap { Levels = levels, Scale = eightBitLevels ? BcFloatMap.EightBitScale : BcFloatMap.SixteenBitScale, Size = width };
+        }
+
+        // Plain greyscale, the maps BC worlds carry, each without a per-pixel branch: the same values SixteenBitLuminance gives
+        // (a 16-bit sample as is, an 8-bit one widened by 257), about 2 ns a pixel instead of the generic path's branches on
+        // every one of a world's 335 M pixels.
+        private static void SixteenBitGreyRow(byte[] raw, ushort[] levels, int targetRow, int width)
+        {
+            for (int column = 0, at = 0; column < width; column++, at += 2)
+                levels[targetRow + column] = (ushort)((raw[at] << EightBit) | raw[at + 1]);
+        }
+
+        private static void EightBitGreyRow(byte[] raw, ushort[] levels, int targetRow, int width)
+        {
+            for (int column = 0; column < width; column++)
+                levels[targetRow + column] = UpscaleTo16Bit(raw[column]);
         }
 
         private static BcBiomeMap DecodeBiomeIndexMap(BcBiomeIndexMap indexMap)
@@ -125,7 +155,7 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             if (image == null || image.Data == null || image.Data.Length == 0) return null;
 
-            byte[] raw = FiresPng.DecodeRaw(image.Data, out int width, out int height, out int bitDepth, out int channels);
+            byte[] raw = BcMapPixels.DecodeRaw(image.Data, out int width, out int height, out int bitDepth, out int channels);
             RequireSquare(width, height, image);
 
             List<KeyValuePair<Heightmap.Biome, Color32>> palette = ParseBiomeColors(
@@ -256,7 +286,7 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             if (image == null || image.Data == null || image.Data.Length == 0) return null;
 
-            byte[] raw = FiresPng.DecodeRaw(image.Data, out int width, out int height, out int bitDepth, out int channels);
+            byte[] raw = BcMapPixels.DecodeRaw(image.Data, out int width, out int height, out int bitDepth, out int channels);
             RequireSquare(width, height, image);
 
             Dictionary<int, Color32?> table = ParseColorTable(
@@ -395,8 +425,8 @@ namespace VerdantsAscent.Terrain.BcImport
             return (byte)Bt709Luminance(raw[at], raw[at + 1], raw[at + 2]);
         }
 
-        private static float RedChannel01(byte[] raw, int at, int bitDepth) =>
-            (bitDepth == SixteenBit ? DownscaleTo8Bit(BigEndian16(raw, at)) : raw[at]) / (float)byte.MaxValue;
+        private static byte RedChannel8(byte[] raw, int at, int bitDepth) =>
+            bitDepth == SixteenBit ? DownscaleTo8Bit(BigEndian16(raw, at)) : raw[at];
 
         private static ushort Bt709Luminance(ushort red, ushort green, ushort blue) =>
             (ushort)(red * 0.2125999927520752 + green * 0.71520000696182251 + blue * 0.0722000002861023 + 0.5);
@@ -442,8 +472,24 @@ namespace VerdantsAscent.Terrain.BcImport
 
     internal sealed class BcFloatMap
     {
-        public float[] Values;
+        // level -> the float BC gives it: level / 255f for 8-bit sources, level / 65535f for 16-bit ones.
+        public static readonly float[] EightBitScale = BuildScale(byte.MaxValue);
+        public static readonly float[] SixteenBitScale = BuildScale(ushort.MaxValue);
+
+        public ushort[] Levels;
+        public float[] Scale;
         public int Size;
+
+        public int Count => Levels.Length;
+
+        public float this[int index] => Scale[Levels[index]];
+
+        private static float[] BuildScale(int maxLevel)
+        {
+            var scale = new float[maxLevel + 1];
+            for (int level = 0; level <= maxLevel; level++) scale[level] = level / (float)maxLevel;
+            return scale;
+        }
 
         public float GetValue(float x, float y)
         {
@@ -458,8 +504,8 @@ namespace VerdantsAscent.Terrain.BcImport
             int bottom = Mathf.Clamp(rowFloor, 0, Size - 1);
             int top = Mathf.Clamp(rowFloor + 1, 0, Size - 1);
             return Mathf.Lerp(
-                Mathf.Lerp(Values[bottom * Size + left], Values[bottom * Size + right], columnFraction),
-                Mathf.Lerp(Values[top * Size + left], Values[top * Size + right], columnFraction),
+                Mathf.Lerp(this[bottom * Size + left], this[bottom * Size + right], columnFraction),
+                Mathf.Lerp(this[top * Size + left], this[top * Size + right], columnFraction),
                 rowFraction);
         }
     }
@@ -469,6 +515,11 @@ namespace VerdantsAscent.Terrain.BcImport
     internal sealed class BcBiomeMap
     {
         private const int Corners = 4;
+
+        // One scratch pair per thread: a join samples this 4.2 M times across the worker threads (GenerateBiomePoints), and
+        // two small arrays per call were 8.4 M allocations for the game's garbage collector.
+        [ThreadStatic] private static Heightmap.Biome[] t_found;
+        [ThreadStatic] private static float[] t_weights;
 
         public Heightmap.Biome[] Biomes;
         public int Size;
@@ -482,8 +533,10 @@ namespace VerdantsAscent.Terrain.BcImport
             float columnFraction = column - columnFloor;
             float rowFraction = row - rowFloor;
 
-            var found = new Heightmap.Biome[Corners];
-            var weights = new float[Corners];
+            var found = t_found ?? (t_found = new Heightmap.Biome[Corners]);
+            var weights = t_weights ?? (t_weights = new float[Corners]);
+            Array.Clear(found, 0, Corners);
+            Array.Clear(weights, 0, Corners);
             int count = 0;
             int heaviest = 0;
             Accumulate(columnFloor, rowFloor, (float)((1.0 - columnFraction) * (1.0 - rowFraction)), found, weights, ref count, ref heaviest);

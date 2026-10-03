@@ -55,7 +55,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Time.time < s_nextTick) return;
             s_nextTick = Time.time + TickSeconds;
             if (ZNet.instance == null || !ZNet.instance.IsServer() || ZDOMan.instance == null || ZNetScene.instance == null) return;
-            if (!CaveContentConfig.ChestsEnabled || ZNet.World == null) return;
+            if (!CaveContentConfig.ChestsEnabled || ZNet.World == null || !VoxelCaveRecord.Bound) return;
 
             long now = CaveRestockClock.NowMilliseconds();
             int started = 0, restocked = 0, recreated = 0;
@@ -63,7 +63,8 @@ namespace VerdantsAscent.Terrain.Voxel
             s_scratch.AddRange(VoxelCaveRecord.Chests);
             foreach (var chest in s_scratch)
             {
-                var zdo = chest.Id.IsNone() ? null : ZDOMan.instance.GetZDO(chest.Id);
+                if (!VoxelCaveRecord.InOpenZone(chest.Position)) continue;
+                var zdo = VoxelCaveRecord.Resolve(chest);
                 if (chest.RestockAtMs == 0)
                 {
                     if (zdo != null && ItemsHash(zdo) == chest.StockedHash) continue;
@@ -86,7 +87,6 @@ namespace VerdantsAscent.Terrain.Voxel
                 chest.RestockAtMs = 0;
                 VoxelCaveRecord.MarkDirty();
             }
-            VoxelCaveRecord.SaveIfDirty();
             VoxelCaveContent.ReportIfDue();
             if (restocked + recreated > 0)
                 FiresLogger.LogInfo($"[FiresVoxel] cave chests: {restocked} restocked, {recreated} rebuilt after being emptied"
@@ -138,6 +138,21 @@ namespace VerdantsAscent.Terrain.Voxel
             zdo.Set(ZDOVars.s_items, package.GetArray());
             zdo.Set(ZDOVars.s_addedDefaultItems, true);
         }
+
+        // A chest vanilla would still fill with its default items when opened counts as holding items.
+        internal static bool HoldsItems(ZDO zdo)
+        {
+            var bytes = zdo.GetByteArray(ZDOVars.s_items);
+            if (bytes == null) return !zdo.GetBool(ZDOVars.s_addedDefaultItems);
+            var prefab = ZNetScene.instance.GetPrefab(zdo.GetPrefab());
+            var container = prefab != null ? prefab.GetComponentInChildren<Container>(true) : null;
+            if (container == null) return true;
+            var inventory = NewInventory(container);
+            inventory.Load(new ZPackage(bytes));
+            return inventory.NrOfItems() > 0;
+        }
+
+        internal static bool IsAsStocked(ZDO zdo, VoxelCaveRecord.Chest chest) => ItemsHash(zdo) == chest.StockedHash;
 
         private static int ItemsHash(ZDO zdo)
         {

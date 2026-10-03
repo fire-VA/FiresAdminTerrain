@@ -33,7 +33,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private const string Section = "VoxelTerrain Tree Seeds";
         private const string DefaultAshlandsTrees = "AshlandsTree3, AshlandsTree4, AshlandsTree5, AshlandsTree6";
-        private const string DefaultSnowFirTrees = "SnowFirTree, SnowFirTree 2, SnowFirTree_small";
+        // SnowFirTree_small carries no TreeBase in 1.0 (R45), so it was always skipped; listing it only logged a warning.
+        private const string DefaultSnowFirTrees = "SnowFirTree, SnowFirTree 2";
         private const int SeedCost = 1;
         private const string CultivatorItem = "Cultivator";
 
@@ -41,7 +42,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static ConfigEntry<string> s_ashlandsTrees, s_snowFirTrees;
 
         private static readonly HashSet<string> s_reportedMissing = new HashSet<string>();
-        private static bool s_wired;
+        private static bool s_wired, s_ashlandsWired, s_snowFirWired;
 
         internal static void Bind(ConfigFile cfg)
         {
@@ -61,19 +62,30 @@ namespace VerdantsAscent.Terrain.Voxel
             ZNetScene scene = ZNetScene.instance;
             if (scene == null) return;
 
-            bool ashlands = Wire(scene, AshlandsSapling, Names(s_ashlandsTrees), CharredSeedItem);
-            bool snowFir = Wire(scene, SnowFirSapling, Names(s_snowFirTrees), FrostConeItem);
-            s_wired = ashlands || snowFir;
-            if (!s_wired) return;
+            s_ashlandsWired = Wire(scene, AshlandsSapling, Names(s_ashlandsTrees), CharredSeedItem);
+            s_snowFirWired = Wire(scene, SnowFirSapling, Names(s_snowFirTrees), FrostConeItem);
+            s_wired = s_ashlandsWired || s_snowFirWired;
+            if (s_wired) ListOnCultivator();
+        }
 
+        // ZNetScene and ObjectDB wake in either order, so whichever comes second lists the saplings. Listed only from
+        // ZNetScene, a world whose ObjectDB woke later never had them on the cultivator (SanctuaryAshlands, 2026-09-27).
+        internal static void OnObjectDBAwake()
+        {
+            if (s_wired) ListOnCultivator();
+        }
+
+        private static void ListOnCultivator()
+        {
             PieceTable table = CultivatorTable();
             if (table == null)
             {
-                Missing("the cultivator has no build table yet, so the saplings are not listed on it.");
+                if (ObjectDB.instance != null && ObjectDB.instance.m_items.Count > 0)
+                    Missing("the cultivator has no build table, so the saplings are not listed on it.");
                 return;
             }
-            if (ashlands) AddSapling(table, AshlandsSapling);
-            if (snowFir) AddSapling(table, SnowFirSapling);
+            if (s_ashlandsWired) AddSapling(table, AshlandsSapling);
+            if (s_snowFirWired) AddSapling(table, SnowFirSapling);
         }
 
         // A tool's pieces live on the tool's own item, so the cultivator's table comes from the cultivator rather than

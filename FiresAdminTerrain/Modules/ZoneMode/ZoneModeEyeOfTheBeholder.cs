@@ -15,6 +15,13 @@ namespace VerdantsAscent.Terrain.Zones
         internal const string HelmetName = "The Eye of the Beholder";
         private const float TickSeconds = 0.1f;
 
+        // Readable on Valheim's parchment and against sky and sea, and distinguishable for the common
+        // red-green colour blindness because the SENTENCE below still says which it is - the colour is
+        // a second channel on a message that already reads in words, never the only one.
+        private const string RightColour = "#7CD96B";     // this seed restores or matches the land
+        private const string WrongColour = "#FF5A4D";     // planting overwrites parked land for good
+        private const string NeutralColour = "#F0C36B";   // a choice, but nothing is lost
+
         private static TextMeshProUGUI s_label;
         private static float s_nextTick;
         private static Vector2s s_zone;
@@ -38,7 +45,17 @@ namespace VerdantsAscent.Terrain.Zones
             s_seed = seed.Prefab;
             ZoneModeChunkTiers.ZoneTier(zone, out var planned);
             string meant = planned == Heightmap.Biome.Ocean ? "open sea" : BiomeTitle(planned);
-            s_label.text = $"<size=30>Meant to be: {meant}</size>\n<size=19>{Outcome(seed, zone, planned)}</size>";
+
+            // RED MEANS YOU ARE ABOUT TO LOSE SOMETHING. The biome name is the one word being read at
+            // a glance while aiming, so it carries the warning rather than the sentence below it.
+            // Red is reserved for an actual overwrite of parked land - if it also went red for merely
+            // raising a different biome on empty sea it would be red most of the time and mean nothing.
+            bool overwrites = ZoneModeChunkSpawner.WouldOverwriteParkedLand(seed, zone, true, out _);
+            bool right = ZoneModeChunkSpawner.SeedMatchesIntent(seed, zone, planned);
+            string colour = overwrites ? WrongColour : right ? RightColour : NeutralColour;
+
+            s_label.text = $"<size=30>Meant to be: <color={colour}>{meant}</color></size>"
+                + $"\n<size=19>{Outcome(seed, zone, planned)}</size>";
             s_label.gameObject.SetActive(true);
             s_shown = true;
         }
@@ -53,7 +70,7 @@ namespace VerdantsAscent.Terrain.Zones
                     : $"{stood} Your {seed.Name} raises {seed.Land} instead, and what stood here is lost.";
             }
             if (seed.IsLocation) return $"Your {seed.Name} raises land holding {seed.Title} here.";
-            return planned == seed.Tier.Biome
+            return seed.RestoresOnly || planned == seed.Tier.Biome
                 ? $"Your {seed.Name} raises it as it was meant to be."
                 : $"Your {seed.Name} raises {seed.Tier.Title} land here instead.";
         }

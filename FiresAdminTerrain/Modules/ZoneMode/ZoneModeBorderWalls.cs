@@ -63,6 +63,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static readonly List<FiresWaterfalls.Column> s_fallColumns = new List<FiresWaterfalls.Column>(80);
         private static readonly List<Vector3> s_fallSites = new List<Vector3>(8);
+        private static readonly List<FiresWaterfallMist.Site> s_mistSites = new List<FiresWaterfallMist.Site>(8);
         private static readonly float[] s_levels = new float[ZoneCells + 1];
         private static readonly bool[] s_outflow = new bool[ZoneCells + 1];
 
@@ -80,6 +81,8 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly Vector2[] s_corners = new Vector2[4];
         private static readonly int[] s_values = new int[4];
         private static readonly Color32[] s_edgeColors = new Color32[ZoneCells + 1];
+        private static readonly List<Vector3> s_recolourVerts = new List<Vector3>(4096);
+        private static readonly List<Color32> s_recolourCols = new List<Color32>(4096);
 
         private static GameObject s_root;
         private static float s_nextTick;
@@ -205,8 +208,7 @@ namespace VerdantsAscent.Terrain.Zones
                 {
                     float x = x0 + i * step, z = z0 + j * step;
                     s_topVerts.Add(new Vector3(x, AnalyticGround(x, z) + FarLift, z));
-                    float bx = Mathf.Clamp(x, x0 + 0.5f, x0 + 63.5f), bz = Mathf.Clamp(z, z0 + 0.5f, z0 + 63.5f);
-                    s_topCols.Add(BiomeCornerBlend.Sample(bx, bz));
+                    s_topCols.Add(TopColour(zone, x, z));
                     s_topUvs.Add(new Vector2(i / (float)TopCells, j / (float)TopCells));
                     s_topUv1.Add(Vector2.zero);
                 }
@@ -237,6 +239,65 @@ namespace VerdantsAscent.Terrain.Zones
             VoxelChunkView.ApplyShadowMode(renderer);
             VoxelRenderGroup.Apply(renderer);
             return new FarTop { Go = go, Mesh = mesh };
+        }
+
+        // A far top's colour at a vertex: the ground just inside the zone's rim, with its winter.
+        private static Color32 TopColour(Vector2s zone, float x, float z)
+        {
+            float x0 = zone.x * 64f - 32f, z0 = zone.y * 64f - 32f;
+            return FatSeasons.UnpaintedGroundColour(Mathf.Clamp(x, x0 + 0.5f, x0 + 63.5f), Mathf.Clamp(z, z0 + 0.5f, z0 + 63.5f));
+        }
+
+        // The colour each column of a wall wears: the ground half a metre inside the open zone, with its winter.
+        private static void FillEdgeColours(Vector2s zone, int edge)
+        {
+            Vector3 inward = -Outward(edge);
+            for (int t = 0; t <= ZoneCells; t++)
+            {
+                ColumnAt(zone, edge, t, out int wx, out int wz);
+                s_edgeColors[t] = FatSeasons.UnpaintedGroundColour(wx + inward.x * 0.5f, wz + inward.z * 0.5f);
+            }
+        }
+
+        private static int ColumnIndex(float along) => Mathf.Clamp(Mathf.RoundToInt(along), 0, ZoneCells);
+
+        // Vedr seasons: live walls and far tops take the new ground colours in place; mesh and collider stay.
+        internal static void CollectSeasonRecolours(List<FatSeasons.Recolour> into)
+        {
+            foreach (var kv in s_walls)
+            {
+                var key = kv.Key;
+                into.Add(new FatSeasons.Recolour(ZoneCentre(key.zone), () => RecolourWall(key)));
+            }
+            foreach (var kv in s_tops)
+            {
+                var zone = kv.Key;
+                into.Add(new FatSeasons.Recolour(ZoneCentre(zone), () => RecolourTop(zone)));
+            }
+        }
+
+        private static Vector3 ZoneCentre(Vector2s zone) => new Vector3(zone.x * ZoneCells, 0f, zone.y * ZoneCells);
+
+        // A wall vertex sits at start + column along its edge (MapPoint), so its column comes back from its position.
+        private static void RecolourWall((Vector2s zone, int edge) key)
+        {
+            if (!s_walls.TryGetValue(key, out var wall) || wall.Mesh == null) return;
+            FillEdgeColours(key.zone, key.edge);
+            int start = AlongStart(key.zone, key.edge);
+            bool alongX = AlongX(key.edge);
+            wall.Mesh.GetVertices(s_recolourVerts);
+            s_recolourCols.Clear();
+            foreach (var v in s_recolourVerts) s_recolourCols.Add(s_edgeColors[ColumnIndex((alongX ? v.x : v.z) - start)]);
+            wall.Mesh.SetColors(s_recolourCols);
+        }
+
+        private static void RecolourTop(Vector2s zone)
+        {
+            if (!s_tops.TryGetValue(zone, out var top) || top.Mesh == null) return;
+            top.Mesh.GetVertices(s_recolourVerts);
+            s_recolourCols.Clear();
+            foreach (var v in s_recolourVerts) s_recolourCols.Add(TopColour(zone, v.x, v.z));
+            top.Mesh.SetColors(s_recolourCols);
         }
 
         private static void DestroyTop(FarTop top)
@@ -494,14 +555,9 @@ namespace VerdantsAscent.Terrain.Zones
             }
 
             Vector3 outward = Outward(edge);
-            Vector3 inward = -outward;
             int plane = PlaneCoordinate(zone, edge);
             int start = AlongStart(zone, edge);
-            for (int t = 0; t < columns; t++)
-            {
-                ColumnAt(zone, edge, t, out int wx, out int wz);
-                s_edgeColors[t] = BiomeCornerBlend.Sample(wx + inward.x * 0.5f, wz + inward.z * 0.5f);
-            }
+            FillEdgeColours(zone, edge);
 
             s_verts.Clear(); s_norms.Clear(); s_tans.Clear(); s_uvs.Clear(); s_uv1.Clear(); s_cols.Clear(); s_tris.Clear();
             Vector3 m0 = MapPoint(edge, plane, start, outward, Vector2.zero);
@@ -603,6 +659,7 @@ namespace VerdantsAscent.Terrain.Zones
 
             FiresWaterfalls.BeginMesh();
             s_fallSites.Clear();
+            s_mistSites.Clear();
             int runs = 0;
             if (material != null)
             {
@@ -615,7 +672,8 @@ namespace VerdantsAscent.Terrain.Zones
                     AddFallColumn(edge, plane, start, t - 0.5f, s_levels[t]);
                     for (int k = t; k <= end; k++) AddFallColumn(edge, plane, start, k, s_levels[k]);
                     AddFallColumn(edge, plane, start, end + 0.5f, s_levels[end]);
-                    FiresWaterfalls.AppendCurtain(s_fallColumns, outward, FiresWaterfalls.EdgeLipOut, 0f, FallSeed(zone, edge, t));
+                    if (FiresWaterfalls.AppendCurtain(s_fallColumns, outward, FiresWaterfalls.EdgeLipOut, 0f, FallSeed(zone, edge, t)))
+                        s_mistSites.Add(FiresWaterfalls.LastSite);
                     s_fallSites.Add(FiresWaterfalls.SoundSite(s_fallColumns, outward));
                     runs++;
                     t = end;
@@ -637,12 +695,13 @@ namespace VerdantsAscent.Terrain.Zones
                 var renderer = wall.FallsGo.AddComponent<MeshRenderer>();
                 renderer.shadowCastingMode = ShadowCastingMode.Off;
                 renderer.receiveShadows = false;
-                renderer.sharedMaterial = material;
+                renderer.sharedMaterials = FiresWaterfalls.Materials;
                 VoxelRenderGroup.Apply(renderer);
             }
             int vertices = FiresWaterfalls.EndMesh(wall.FallsMesh);
             wall.FallsGo.SetActive(vertices > 0);
             FiresWaterfalls.SetSounds(wall.FallsGo.transform, s_fallSites);
+            FiresWaterfallMist.SetEmitters(wall.FallsGo.transform, s_mistSites);
             wall.FallRuns = runs;
         }
 
@@ -792,8 +851,7 @@ namespace VerdantsAscent.Terrain.Zones
                 s_tans.Add(tan4);
                 s_uvs.Add(new Vector2(p.x / ZoneCells, p.y / VoxelChunk.CELLS));
                 s_uv1.Add(Vector2.zero);
-                int ci = Mathf.Clamp(Mathf.RoundToInt(p.x), 0, ZoneCells);
-                s_cols.Add(s_edgeColors[ci]);
+                s_cols.Add(s_edgeColors[ColumnIndex(p.x)]);
             }
             for (int i = 1; i < count - 1; i++)
             {

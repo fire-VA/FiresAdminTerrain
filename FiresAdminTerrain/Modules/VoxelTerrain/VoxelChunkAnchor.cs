@@ -40,6 +40,43 @@ namespace VerdantsAscent.Terrain.Voxel
 
         public ZNetView Nview => _nv;
 
+        // 0.2.689 (FatGroundProbe): the ZDO's latest revision and the one this peer has applied.
+        internal uint LatestRevision => _nv != null && _nv.IsValid() ? _nv.GetZDO().DataRevision : 0u;
+        internal string AppliedRevisionText => _lastRev == uint.MaxValue ? "none" : _lastRev.ToString();
+
+        // 0.2.690 (FatGroundProbe.CollidersReady): this peer has applied the ZDO's latest revision (a key-less fresh
+        // anchor has nothing to apply yet).
+        internal bool Applied => !_keyKnown || (_nv != null && _nv.IsValid() && _lastRev == _nv.GetZDO().DataRevision);
+
+        // 0.2.693 (FatGroundProbe.HasEditsXZ): a loaded edit anchor in the 32 m column over (x, z), at any height.
+        internal static bool AnyInColumn(float x, float z, float radius)
+        {
+            foreach (var kv in s_byKey)
+            {
+                if (kv.Value == null) continue;
+                float minX = kv.Key.x * 32f, minZ = kv.Key.z * 32f;
+                float dx = Mathf.Max(minX - x, 0f, x - (minX + 32f));
+                float dz = Mathf.Max(minZ - z, 0f, z - (minZ + 32f));
+                if (dx * dx + dz * dz <= radius * radius) return true;
+            }
+            return false;
+        }
+
+        // 0.2.689 (FatGroundProbe.HasEdits): a loaded edit anchor whose 32 m chunk comes within radius of pos.
+        internal static bool AnyNear(Vector3 pos, float radius)
+        {
+            foreach (var kv in s_byKey)
+            {
+                if (kv.Value == null) continue;
+                Vector3 min = new Vector3(kv.Key.x * 32f, kv.Key.y * 32f, kv.Key.z * 32f);
+                float dx = Mathf.Max(min.x - pos.x, 0f, pos.x - (min.x + 32f));
+                float dy = Mathf.Max(min.y - pos.y, 0f, pos.y - (min.y + 32f));
+                float dz = Mathf.Max(min.z - pos.z, 0f, pos.z - (min.z + 32f));
+                if (dx * dx + dy * dy + dz * dz <= radius * radius) return true;
+            }
+            return false;
+        }
+
         private void Awake()
         {
             _nv = GetComponent<ZNetView>();
@@ -106,7 +143,12 @@ namespace VerdantsAscent.Terrain.Voxel
             // (length mismatch) → skip until the ZDO revision changes;
             // TRANSIENT (chunk cap, null blob) → back off to a 5s retry
             // instead of hammering decompress at 2Hz.
+            float applyStart = Time.realtimeSinceStartup;
             var outcome = Apply(zdo);
+            // 0.2.689 ([lead] RIDEg pit): when a dedicated server takes in a runtime edit, at Debug (Fire's log rule).
+            if (ZNet.instance != null && ZNet.instance.IsDedicated() && FiresLogger.DebugEnabled)
+                FiresLogger.LogDebug($"[FiresVoxel] server applied edit: chunk {_key} rev {rev} → {outcome} in {(Time.realtimeSinceStartup - applyStart) * 1000f:0} ms"
+                    + $" ({Time.time - _bornAt:0.0} s after its anchor arrived).");
             if (outcome == ApplyOutcome.Success) _lastRev = rev;
             else if (outcome == ApplyOutcome.PermanentForRevision) _lastFailedRev = rev;
             else _nextPoll = Time.time + 5f;
@@ -174,6 +216,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private static readonly List<ZDO> s_zoneAnchors = new List<ZDO>();
+        private static readonly HashSet<Vector3Int> s_skippedKeys = new HashSet<Vector3Int>();
 
         // A dedicated server keeps no anchor instances near its players, so its copy of a zone reads the zone's
         // VAVoxel ZDOs directly. Only chunks the zone holds, and only revisions not imported yet.
@@ -192,7 +235,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 int kx = zdo.GetInt(VoxelAnchorPrefab.ZDO_KX, int.MinValue);
                 if (kx == int.MinValue) continue;
                 var key = new Vector3Int(kx, zdo.GetInt(VoxelAnchorPrefab.ZDO_KY), zdo.GetInt(VoxelAnchorPrefab.ZDO_KZ));
-                if (!zoneKeys.Contains(key)) continue;
+                if (!zoneKeys.Contains(key))
+                {
+                    // A player edited a chunk this zone's data build never armed (R77: the server read a surface carve's old
+                    // height for 42 s and more, and an island cube's, while other edits landed). The zone holds it from now on,
+                    // so the server's copy of the ground matches every client's.
+                    zoneKeys.Add(key);
+                    if (s_skippedKeys.Add(key))
+                        FiresLogger.LogInfo($"[FiresVoxel] server data for zone ({zone.x},{zone.y}) takes the player edit in chunk {key}: "
+                                            + $"added to the zone's data chunks (now {zoneKeys.Count}).");
+                }
                 uint revision = zdo.DataRevision;
                 if (importedRevisions.TryGetValue(key, out uint seen) && seen == revision) continue;
                 var packed = zdo.GetByteArray(VoxelAnchorPrefab.ZDO_EDITS);

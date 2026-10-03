@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using FiresCore.UI;
 using HarmonyLib;
 using UnityEngine;
@@ -64,18 +65,89 @@ namespace VerdantsAscent.Terrain.Zones
                 () => Answer(true, seed, zone, choosingLand), () => Answer(false, seed, zone, choosingLand), false));
         }
 
+        // ONE ANSWER TO "IS THIS THE RIGHT SEED", asked by the popup and by the Eye's label. Two
+        // copies of this rule would eventually disagree, and the one place that must never be wrong
+        // is the one telling you whether you are about to destroy a chunk you built.
+        //
+        // Overwriting means: the zone was parked (there IS something to come back), the seed does not
+        // match what was parked, and the player is choosing land rather than letting it return. A zone
+        // that was never parked has nothing to lose - raising it as the "wrong" biome is a choice, not
+        // a loss, so it is not red and does not ask twice.
+        internal static bool WouldOverwriteParkedLand(ChunkSeed seed, Vector2s zone, bool choosingLand, out int lostPieces)
+        {
+            lostPieces = 0;
+            if (!ZoneModePark.TryGetParked(zone, out var park)) return false;
+            if (!choosingLand || ZoneModePark.SeedMatches(seed, zone, park)) return false;
+            lostPieces = park.Pieces;
+            return true;
+        }
+
+        /// <summary>True when this seed raises the land the zone was meant to hold (or restores what was parked).</summary>
+        internal static bool SeedMatchesIntent(ChunkSeed seed, Vector2s zone, Heightmap.Biome planned)
+        {
+            if (seed.RestoresOnly) return true;
+            if (ZoneModePark.TryGetParked(zone, out var park)) return ZoneModePark.SeedMatches(seed, zone, park);
+            if (seed.IsLocation) return true;   // a location seed is always a deliberate choice
+            return planned == seed.Tier.Biome;
+        }
+
         private static string Promise(ChunkSeed seed, Vector2s zone, bool choosingLand)
         {
             string cost = $" This uses one {seed.Name}.";
-            if (!ZoneModePark.TryGetParked(zone, out var park)) return $"Zone ({zone.x},{zone.y}) rises as {seed.Land}.{cost}";
+            // Fire (10-03, popup b): say plainly why a seed restores instead of raising new land.
+            string restoresOnly = seed.RestoresOnly
+                ? $" The {seed.Name} restores only: to raise other land, plant a biome seed (and on parked land, wear the Eye of the Beholder)."
+                : string.Empty;
+            if (!ZoneModePark.TryGetParked(zone, out var park)) return $"Zone ({zone.x},{zone.y}) rises as {seed.Land}.{restoresOnly}{cost}";
             if (!choosingLand || ZoneModePark.SeedMatches(seed, zone, park))
+            {
+                string why = seed.RestoresOnly ? restoresOnly
+                    : ZoneModePark.SeedMatches(seed, zone, park) ? string.Empty
+                    : $" This land is parked: wear the Eye of the Beholder to raise {seed.Land} here instead (this seed will return it as it was).";
                 return $"Zone ({zone.x},{zone.y}) returns as it was"
-                    + (park.Pieces > 0 ? $", with the {park.Pieces} pieces built there." : ".") + cost;
+                    + (park.Pieces > 0 ? $", with the {park.Pieces} pieces built there." : ".") + why + cost;
+            }
             return $"Zone ({zone.x},{zone.y}) rises as {seed.Land} INSTEAD of returning as it was: "
                 + (park.Pieces > 0 ? $"the {park.Pieces} pieces built there are lost for good." : "what stood there is lost for good.") + cost;
         }
 
         private static void Answer(bool plant, ChunkSeed seed, Vector2s zone, bool choosingLand)
+        {
+            if (!s_confirming) return;
+            s_confirming = false;
+            UnifiedPopup.Pop();
+            InputBlock.Block(false);
+            var player = Player.m_localPlayer;
+            if (!plant || player == null) return;
+
+            // SECOND ASK, ONLY WHEN SOMETHING IS ACTUALLY DESTROYED. The first popup describes the
+            // trade; this one makes the destructive answer cost a separate, deliberate click, because
+            // the two dialogs are otherwise identical in shape and a habitual Yes reaches both. It is
+            // NOT shown for an ordinary planting - a confirmation that appears every time is one
+            // nobody reads by the third chunk.
+            if (WouldOverwriteParkedLand(seed, zone, choosingLand, out int lostPieces) && UnifiedPopup.IsAvailable())
+            {
+                s_confirming = true;
+                InputBlock.Block(true);
+                string what = lostPieces > 0
+                    ? $"The {lostPieces} piece(s) built in zone ({zone.x},{zone.y}) will be REMOVED FROM THE WORLD."
+                    : $"Whatever was built in zone ({zone.x},{zone.y}) will be REMOVED FROM THE WORLD.";
+                // Says what is actually true today: the chunk is kept on disk as a .override file, so it is
+                // recoverable in principle, but nothing restores it yet. Promising an undo that does not exist
+                // would be worse than promising nothing.
+                UnifiedPopup.Push(new YesNoPopup("Overwrite what is already there?",
+                    $"{what}\n\nThis raises {seed.Land} over the original land. The old chunk is set aside on "
+                    + "disk rather than deleted, but there is no way to put it back in-game yet - treat this as "
+                    + "permanent.\n\nPlant anyway?",
+                    () => AnswerOverwrite(true, seed, zone, choosingLand),
+                    () => AnswerOverwrite(false, seed, zone, choosingLand), false));
+                return;
+            }
+
+            Plant(player, seed, zone, choosingLand);
+        }
+
+        private static void AnswerOverwrite(bool plant, ChunkSeed seed, Vector2s zone, bool choosingLand)
         {
             if (!s_confirming) return;
             s_confirming = false;
@@ -138,9 +210,47 @@ namespace VerdantsAscent.Terrain.Zones
             string seed = s_pendingSeed;
             s_pending = false;
             s_pendingSeed = null;
-            if (player == null) return;
-            if (opened && seed != null) UseOne(player, seed);
-            Tell(player, message);
+            if (player != null)
+            {
+                if (opened && seed != null) UseOne(player, seed);
+                Tell(player, message);
+            }
+            ChunkGeneratorApi.RaiseSeedResult(zone, opened, message);
+        }
+
+        // ChunkGeneratorApi.PlantSeed: the hammer's "Yes" without the popup, for a bot. Never an overwrite choice (choosingLand
+        // false: a parked zone comes back as it was). Null when the request went out, else why not.
+        internal static string PlantForBot(Player player, string seedPrefab, Vector2s zone)
+        {
+            if (player == null) return "No player.";
+            if (!ZoneModeRegistry.ModeActive) return "Chunk seeds only grow in a one-zone-at-a-time world.";
+            if (s_pending && Time.time - s_pendingSince < ReplyTimeoutSeconds) return "The land is still answering the last seed.";
+            if (!ZoneModeSeeds.TryGet(seedPrefab, out var seed)) return $"'{seedPrefab}' is not a chunk seed.";
+            if (FindSeed(player, seed.Prefab) == null) return $"No {seed.Name} in the inventory.";
+            string refusal = Check(zone, player.transform.position, true);
+            if (refusal != null) return refusal;
+            Plant(player, seed, zone, false);
+            return null;
+        }
+
+        // Closed zones that can open now (inside the world, beside open land), nearest first, for ChunkGeneratorApi.Frontier.
+        // The open set is a bitset with no list, so this scans the square of zones around `from` with the same Check the
+        // hammer uses (a few hundred bit reads).
+        private const int FrontierScanZones = 12;
+
+        internal static List<(Vector2s Zone, float Distance)> Frontier(Vector3 from, int max)
+        {
+            var found = new List<(Vector2s Zone, float Distance)>();
+            Vector2s center = ZoneSystem.GetZone(from);
+            for (int dx = -FrontierScanZones; dx <= FrontierScanZones; dx++)
+                for (int dy = -FrontierScanZones; dy <= FrontierScanZones; dy++)
+                {
+                    var zone = new Vector2s(center.x + dx, center.y + dy);
+                    if (Check(zone, from, false) == null) found.Add((zone, DistanceToZone(from, zone)));
+                }
+            found.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+            if (max > 0 && found.Count > max) found.RemoveRange(max, found.Count - max);
+            return found;
         }
 
         private static void UseOne(Player player, string prefab)

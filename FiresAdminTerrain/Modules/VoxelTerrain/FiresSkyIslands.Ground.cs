@@ -47,6 +47,11 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float PondMaxRadius = 12f;
         private const float PondInterior = 0.6f;
         private const float PondLip = 2.5f;
+
+        // The horizontal run the pond rim climbs over, shared by BOTH pond carves (this file's ground
+        // model and Sdf's density) so the two cannot drift apart. It exists because a rim with no run
+        // is a vertical wall, and a vertical wall one cell wide meshes into slivers PhysX will not bake.
+        internal const float PondRim = 2.5f;
         private const float RiverShare = 0.6f;
         private const float RiverDrop = 0.03f;
         private const float RiverBankWidth = 2.5f;
@@ -173,12 +178,12 @@ namespace VerdantsAscent.Terrain.Voxel
             if (strength <= 0f) return 0f;
             float size = isl.Shape.HeartWidth;
             float f = 1f / Mathf.Max(18f, size * ReliefFeature);
-            float hills = (VoxelCaveNoise.Noise01(wx * f + 301f, isl.Seed + 131f, wz * f) - 0.5f) * 1.4f
-                          + (VoxelCaveNoise.Noise01(wx * f * 2.3f + 17f, isl.Seed + 137f, wz * f * 2.3f) - 0.5f) * 0.6f;
-            float crest = 1f - Mathf.Abs(2f * VoxelCaveNoise.Noise01(wx * f * 0.8f + 91f, isl.Seed + 139f, wz * f * 0.8f) - 1f);
+            float hills = (N(in isl, wx * f + 301f, isl.Seed + 131f, wz * f) - 0.5f) * 1.4f
+                          + (N(in isl, wx * f * 2.3f + 17f, isl.Seed + 137f, wz * f * 2.3f) - 0.5f) * 0.6f;
+            float crest = 1f - Mathf.Abs(2f * N(in isl, wx * f * 0.8f + 91f, isl.Seed + 139f, wz * f * 0.8f) - 1f);
             float height = hills * Mathf.Min(HillMax, size * HillShare) + crest * crest * Mathf.Min(RidgeMax, size * RidgeShare);
             float step = TerraceMin + TerraceSpan * Hash(0, 0, isl.Variety, ReliefSalt);
-            float cliffs = Mathf.SmoothStep(0f, 1f, (VoxelCaveNoise.Noise01(wx * f * 0.7f + 55f, isl.Seed + 149f, wz * f * 0.7f) - TerraceShare) / 0.12f);
+            float cliffs = Mathf.SmoothStep(0f, 1f, (N(in isl, wx * f * 0.7f + 55f, isl.Seed + 149f, wz * f * 0.7f) - TerraceShare) / 0.12f);
             height = Mathf.Lerp(height, Terrace(height, step, TerraceRiser), cliffs);
             if (height < 0f)
             {
@@ -195,7 +200,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (strength <= TierFrom) return 0f;
             float step = TierMin + TierSpan * Hash(0, 0, isl.Variety, ReliefSalt + 1);
-            float lay = (VoxelCaveNoise.Noise01(wx * f * 0.45f + 7f, isl.Seed + 157f, wz * f * 0.45f) - 0.35f) * 2.2f * step;
+            float lay = (N(in isl, wx * f * 0.45f + 7f, isl.Seed + 157f, wz * f * 0.45f) - 0.35f) * 2.2f * step;
             return Mathf.Max(0f, Terrace(lay, step, TierRiser)) * Mathf.SmoothStep(0f, 1f, (strength - TierFrom) / (1f - TierFrom));
         }
 
@@ -399,12 +404,20 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 float dx = wx - pond.Centre.x, dz = wz - pond.Centre.y;
                 float d = Mathf.Sqrt(dx * dx + dz * dz);
+                // Continuous rim, matching Sdf's pond exactly. These two carves MUST agree: this one
+                // shapes the ground model the water system reads, Sdf writes the voxel density, and a
+                // disagreement between them is water standing over solid or a bed with no water in it.
+                // See the note in Sdf for why the old two-branch version produced uncollidable slivers.
                 if (d < pond.Radius)
                 {
                     float rp = d / pond.Radius;
                     top = Mathf.Min(top, pond.Level - (0.7f + 1.3f * (1f - rp * rp)));
                 }
-                else if (d < pond.Radius + PondLip) top = Mathf.Max(top, pond.Level + 0.5f);
+                else if (d < pond.Radius + PondRim)
+                {
+                    float t = (d - pond.Radius) / PondRim;
+                    top = Mathf.Max(top, Mathf.Lerp(pond.Level - 0.7f, pond.Level + 0.5f, t * t * (3f - 2f * t)));
+                }
             }
             foreach (var river in isl.Waters.Rivers)
             {
@@ -529,8 +542,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     Drop = FallDrop(0f, Hash(0, 0, isl.Variety, FallDropSalt)),
                 });
             }
-            if (isl.Waters == null) return;
-            for (int k = 0; k < isl.Waters.Rivers.Count; k++)
+            for (int k = 0; isl.Waters != null && k < isl.Waters.Rivers.Count; k++)
             {
                 var river = isl.Waters.Rivers[k];
                 int last = river.Path.Length - 1;
@@ -543,6 +555,19 @@ namespace VerdantsAscent.Terrain.Voxel
                     Width = river.HalfWidth * 1.8f,
                     Drop = FallDrop(flow, Hash(k, 5, isl.Variety, WaterSalt)),
                 });
+            }
+            ShiftLips(in isl, falls);
+        }
+
+        private static void ShiftLips(in Island isl, List<SkylandFall> falls)
+        {
+            if (!IsMoved(in isl)) return;
+            var offset = new Vector3(isl.OffX, isl.OffY, isl.OffZ);
+            for (int k = 0; k < falls.Count; k++)
+            {
+                var fall = falls[k];
+                fall.Lip += offset;
+                falls[k] = fall;
             }
         }
 

@@ -16,8 +16,13 @@ namespace VerdantsAscent.Terrain.BcImport
     {
         public const string FileName = "FiresAdminTerrain";
 
+        // Format 2 stores the map images in bands (BcBandedImage) so they decode side by side; format 1 held the PNGs as
+        // they came. Both read, and a format 1 file is re-stored in bands once, on its first load (StoreInBands).
         private const int Magic = 0x57434246;
-        private const int FormatVersion = 1;
+        private const int FormatVersion = 2;
+        private const int FirstFormatVersion = 1;
+        private const string ReplacementSuffix = "_writing";
+        private const double BytesPerMegabyte = 1024d * 1024d;
 
         private enum MapSlot
         {
@@ -85,9 +90,8 @@ namespace VerdantsAscent.Terrain.BcImport
             failure = null;
             try
             {
-                var package = new ZPackage();
-                Write(package, settings);
-                byte[] bytes = package.GetArray();
+                StoreImagesInBands(worldName, settings);
+                byte[] bytes = Serialise(settings);
 
                 string folder = $"{SaveSystem.GetWorldsSaveRootPath(source)}/{worldName}";
                 if (source.IsLocal() && !Directory.Exists(folder))
@@ -122,44 +126,147 @@ namespace VerdantsAscent.Terrain.BcImport
             }
         }
 
-        public static bool TryRead(BcSaveLocation location, out BcWorldSettings settings, out string failure)
+        /// <summary>The package reads straight from the file: a whole-file byte[] and the ZPackage's own copy of it
+        /// were two needless copies of 150+ MB on every load and every join.</summary>
+        public static bool TryRead(BcSaveLocation location, out BcWorldSettings settings, out string failure) =>
+            TryRead(location, out settings, out int _, out failure);
+
+        /// <summary>As TryRead, also saying which format the file was in (worldgen_test reports it).</summary>
+        public static bool TryRead(BcSaveLocation location, out BcWorldSettings settings, out int format, out string failure)
         {
             settings = null;
+            format = 0;
             failure = null;
             try
             {
                 var reader = new FileReader(location.Path, location.Source);
-                byte[] bytes;
                 try
                 {
                     BinaryReader binary = reader.m_binary;
-                    bytes = binary.ReadBytes(binary.ReadInt32());
+                    binary.ReadInt32();
+                    var package = new ZPackage();
+                    package.SetReader(binary);
+                    if (package.ReadInt() != Magic)
+                    {
+                        failure = $"{location.Path} is not a FiresAdminTerrain world file";
+                        return false;
+                    }
+                    format = package.ReadInt();
+                    if (format < FirstFormatVersion || format > FormatVersion)
+                    {
+                        failure = $"{location.Path} is format {format}, this build reads {FirstFormatVersion} to {FormatVersion}";
+                        return false;
+                    }
+                    settings = Read(package);
+                    return true;
                 }
                 finally
                 {
                     reader.Dispose();
                 }
-
-                var package = new ZPackage(bytes);
-                if (package.ReadInt() != Magic)
-                {
-                    failure = $"{location.Path} is not a FiresAdminTerrain world file";
-                    return false;
-                }
-                int format = package.ReadInt();
-                if (format != FormatVersion)
-                {
-                    failure = $"{location.Path} is format {format}, this build reads {FormatVersion}";
-                    return false;
-                }
-                settings = Read(package);
-                return true;
             }
             catch (Exception ex)
             {
                 failure = $"{location.Path} could not be read ({ex.GetType().Name}: {ex.Message})";
                 return false;
             }
+        }
+
+        /// <summary>A format 1 file's maps are PNGs, which decode one row after another: 3.5 s at every load and join for
+        /// an 8192² map. The first load of a world's OWN file re-stores them in bands and writes the file back in place,
+        /// once. Each map is read back and matched against its PNG byte for byte before it is used, and the new file is
+        /// swapped in whole, so the old one stands until the new one is complete. A client's copy of a server's data is
+        /// the server's content by hash and is never rewritten, and storage other than local disk is left alone. True when
+        /// the file was rewritten.</summary>
+        public static bool StoreInBands(string worldName, BcSaveLocation location, BcWorldSettings settings)
+        {
+            bool ownLocalFile = location.Source == FileHelpers.FileSource.Local
+                && (location.Kind == BcSaveKind.InsideWorldFolder || location.Kind == BcSaveKind.FatRecordsFolder);
+            if (!ownLocalFile || !StoreImagesInBands(worldName, settings)) return false;
+            try
+            {
+                FiresLogger.LogInfo($"[BcImport] '{worldName}': writing the banded maps to {location.Path}{ReplacementSuffix}, then "
+                    + $"swapping it in for {location.Path}. Until the next line says it is done, the old file stands.");
+                ReplaceLocalFile(location.Path, Serialise(settings));
+                FiresLogger.LogInfo($"[BcImport] '{worldName}': {location.Path} now holds its maps in bands (format {FormatVersion}).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"[BcImport] '{worldName}': the banded maps could not be written back to {location.Path} "
+                    + $"({ex.GetType().Name}: {ex.Message}). The old file stands, this load decodes the bands from memory, and "
+                    + "the next load tries again.");
+                return false;
+            }
+        }
+
+        /// <summary>How many of the settings' map images are stored in bands and how many are still PNGs.</summary>
+        internal static void CountImages(BcWorldSettings settings, out int banded, out int png)
+        {
+            banded = 0;
+            png = 0;
+            foreach (KeyValuePair<MapSlot, BcMapImage> entry in PresentImages(settings))
+            {
+                if (BcBandedImage.IsBanded(entry.Value.Data)) banded++;
+                else png++;
+            }
+        }
+
+        // Every PNG map is re-stored in bands; one whose bands do not read back as its PNG keeps the PNG. True when any changed.
+        private static bool StoreImagesInBands(string worldName, BcWorldSettings settings)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            int banded = 0;
+            long pngBytes = 0L, bandedBytes = 0L;
+            foreach (KeyValuePair<MapSlot, BcMapImage> entry in PresentImages(settings))
+            {
+                BcMapImage image = entry.Value;
+                if (BcBandedImage.IsBanded(image.Data)) continue;
+                byte[] bands;
+                string failure;
+                try { bands = BcBandedImage.FromPng(image.Data, out failure); }
+                catch (Exception ex)
+                {
+                    bands = null;
+                    failure = $"{ex.GetType().Name}: {ex.Message}";
+                }
+                if (bands == null)
+                {
+                    FiresLogger.LogError($"[BcImport] '{worldName}': the {entry.Key} map was NOT re-stored in bands ({failure}); "
+                        + "it stays a PNG and decodes the slow way.");
+                    continue;
+                }
+                pngBytes += image.Data.Length;
+                bandedBytes += bands.Length;
+                image.Data = bands;
+                banded++;
+            }
+            if (banded == 0) return false;
+            FiresLogger.LogInfo($"[BcImport] '{worldName}': {banded} map(s) re-stored in bands, once ({pngBytes / BytesPerMegabyte:0.#} MB "
+                + $"as PNG, {bandedBytes / BytesPerMegabyte:0.#} MB in bands), each read back and matched against its PNG byte for "
+                + $"byte, in {clock.ElapsedMilliseconds} ms. From now on they decode side by side.");
+            return true;
+        }
+
+        private static byte[] Serialise(BcWorldSettings settings)
+        {
+            var package = new ZPackage();
+            Write(package, settings);
+            return package.GetArray();
+        }
+
+        // Written beside the old file under an extension-less name (which Valheim's save plumbing leaves alone), then
+        // swapped in whole, so a crash mid-write leaves the old file as it was.
+        private static void ReplaceLocalFile(string path, byte[] bytes)
+        {
+            string replacement = path + ReplacementSuffix;
+            using (var stream = new FileStream(replacement, FileMode.Create, FileAccess.Write))
+            using (var binary = new BinaryWriter(stream))
+            {
+                binary.Write(bytes.Length);
+                binary.Write(bytes);
+            }
+            File.Replace(replacement, path, null);
         }
 
         private static void Write(ZPackage package, BcWorldSettings settings)
@@ -283,7 +390,7 @@ namespace VerdantsAscent.Terrain.BcImport
             return settings;
         }
 
-        private static void WriteImages(ZPackage package, BcWorldSettings settings)
+        private static List<KeyValuePair<MapSlot, BcMapImage>> PresentImages(BcWorldSettings settings)
         {
             var present = new List<KeyValuePair<MapSlot, BcMapImage>>();
             AddIfPresent(present, MapSlot.Height, settings.HeightMap);
@@ -296,7 +403,12 @@ namespace VerdantsAscent.Terrain.BcImport
             AddIfPresent(present, MapSlot.Terrain, settings.TerrainMap);
             AddIfPresent(present, MapSlot.Paint, settings.PaintMap);
             AddIfPresent(present, MapSlot.LegacyBiomeImage, settings.LegacyBiomeImage);
+            return present;
+        }
 
+        private static void WriteImages(ZPackage package, BcWorldSettings settings)
+        {
+            List<KeyValuePair<MapSlot, BcMapImage>> present = PresentImages(settings);
             package.Write(present.Count);
             foreach (KeyValuePair<MapSlot, BcMapImage> entry in present)
             {

@@ -97,6 +97,10 @@ namespace VerdantsAscent.Terrain.Zones
         internal static int CurrentEpoch => Volatile.Read(ref s_epoch);
         internal static bool InPlanningScope => t_planningDepth > 0;
 
+        // True inside the gate's own translated call for a swapped zone's source point, where a world-position rule (the
+        // Chaos Hammer's biome paint) must not apply a second time at the source's coordinates.
+        internal static bool InSourceLookup => t_bypassDepth > 0;
+
         private static SampleTally Tally => t_tally ?? (t_tally = new SampleTally());
 
         internal static void SetView(ZoneOpenSet open, float coastWidth, float seaFloorY)
@@ -175,34 +179,175 @@ namespace VerdantsAscent.Terrain.Zones
         internal static bool ReadsLiveTerrain
             => t_bypassDepth == 0 && (t_pinned ? t_pinnedView : Volatile.Read(ref s_view)) != null;
 
+        // A point of a swapped zone: the zone, the zone its land comes from, and how that land is moved beyond the whole
+        // zone (ZoneShift: its lift, and the slide that centres a location seed's location).
+        private struct Swap
+        {
+            internal int Zx, Zy, SrcX, SrcY;
+            internal ZoneShift Shift;
+            internal float Lift => Shift.Lift;
+        }
+
         private static bool TrySourcePoint(View view, float wx, float wy, out float sx, out float sy)
+            => TrySourcePoint(view, wx, wy, out sx, out sy, out _);
+
+        private static bool TrySourcePoint(View view, float wx, float wy, out float sx, out float sy, out Swap swap)
         {
             sx = wx;
             sy = wy;
+            swap = default;
             if (view == null || view.Open.SourceCount == 0) return false;
             int zx, zy;
             if (t_pinned && t_buildZoneSet) { zx = t_buildZoneX; zy = t_buildZoneY; }
             else ZoneOpenSet.ZoneOf(wx, wy, out zx, out zy);
             if (t_planningDepth > 0 && (zx != t_populationX || zy != t_populationY)) return false;
-            if (!view.Open.TryGetSource(zx, zy, out int srcX, out int srcY)) return false;
-            sx = wx + (srcX - zx) * ZoneOpenSet.ZoneSize;
-            sy = wy + (srcY - zy) * ZoneOpenSet.ZoneSize;
+            if (!view.Open.TryGetSource(zx, zy, out int srcX, out int srcY, out ZoneShift shift)) return false;
+            sx = wx + (srcX - zx) * ZoneOpenSet.ZoneSize + shift.Dx;
+            sy = wy + (srcY - zy) * ZoneOpenSet.ZoneSize + shift.Dz;
+            swap = new Swap { Zx = zx, Zy = zy, SrcX = srcX, SrcY = srcY, Shift = shift };
             return true;
         }
 
+        // A swapped zone's ground at a point: its source's `height`, raised by the zone's lift and held up by its bank.
+        private static float Raise(View view, in Swap swap, float wx, float wy, float height)
+            => swap.Lift == 0f ? height : ZoneModeLift.Banked(view.Open, swap.Zx, swap.Zy, swap.SrcX, swap.SrcY, swap.Shift, wx, wy, height + swap.Lift);
+
         // For FiresAdminTerrain's own terrain data (generated water, river and lake carves): where to read it for
         // a point of a swapped zone.
-        internal static bool TranslateToSource(ref float wx, ref float wy)
+        internal static bool TranslateToSource(ref float wx, ref float wy) => TranslateToSource(ref wx, ref wy, out _);
+
+        // As above, with how far the zone's land was raised: absolute levels read at the source rise by it.
+        internal static bool TranslateToSource(ref float wx, ref float wy, out float lift)
         {
+            lift = 0f;
             if (t_bypassDepth > 0 || (t_planningDepth > 0 && !t_populationSet)) return false;
             var view = Volatile.Read(ref s_view);
             if (view == null || view.Open.SourceCount == 0) return false;
             ZoneOpenSet.ZoneOf(wx, wy, out int zx, out int zy);
             if (t_planningDepth > 0 && (zx != t_populationX || zy != t_populationY)) return false;
-            if (!view.Open.TryGetSource(zx, zy, out int srcX, out int srcY)) return false;
-            wx += (srcX - zx) * ZoneOpenSet.ZoneSize;
-            wy += (srcY - zy) * ZoneOpenSet.ZoneSize;
+            if (!view.Open.TryGetSource(zx, zy, out int srcX, out int srcY, out ZoneShift shift)) return false;
+            wx += (srcX - zx) * ZoneOpenSet.ZoneSize + shift.Dx;
+            wy += (srcY - zy) * ZoneOpenSet.ZoneSize + shift.Dz;
+            lift = shift.Lift;
             return true;
+        }
+
+        // ── Lifted chunks (ZoneModeLift) ────────────────────────────────────
+        // The real world's height at a point, the gate bypassed: a swapped zone's source as it stands in the world.
+        internal static float RealHeight(WorldGenerator generator, float wx, float wy)
+        {
+            t_bypassDepth++;
+            try { return generator.GetHeight(wx, wy); }
+            finally { t_bypassDepth--; }
+        }
+
+        // How far the land of the zone holding a point was raised; 0 outside a lifted zone. For altitude bands (plants,
+        // creatures), which follow the zone's sea wherever they are judged.
+        internal static float LiftAt(float wx, float wy)
+        {
+            var view = t_pinned ? t_pinnedView : Volatile.Read(ref s_view);
+            if (view == null || view.Open.LiftCount == 0) return 0f;
+            ZoneOpenSet.ZoneOf(wx, wy, out int zx, out int zy);
+            return view.Open.LiftOf(zx, zy);
+        }
+
+        // A height the Fires generator's sampler read at a swapped zone's source (after SamplerSeesClosed or
+        // TryClosedHeight moved the point there), raised as the zone's own land. (wx, wy) is the point BEFORE the move.
+        internal static float Lifted(float wx, float wy, float height)
+        {
+            var live = LiveView();
+            return live != null && live.Open.LiftCount > 0 && TrySourcePoint(live, wx, wy, out _, out _, out var swap)
+                ? Raise(live, swap, wx, wy, height)
+                : height;
+        }
+
+        // A water level the Fires generator's sampler read at a swapped zone's source (after SamplerSeesClosed moved the
+        // point there), raised with the zone, and the zone's lifted sea wherever that stands higher. (wx, wy) is the point
+        // BEFORE the move; `found` is what the sampler answered.
+        internal static bool LiftWater(float wx, float wy, bool found, ref float level, ref float depth)
+        {
+            var live = LiveView();
+            if (live == null || live.Open.LiftCount == 0 || !TrySourcePoint(live, wx, wy, out _, out _, out var swap) || swap.Lift == 0f)
+                return found;
+            if (found) level += swap.Lift;
+            if (!TryLiftedSea(wx, wy, out float seaLevel, out float seaFloor) || (found && level >= seaLevel)) return found;
+            level = seaLevel;
+            depth = seaLevel - seaFloor;
+            return true;
+        }
+
+        // True where a lifted zone's sea stands, for the Fires generator's wet, corridor and class doors, which otherwise
+        // answer from the source, where that water is open sea.
+        internal static bool IsLiftedSeaAt(float wx, float wy) => TryLiftedSea(wx, wy, out _, out _);
+
+        // The water a lifted zone keeps (Fire, 15:00): where its source's ground lies under the sea, the zone shows water
+        // at the lifted sea level over its raised ground. Banks along its edges stand clear of it.
+        internal static bool TryLiftedSea(float wx, float wy, out float level, out float floor)
+        {
+            level = floor = 0f;
+            var live = LiveView();
+            var generator = WorldGenerator.instance;
+            if (live == null || generator == null || live.Open.LiftCount == 0) return false;
+            if (!TrySourcePoint(live, wx, wy, out _, out _, out var swap) || swap.Lift <= 0f) return false;
+            float ground = ZoneModeLift.LiftedGround(live.Open, swap.Zx, swap.Zy, swap.SrcX, swap.SrcY, swap.Shift, wx, wy, generator);
+            level = ZoneSystem.c_WaterLevel + swap.Lift;
+            if (ground >= level) return false;
+            floor = ground;
+            return true;
+        }
+
+        // ── The Fires generator's samplers (FiresWorldGenBase) ──────────────
+        // On a Fires world everything that draws or plays on the land reads the generator's grid through its own
+        // samplers: far terrain, far trees and water, the map's rivers, full-voxel ground, generated water. Each public
+        // sampler asks here first, so zone mode holds there exactly as it does for GetBiomeHeight: a swapped zone's
+        // point moves to its source (true is never returned for it), and a closed point is sea, which the sampler
+        // answers itself. Planning, population and the gate's own real reads pass through untouched. The samplers'
+        // Real twins skip this, for generation that must not depend on which zones are open.
+        internal static bool SamplerSeesClosed(ref float wx, ref float wy)
+        {
+            if (!t_pinned && Volatile.Read(ref s_view) == null) return false;
+            var live = LiveView();
+            if (live != null && TrySourcePoint(live, wx, wy, out float sx, out float sy))
+            {
+                wx = sx;
+                wy = sy;
+                return false;
+            }
+            return SampleView(wx, wy) != null;
+        }
+
+        // As SamplerSeesClosed, for a height sampler: a closed point gets the sea floor, eased up to the real ground
+        // across the coast band exactly as TryGateBiomeHeight eases it. `real` is only read inside that band.
+        internal static bool TryClosedHeight(ref float wx, ref float wy, Func<float, float, float> real, out float height)
+        {
+            height = 0f;
+            if (!t_pinned && Volatile.Read(ref s_view) == null) return false;
+            var live = LiveView();
+            if (live != null && TrySourcePoint(live, wx, wy, out float sx, out float sy))
+            {
+                wx = sx;
+                wy = sy;
+                return false;
+            }
+            var view = SampleView(wx, wy);
+            if (view == null) return false;
+            if (!InCoastBand(view, wx, wy, out float floor, out float fall))
+            {
+                height = floor;
+                return true;
+            }
+            float ground = real(wx, wy);
+            height = DUtils.Lerp(ground, Mathf.Min(ground, floor), fall);
+            return true;
+        }
+
+        // A closed point's sea floor, and how far across the coast band it lies (0 at the open edge, 1 at its far side).
+        private static bool InCoastBand(View view, float wx, float wy, out float floor, out float fall)
+        {
+            floor = SeaFloorAt(view.SeaFloorY, wx, wy);
+            float distance = view.Open.DistanceToOpen(wx, wy, view.CoastWidth);
+            fall = distance >= view.CoastWidth ? 1f : DUtils.SmoothStep(0f, 1f, distance / view.CoastWidth);
+            return distance < view.CoastWidth;
         }
 
         internal static bool TryGateBiome(WorldGenerator generator, float wx, float wy, float oceanLevel, bool waterAlwaysOcean,
@@ -247,20 +392,19 @@ namespace VerdantsAscent.Terrain.Zones
             bool preGeneration, bool riverPreDN, ref Color mask, ref float result)
         {
             var live = LiveView();
-            if (live != null && TrySourcePoint(live, wx, wy, out float sx, out float sy))
+            if (live != null && TrySourcePoint(live, wx, wy, out float sx, out float sy, out var swap))
             {
                 t_bypassDepth++;
                 try { result = generator.GetBiomeHeight(biome, sx, sy, out mask, preGeneration, riverPreDN); }
                 finally { t_bypassDepth--; }
+                result = Raise(live, swap, wx, wy, result);
                 return true;
             }
 
             var view = SampleView(wx, wy);
             if (view == null) return false;
 
-            float floor = SeaFloorAt(view.SeaFloorY, wx, wy);
-            float distance = view.Open.DistanceToOpen(wx, wy, view.CoastWidth);
-            if (distance >= view.CoastWidth)
+            if (!InCoastBand(view, wx, wy, out float floor, out float fall))
             {
                 result = floor;
                 mask = ClearMask;
@@ -274,7 +418,6 @@ namespace VerdantsAscent.Terrain.Zones
             try { real = generator.GetBiomeHeight(biome, wx, wy, out realMask, preGeneration, riverPreDN); }
             finally { t_bypassDepth--; }
 
-            float fall = DUtils.SmoothStep(0f, 1f, distance / view.CoastWidth);
             result = DUtils.Lerp(real, Mathf.Min(real, floor), fall);
             mask = Color.Lerp(realMask, ClearMask, fall);
             Tally.CoastHeight++;

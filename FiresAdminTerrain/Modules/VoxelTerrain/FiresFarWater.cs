@@ -83,6 +83,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     bestD = d; best = key; found = true;
                 }
             if (found) BuildTile(best);
+            else if (s_stale.Count > 0) RebuildNearestStale(center);
 
             // NEAR-HOLE clip: the quilt covers everywhere (baked meshes can't hold a
             // moving hole), so a MaterialPropertyBlock-driven radial discard follows the
@@ -110,6 +111,34 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             foreach (var kv in s_tiles) if (kv.Value != null) Object.Destroy(kv.Value);
             s_tiles.Clear();
+            s_stale.Clear();
+        }
+
+        // Vedr seasons: every live tile is rebuilt in place, nearest first, one per tick once no tile is missing. The old
+        // tile is destroyed in the same frame its replacement is built, so distant water never blinks out.
+        private static readonly HashSet<Vector2Int> s_stale = new HashSet<Vector2Int>();
+
+        internal static void RebuildForSeason()
+        {
+            foreach (var kv in s_tiles) s_stale.Add(kv.Key);
+        }
+
+        private static void RebuildNearestStale(Vector3 center)
+        {
+            Vector2Int best = default; float bestD = float.MaxValue; bool found = false;
+            foreach (var key in s_stale)
+            {
+                float dx = (key.x + 0.5f) * TILE - center.x, dz = (key.y + 0.5f) * TILE - center.z;
+                float d = dx * dx + dz * dz;
+                if (d >= bestD) continue;
+                bestD = d; best = key; found = true;
+            }
+            if (!found) return;
+            s_stale.Remove(best);
+            if (!s_tiles.TryGetValue(best, out var old)) return;
+            if (old != null) Object.Destroy(old);
+            s_tiles.Remove(best);
+            BuildTile(best);
         }
 
         // Vanilla's overworld render group flipped (interior entered or left).
@@ -147,7 +176,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // centre where a corner has no coverage
                     float y00 = Corner(wx, wz, lc), y10 = Corner(wx + CELL, wz, lc);
                     float y01 = Corner(wx, wz + CELL, lc), y11 = Corner(wx + CELL, wz + CELL, lc);
-                    bool ice = cls == FiresWorldGenBase.WC_FROZEN;
+                    bool ice = cls == FiresWorldGenBase.WC_FROZEN || FiresWorldGenBase.SeasonalFrozenAt(wx + CELL * 0.5f, wz + CELL * 0.5f);
                     var vl = ice ? s_iv : s_v;
                     var ul = ice ? s_iuv : s_uv;
                     var tl = ice ? s_it : s_t;

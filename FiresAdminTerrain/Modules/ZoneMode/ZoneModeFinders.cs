@@ -140,12 +140,14 @@ namespace VerdantsAscent.Terrain.Zones
                     bool starter = zdo.GetBool(StarterHash, false);
                     if (starter) starters++;
                     lines.Add($"{Tag}{tier.MachineName} at {Where(zdo.GetPosition(), hasTemple, templeAt)}"
-                              + (starter ? " — the indestructible STARTER." : " — an ordinary machine."));
+                              + (starter ? " — the indestructible STARTER."
+                                  : tier.RestoresOnly ? " — an ordinary machine."
+                                  : " — an OLD per-biome machine; it becomes the Chunk Generator when its zone next loads."));
                 }
             if (starters > 0) return;
             bool loaded = ZoneModePrefabs.TryGet(starterTier.MachinePrefab, out _);
             bool zoneReady = hasTemple && VoxelZoneStreamer.IsZoneGenerated(ZoneSystem.GetZone(templeAt));
-            lines.Add($"{Tag}NO starter {starterTier.MachineName} exists anywhere in the world ({machines} generator(s) of any tier). "
+            lines.Add($"{Tag}NO starter {starterTier.MachineName} exists anywhere in the world ({machines} generator(s) in all). "
                       + $"The placer needs: its prefab '{starterTier.MachinePrefab}' loaded ({Ok(loaded, "the fireszones bundle did not supply it")}), "
                       + $"the {TempleName} registered ({Ok(hasTemple, "not yet")}), and the temple's zone generated ({Ok(zoneReady, "not yet")}). "
                       + "It looks for a spot 30-42 m from the temple and retries every few seconds.");

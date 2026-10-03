@@ -111,7 +111,7 @@ namespace VerdantsAscent.Terrain.Voxel
             seed = isl.Variety;
             if (!IsSkyland(isl.Kind) || isl.Site <= 0) return false;
             location = PaletteOf(isl.Biome).Sites[isl.Site - 1].Location;
-            position = new Vector3(isl.SiteX, isl.SiteY, isl.SiteZ);
+            position = new Vector3(isl.SiteX + isl.OffX, isl.SiteY + isl.OffY, isl.SiteZ + isl.OffZ);
             rotation = Quaternion.Euler(0f, isl.SiteYaw, 0f);
             return true;
         }
@@ -147,8 +147,9 @@ namespace VerdantsAscent.Terrain.Voxel
             foreach (int k in list)
             {
                 var isl = s_islands[k];
-                if (!IsSkyland(isl.Kind) || !Covers(in isl, point.x, point.z)) continue;
-                if (point.y <= SkylandBottomAt(in isl, point.x, point.z) - IslandContactMargin) continue;
+                float sx = point.x - isl.OffX, sz = point.z - isl.OffZ;
+                if (!IsSkyland(isl.Kind) || !Covers(in isl, sx, sz)) continue;
+                if (point.y - isl.OffY <= SkylandBottomAt(in isl, sx, sz) - IslandContactMargin) continue;
                 biome = isl.Biome;
                 return true;
             }
@@ -171,7 +172,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         var isl = s_islands[k];
                         if (!IsSkyland(isl.Kind)) continue;
-                        float nx = Mathf.Clamp(isl.X, x0, x1) - isl.X, nz = Mathf.Clamp(isl.Z, z0, z1) - isl.Z;
+                        float cx = WorldX(in isl), cz = WorldZ(in isl);
+                        float nx = Mathf.Clamp(cx, x0, x1) - cx, nz = Mathf.Clamp(cz, z0, z1) - cz;
                         if (nx * nx + nz * nz <= isl.R * isl.R) biomes |= isl.Biome;
                     }
                 }
@@ -181,7 +183,15 @@ namespace VerdantsAscent.Terrain.Voxel
         // The terrain colour a voxel column in a skyland's band wears: the biome of the skyland whose rim is nearest.
         internal static bool TrySkylandColorAt(float wx, float wz, out Color32 color)
         {
-            color = default;
+            bool found = TrySkylandBiomeNear(wx, wz, out var biome);
+            color = found ? Heightmap.GetBiomeColor(biome) : default;
+            return found;
+        }
+
+        // The biome of the skyland whose rim is nearest, within the skin a skyland's band colours (FatSeasons snows by it).
+        internal static bool TrySkylandBiomeNear(float wx, float wz, out Heightmap.Biome biome)
+        {
+            biome = Heightmap.Biome.None;
             if (!s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
             float nearest = SkylandSkinReach;
             bool found = false;
@@ -189,16 +199,17 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var isl = s_islands[k];
                 if (!IsSkyland(isl.Kind)) continue;
-                float dx = wx - isl.X, dz = wz - isl.Z;
+                float sx = wx - isl.OffX, sz = wz - isl.OffZ;
+                float dx = sx - isl.X, dz = sz - isl.Z;
                 float outside = Mathf.Sqrt(dx * dx + dz * dz) - isl.R;
                 if (outside >= nearest) continue;
                 if (isl.Shape != null)
                 {
-                    outside = (isl.Shape.Sample(wx, wz, out float width) - 1f) * width;
+                    outside = (isl.Shape.Sample(sx, sz, out float width) - 1f) * width;
                     if (outside >= nearest) continue;
                 }
                 nearest = outside;
-                color = Heightmap.GetBiomeColor(isl.Biome);
+                biome = isl.Biome;
                 found = true;
             }
             return found;

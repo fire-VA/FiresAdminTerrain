@@ -42,6 +42,11 @@ namespace VerdantsAscent.Terrain.Voxel
             // and only the instance id tells them apart.
             public int HiddenHmId;
             public int HiddenRendererId;
+            // A swapped zone with a Full chunk that lost its view: vanilla's collider stands in until the view is back
+            // (KeepGroundUnderSwappedZone).
+            public bool VanillaColliderBack;
+            public float NextGroundCheckAt;
+            public float NextGroundLogAt;
             public float StartedAt;      // wrap start (stuck-swap diagnostics)
             public float NextDiagAt;     // throttle for blocked-swap logging
             public float LastRewrapAt;   // debounce for terraform rewraps
@@ -115,13 +120,35 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // Whether a zone's voxel collision is built on this machine; null where its ground is vanilla terrain. A
-        // data-only zone (a headless server's cave and skyland density) builds no colliders, so it never counts.
+        // data-only zone (a dedicated server's cave and skyland density) builds no colliders, so it never counts. Nor
+        // does a zone whose terrain is not settled (a skyland rising over it, an island set arriving from the server, any
+        // in-place rewrap), or one a skyland is announced over that this client has not received yet.
         private static bool? WearGroundReady(Vector2s zone)
         {
-            if (s_zones.TryGetValue(zone, out var wrap) && wrap != null) return wrap.Swapped && !wrap.DataOnly;
+            if (Zones.ZoneModeSkylands.RisingOver(zone)) return false;
+            if (s_zones.TryGetValue(zone, out var wrap) && wrap != null) return !wrap.DataOnly && IsZoneTerrainSettled(zone);
             if (s_driverGO == null) return null;
             return ShouldWrapZone(zone, ZoneSystem.GetZonePos(zone)) ? false : (bool?)null;
         }
+
+        // Whether voxel terrain is (or will become) the ground at a point: Vedr keeps quake scars, craters and lake ice off it.
+        internal static bool OwnsGround(Vector3 point)
+        {
+            Vector2s zone = ZoneSystem.GetZone(point);
+            return s_zones.ContainsKey(zone) || AwaitsWrap(zone);
+        }
+
+        // Vedr waits for this before lifting what a quake scar's ground rose over: the voxel ground at a point is
+        // current once its zone's rewrap has finished and the new chunks are collidable. A zone the streamer will take
+        // up but has not yet is not current either: Vedr already leaves its cracks to voxels that have not cut them.
+        internal static bool IsGroundSettled(Vector3 point)
+        {
+            Vector2s zone = ZoneSystem.GetZone(point);
+            return !AwaitsWrap(zone) && IsZoneTerrainSettled(zone);
+        }
+
+        private static bool AwaitsWrap(Vector2s zone)
+            => !s_zones.ContainsKey(zone) && s_driverGO != null && ShouldWrapZone(zone, ZoneSystem.GetZonePos(zone));
 
         private const float GroundProbeEpsilon = 0.013f;
 
@@ -166,7 +193,11 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // A dedicated server keeps the generated density of the zones around its players, unrendered, so whatever
         // it places or checks underground or on skylands reads the same terrain its clients build.
-        private static bool HeadlessHoldsVoxelData => FiresVoxelConfig.GeneratesCaves || FiresVoxelConfig.BuildsSkyIslands;
+        private static bool ServerHoldsVoxelData => FiresVoxelConfig.GeneratesCaves || FiresVoxelConfig.BuildsSkyIslands;
+
+        // The dedicated server executable, not "no graphics device": a -nographics client (the headless test bot) streams
+        // around its own player like any client, its chunks colliders only.
+        private static bool IsDedicatedServer => FiresCore.Lifecycle.FiresMod.IsDedicatedServer;
 
         private static bool WantsServerData(Vector2s zone)
         {
@@ -190,10 +221,18 @@ namespace VerdantsAscent.Terrain.Voxel
             var zone = ZoneSystem.GetZone(point);
             for (int dz = -1; dz <= 1; dz++)
                 for (int dx = -1; dx <= 1; dx++)
-                    if (!IsZoneSolid(new Vector2s(zone.x + dx, zone.y + dz)))
-                        return false;
+                {
+                    var neighbour = new Vector2s(zone.x + dx, zone.y + dz);
+                    if (IsZoneSolid(neighbour) || ((dx != 0 || dz != 0) && NeverWraps(neighbour))) continue;
+                    return false;
+                }
             return true;
         }
+
+        // A neighbour the zone gate holds closed, and the streamer has not taken up, never wraps: nothing loads there. A spawn
+        // or teleport beside closed land waited on it to the 45 s fail-open, every time. The zone stood on is always awaited.
+        private static bool NeverWraps(Vector2s zone)
+            => Zones.ZoneModeRegistry.ModeActive && !Zones.ZoneModeRegistry.IsOpen(zone) && !IsZoneKnown(zone);
 
         // Spawn-gate diagnostics: which of the 3x3 zones are not solid, and
         // exactly what each is waiting on — the same accounting the swap-block
@@ -208,6 +247,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     var z = new Vector2s(zone.x + dx, zone.y + dz);
                     if (IsZoneSolid(z)) continue;
+                    if ((dx != 0 || dz != 0) && NeverWraps(z)) { sb.Append($"({z.x},{z.y}):CLOSED(not awaited) "); continue; }
                     if (!s_zones.TryGetValue(z, out var w))
                     { sb.Append($"({z.x},{z.y}):UNWRAPPED "); continue; }
                     int pendingGen = 0, queued = 0, noView = 0, noCollider = 0, full = 0;
@@ -292,11 +332,12 @@ namespace VerdantsAscent.Terrain.Voxel
         // From FAT's one ZoneSystem.Start hook (FatVanillaHooks), after FarQuilt.
         internal static void OnZoneSystemStart()
         {
-            // Headless streams in VoxelOnly (colliders around its peers) and whenever caves or skylands are
+            // A dedicated server streams when it builds voxel colliders around its peers (VoxelOnly, and VoxelWrap unless
+            // 'Server builds voxel collision' is off) and whenever caves or skylands are
             // generated (their density around its peers, unrendered).
-            if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null
-                && !HeadlessHoldsVoxelData
-                && FiresVoxelConfig.WorldKind != VoxelWorldMode.VoxelOnly) return;
+            if (IsDedicatedServer
+                && !ServerHoldsVoxelData
+                && !FiresVoxelConfig.ServerCollides) return;
             if (s_driverGO != null) return;
             s_driverGO = new GameObject("FiresVoxelZoneStreamer");
             s_driverGO.AddComponent<StreamerDriver>();
@@ -338,6 +379,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 VoxelRenderGroup.Disarm();
                 s_zones.Clear();
                 s_brushedZones.Clear();
+                FatCracks.Forget();
                 FiresLocationPads.Clear();
                 HeightmapBuildCache.Clear();
                 VoxelCaveClutter.Clear();
@@ -361,7 +403,7 @@ namespace VerdantsAscent.Terrain.Voxel
             VoxelCaveSpawners.ServerTick();
 
             bool voxelOnly = FiresVoxelConfig.WorldKind == VoxelWorldMode.VoxelOnly;
-            bool headless = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
+            bool dedicated = IsDedicatedServer;
 
             // VoxelOnly is only meaningful on a Fires world (the A1 patches
             // gate on the generator too) — on anything else, stand down.
@@ -372,7 +414,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             Vector3 preSpawnCenter = Vector3.zero;
-            if (headless)
+            if (dedicated)
             {
                 // W3-A3 — the dedi streams COLLIDERS around its peers. Zone
                 // discovery below is heightmap-driven, and vanilla only keeps
@@ -413,12 +455,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 VoxelCaveNoise.SetSeed(WorldGenerator.instance.GetSeed());
 
             // Hydrology must exist before any zone wraps so river beds carve in from the very first chunk (a 2-4 s
-            // worker build at login). A headless server needs it only where it holds voxel data on a vanilla-generated
+            // worker build at login). A dedicated server needs it only where it holds voxel data on a vanilla-generated
             // world: Fires worlds carry their rivers in the base, and water placement is client-side.
-            bool serverCarvesRivers = headless && HeadlessHoldsVoxelData
+            bool serverCarvesRivers = dedicated && ServerHoldsVoxelData
                 && FiresVoxelConfig.CarvesRiverBeds && !FiresWorldGenBase.Active;
             if (serverCarvesRivers
-                || (!headless && (FiresVoxelConfig.CarvesRiverBeds || FiresVoxelConfig.PlacesHydrologyWater)))
+                || (!dedicated && (FiresVoxelConfig.CarvesRiverBeds || FiresVoxelConfig.PlacesHydrologyWater)))
             {
                 VoxelHydrology.EnsureBuilding();
                 VoxelHydrology.FlushReport();
@@ -427,7 +469,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             // Clear what the carve drowned, whenever it streams in (client only
             // — the dedi has no water field of its own).
-            if (!headless)
+            if (!dedicated)
             {
                 try { DrownedVegTick(); }
                 catch (System.Exception ex)
@@ -442,7 +484,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (Time.time < s_waterQueue[i].due) continue;
                 var zq = s_waterQueue[i].zone;
                 s_waterQueue.RemoveAt(i);
-                if (headless) continue;
+                if (dedicated) continue;
                 var swWater = System.Diagnostics.Stopwatch.StartNew();
                 try { PlaceWaterForZone(zq); }
                 catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] water placement threw for ({zq.x},{zq.y}): {ex.Message}"); }
@@ -454,14 +496,14 @@ namespace VerdantsAscent.Terrain.Voxel
             float radius = FiresVoxelConfig.WrapRadius.Value;
             // wrapAll (the whole-active-area envelope) only applies in FullVoxel.
             // PlacedOnly/ZoneReplace wrap a SPARSE set of zones, so they stay
-            // radius-bounded regardless of the headless/WrapAllLoaded levers.
+            // radius-bounded regardless of the dedicated/WrapAllLoaded levers.
             bool wrapAll = FiresVoxelConfig.WrapsAllTerrain
-                && (headless || (FiresVoxelConfig.WrapAllLoaded != null && FiresVoxelConfig.WrapAllLoaded.Value));
+                && (dedicated || (FiresVoxelConfig.WrapAllLoaded != null && FiresVoxelConfig.WrapAllLoaded.Value));
             // Active centers the footprint is bounded around: the local player on
-            // a client; every connected peer's ref position on a headless dedi.
+            // a client; every connected peer's ref position on a dedicated server.
             s_centers.Clear();
             if (player != null) s_centers.Add(player.transform.position);
-            else if (headless && ZNet.instance != null)
+            else if (dedicated && ZNet.instance != null)
             {
                 // Peer refpositions are the DEDI's centers. On a client they
                 // are the server peer's refposition — nowhere near our pending
@@ -469,7 +511,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // pre-spawn wrap centered on the wrong spot.
                 var peers = ZNet.instance.GetPeers();
                 for (int pi = 0; pi < peers.Count; pi++)
-                    if (peers[pi] != null && peers[pi].m_refPos != Vector3.zero) s_centers.Add(peers[pi].m_refPos);
+                    if (peers[pi] != null && peers[pi].m_refPos != Vector3.zero && !OffMap(peers[pi].m_refPos)) s_centers.Add(peers[pi].m_refPos);
             }
             if (s_centers.Count == 0 && pp != Vector3.zero) s_centers.Add(pp);
 
@@ -496,7 +538,7 @@ namespace VerdantsAscent.Terrain.Voxel
             Patch_Heightmap_WetMask.Sweep();
             Paint.DistantPaintCache.VanillaLodSweep();
             FiresFarWater.Tick(pp);
-            if (!headless) GhostBurst(pp);
+            if (!dedicated) GhostBurst(pp);
             else if (s_centers.Count > 0) GhostBurst(NextBurstCenter());
 
             // Unwrap: dead heightmaps (zone unloaded); also zones beyond the
@@ -550,16 +592,18 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var w = kv.Value;
                 if (!w.Swapped || w.Hm == null) continue;
+                KeepGroundUnderSwappedZone(w);
                 var rend = w.Hm.GetComponent<MeshRenderer>();
                 var col = s_hmCollider(w.Hm);
                 bool rendBack = rend != null && rend.enabled;
-                bool colBack = col != null && col.enabled;
+                bool colBack = col != null && col.enabled && !w.VanillaColliderBack;
                 if (rendBack || colBack)
                 {
                     bool sameHm = w.HiddenHmId != 0 && w.Hm.GetInstanceID() == w.HiddenHmId;
                     bool sameRenderer = rend != null && w.HiddenRendererId != 0 && rend.GetInstanceID() == w.HiddenRendererId;
 
                     HideVanilla(w.Hm);
+                    if (w.VanillaColliderBack && col != null) col.enabled = true;
                     w.HiddenHmId = w.Hm.GetInstanceID();
                     if (rend != null) w.HiddenRendererId = rend.GetInstanceID();
 
@@ -591,7 +635,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
             // Wrap candidates + completion checks. ≤1 NEW zone per tick keeps
             // the worker fed without bursts.
-            bool dataOnlyServer = headless && !voxelOnly;
+            // A VoxelWrap dedi held voxel DATA only until 0.2.652: its physics stood on vanilla ground (R77). Now it meshes colliders
+            // like VoxelOnly unless 'Server builds voxel collision' is off.
+            bool dataOnlyServer = dedicated && !FiresVoxelConfig.ServerCollides;
             bool startedOne = false;
             foreach (var hm in Heightmap.GetAllHeightmaps())
             {
@@ -599,6 +645,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Vector3 c = hm.transform.position;
                 float wrapBound = GovernorBound(wrapAll ? WRAP_HARD_CAP : radius);
                 if (s_centers.Count > 0 && !NearAnyCenter(c, wrapBound)) continue;
+                if (dedicated && OffMap(c)) { SkipOffMap(ZoneSystem.GetZone(c)); continue; }
 
                 var zone = ZoneSystem.GetZone(c);
                 if (s_zones.TryGetValue(zone, out var wrap))
@@ -614,8 +661,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (!ShouldWrapZone(zone, c)) continue;
                 startedOne = StartWrap(zone, hm);
             }
-            if (headless && HeadlessHoldsVoxelData)
+            if (dedicated && ServerHoldsVoxelData)
                 TickServerData(GovernorBound(wrapAll ? WRAP_HARD_CAP : radius), dataOnlyServer, startedOne);
+            if (dedicated && !dataOnlyServer) ReportServerColliders();
             ReportBlocked();
         }
 
@@ -632,6 +680,45 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static Vector3 WrapCenter(ZoneWrap wrap)
             => wrap.Hm != null ? wrap.Hm.transform.position : ZoneSystem.GetZonePos(wrap.Zone);
+
+        // Beyond the world's edge (vanilla's 10 km world plus its ocean rim). A joining peer's pre-spawn reference position
+        // sits around (1e6, 1e6), and the dedi meshed colliders for zones out there on every join (R78: "server colliders for
+        // zone (15625,15625): 12 chunk(s)"). Neither a centre nor a wrap; one line per skipped zone.
+        private const float WorldEdgeMetres = 10500f;
+        private static readonly HashSet<Vector2s> s_offMapLogged = new HashSet<Vector2s>();
+
+        private static bool OffMap(Vector3 p) => Mathf.Abs(p.x) > WorldEdgeMetres || Mathf.Abs(p.z) > WorldEdgeMetres;
+
+        private static void SkipOffMap(Vector2s zone)
+        {
+            if (s_offMapLogged.Add(zone))
+                FiresLogger.LogInfo($"[FiresVoxel] server skips zone ({zone.x},{zone.y}): beyond the world's edge ({WorldEdgeMetres:0} m), "
+                                    + "a joining peer's placeholder position; nothing wrapped there.");
+        }
+
+        // Every DataReportSeconds on a dedi that builds colliders: what it holds and what it cost, for the on/off A/B.
+        private static int s_serverSwaps, s_serverSwapChunks;
+        private static float s_nextColliderReport;
+
+        private static void ReportServerColliders()
+        {
+            if (Time.time < s_nextColliderReport) return;
+            s_nextColliderReport = Time.time + DataReportSeconds;
+            int zones = 0, swapped = 0, chunks = 0;
+            foreach (var kv in s_zones)
+            {
+                if (kv.Value.DataOnly) continue;
+                zones++;
+                if (kv.Value.Swapped) swapped++;
+                chunks += kv.Value.Keys.Count;
+            }
+            if (zones == 0 && s_serverSwaps == 0) return;
+            FiresLogger.LogInfo($"[FiresVoxel] server colliders: {zones} zone(s) wrapped around {s_centers.Count} peer(s), {swapped} swapped, "
+                                + $"{chunks} chunk(s); last {DataReportSeconds:0}s: {s_serverSwaps} zone(s) swapped, {s_serverSwapChunks} chunk(s); "
+                                + $"managed heap {System.GC.GetTotalMemory(false) / 1048576.0:0} MB.");
+            s_serverSwaps = 0;
+            s_serverSwapChunks = 0;
+        }
 
         private static void TickServerData(float bound, bool dataOnlyServer, bool startedOne)
         {
@@ -1028,13 +1115,21 @@ namespace VerdantsAscent.Terrain.Voxel
             var newKeys = new List<Vector3Int>(12);
             var armed = new List<VoxelChunk>(12);
             bool usedFallback = false;
+            long buildStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            long gatherTicks = 0;
             for (int cz = 0; cz < 2; cz++)
             {
                 for (int cx = 0; cx < 2; cx++)
                 {
                     int kx = kx0 + cx, kz = kz0 + cz;
+                    long gatherStart = System.Diagnostics.Stopwatch.GetTimestamp();
                     GatherColumns(kx, kz, out var ground, out var biome, out float minG, out float maxG, ref usedFallback);
-                    uint genHash = HashColumns(ground, biome, caves, voxelRivers);
+                    // Vedr's open quake fissures: ONE grid per column feeds both the hash and every chunk's carve, so
+                    // the change-gate and the cut can never disagree; the crack's depth widens the column's band.
+                    float[] cracks = FatCracks.ColumnCracks(kx, kz);
+                    float crackDepth = FatCracks.MaxDepth(cracks);
+                    uint genHash = FatCracks.Fold(HashColumns(ground, biome, caves, voxelRivers), cracks);
+                    gatherTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gatherStart;
 
                     // SKY ISLANDS — extend this column's chunk band to cover
                     // any island above it; the air gap between ground and the
@@ -1045,7 +1140,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         ? FiresSkyIslands.ColumnSignature(kx * 32f, kz * 32f, kx * 32f + 32f, kz * 32f + 32f)
                         : 0u;
 
-                    int kyLo = FloorDiv(Mathf.FloorToInt(minG) - (caves ? caveDepth : 4), 32);
+                    int kyLo = FloorDiv(Mathf.FloorToInt(minG) - Mathf.Max(caves ? caveDepth : 4, Mathf.CeilToInt(crackDepth) + 1), 32);
                     int kyHi = FloorDiv(Mathf.CeilToInt(maxG) + 2, 32);
                     if (isl)
                     {
@@ -1081,7 +1176,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // solid rock, one fully above the surface is air. Neither
                         // needs arrays, a mesh, or a collider — but it stays
                         // registered so the Y-range union + border ownership hold.
-                        var kind = ClassifyChunkKind(ky, minG, maxG, carveReach);
+                        var kind = ClassifyChunkKind(ky, minG, maxG, Mathf.Max(carveReach, crackDepth));
                         // Chunks intersecting the island band are real, AND their
                         // density depends on the island set — so one band test
                         // drives both the kind override and the generation hash.
@@ -1118,7 +1213,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // chunk (brush edits re-apply on the new ground).
                             existing.MeshAll = true;
                             existing.LastGenHash = chunkHash;
-                            existing.PrepareGenerate(ground, chunkBiome, caves);
+                            existing.PrepareGenerate(ground, chunkBiome, caves, cracks);
                             armed.Add(existing);
                             continue;
                         }
@@ -1130,12 +1225,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         // one frame (already-swapped zones render immediately).
                         chunk.SuppressRenderUntilSwap = !wrap.Swapped && !VoxelOnlyMode.Active;
                         chunk.LastGenHash = chunkHash;
-                        chunk.PrepareGenerate(ground, chunkBiome, caves);
+                        chunk.PrepareGenerate(ground, chunkBiome, caves, cracks);
                         armed.Add(chunk);
                     }
                 }
             }
 
+            long columnsEnd = System.Diagnostics.Stopwatch.GetTimestamp();
             // Whole zone is armed (mutually pending) — NOW capture canonical
             // border values from every loaded generated neighbour (brush-
             // edited chunks included) so the worker generate ends with rings
@@ -1160,6 +1256,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
 
+            long enqueueEnd = System.Diagnostics.Stopwatch.GetTimestamp();
             // Y-RANGE CONSISTENCY INVARIANT (the see-through fix): a chunk may
             // NOT be dropped while any lateral neighbour column still has a
             // chunk at its height — that neighbour's shared face quads are
@@ -1187,15 +1284,16 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (lcx >= 0 && lcx < 2 && lcz >= 0 && lcz < 2)
                         {
                             GatherColumns(old.x, old.z, out var kg, out var kb, out float kMin, out float kMax, ref usedFallback);
-                            var keepKind = ClassifyChunkKind(old.y, kMin, kMax, carveReach);
+                            float[] keepCracks = FatCracks.ColumnCracks(old.x, old.z);
+                            var keepKind = ClassifyChunkKind(old.y, kMin, kMax, Mathf.Max(carveReach, FatCracks.MaxDepth(keepCracks)));
                             if (keepKind != ChunkKind.Full)
                                 VoxelWorld.EnsureUniformChunk(old, keepKind);
                             else
                             {
                                 VoxelWorld.PromoteToFull(keep);
                                 keep.MeshAll = true;
-                                keep.LastGenHash = HashColumns(kg, kb, caves, voxelRivers);
-                                keep.PrepareGenerate(kg, kb, caves);
+                                keep.LastGenHash = FatCracks.Fold(HashColumns(kg, kb, caves, voxelRivers), keepCracks);
+                                keep.PrepareGenerate(kg, kb, caves, keepCracks);
                                 keep.SetBorderOverrides(VoxelChunk.CaptureBorderOverrides(old));
                                 VoxelMeshPipeline.EnqueueRemesh(keep);
                             }
@@ -1214,7 +1312,30 @@ namespace VerdantsAscent.Terrain.Voxel
             wrap.Keys.Clear();
             wrap.Keys.AddRange(newKeys);
             wrap.UsedFallback = usedFallback;
+            ReportSlowBuild(wrap, buildStart, gatherTicks, columnsEnd, enqueueEnd, armed.Count);
         }
+
+        // [perf] R32: the dedi's main thread spent 105-260 ms per new area in here. The split says which part to move to
+        // workers or spread over frames: the ground and biome gather, creating and arming the chunks, the border capture
+        // and queueing, or keeping and dropping the old stack.
+        private const double SlowZoneBuildMs = 50d;
+
+        private static void ReportSlowBuild(ZoneWrap wrap, long buildStart, long gatherTicks, long columnsEnd, long enqueueEnd, int armed)
+        {
+            long end = System.Diagnostics.Stopwatch.GetTimestamp();
+            double totalMs = TicksToMs(end - buildStart);
+            if (totalMs < SlowZoneBuildMs) return;
+            double gatherMs = TicksToMs(gatherTicks);
+            FiresLogger.LogInfo($"[FiresVoxel] zone ({wrap.Zone.x},{wrap.Zone.y}) {(wrap.DataOnly ? "server data" : "wrap")} build took "
+                + $"{totalMs:0} ms on the main thread: ground + biome gather {gatherMs:0} ms, chunk setup "
+                + $"{TicksToMs(columnsEnd - buildStart) - gatherMs:0} ms ({armed} armed of {wrap.Keys.Count} key(s)), borders + queue "
+                + $"{TicksToMs(enqueueEnd - columnsEnd):0} ms, keep/drop {TicksToMs(end - enqueueEnd):0} ms"
+                + (wrap.UsedFallback ? "; some ground came from the generator (no heightmap or build data yet)." : "."));
+        }
+
+        private const double MillisecondsPerSecond = 1000d;
+
+        private static double TicksToMs(long ticks) => ticks * MillisecondsPerSecond / System.Diagnostics.Stopwatch.Frequency;
 
         private static readonly HashSet<Vector3Int> s_batchKeys = new HashSet<Vector3Int>();
 
@@ -1282,7 +1403,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static int s_burstCursor;
 
-        // A headless server has no player of its own: its ghost bursts rotate through its peers.
+        // A dedicated server has no player of its own: its ghost bursts rotate through its peers.
         private static Vector3 NextBurstCenter()
         {
             s_burstCursor = (s_burstCursor + 1) % s_centers.Count;
@@ -1363,14 +1484,20 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float PAINT_SHORE_REACH = 9f;   // legacy const (style table governs)
         internal static float PaintWet01(float pwx, float pwz)
         {
+            // One zone at a time: a closed zone is sea and paints nothing; a swapped zone reads its source's water
+            // (sx, sz), raised or lowered with its land, and a lifted zone's own sea wears a shore band of its own.
+            if (Zones.ZoneModeGate.IsClosedForTerrain(pwx, pwz)) return 0f;
+            float sx = pwx, sz = pwz;
+            Zones.ZoneModeGate.TranslateToSource(ref sx, ref sz, out float lift);
+            bool nearSea = Zones.ZoneModeLiftShore.TryNearest(pwx, pwz, Zones.ZoneModeLiftShore.Reach,
+                out byte seaCls, out float seaLevel, out float seaDist);
             // Cheap far bail on the 8m shore field — beyond every biome's
             // reach (+ slack for its own granularity) nothing can paint.
             if (FiresWorldGenBase.Active)
             {
-                if (!FiresWorldGenBase.TryGetShoreCorners(pwx, pwz, out float dist8, out _, out _,
-                        out _, out _, out _, out _, out _, out _, out _, out _))
+                if (!nearSea && (!FiresWorldGenBase.TryGetShoreCorners(sx, sz, out float dist8, out _, out _,
+                        out _, out _, out _, out _, out _, out _, out _, out _) || dist8 >= 18f))
                     return 0f;
-                if (dist8 >= 18f) return 0f;
             }
             else if (!GenWaterField.Ready) return 0f;
             byte pbio = GenWaterField.BiomeCodeAt(pwx, pwz);
@@ -1402,24 +1529,24 @@ namespace VerdantsAscent.Terrain.Voxel
             // nearest wet source comes from the channel geometry and the still
             // grid instead. Same CornerWet, same styles, same falloffs — only
             // the neighbour search differs.
+            float best = nearSea ? CornerWet(seaCls, seaLevel, pgy, in st, seaDist, beachT) : 0f;
             if (!FiresWorldGenBase.Active)
             {
                 float vReach = Mathf.Max(1f, st.ShoreReach) + 2f;
-                if (!GenWaterField.TryNearestWet(pwx, pwz, vReach, out byte vCls, out float vLvl, out float vDist))
-                    return 0f;
-                return CornerWet(vCls, vLvl, pgy, in st, vDist, beachT);
+                if (GenWaterField.TryNearestWet(pwx, pwz, vReach, out byte vCls, out float vLvl, out float vDist))
+                    best = Mathf.Max(best, CornerWet(vCls, vLvl, pgy, in st, vDist, beachT));
+                return best;
             }
 
             var wS = FiresWorldGenBase.WaterShorts;
             var gS = FiresWorldGenBase.GridShorts;
-            if (wS == null || gS == null) return 0f;
+            if (wS == null || gS == null) return best;
             int n = FiresWorldGenBase.GridN;
             float half = FiresWorldGenBase.GridHalf;
             float cell = (2f * half) / (n - 1);
-            int cx = Mathf.RoundToInt((pwx + half) / cell);
-            int cz = Mathf.RoundToInt((pwz + half) / cell);
+            int cx = Mathf.RoundToInt((sx + half) / cell);
+            int cz = Mathf.RoundToInt((sz + half) / cell);
             int R = Mathf.CeilToInt(12f / cell);
-            float best = 0f;
             for (int dz = -R; dz <= R; dz++)
             {
                 int z2 = cz + dz;
@@ -1434,11 +1561,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     float gv = gS[i] * FiresWorldGenBase.UNPACK;
                     float wv = wS[i] * FiresWorldGenBase.UNPACK;
                     if (wv <= gv + 0.05f) continue;                    // dry
-                    float ddx = pwx - (x2 * cell - half), ddz = pwz - wzc;
+                    float ddx = sx - (x2 * cell - half), ddz = sz - wzc;
                     float d = Mathf.Sqrt(ddx * ddx + ddz * ddz);
                     if (d >= 12f) continue;
-                    byte cls = FiresWorldGenBase.WaterClassAt(x2 * cell - half, wzc);
-                    float c = CornerWet(cls, wv, pgy, in st, d, beachT);
+                    byte cls = FiresWorldGenBase.WaterClassAtReal(x2 * cell - half, wzc);
+                    float c = CornerWet(cls, wv + lift, pgy, in st, d, beachT);
                     if (c > best) best = c;
                 }
             }
@@ -1594,6 +1721,14 @@ namespace VerdantsAscent.Terrain.Voxel
             RecordHiddenIdentity(wrap);
             wrap.Swapped = true;
             s_swapAt[wrap.Zone] = Time.time;
+            FatClutterRegrow.Zone(wrap.Zone);   // 0.2.690: grass rolled on vanilla's collider re-rolls on the voxel ground
+            if (IsDedicatedServer)
+            {
+                s_serverSwaps++;
+                s_serverSwapChunks += wrap.Keys.Count;
+                FiresLogger.LogInfo($"[FiresVoxel] server colliders for zone ({wrap.Zone.x},{wrap.Zone.y}): {wrap.Keys.Count} chunk(s) meshed in "
+                                    + $"{(Time.time - wrap.StartedAt) * 1000f:0} ms (wrap start to swap; vanilla's heightmap collider hidden).");
+            }
             if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value)
                 FiresLogger.LogInfo($"[FiresVoxel] zone ({wrap.Zone.x},{wrap.Zone.y}) SWAPPED to voxel terrain " +
                     $"({wrap.Keys.Count} chunks, {Time.time - wrap.StartedAt:F1}s after wrap start).");
@@ -1651,6 +1786,20 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
         }
 
+        // A Vedr quake scar changed inside this XZ rectangle: re-wrap exactly the wrapped zones it overlaps. A dedicated
+        // server gets no heightmap poke for it; on a client the poke already queued them and the set keeps one entry.
+        internal static void MarkRectDirty(float minX, float minZ, float maxX, float maxZ)
+        {
+            var zmin = ZoneSystem.GetZone(new Vector3(minX, 0f, minZ));
+            var zmax = ZoneSystem.GetZone(new Vector3(maxX, 0f, maxZ));
+            for (int zz = zmin.y; zz <= zmax.y; zz++)
+                for (int zx = zmin.x; zx <= zmax.x; zx++)
+                {
+                    var z = new Vector2s(zx, zz);
+                    if (s_zones.ContainsKey(z)) s_dirty.Add(z);
+                }
+        }
+
         // One-zone-at-a-time: true once this peer shows the zone's current terrain — either it is not
         // wrapped (the vanilla heightmap is the terrain) or its in-place rewrap has finished and every
         // surface chunk is generated, meshed and collidable.
@@ -1680,6 +1829,48 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_waterQueue.Add((zone, Time.time + 2f));
                 try { VoxelCaveContent.PlaceForZone(zone); }
                 catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] cave content threw for ({zone.x},{zone.y}): {ex.Message}"); }
+            }
+        }
+
+        private const float GroundCheckSeconds = 0.5f;
+        private const float GroundLogSeconds = 30f;
+
+        // A swapped zone hides vanilla's collider, so every Full chunk must keep a view (its mesh + collider). A chunk that
+        // loses its view after the swap (a remesh whose apply was stale-dropped, as the pre-swap spawn self-heal in TrySwap
+        // describes) leaves a hole with no ground at all: [fgn] R89 saw Fire's own drops fall 30 and 270 m after a zone reload.
+        // Such a chunk is re-armed, and vanilla's collider (not its renderer) stands in until every view is back. A remesh
+        // keeps its old baked collider until the new one lands, so ColliderReady going false is not a hole and is not counted.
+        private static void KeepGroundUnderSwappedZone(ZoneWrap w)
+        {
+            if (w.DataOnly || Time.time < w.NextGroundCheckAt) return;
+            w.NextGroundCheckAt = Time.time + GroundCheckSeconds;
+            int viewless = 0;
+            foreach (var key in w.Keys)
+            {
+                if (!VoxelWorld.TryGetChunk(key, out var chunk) || chunk.Kind != ChunkKind.Full) continue;
+                if (VoxelWorld.TryGetView(key, out var view) && view != null) continue;
+                viewless++;
+                if (!chunk.PendingGenerate && !chunk.Queued) VoxelMeshPipeline.EnqueueRemesh(chunk);
+            }
+            var col = s_hmCollider(w.Hm);
+            if (col == null) return;
+            if (viewless > 0)
+            {
+                col.enabled = true;
+                if (w.VanillaColliderBack) return;
+                w.VanillaColliderBack = true;
+                if (Time.time >= w.NextGroundLogAt)
+                {
+                    w.NextGroundLogAt = Time.time + GroundLogSeconds;
+                    FiresLogger.LogWarning($"[FiresVoxel] zone ({w.Zone.x},{w.Zone.y}): {viewless} voxel chunk(s) lost their mesh and collider after "
+                        + "the swap; re-meshing them, and vanilla's collider stands in until they are back.");
+                }
+            }
+            else if (viewless == 0 && w.VanillaColliderBack)
+            {
+                w.VanillaColliderBack = false;
+                col.enabled = false;
+                FiresLogger.LogInfo($"[FiresVoxel] zone ({w.Zone.x},{w.Zone.y}): voxel colliders back; vanilla's collider hidden again.");
             }
         }
 
@@ -1920,9 +2111,16 @@ namespace VerdantsAscent.Terrain.Voxel
         // this is legal from a client; hand-rolled ZDO destruction on a ZNetView
         // is not. Never on a Fires world (its generator placed vegetation
         // against the water field already).
+        // 0.2.686 ([lead] relaying Fire 10-01: "only stumps logs and rocks … under the water"; "a few small beech trees
+        // and maybe some saplings in the water"): what is cleared is FatUnderWaterPlacement's rule (logs now STAY; small
+        // beeches/birches, Destructible-only, and saplings GO), tool water drowns anything whose base is under the
+        // surface by more than FatUnderWaterPlacement.SurfaceTolerance (was 0.3 m, which spared the shallow rim), and the
+        // sweep runs on every world with tool water, not only hydrology worlds (it returned without the water field, so a
+        // tool pond on a world without hydrology never drowned anything). Fires worlds still skip the generated half.
         private static void DrownedVegTick()
         {
-            if (FiresWorldGenBase.Active || !GenWaterField.Ready) return;
+            bool generated = !FiresWorldGenBase.Active && GenWaterField.Ready;
+            if (!generated && global::VerdantsAscent.Water.Core.WaterMeshCombiner.AllCombiners.Count == 0) return;
             if (Time.time < s_nextDrownSweep) return;
             s_nextDrownSweep = Time.time + 5f;
             if (ZNetScene.instance == null || ZNetScene.instance.m_instances == null) return;
@@ -1941,10 +2139,19 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (!IsClearableVegetation(go)) continue;
                 veg++;
                 var p = go.transform.position;
-                if (!GenWaterField.TryWaterSurfaceSmooth(p.x, p.z, out float lvl, out float dep)
-                    || dep < 0.15f) continue;
+                if (generated && GenWaterField.TryWaterSurfaceSmooth(p.x, p.z, out float lvl, out float dep) && dep >= 0.15f)
+                {
+                    overWater++;
+                    if (p.y > lvl + clear) continue;   // stands clear of the waterline
+                    s_doomed.Add(go);
+                    continue;
+                }
+                // 0.2.675 (R46: saplings standing in the CoopStream base pond): tool ponds (Vpool/va_pool WaterDisks, pours)
+                // are not in the generated field, so they never drowned anything. Their surface is read at the plant's own
+                // base (a ray from above would land on its canopy), and only a base truly under that water is cleared.
+                float tool = VerdantsAscent.Water.Core.FatWaterChecks.SurfaceAt(new Vector3(p.x, p.y + DrownProbeLift, p.z));
+                if (tool <= SeaPlaneGate || tool < p.y + DrownedDepth) continue;
                 overWater++;
-                if (p.y > lvl + clear) continue;   // stands clear of the waterline
                 s_doomed.Add(go);
             }
 
@@ -1954,7 +2161,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_doomed.Count > 0)
             {
                 s_drownTotal += s_doomed.Count;
-                FiresLogger.LogInfo($"[FiresVoxel] drowned vegetation: cleared {s_doomed.Count} " +
+                FiresLogger.LogDebug($"[FiresVoxel] drowned vegetation: cleared {s_doomed.Count} " +
                     $"(session {s_drownTotal}) | scanned {scanned} instance(s), {veg} clearable veg, {overWater} over generated water.");
             }
             else if (veg > 0 && FiresLogger.VerboseEnabled)
@@ -1965,25 +2172,15 @@ namespace VerdantsAscent.Terrain.Voxel
             s_doomed.Clear();
         }
 
-        private static readonly string[] s_drownKeep = { "rock", "stone", "cliff", "mine" };
+        // Rocks, logs, stumps and water plants stay: FatUnderWaterPlacement's keep list (0.2.686).
+        // Tool water: the probe sits just above the plant's base, which must be at least DrownedDepth under the surface;
+        // water at or below the sea sheet is vanilla's own and left alone.
+        private const float DrownProbeLift = 0.1f, DrownedDepth = FatUnderWaterPlacement.SurfaceTolerance, SeaPlaneGate = 30.3f;
 
-        private static bool IsClearableVegetation(GameObject go)
-        {
-            // Never touch anything built, alive, carried or stored.
-            if (go.GetComponent<Piece>() != null || go.GetComponent<Character>() != null
-                || go.GetComponent<ItemDrop>() != null || go.GetComponent<Container>() != null) return false;
-
-            bool veg = go.GetComponent<TreeBase>() != null
-                    || go.GetComponent<TreeLog>() != null
-                    || go.GetComponent<Plant>() != null
-                    || go.GetComponent<Pickable>() != null;
-            if (!veg) return false;
-
-            string name = go.name.ToLowerInvariant();
-            for (int i = 0; i < s_drownKeep.Length; i++)
-                if (name.Contains(s_drownKeep[i])) return false;
-            return true;
-        }
+        // 0.2.686: one rule with generation and waterlife_test (FatUnderWaterPlacement): never anything built, alive,
+        // carried or stored; rocks, logs, stumps and water plants stay; trees, Tree-type destructibles, plants, pickables,
+        // bushes and saplings go.
+        private static bool IsClearableVegetation(GameObject go) => FatUnderWaterPlacement.IsRefusedInstance(go);
 
         private static void PlaceWaterForZone(Vector2s zone)
         {
@@ -2204,5 +2401,21 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// FAT's public voxel queries for other mods (FDT's bot, test drills). Additive; changes nothing by being called.
+    /// </summary>
+    public static class FiresVoxelApi
+    {
+        /// <summary>
+        /// Whether the ground at <paramref name="point"/> shows its current terrain on this peer: true where it is vanilla
+        /// terrain (not voxel-wrapped), and on voxel ground once its zone's rewrap has finished and the new chunks are
+        /// collidable. A terrain op (hoe, pickaxe, TerrainComp) reaches the heightmap a frame or more after it is placed
+        /// (longer when another peer owns the TerrainComp), and only then marks the zone for its rewrap, which waits at
+        /// least 2 s between runs. So wait about 0.5 s after the last op before polling this, then re-measure once it is
+        /// true. Main thread only.
+        /// </summary>
+        public static bool IsGroundSettled(Vector3 point) => VoxelZoneStreamer.IsGroundSettled(point);
     }
 }

@@ -261,6 +261,21 @@ namespace VerdantsAscent.Terrain.Voxel
             var zs = ZoneSystem.instance;
             if (zs == null) return true;
             var p = __instance.transform.position;
+
+            // 0.2.697 (Fire 10-01, after a sea-cliff climb kept snapping him 61 m up to the cliff top: "vanilla should not be
+            // running "below the ground" rescue on our voxel terrain, or our caves, or our sky islands for that matter
+            // because it would pull us up to them too"). Vanilla lifts any body below GetGroundHeight - 1 to that height,
+            // and on voxel ground GetGroundHeight is the TOP of the column: a cliff or overhang above a swimmer, the roof
+            // over a cave, a sky island over the ground. On voxel ground vanilla's rescue never runs; the only net left is
+            // voxel-native (VoidRescue): a body far below the world with nothing under it goes onto the LOWEST floor of
+            // its column, never onto a column top above it. Zones still on vanilla terrain keep vanilla's check.
+            if (VoxelOnlyMode.Active || VoxelZoneStreamer.IsZoneSolid(ZoneSystem.GetZone(p)))
+            {
+                TimerRef(__instance) = 0f;   // vanilla's timer contract (NPCs re-check every 5 s)
+                VoidRescue(__instance, p);
+                return false;
+            }
+
             if (p.y >= zs.GetGroundHeight(p) - 1f)
             {
                 TimerRef(__instance) = 0f;   // vanilla resets here too; without it NPCs re-check every frame
@@ -271,7 +286,61 @@ namespace VerdantsAscent.Terrain.Voxel
                 TimerRef(__instance) = 0f;   // keep the NPC cadence contract
                 return false;                // solid voxel floor below — inside carved terrain, no rescue
             }
-            return true;                     // true void — vanilla safety net
+            return true;                     // true void on vanilla terrain — vanilla safety net
+        }
+
+        // Fire 10-01: "we will replace it with our own safety that only pulls someone up to the lowest layer if they happen
+        // to fall through the world" - "or, whatever layer they were trying to teleport to if they fall through on
+        // teleport". It fires ONLY when nothing solid is under the body (a down ray on the solid layers, checked first, so
+        // a normal frame costs one ray) AND the body is below the LOWEST voxel floor of its column (the first solid→air
+        // crossing scanned up from ScanBottom). It lands on that lowest floor - never a cave ceiling, an overhang, a cliff
+        // top or a sky island above - except within TeleportMemory s of a teleport that targeted this spot, where it
+        // lands on the floor nearest the target's height (the layer the teleport meant: an island, a cave, a floor).
+        private const float ScanBottom = -300f, ColumnTop = 1200f, ScanStep = 20f, RescueLift = 0.5f, BelowFloor = 1f;
+        private const float TeleportMemory = 10f, TeleportReach = 16f, TeleportWindow = 40f;
+        private static readonly int s_solidMask = LayerMask.GetMask("Default", "static_solid", "Default_small", "piece", "terrain", "vehicle");
+        private static bool s_rescueLogged;
+        private static readonly System.Collections.Generic.Dictionary<int, (Vector3 to, float at)> s_teleports =
+            new System.Collections.Generic.Dictionary<int, (Vector3 to, float at)>();
+
+        // From FAT's one Player.TeleportTo hook (FatVanillaHooks), after a teleport that went ahead.
+        internal static void NoteTeleport(Character c, Vector3 to)
+        {
+            if (c == null) return;
+            if (s_teleports.Count > 256) s_teleports.Clear();
+            s_teleports[c.GetInstanceID()] = (to, Time.time);
+        }
+
+        private static void VoidRescue(Character c, Vector3 p)
+        {
+            if (Physics.Raycast(p + Vector3.up * 0.5f, Vector3.down, 3000f, s_solidMask, QueryTriggerInteraction.Ignore)) return;
+            float lowest = float.NaN;
+            for (float lo = ScanBottom; lo < ColumnTop && float.IsNaN(lowest); lo += ScanStep)
+                if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, lo + ScanStep, lo, out float y, out _)) lowest = y;
+            if (float.IsNaN(lowest) || p.y >= lowest - BelowFloor) return;   // not under the world's floor here: no rescue
+
+            float floor = lowest;
+            string why = "the lowest voxel floor";
+            if (s_teleports.TryGetValue(c.GetInstanceID(), out var tp) && Time.time - tp.at <= TeleportMemory
+                && Utils.DistanceXZ(tp.to, p) <= TeleportReach)
+            {
+                // The floor nearest the target's height: the highest crossing at or below target + 2 m within the window,
+                // else the lowest one above it.
+                if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, tp.to.y + 2f, tp.to.y - TeleportWindow, out float near, out _))
+                { floor = near; why = "the floor nearest its teleport target"; }
+                else if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, tp.to.y + TeleportWindow, tp.to.y + 2f, out float above, out _))
+                { floor = above; why = "the floor nearest its teleport target"; }
+            }
+            var to = new Vector3(p.x, floor + RescueLift, p.z);
+            c.transform.position = to;
+            var body = c.GetComponent<Rigidbody>();
+            if (body != null) { body.position = to; body.linearVelocity = Vector3.zero; }
+            if (!s_rescueLogged)
+            {
+                s_rescueLogged = true;
+                FiresLogger.LogInfo($"[FiresVoxel] void rescue: {c.m_name} fell through the world at ({p.x:0}, {p.y:0}, {p.z:0}); "
+                    + $"placed on {why}, y {floor:0.0} (lowest floor {lowest:0.0}). First of this session.");
+            }
         }
     }
 
@@ -298,8 +367,10 @@ namespace VerdantsAscent.Terrain.Voxel
             // A prop dressed onto a skyland never falls or pushes up at all. Vanilla measures the ground it should sit on
             // with ZoneSystem.GetGroundHeight (GetSolidHeight only when m_checkSolids, which these rocks do not set), and
             // that is the heightmap 150 m below: every rock and stone dropped out of the sky once its area loaded. It
-            // keeps the height the dressing placed it at.
-            if (FiresSkyIslands.IsOnZoneSkyland(__instance.transform.position)) return false;
+            // keeps the height the dressing placed it at, and so does anything under a skyland the server has announced
+            // but whose island set has not reached this client yet.
+            Vector3 position = __instance.transform.position;
+            if (FiresSkyIslands.IsOnZoneSkyland(position) || Zones.ZoneModeSkylands.RisingAt(position)) return false;
             if (!FiresWorldGenBase.Active) return true;
             // Solid AND settled for 3s — bounce reports persisted with the
             // bare solid gate; the settle window outlasts collider bake races.
@@ -411,20 +482,26 @@ namespace VerdantsAscent.Terrain.Voxel
     // method at default priority, so this reports the POST-swap truth (the
     // old Awake-time log fired before any swap could land and cried vanilla
     // even when the swap was about to apply).
+    // A built piece with water (a hot tub) enables its own WaterVolume and can come first ([perf] R41: "zone water surface:
+    // material='water_hottub'"), so zone water and piece water are logged apart, each naming its object.
     [HarmonyPatch(typeof(WaterVolume), "OnEnable")]
     internal static class Patch_WaterVolume_OnEnable_MaterialLog
     {
-        private static bool s_logged;
+        private static bool s_loggedZone;
+        private static bool s_loggedPiece;
 
         [HarmonyPostfix]
         [HarmonyPriority(Priority.Last)]
         private static void Postfix(WaterVolume __instance)
         {
-            if (s_logged || __instance.m_waterSurface == null) return;
-            s_logged = true;
+            if (__instance.m_waterSurface == null) return;
+            bool piece = __instance.GetComponentInParent<ZNetView>() != null;
+            if (piece ? s_loggedPiece : s_loggedZone) return;
+            if (piece) s_loggedPiece = true;
+            else s_loggedZone = true;
             var mat = __instance.m_waterSurface.sharedMaterial;
-            FiresLogger.LogInfo($"[FiresVoxel] zone water surface: material='{(mat != null ? mat.name : "null")}' " +
-                      $"shader='{(mat != null && mat.shader != null ? mat.shader.name : "null")}'");
+            FiresLogger.LogInfo($"[FiresVoxel] {(piece ? "piece" : "zone")} water surface on '{__instance.transform.root.name}': "
+                + $"material='{(mat != null ? mat.name : "null")}' shader='{(mat != null && mat.shader != null ? mat.shader.name : "null")}'");
         }
     }
 
@@ -470,10 +547,14 @@ namespace VerdantsAscent.Terrain.Voxel
         // Every voxel world, whatever its generator and terrain kind: vanilla's top-down ray that lands on voxel ground
         // hits a chunk collider with no Heightmap, so it answers no biome and no heightmap (and callers read no lava).
         // The zone's own heightmap answers them, the generator's biome where none is loaded; the height stays the ray's.
+        // 0.2.674 → 0.2.675 (R46, CoopStream base pond, 10-01): the answer was gated on the ray landing within 0.5 m
+        // of a sampled voxel surface. At a tool-carved pond in a zone converted by ZoneReplace that sample missed, the biome
+        // stayed None, and every biome-gated spawn and clutter rule refused the pond ("biome None", 0 fish). Vanilla leaves
+        // the biome None only when its ray missed or hit something without a Heightmap, and the zone's (or the generator's)
+        // biome is the right answer in both cases, so it is now always given.
         private static void Postfix(ref Vector3 p, ref Heightmap.Biome biome, ref Heightmap.BiomeArea biomeArea, ref Heightmap hmap)
         {
-            if (hmap != null || biome != Heightmap.Biome.None || !FiresVoxelConfig.StreamerRuns) return;
-            if (!VoxelWorld.TrySampleSurfaceY(p.x, p.z, p.y + VoxelHitTolerance, p.y - VoxelHitTolerance, out _, out _)) return;
+            if (hmap != null || biome != Heightmap.Biome.None) return;
             var zoneMap = Heightmap.FindHeightmap(p);
             if (zoneMap != null)
             {
@@ -485,7 +566,6 @@ namespace VerdantsAscent.Terrain.Voxel
             if (WorldGenerator.instance != null) biome = WorldGenerator.instance.GetBiome(p.x, p.z);
         }
 
-        private const float VoxelHitTolerance = 0.5f;
 
         // Timed wrapper — see FiresVegProfiler. Zero cost outside PlaceVegetation:
         // one bool test, and the stopwatch only runs while that method is on the stack.
@@ -612,7 +692,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // River wet channel = Ocean for placement purposes: vegetation,
             // clutter and spawns biome-gate on this call, and Ocean is the
             // one biome no land flora plants in — riverbeds stay clear.
-            if (FiresWorldGenBase.IsWetAt(p.x, p.z))
+            if (FiresWorldGenBase.IsGenWetAt(p.x, p.z))
                 biome = Heightmap.Biome.Ocean;
             biomeArea = hm.GetBiomeArea();
             hmap = hm;

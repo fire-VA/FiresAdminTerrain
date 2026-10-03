@@ -137,7 +137,8 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private static bool FrozenAt(float wx, float wz)
-            => FiresWorldGenBase.WaterClassAt(wx, wz) == FiresWorldGenBase.WC_FROZEN;
+            => FiresWorldGenBase.WaterClassAt(wx, wz) == FiresWorldGenBase.WC_FROZEN
+            || FiresWorldGenBase.SeasonalFrozenAt(wx, wz);
 
         // Main-thread scratch for the one-lock 3x3 batch.
         private static readonly float[] s_nine = new float[9];

@@ -33,13 +33,17 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresVoxelConfig.VegWaterEcology == null || FiresVoxelConfig.VegWaterEcology.Value;
 
         // Called from transpiled IL in ZoneSystem.PlaceVegetation.
+        // A chunk raised with other land (ZoneModeLift) judges altitude against its lifted sea, so it grows as its source.
         public static float EffectiveWaterY(ref Vector3 p)
         {
-            if (!Enabled || !GenWaterField.Ready) return 30f;
+            float sea = ZoneSystem.c_WaterLevel + Zones.ZoneModeGate.LiftAt(p.x, p.z);
+            if (!Enabled || !GenWaterField.Ready) return sea;
             if (GenWaterField.TryWaterSurfaceSmooth(p.x, p.z, out float lvl, out _)
-                && lvl > 30.3f) return lvl;
-            return 30f;
+                && lvl > sea + SeaSheetMargin) return lvl;
+            return sea;
         }
+
+        private const float SeaSheetMargin = 0.3f;
 
         private static string s_treeCsvCache, s_sinkCsvCache;
         private static string[] s_trees = System.Array.Empty<string>();

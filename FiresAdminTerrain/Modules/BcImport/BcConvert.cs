@@ -167,9 +167,16 @@ namespace VerdantsAscent.Terrain.BcImport
         public static bool TryConvert(string sourceName, string cloneName, WorldCloneOptions extras, out string report)
         {
             report = null;
-            if (!CanConvert(sourceName, out BcSaveLocation source, out string reason))
+
+            // BETTERCONTINENTS IS AN EXTRA TO CARRY, NOT A PRECONDITION.
+            // This used to open with CanConvert, which refuses any world without a BetterContinents
+            // file beside it - so a plain world, the common case, could not be cloned or updated at
+            // all. The clone, the 1.0 save format and the terrain options are the same work either
+            // way; BC data is one more thing to hand the copy WHEN the source has some.
+            // Re-converting a world that already carries the data is still refused: that is a no-op.
+            if (BcWorldData.Exists(sourceName, out BcSaveLocation already))
             {
-                report = reason;
+                report = $"'{sourceName}' is already converted ({already.Path}).";
                 return false;
             }
             if (!FiresWorldClone.IsUsableName(cloneName, out string nameProblem))
@@ -179,16 +186,21 @@ namespace VerdantsAscent.Terrain.BcImport
             }
 
             var timer = Stopwatch.StartNew();
-            if (!BcSaveReader.TryReadFile(source, out BcWorldSettings settings, out string readFailure))
+
+            // A source with no BC file, or with BC switched off for it, converts as a normal world:
+            // hasBcTerrain stays false and the hand-over below is skipped. Neither is an error now.
+            bool hasBcTerrain = BcSaveLocator.TryLocate(sourceName, out BcSaveLocation source);
+            BcWorldSettings settings = default(BcWorldSettings);
+            if (hasBcTerrain)
             {
-                report = $"{source.Describe()} was refused, so nothing was cloned: {readFailure}";
-                return false;
-            }
-            if (!settings.EnabledForThisWorld)
-            {
-                report = $"{source.Describe()} says BetterContinents was switched off for '{sourceName}', so there is "
-                    + "nothing to convert.";
-                return false;
+                if (!BcSaveReader.TryReadFile(source, out settings, out string readFailure))
+                {
+                    // Unreadable BC data IS an error: the source visibly has terrain we would drop
+                    // silently, and the copy would come out on vanilla heights looking nothing like it.
+                    report = $"{source.Describe()} was refused, so nothing was cloned: {readFailure}";
+                    return false;
+                }
+                if (!settings.EnabledForThisWorld) hasBcTerrain = false;
             }
 
             WorldCloneOptions options = WithVanillaDefaults(extras);
@@ -205,21 +217,22 @@ namespace VerdantsAscent.Terrain.BcImport
                 return false;
             }
 
-            if (!TryGiveCloneTheData(cloneName, source, settings, out string ownership))
+            string ownership = null;
+            if (hasBcTerrain && BcWorldData.Exists(cloneName, out BcSaveLocation carried))
+                ownership = $"'{cloneName}' carries FAT's own terrain data ({carried.Path}).";
+            else if (hasBcTerrain && !TryGiveCloneTheData(cloneName, settings, out ownership))
             {
                 report = $"Cloned '{sourceName}' as '{cloneName}', but {ownership} The original is untouched.";
                 return false;
             }
 
-            report = $"Converted '{sourceName}' to '{cloneName}' in {timer.ElapsedMilliseconds} ms. {ownership} "
+            report = $"Converted '{sourceName}' to '{cloneName}' in {timer.ElapsedMilliseconds} ms. "
+                + (hasBcTerrain ? ownership + " " : string.Empty)
                 + $"{DescribeTerrain(options)} "
                 + "The original is untouched - open it any time and it is exactly what it was.";
             return true;
         }
 
-        /// <summary>The clone gets FAT's record when it already has a world folder; a clone of a pre-1.0 world is
-        /// still flat, so it gets its own copy of the BetterContinents file instead and takes ownership the first
-        /// time Valheim converts the save. Either way the clone is self-contained.</summary>
         /// <summary>Hands a copy the BetterContinents terrain of the world it was copied from, for callers that
         /// clone WITHOUT converting. A plain clone used to carry only FAT's own records, and an unconverted source
         /// has none of those - its terrain lives in BetterContinents' file, which nothing reads once BC is gone -
@@ -239,7 +252,7 @@ namespace VerdantsAscent.Terrain.BcImport
             }
             if (!settings.EnabledForThisWorld) return true;
 
-            if (!TryGiveCloneTheData(cloneName, source, settings, out string ownership))
+            if (!TryGiveCloneTheData(cloneName, settings, out string ownership))
             {
                 report = $"'{cloneName}' did not get the BetterContinents terrain: {ownership}";
                 return false;
@@ -248,42 +261,19 @@ namespace VerdantsAscent.Terrain.BcImport
             return true;
         }
 
-        private static bool TryGiveCloneTheData(string cloneName, BcSaveLocation source, BcWorldSettings settings, out string ownership)
+        // FAT's own record is the ONLY thing a load reads: no load ever converts, so there is no fallback. Copying the
+        // BetterContinents file beside the clone used to be one, logged as "takes full ownership the first time it
+        // loads" - nothing did, and the clone generated as vanilla (2026-09-29 04:21, CratersBCWrap on the dedi).
+        private static bool TryGiveCloneTheData(string cloneName, BcWorldSettings settings, out string ownership)
         {
             if (BcWorldData.TryWrite(cloneName, FileHelpers.FileSource.Local, settings, out string writeFailure))
             {
-                ownership = $"'{cloneName}' now carries FAT's own terrain data ({BcWorldData.FileName} in its world folder).";
+                ownership = $"'{cloneName}' now carries FAT's own terrain data.";
                 return true;
             }
-
-            if (!TryCopyBetterContinentsFile(cloneName, source, out string copyFailure))
-            {
-                ownership = $"the clone could not be given the terrain data ({writeFailure}; {copyFailure}), so it would "
-                    + "generate as vanilla.";
-                return false;
-            }
-
-            ownership = $"'{cloneName}' carries its own copy of the BetterContinents data and takes full ownership the "
-                + "first time it loads, once Valheim has converted the save to the 1.0 format.";
-            return true;
-        }
-
-        private static bool TryCopyBetterContinentsFile(string cloneName, BcSaveLocation source, out string failure)
-        {
-            failure = null;
-            try
-            {
-                string root = SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local);
-                string destination = $"{root}/{cloneName}.BetterContinents";
-                File.Copy(source.Path, destination, true);
-                FiresLogger.LogInfo($"[BcImport] copied {source.Path} to {destination} so the clone is self-contained.");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                failure = $"{ex.GetType().Name}: {ex.Message}";
-                return false;
-            }
+            ownership = $"FAT's own terrain data could not be written ({writeFailure}), so it would generate as VANILLA "
+                + "and must not be played.";
+            return false;
         }
     }
 }

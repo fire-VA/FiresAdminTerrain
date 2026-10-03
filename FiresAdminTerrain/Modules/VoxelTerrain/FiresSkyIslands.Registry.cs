@@ -48,9 +48,34 @@ namespace VerdantsAscent.Terrain.Voxel
     internal static partial class FiresSkyIslands
     {
         private const uint RegistryMagic = 0x53494953u;
+        // Format 2 adds each island's placement offset (OffX, OffY, OffZ). It is written only once the world holds a skyland
+        // placed from a blueprint, so every other world keeps writing format 1 byte for byte, and older builds still read it.
+        // Format 3 adds an island's own seeds and biome: a skyland raised from another world's blueprint keeps its home
+        // world's noise, shape and biome. It is written only while such an island stands.
         private const byte RegistryFormat = 1;
+        private const byte RegistryFormatPlaced = 2;
+        private const byte RegistryFormatForeign = 3;
         private const int RegistryHeaderBytes = 4 + 1 + 1 + 8 + 4 + 4 + 4 + 4;
         private const int IslandRecordBytes = 15 * 4 + 1;
+        private const int PlacedRecordBytes = IslandRecordBytes + 3 * 4;
+        private const int ForeignRecordBytes = PlacedRecordBytes + 1 + 3 * 4;
+
+        private static int RecordBytes(byte format)
+            => format == RegistryFormatForeign ? ForeignRecordBytes : format == RegistryFormatPlaced ? PlacedRecordBytes : IslandRecordBytes;
+
+        private static bool KnownFormat(byte format)
+            => format == RegistryFormat || format == RegistryFormatPlaced || format == RegistryFormatForeign;
+
+        private static byte FormatFor(List<Island> islands)
+        {
+            byte format = RegistryFormat;
+            foreach (var isl in islands)
+            {
+                if (isl.OwnSeeds) return RegistryFormatForeign;
+                if (IsMoved(in isl)) format = RegistryFormatPlaced;
+            }
+            return format;
+        }
         private const int RegistryMaxIslands = 100000;
         private const float AwaitServerTimeoutSeconds = 60f;
         private const string RegistrySyncKey = "firesgen-islands";
@@ -271,6 +296,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!firstDelivery)
             {
                 int updated = MarkChangedZonesDirty(before, s_islands);
+                Zones.ZoneModeSkylands.RisingArrived();
                 FiresLogger.LogInfo(
                     $"[FiresSkyIslands] island set UPDATED from the server — {s_islands.Count} island(s); "
                     + $"{updated} loaded zone(s) re-armed for in-place regeneration.");
@@ -317,7 +343,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private static void MarkOne(in Island isl)
-            => VoxelZoneStreamer.MarkAreaDirty(new UnityEngine.Vector3(isl.X, 0f, isl.Z), isl.R);
+            => VoxelZoneStreamer.MarkAreaDirty(new UnityEngine.Vector3(WorldX(in isl), 0f, WorldZ(in isl)), isl.R);
 
         // ── Load / save ─────────────────────────────────────────────────────
         private static bool TryLoadRegistry(string path, World world, out string failure)
@@ -345,7 +371,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (magic != RegistryMagic) { failure = $"not an island registry (magic 0x{magic:X8})"; return false; }
 
                     byte format = r.ReadByte();
-                    if (format != RegistryFormat) { failure = $"format {format}, this build reads {RegistryFormat}"; return false; }
+                    if (!KnownFormat(format))
+                    {
+                        failure = $"format {format}, this build reads {RegistryFormat} to {RegistryFormatForeign}";
+                        return false;
+                    }
 
                     seeded = r.ReadByte() != 0;
                     long uid = r.ReadInt64();
@@ -363,13 +393,13 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (count < 0 || count > RegistryMaxIslands) { failure = $"implausible island count {count}"; return false; }
                     if (!seeded && count != 0) { failure = $"marked unseeded yet holds {count} island(s)"; return false; }
 
-                    long expected = RegistryHeaderBytes + (long)count * IslandRecordBytes;
+                    long expected = RegistryHeaderBytes + (long)count * RecordBytes(format);
                     if (bytes.Length != expected)
                     {
                         failure = $"length {bytes.Length}, expected {expected} for {count} island(s)";
                         return false;
                     }
-                    for (int i = 0; i < count; i++) loaded.Add(ReadIsland(r));
+                    for (int i = 0; i < count; i++) loaded.Add(ReadIsland(r, format));
                 }
             }
             catch (Exception ex) { failure = $"corrupt ({ex.GetType().Name}: {ex.Message})"; return false; }
@@ -422,18 +452,19 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static byte[] Serialize(World world, float rarity)
         {
-            using (var ms = new MemoryStream(RegistryHeaderBytes + s_islands.Count * IslandRecordBytes))
+            byte format = FormatFor(s_islands);
+            using (var ms = new MemoryStream(RegistryHeaderBytes + s_islands.Count * RecordBytes(format)))
             using (var w = new BinaryWriter(ms))
             {
                 w.Write(RegistryMagic);
-                w.Write(RegistryFormat);
+                w.Write(format);
                 w.Write((byte)(s_seeded ? 1 : 0));
                 w.Write(world.m_uid);
                 w.Write(world.m_seed);
                 w.Write(rarity);
                 w.Write(s_islands.Count);
                 w.Write(ClusterCount);
-                foreach (var isl in s_islands) WriteIsland(w, in isl);
+                foreach (var isl in s_islands) WriteIsland(w, in isl, format);
                 w.Flush();
                 return ms.ToArray();
             }
@@ -441,16 +472,20 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Field order is the file format. A new field means a new RegistryFormat,
         // never a reshuffle.
-        private static void WriteIsland(BinaryWriter w, in Island isl)
+        private static void WriteIsland(BinaryWriter w, in Island isl, byte format)
         {
             w.Write(isl.X); w.Write(isl.Z); w.Write(isl.R); w.Write(isl.BaseY); w.Write(isl.Seed);
             w.Write(isl.Top); w.Write(isl.Bot); w.Write(isl.MaxDepth);
             w.Write(isl.Kind);
             w.Write(isl.PondX); w.Write(isl.PondZ); w.Write(isl.PondR); w.Write(isl.PondLvl);
             w.Write(isl.RillAng); w.Write(isl.RillLen); w.Write(isl.RillEndLvl);
+            if (format == RegistryFormat) return;
+            w.Write(isl.OffX); w.Write(isl.OffY); w.Write(isl.OffZ);
+            if (format != RegistryFormatForeign) return;
+            w.Write(isl.OwnSeeds); w.Write(isl.NoiseSeed); w.Write(isl.OwnShapeSeed); w.Write((int)isl.FixedBiome);
         }
 
-        private static Island ReadIsland(BinaryReader r)
+        private static Island ReadIsland(BinaryReader r, byte format)
         {
             var isl = new Island
             {
@@ -460,6 +495,11 @@ namespace VerdantsAscent.Terrain.Voxel
             };
             isl.PondX = r.ReadSingle(); isl.PondZ = r.ReadSingle(); isl.PondR = r.ReadSingle(); isl.PondLvl = r.ReadSingle();
             isl.RillAng = r.ReadSingle(); isl.RillLen = r.ReadSingle(); isl.RillEndLvl = r.ReadSingle();
+            if (format == RegistryFormat) return isl;
+            isl.OffX = r.ReadSingle(); isl.OffY = r.ReadSingle(); isl.OffZ = r.ReadSingle();
+            if (format != RegistryFormatForeign) return isl;
+            isl.OwnSeeds = r.ReadBoolean(); isl.NoiseSeed = r.ReadInt32(); isl.OwnShapeSeed = r.ReadInt32();
+            isl.FixedBiome = (Heightmap.Biome)r.ReadInt32();
             return isl;
         }
 

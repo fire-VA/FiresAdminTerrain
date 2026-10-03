@@ -62,14 +62,22 @@ namespace VerdantsAscent.Terrain.Voxel
             return DecodeRaw(File.ReadAllBytes(path), out w, out h, out bitDepth, out channels);
         }
 
-        // Rows top-first, one row of channels x (bitDepth/8) bytes per pixel, 16-bit samples big-endian.
-        public static byte[] DecodeRaw(byte[] bytes, out int w, out int h, out int bitDepth, out int channels)
+        // A PNG's size, format and where its compressed data sits inside the file, read without copying anything.
+        public sealed class PngLayout
+        {
+            public int Width, Height, BitDepth, Channels;
+            internal readonly List<KeyValuePair<int, int>> Idat = new List<KeyValuePair<int, int>>();
+            public int RowBytes => Width * Channels * (BitDepth / 8);
+        }
+
+        private const int ZlibHeaderBytes = 2;
+
+        public static PngLayout ReadLayout(byte[] bytes)
         {
             if (bytes.Length < 8 || bytes[1] != 'P' || bytes[2] != 'N' || bytes[3] != 'G')
                 throw new Exception("not a PNG");
-            w = h = bitDepth = 0;
+            var layout = new PngLayout();
             int colorType = 0;
-            var idat = new List<byte[]>();
             int pos = 8;
             while (pos + 8 <= bytes.Length)
             {
@@ -78,36 +86,48 @@ namespace VerdantsAscent.Terrain.Voxel
                 int dataAt = pos + 8;
                 if (type == "IHDR")
                 {
-                    w = (bytes[dataAt] << 24) | (bytes[dataAt + 1] << 16) | (bytes[dataAt + 2] << 8) | bytes[dataAt + 3];
-                    h = (bytes[dataAt + 4] << 24) | (bytes[dataAt + 5] << 16) | (bytes[dataAt + 6] << 8) | bytes[dataAt + 7];
-                    bitDepth = bytes[dataAt + 8];
+                    layout.Width = (bytes[dataAt] << 24) | (bytes[dataAt + 1] << 16) | (bytes[dataAt + 2] << 8) | bytes[dataAt + 3];
+                    layout.Height = (bytes[dataAt + 4] << 24) | (bytes[dataAt + 5] << 16) | (bytes[dataAt + 6] << 8) | bytes[dataAt + 7];
+                    layout.BitDepth = bytes[dataAt + 8];
                     colorType = bytes[dataAt + 9];
                     if (bytes[dataAt + 12] != 0) throw new Exception("interlaced PNG not supported");
                 }
-                else if (type == "IDAT")
-                {
-                    var seg = new byte[len];
-                    Buffer.BlockCopy(bytes, dataAt, seg, 0, len);
-                    idat.Add(seg);
-                }
+                else if (type == "IDAT") layout.Idat.Add(new KeyValuePair<int, int>(dataAt, len));
                 else if (type == "IEND") break;
                 pos = dataAt + len + 4;
             }
-            channels = colorType == 0 ? 1 : colorType == 2 ? 3 : colorType == 4 ? 2 : colorType == 6 ? 4 : -1;
-            if (channels < 0) throw new Exception($"unsupported PNG color type {colorType}");
-            if (bitDepth != 8 && bitDepth != 16) throw new Exception($"unsupported PNG bit depth {bitDepth}");
+            layout.Channels = colorType == 0 ? 1 : colorType == 2 ? 3 : colorType == 4 ? 2 : colorType == 6 ? 4 : -1;
+            if (layout.Channels < 0) throw new Exception($"unsupported PNG color type {colorType}");
+            if (layout.BitDepth != 8 && layout.BitDepth != 16) throw new Exception($"unsupported PNG bit depth {layout.BitDepth}");
+            return layout;
+        }
 
-            int total = 0;
-            foreach (var seg in idat) total += seg.Length;
-            var z = new byte[total];
-            int o = 0;
-            foreach (var seg in idat) { Buffer.BlockCopy(seg, 0, z, o, seg.Length); o += seg.Length; }
-
-            int bpp = channels * (bitDepth / 8);
-            int rowBytes = w * bpp;
+        // Rows top-first, one row of channels x (bitDepth/8) bytes per pixel, 16-bit samples big-endian.
+        public static byte[] DecodeRaw(byte[] bytes, out int w, out int h, out int bitDepth, out int channels)
+        {
+            PngLayout layout = ReadLayout(bytes);
+            w = layout.Width;
+            h = layout.Height;
+            bitDepth = layout.BitDepth;
+            channels = layout.Channels;
+            int rowBytes = layout.RowBytes;
             var outp = new byte[h * rowBytes];
-            using (var ms = new MemoryStream(z, 2, z.Length - 2))   // skip zlib header
-            using (var ds = new DeflateStream(ms, CompressionMode.Decompress))
+            DecodeRows(bytes, layout, (y, row) => Buffer.BlockCopy(row, 0, outp, y * rowBytes, rowBytes));
+            return outp;
+        }
+
+        // Each unfiltered row, top-first, handed to `onRow` and then reused: copy out what is needed, keep no reference.
+        // The compressed data is read where it sits in `bytes`, and no whole-image buffer is ever built, so an 8192² map
+        // costs two row buffers instead of three copies of itself.
+        public static void DecodeRows(byte[] bytes, PngLayout layout, Action<int, byte[]> onRow)
+        {
+            int h = layout.Height;
+            int bpp = layout.Channels * (layout.BitDepth / 8);
+            int rowBytes = layout.RowBytes;
+            var idat = new IdatStream(bytes, layout.Idat);
+            var header = new byte[ZlibHeaderBytes];
+            if (idat.Read(header, 0, ZlibHeaderBytes) != ZlibHeaderBytes) throw new EndOfStreamException();
+            using (var ds = new DeflateStream(idat, CompressionMode.Decompress))
             {
                 var prev = new byte[rowBytes];
                 var cur = new byte[rowBytes];
@@ -141,11 +161,55 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                         cur[x] = (byte)v;
                     }
-                    Buffer.BlockCopy(cur, 0, outp, y * rowBytes, rowBytes);
+                    onRow(y, cur);
                     var t = prev; prev = cur; cur = t;
                 }
             }
-            return outp;
+        }
+
+        // The IDAT chunks read in order where they sit in the file, as one stream.
+        private sealed class IdatStream : Stream
+        {
+            private readonly byte[] _bytes;
+            private readonly List<KeyValuePair<int, int>> _segments;
+            private int _segment;
+            private int _offset;
+
+            internal IdatStream(byte[] bytes, List<KeyValuePair<int, int>> segments)
+            {
+                _bytes = bytes;
+                _segments = segments;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                while (_segment < _segments.Count)
+                {
+                    KeyValuePair<int, int> segment = _segments[_segment];
+                    int left = segment.Value - _offset;
+                    if (left <= 0)
+                    {
+                        _segment++;
+                        _offset = 0;
+                        continue;
+                    }
+                    int copied = Math.Min(left, count);
+                    Buffer.BlockCopy(_bytes, segment.Key + _offset, buffer, offset, copied);
+                    _offset += copied;
+                    return copied;
+                }
+                return 0;
+            }
+
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
     }
 }

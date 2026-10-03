@@ -32,6 +32,8 @@ namespace VerdantsAscent.Terrain.Zones
         private const float SkylandGap = 8f;
         private const float RangeStep = 4f;
         private const int UndoDepth = 16;
+        internal const string WorldSavingMessage = "The world is being saved right now. Try again in a moment.";
+        internal static string RefusedLoadMessage => $"This world's load was refused ({FiresWorldLoadGuard.Reason}), so nothing in it is changed.";
 
         private static readonly AccessTools.FieldRef<TerrainComp, Color[]> CompilerPaint =
             AccessTools.FieldRefAccess<TerrainComp, Color[]>("m_paintMask");
@@ -41,12 +43,21 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly AccessTools.FieldRef<ZoneSystem, HashSet<Vector2s>> GeneratedZonesRef =
             AccessTools.FieldRefAccess<ZoneSystem, HashSet<Vector2s>>("m_generatedZones");
 
+        // One placement that can be stepped back: a whole zone, or an area (ZoneModeAreaBlueprint), whose kept file knows
+        // its own place. A skyland (ZoneModeSkylandBlueprint) steps two ways: a placed one (SkylandId) is taken back into a
+        // kept file, and a kept one (IsSkyland) is raised again from it. A biome paint (BiomePaint) steps the same way: a
+        // laid circle (PaintId) is taken back into its kept record (Paint), which is laid again.
         private struct Step
         {
             internal Vector2s Zone;
             internal string Path;
             internal string What;
             internal bool WasOpen;
+            internal bool IsArea;
+            internal bool IsSkyland;
+            internal uint SkylandId;
+            internal uint PaintId;
+            internal byte[] Paint;
         }
 
         private static readonly List<Step> s_undo = new List<Step>();
@@ -99,7 +110,8 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── Saving ──────────────────────────────────────────────────────────
-        internal static bool TrySave(Vector2s zone, string name, bool overwrite, out string report)
+        // `snapshot` is the saving client's own render of the chunk (ZoneModeBlueprintIcons.TakeSnapshot), or null.
+        internal static bool TrySave(Vector2s zone, string name, bool overwrite, byte[] snapshot, out string report)
         {
             if (!ServerReady(out report)) return false;
             if (!IsUsableName(name, out report)) return false;
@@ -109,16 +121,62 @@ namespace VerdantsAscent.Terrain.Zones
                 report = $"'{name}' already exists. Pass 'overwrite' to replace it.";
                 return false;
             }
-            if (!TryCapture(zone, path, out var blueprint, out report)) return false;
+            var builtAt = new List<Vector2>();
+            if (!TryCapture(zone, path, out var blueprint, out report, builtAt)) return false;
+            ZoneModeBlueprintIcons.Delete(path);
+            WriteMap(path, blueprint, builtAt);
+            bool snapped = ZoneModeBlueprintIcons.IsAcceptableSnapshot(snapshot);
+            if (snapped) ZoneModeBlueprintIcons.Write(path, ZoneModeBlueprintIcons.Kind.Snapshot, snapshot);
             report = $"Saved '{name}': zone ({zone.x},{zone.y}) of '{blueprint.World}', ground {blueprint.LowGround:0.#} to "
                 + $"{blueprint.HighGround:0.#} m, {blueprint.ChunkCountY * VoxelWorld.ZoneChunksPerAxis * VoxelWorld.ZoneChunksPerAxis} "
                 + $"chunk(s) of land with everything carved into them, {blueprint.Objects + blueprint.Portals} object(s) "
-                + $"({blueprint.Pieces} built piece(s)), {new FileInfo(path).Length / BytesPerKilobyte:0} KB. Skylands over the "
-                + "zone stay where they are.";
+                + $"({blueprint.Pieces} built piece(s)), {new FileInfo(path).Length / BytesPerKilobyte:0} KB, pictured by "
+                + (snapped ? "a snapshot" : "its map") + ". Skylands over the zone stay where they are.";
             return true;
         }
 
-        private static bool TryCapture(Vector2s zone, string path, out Blueprint blueprint, out string problem)
+        // A blueprint saved before pictures existed gets its map the first time its name is listed.
+        internal static void EnsureMap(string path)
+        {
+            if (!File.Exists(path) || ZoneModeBlueprintIcons.IsCurrent(path, ZoneModeBlueprintIcons.Kind.Map)) return;
+            var objects = new List<ZDO>();
+            try
+            {
+                var blueprint = Read(path, objects);
+                var builtAt = new List<Vector2>();
+                AddBuiltPositions(blueprint.Zone, objects, builtAt);
+                WriteMap(path, blueprint, builtAt);
+                FiresLogger.LogInfo($"[FiresZones] drew the map of {Path.GetFileName(path)} ({builtAt.Count} built piece(s) marked).");
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresZones] no map for {Path.GetFileName(path)} ({ex.GetType().Name}: {ex.Message}); it wears the hammer's icon.");
+            }
+            finally
+            {
+                foreach (var zdo in objects) ZDOPool.Release(zdo);
+            }
+        }
+
+        private static void WriteMap(string path, Blueprint blueprint, List<Vector2> builtAt)
+            => ZoneModeBlueprintIcons.Write(path, ZoneModeBlueprintIcons.Kind.Map, ZoneModeBlueprintIcons.DrawMap(blueprint.Volume,
+                blueprint.ChunkCountY, blueprint.ChunkMinY, blueprint.Paint, blueprint.Biome, Pitch, builtAt));
+
+        // Built pieces as metre positions from the zone's minimum corner, for the map's marks.
+        private static void AddBuiltPositions(Vector2s zone, List<ZDO> zdos, List<Vector2> into)
+        {
+            Vector3 centre = ZoneSystem.GetZonePos(zone);
+            float minX = centre.x - ZoneOpenSet.ZoneSize * 0.5f, minZ = centre.z - ZoneOpenSet.ZoneSize * 0.5f;
+            foreach (var zdo in zdos)
+            {
+                if (!ZoneModeBuilds.IsBuilt(zdo)) continue;
+                Vector3 at = zdo.GetPosition();
+                into.Add(new Vector2(at.x - minX, at.z - minZ));
+            }
+        }
+
+        private static bool TryCapture(Vector2s zone, string path, out Blueprint blueprint, out string problem,
+            List<Vector2> builtAt = null)
         {
             blueprint = new Blueprint
             {
@@ -150,6 +208,11 @@ namespace VerdantsAscent.Terrain.Zones
             blueprint.Objects = objects.Count;
             blueprint.Portals = portals.Count;
             blueprint.Pieces = CountBuilt(objects) + CountBuilt(portals);
+            if (builtAt != null)
+            {
+                AddBuiltPositions(zone, objects, builtAt);
+                AddBuiltPositions(zone, portals, builtAt);
+            }
 
             try
             {
@@ -249,6 +312,46 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal static bool TryRedo(out string report) => TryStep(s_redo, s_undo, "Redid", out report);
 
+        // An area placement joins the same history as chunk placements, so the hammer's Undo and Redo cover both.
+        internal static void RecordAreaPlacement(string keptPath, string what)
+        {
+            if (keptPath != null) Keep(s_undo, new Step { Path = keptPath, What = what, IsArea = true });
+            foreach (var step in s_redo) TryDelete(step.Path);
+            s_redo.Clear();
+        }
+
+        // A skyland placement joins the same history, so Undo takes the skyland back and Redo raises it again.
+        internal static void RecordSkylandPlacement(uint id, string what)
+        {
+            Keep(s_undo, new Step { SkylandId = id, What = what });
+            foreach (var step in s_redo) TryDelete(step.Path);
+            s_redo.Clear();
+        }
+
+        // A biome paint joins the same history (Fire's popup: Undo/Redo cover paint).
+        internal static void RecordPaint(uint id, string what)
+        {
+            Keep(s_undo, new Step { PaintId = id, What = what });
+            foreach (var step in s_redo) TryDelete(step.Path);
+            s_redo.Clear();
+        }
+
+        internal static string NewUndoPath(string extension)
+        {
+            Directory.CreateDirectory(UndoFolder);
+            return Path.Combine(UndoFolder, $"{++s_stepCount:00}_area{extension}");
+        }
+
+        private static void Keep(List<Step> into, Step step)
+        {
+            into.Add(step);
+            while (into.Count > UndoDepth)
+            {
+                TryDelete(into[0].Path);
+                into.RemoveAt(0);
+            }
+        }
+
         // Stepping back and forward is symmetric: what the zone holds now goes onto the other stack before the saved
         // state is laid down, so undo and redo are the same move in opposite directions.
         private static bool TryStep(List<Step> from, List<Step> onto, string verb, out string report)
@@ -261,6 +364,63 @@ namespace VerdantsAscent.Terrain.Zones
             }
             var step = from[from.Count - 1];
             from.RemoveAt(from.Count - 1);
+            if (step.PaintId != 0u)
+            {
+                if (!BiomePaint.TryTakeBack(step.PaintId, out byte[] kept, out string takenReport))
+                {
+                    report = takenReport;
+                    return false;
+                }
+                Keep(onto, new Step { Paint = kept, What = step.What });
+                report = $"{verb} {step.What}. {takenReport}";
+                return true;
+            }
+            if (step.Paint != null)
+            {
+                if (!BiomePaint.TryPutBack(step.Paint, out uint laid, out string laidReport))
+                {
+                    report = laidReport;
+                    return false;
+                }
+                Keep(onto, new Step { PaintId = laid, What = step.What });
+                report = $"{verb} {step.What}. {laidReport}";
+                return true;
+            }
+            if (step.SkylandId != 0u)
+            {
+                if (!ZoneModeSkylandBlueprint.TryTakeBack(step.SkylandId, step.What, out string kept, out string takenReport))
+                {
+                    report = takenReport;
+                    return false;
+                }
+                Keep(onto, new Step { Path = kept, What = step.What, IsSkyland = true });
+                report = $"{verb} {step.What}. {takenReport}";
+                return true;
+            }
+            if (step.IsSkyland)
+            {
+                if (!ZoneModeSkylandBlueprint.TryPutBack(step.Path, step.What, out uint raised, out string raisedReport))
+                {
+                    report = raisedReport;
+                    return false;
+                }
+                Keep(onto, new Step { SkylandId = raised, What = step.What });
+                TryDelete(step.Path);
+                report = $"{verb} {step.What}. {raisedReport}";
+                return true;
+            }
+            if (step.IsArea)
+            {
+                if (!ZoneModeAreaBlueprint.TryApplyKept(step.Path, step.What, out string keptNow, out string areaReport))
+                {
+                    report = areaReport;
+                    return false;
+                }
+                if (keptNow != null) Keep(onto, new Step { Path = keptNow, What = step.What, IsArea = true });
+                TryDelete(step.Path);
+                report = $"{verb} {step.What}. {areaReport}";
+                return true;
+            }
             if (!Apply(step.Path, step.Zone, step.What, onto, out string applied))
             {
                 report = applied;
@@ -380,16 +540,28 @@ namespace VerdantsAscent.Terrain.Zones
             heightmap.Poke(0, true);
         }
 
-        private static bool ServerReady(out string problem)
+        internal static bool ServerReady(out string problem)
         {
             var net = ZNet.instance;
-            if (net != null && net.IsServer() && ZDOMan.instance != null && ZoneSystem.instance != null)
+            if (net == null || !net.IsServer() || ZDOMan.instance == null || ZoneSystem.instance == null)
             {
-                problem = null;
-                return true;
+                problem = "Chunks are saved and placed by the server: run this on the host or the server console.";
+                return false;
             }
-            problem = "Chunks are saved and placed by the server: run this on the host or the server console.";
-            return false;
+            // Clearing a zone resets vanilla's chunk save mapping, and a save in flight would swap the old mapping
+            // back in afterwards (Tools\WORLD_LOSS_20260927_RPGWORLD_CHUNKS.md).
+            if (net.IsSaving())
+            {
+                problem = WorldSavingMessage;
+                return false;
+            }
+            if (FiresWorldLoadGuard.Refused)
+            {
+                problem = RefusedLoadMessage;
+                return false;
+            }
+            problem = null;
+            return true;
         }
 
         // ── File ────────────────────────────────────────────────────────────

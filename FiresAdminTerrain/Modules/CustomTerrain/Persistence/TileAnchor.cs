@@ -121,6 +121,45 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             if (_nview == null || !_nview.IsValid()) return;
             CheckLoad();
+            TileAnchorHeal.Tick();
+        }
+
+        // For TileAnchorHeal: this anchor's ZDO and its stored tile payload (null until it has synced).
+        internal ZDO Zdo => _nview != null && _nview.IsValid() ? _nview.GetZDO() : null;
+        internal byte[] StoredPayload => Zdo?.GetByteArray(K_TILE_DATA);
+
+        // TileAnchorHeal, server only: store a merged payload on this (the keeper) anchor as its owner, then read it back.
+        // True only when the ZDO now holds exactly these bytes and they decode. CheckLoad re-decodes it on every peer.
+        internal bool WriteHealedPayload(byte[] payload, out string failure)
+        {
+            failure = null;
+            var zdo = Zdo;
+            if (zdo == null) { failure = "no ZDO"; return false; }
+            if (!_nview.IsOwner()) zdo.SetOwner(ZDOMan.GetSessionID());
+            if (!_nview.IsOwner()) { failure = "could not take ownership"; return false; }
+            zdo.Set(K_TILE_V, (int)TerrainTileCodec.SCHEMA_VERSION);
+            zdo.Set(K_TILE_X, TileXZ.x);
+            zdo.Set(K_TILE_Z, TileXZ.y);
+            zdo.Set(K_TILE_DATA, payload);
+            byte[] back = zdo.GetByteArray(K_TILE_DATA);
+            if (back == null || back.Length != payload.Length) { failure = "read-back length differs"; return false; }
+            for (int i = 0; i < back.Length; i++)
+                if (back[i] != payload[i]) { failure = $"read-back byte {i} differs"; return false; }
+            try { TerrainTileCodec.Decode(back); }
+            catch (Exception ex) { failure = $"read-back does not decode ({ex.Message})"; return false; }
+            return true;
+        }
+
+        // TileAnchorHeal, server only: remove this duplicate (its data already merged into the keeper) from the world.
+        internal bool DestroyAsLoser(out string failure)
+        {
+            failure = null;
+            if (ZNetScene.instance == null || _nview == null || !_nview.IsValid()) { failure = "no ZNetScene or ZNetView"; return false; }
+            var zdo = Zdo;
+            if (zdo != null && !_nview.IsOwner()) zdo.SetOwner(ZDOMan.GetSessionID());
+            if (!_nview.IsOwner()) { failure = "could not take ownership"; return false; }
+            ZNetScene.instance.Destroy(gameObject);
+            return true;
         }
 
         private void OnDestroy()
@@ -265,9 +304,12 @@ namespace VerdantsAscent.Terrain.Persistence
         // stitch's secondary rebuild lands a frame later (and on slow
         // clients, the user sees a permanent-looking seam because the
         // stitch's rebuild doesn't always catch every affected tile).
+        // The 2D tile layer is retired: no anchor is created (Spawn) and no tile is written (here), whoever asks.
+        internal static readonly bool Retired = true;
+
         public int ApplyOpAndSave(Func<TerrainTile, int> mutate, bool deferRebuild = false)
         {
-            if (mutate == null) return 0;
+            if (mutate == null || Retired) return 0;
             if (_nview == null || !_nview.IsValid())
             {
                 FiresLogger.LogWarning($"[TileAnchor] tile=({TileXZ.x},{TileXZ.y}) ApplyOpAndSave: invalid ZNetView");
@@ -491,12 +533,27 @@ namespace VerdantsAscent.Terrain.Persistence
         //   * The spawned GameObject is missing the TileAnchor component
         public static TileAnchor Spawn(Vector2i tileXZ)
         {
+            // The 2D tile layer is retired (Fire, 2026-09-29: FAT's terrain tools are the voxel tools only; on voxel worlds
+            // its leftovers floated as "pixels of previous terrain"). No caller gets an anchor to create or edit; what a save
+            // still holds is only there to be purged (TileAnchorHeal, mode Purge / fat_tile_purge).
+            if (Retired) return null;
+
             // De-dupe first: if an anchor is already in the registry, return it.
             var existing = TileAnchorRegistry.GetAt(tileXZ);
             if (existing != null)
             {
                 FiresLogger.LogVerbose($"[TileAnchor.Spawn] tile=({tileXZ.x},{tileXZ.y}) already loaded; returning existing.");
                 return existing;
+            }
+
+            // Only the server creates a tile's anchor. Every tile op reaches every peer (TileBrushRPC), and a de-dupe against
+            // this peer's registry alone let the editor, the server and the bot each spawn one on a fresh tile before the
+            // others' ZDO arrived: the edits split across them and a reload kept one (R70, OPEN_BUGS #47). A client's edit on
+            // a fresh tile lands through the server's anchor, which then replicates here.
+            if (ZNet.instance != null && !ZNet.instance.IsServer())
+            {
+                FiresLogger.LogVerbose($"[TileAnchor.Spawn] tile=({tileXZ.x},{tileXZ.y}) has no anchor here yet; the server creates it.");
+                return null;
             }
 
             if (!TileAnchorPrefab.IsRegistered)

@@ -621,7 +621,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // still-family otherwise. One decimated-grid read; cheap enough for the hot surface queries.
         private static float ReliefFor(float wx, float wz)
         {
-            byte c = WaterClassAt(wx, wz);
+            byte c = WaterClassAtReal(wx, wz);
             return (c == WC_RIVER || c == WC_STREAM || c == WC_WATERFALL) ? RiverRelief : StillRelief;
         }
 
@@ -702,7 +702,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (mask != null && mask[i] != 0)
                         {
                             v = WC_RIVER;
-                            byte c = WaterClassAt(x * cellM - half, wz);
+                            byte c = WaterClassAtReal(x * cellM - half, wz);
                             if (c == WC_STREAM || c == WC_WATERFALL) v = c;
                         }
                         else if (wv <= SEA + 0.01f) v = WC_OCEAN;                       // sea-level water — the tidal plane owns it
@@ -719,7 +719,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         else
                         {
                             v = WC_LAKE;                                               // walk-kept still water
-                            byte c = WaterClassAt(x * cellM - half, wz);
+                            byte c = WaterClassAtReal(x * cellM - half, wz);
                             if (c == WC_POND || c == WC_SWAMP || c == WC_FROZEN || c == WC_HOTSPRING || c == WC_STREAM) v = c;
                         }
                     }
@@ -983,7 +983,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // solid and the analytic grid knows nothing of the void. Kept because it is nearly free
                     // and it is the standing evidence for why the raycast is not replaceable.
                     if (s_peOn && (++s_peCalls % PROBE_EQUIV_EVERY) == 0
-                        && TryGetGenGround(wx, wz, out float gg))
+                        && TryGetGenGroundReal(wx, wz, out float gg))
                     {
                         double d = y - gg; if (d < 0) d = -d;
                         s_peSamples++; s_peSum += d;
@@ -1002,7 +1002,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // and both arms doubled). Kept on reasoning alone; do not cite a figure for it.
             NoteFallbackAt(wx, wz);   // the ONE chokepoint - every ClipGroundAt fallback passes here
             if (SheetProbeComplete) SheetProbeComplete = false;
-            return SampleFinalMeters(wx, wz);
+            return SampleFinalMetersReal(wx, wz);
         }
         private static bool s_sheetStamped;
         // The sheet dilation reach, as ONE named constant so the log stamp and the loop cannot disagree.
@@ -1225,10 +1225,10 @@ namespace VerdantsAscent.Terrain.Voxel
                         // sub-tide bed only hands the column to the ocean when the water on it is also within reach of
                         // the sea. Coastal mouth ribbons (30.0–30.5 over a 29.x bed — the 08-13 floating-plank case)
                         // stay gated; inland standing water over a dug floor draws. The field is not touched.
-                        ok = TryGetWaterSurfaceSmooth(wx, wz, out sl, out sd) && sl > SEA && ((sl - sd) > SEA || sl > SEA + 1f);
+                        ok = TryGetWaterSurfaceSmoothReal(wx, wz, out sl, out sd) && sl > SEA && ((sl - sd) > SEA || sl > SEA + 1f);
                         if (ok)
                         {
-                            byte wc = WaterClassAt(wx, wz);
+                            byte wc = WaterClassAtReal(wx, wz);
                             if (wc != WC_RIVER && wc != WC_STREAM && wc != WC_WATERFALL) F[ni] = 1;   // still family → body skirt rules (pocket-wall deep tolerance)
                         }
                     }
@@ -1240,7 +1240,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (!ok && TryGetRawWaterCell(wx, wz, out float erl, out _) && erl > 30.4f) ok = true;
                         if (ok)
                         {
-                            TryGetWaterSurfaceSmooth(wx, wz, out sl, out sd);
+                            TryGetWaterSurfaceSmoothReal(wx, wz, out sl, out sd);
                             if (TryGetRawWaterCell(wx, wz, out float rl, out float rd)
                                 && (sl <= 28.3f || sl - rl > 1.5f)) { sl = rl; sd = rd; }
                             ok = sl > 28.05f;
@@ -1585,7 +1585,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 if (nv > 0f && nv < lo) lo = nv;
                             }
                         if (lo == float.MaxValue) continue;
-                        float g = SampleFinalMeters(originX + (nx - NH), originZ + (nz - NH));
+                        float g = SampleFinalMetersReal(originX + (nx - NH), originZ + (nz - NH));
                         // ⚠ A SHORE, NOT A FALL (2026-08-18, user: "the entire water logic is built on leveling from
                         // the lower of the two banks, there physically shouldn't be a bank dropped out from under it
                         // unless we have a river that is flowing in that direction and it's flowing downhill"). The

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using FiresCore.Materials;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -6,7 +7,9 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // Falling-water curtains drawn with Custom/FiresWaterfall from the embedded "fireswaterfall" bundle: the
     // river that leaves an open zone over a closed one, and the short falls under skylands. The mesh contract
-    // is documented in the shader; the geometry here is the same one the bundle builder previews.
+    // is documented in the shader; the geometry here is the same one the bundle builder previews. A falls
+    // renderer carries both Materials: the first dims what is behind each curtain, the second adds its light,
+    // so curtains that overlap blend the same in any order, after the water sheets have taken their screen grab.
     internal static class FiresWaterfalls
     {
         internal const float SeaLevel = 30f;
@@ -15,7 +18,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float Curl = 0.6f;
         private const float CurlLength = 1.2f;
         private const float LowerRowStep = 3f;
-        private const int FallQueue = 2899;
+        private const int TransmitQueue = 3002;
+        private const int AddQueue = 3003;
         private const float FogSyncSeconds = 1f;
         private static readonly float[] UpperRows = { 0f, 0.3f, 0.7f, 1.2f, 1.8f, 2.6f, 3.6f };
         private const float ApproachLength = 1.2f;
@@ -59,10 +63,27 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float MinFallLength = 2f;
         private static readonly List<float> s_rowOut = new List<float>(32);
 
+        private const int MistQueue = 3010;
+        private const string BundleName = "fireswaterfall";
+        private const string OfferingMod = "FiresAdminTerrain";
+        private const string MistShaderName = "FiresWaterfallMist";
+        private const string MistShaderFullName = "Custom/FiresWaterfallMist";
+        private const string MistPuffsName = "FiresWaterfallMistPuffs";
+        private const float MistLipSprayOut = 0.8f;
+        private const float MistLipSprayDrop = 0.8f;
+
         private static AssetBundle s_bundle;
         private static Material s_material;
+        private static Material s_addMaterial;
+        private static Material[] s_materials;
+        private static Material s_mistMaterial;
+        private static Material s_veilMaterial;
         private static bool s_loadTried;
+        private static bool s_bundleTried;
         private static float s_nextFogSync;
+
+        // Where the curtain AppendCurtain last drew leaves its lip and lands (or thins out), for its mist.
+        internal static FiresWaterfallMist.Site LastSite;
 
         private static readonly List<Vector3> s_verts = new List<Vector3>(2048);
         private static readonly List<Vector3> s_norms = new List<Vector3>(2048);
@@ -77,6 +98,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly List<float> s_fallen = new List<float>(2048);
         private static readonly List<Vector3> s_dirs = new List<Vector3>(128);
         private static readonly List<float> s_lengths = new List<float>(128);
+        private static readonly List<float> s_plunges = new List<float>(128);
 
         internal static Material Material
         {
@@ -87,12 +109,43 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // What a falls renderer carries (sharedMaterials) on its one-submesh mesh: Unity draws the mesh once per material.
+        internal static Material[] Materials
+        {
+            get
+            {
+                if (s_material == null && !s_loadTried) Load();
+                return s_materials;
+            }
+        }
+
+        // The mist shader is offered to Core's broker, so other mods (FDT's ghost) draw with the one live copy instead
+        // of shipping their own; the falls take theirs from the broker too. The bundle loads once, whoever asks first.
+        internal static void OfferShaders() => FiresShaderBroker.Offer(MistShaderFullName, OfferingMod, LoadMistShader);
+
+        private static Shader LoadMistShader()
+        {
+            var bundle = Bundle;
+            return bundle != null ? bundle.LoadAsset<Shader>(MistShaderName) : null;
+        }
+
+        private static AssetBundle Bundle
+        {
+            get
+            {
+                if (s_bundleTried) return s_bundle;
+                s_bundleTried = true;
+                s_bundle = FiresAdminTerrain.GetAssetBundleFromResources(BundleName);
+                return s_bundle;
+            }
+        }
+
         private static void Load()
         {
             s_loadTried = true;
             try
             {
-                s_bundle = FiresAdminTerrain.GetAssetBundleFromResources("fireswaterfall");
+                s_bundle = Bundle;
                 if (s_bundle == null)
                 {
                     FiresLogger.LogWarning("[FiresWaterfall] embedded bundle 'fireswaterfall' missing — no falling water.");
@@ -107,14 +160,55 @@ namespace VerdantsAscent.Terrain.Voxel
                     FiresLogger.LogWarning($"[FiresWaterfall] Custom/FiresWaterfall {(shader == null ? "not in the bundle" : "not supported on this GPU")} — no falling water.");
                     return;
                 }
-                s_material = new Material(shader) { name = "FiresWaterfall", renderQueue = FallQueue };
+                s_material = new Material(shader) { name = "FiresWaterfallTransmit", renderQueue = TransmitQueue };
+                s_material.SetFloat("_SrcBlend", (float)BlendMode.Zero);
+                s_material.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+                s_addMaterial = new Material(shader) { name = "FiresWaterfallAdd", renderQueue = AddQueue };
+                s_addMaterial.SetFloat("_SrcBlend", (float)BlendMode.One);
+                s_addMaterial.SetFloat("_DstBlend", (float)BlendMode.One);
+                s_materials = new[] { s_material, s_addMaterial };
+                LoadMist();
                 SyncFog();
-                FiresLogger.LogInfo($"[FiresWaterfall] {shader.name} loaded from bundle '{s_bundle.name}' (queue {FallQueue}).");
+                FiresLogger.LogInfo($"[FiresWaterfall] {shader.name} loaded from bundle '{s_bundle.name}' (queues {TransmitQueue} dim + {AddQueue} light).");
             }
             catch (System.Exception ex)
             {
                 FiresLogger.LogWarning($"[FiresWaterfall] bundle load failed: {ex.GetType().Name}: {ex.Message}");
             }
+        }
+
+        // The mist's two materials: the veil rising off a landing is the only one that shows the rainbow.
+        internal static Material MistMaterial
+        {
+            get
+            {
+                if (s_material == null && !s_loadTried) Load();
+                return s_mistMaterial;
+            }
+        }
+
+        internal static Material VeilMaterial
+        {
+            get
+            {
+                if (s_material == null && !s_loadTried) Load();
+                return s_veilMaterial;
+            }
+        }
+
+        private static void LoadMist()
+        {
+            var shader = FiresShaderBroker.Get(MistShaderFullName) ?? LoadMistShader();
+            var puffs = s_bundle.LoadAsset<Texture2D>(MistPuffsName);
+            if (shader == null || !shader.isSupported || puffs == null)
+            {
+                FiresLogger.LogWarning($"[FiresWaterfall] mist {(shader == null ? "shader not in the bundle" : !shader.isSupported ? "shader not supported on this GPU" : "puff atlas not in the bundle")} — falls draw without mist.");
+                return;
+            }
+            s_mistMaterial = new Material(shader) { name = "FiresWaterfallMist", renderQueue = MistQueue, mainTexture = puffs };
+            s_mistMaterial.SetFloat("_Rainbow", 0f);
+            s_veilMaterial = new Material(shader) { name = "FiresWaterfallMistVeil", renderQueue = MistQueue, mainTexture = puffs };
+            FiresLogger.LogInfo($"[FiresWaterfall] {shader.name} loaded with its puff atlas (queue {MistQueue}).");
         }
 
         internal static void Tick()
@@ -130,6 +224,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 : RenderSettings.fogMode == FogMode.Linear ? 1f
                 : RenderSettings.fogMode == FogMode.Exponential ? 2f : 3f;
             s_material.SetFloat("_FiresFogMode", mode);
+            s_addMaterial.SetFloat("_FiresFogMode", mode);
+            if (s_mistMaterial != null) s_mistMaterial.SetFloat("_FiresFogMode", mode);
+            if (s_veilMaterial != null) s_veilMaterial.SetFloat("_FiresFogMode", mode);
         }
 
         internal static void BeginMesh()
@@ -141,15 +238,16 @@ namespace VerdantsAscent.Terrain.Voxel
         // leaves, it arcs Curl further out over the first metres, then falls straight down to its length. A column
         // with its own Outward follows a curved lip. With a profile, every row stays in front of the terrain and the
         // fall ends where the terrain catches it. The sheet those rows trace is the slab's rear face; its front face,
-        // the approach on the river and the rounded sides are one ribbon, the rear another.
-        internal static void AppendCurtain(List<Column> columns, Vector3 outward, float lipOut, float fadeLength, float seed,
+        // the approach on the river and the rounded sides are one ribbon, the rear another. Returns whether it drew, and
+        // leaves the curtain's lip and foot in LastSite.
+        internal static bool AppendCurtain(List<Column> columns, Vector3 outward, float lipOut, float fadeLength, float seed,
             OutwardProfile profile = null)
         {
             int n = columns.Count;
-            if (n < 2) return;
+            if (n < 2) return false;
             float longest = 0f;
             foreach (var column in columns) longest = Mathf.Max(longest, column.FallLength);
-            if (longest <= 0.5f) return;
+            if (longest <= 0.5f) return false;
 
             s_rows.Clear();
             s_rows.AddRange(ApproachRows);
@@ -169,15 +267,23 @@ namespace VerdantsAscent.Terrain.Voxel
             float width = s_along[n - 1];
             float thickness = Mathf.Min(Thickness, Mathf.Max(width, MinThickness));
 
-            s_rear.Clear(); s_thick.Clear(); s_fallen.Clear(); s_dirs.Clear(); s_lengths.Clear();
+            s_rear.Clear(); s_thick.Clear(); s_fallen.Clear(); s_dirs.Clear(); s_lengths.Clear(); s_plunges.Clear();
+            bool anyLanded = false;
+            Vector3 lipSum = Vector3.zero, footSum = Vector3.zero, dirSum = Vector3.zero;
             for (int c = 0; c < n; c++)
             {
                 var column = columns[c];
                 Vector3 dir = column.Outward.sqrMagnitude > 0.01f ? column.Outward : outward;
                 float length = Shape(column, dir, profile, out bool landed);
                 bool closesOnGround = landed || column.OntoGround;
+                bool plunges = !closesOnGround && fadeLength <= 0f;
+                anyLanded |= landed;
+                dirSum += dir;
+                lipSum += new Vector3(column.Base.x, column.LipY - MistLipSprayDrop, column.Base.z) + dir * (lipOut + MistLipSprayOut);
+                footSum += new Vector3(0f, plunges ? PlungeDepth : 0f, 0f);
                 s_dirs.Add(dir);
                 s_lengths.Add(length);
+                s_plunges.Add(plunges ? 1f : 0f);
                 for (int r = 0; r < rows; r++)
                 {
                     float f = s_rows[r];
@@ -204,7 +310,20 @@ namespace VerdantsAscent.Terrain.Voxel
             // Nothing is drawn there at all, approach rows included.
             float shaped = 0f;
             foreach (float length in s_lengths) shaped = Mathf.Max(shaped, length);
-            if (shaped < MinFallLength) return;
+            if (shaped < MinFallLength) return false;
+
+            for (int c = 0; c < n; c++) footSum += s_rear[c * rows + rows - 1];
+            Vector3 meanDir = dirSum.sqrMagnitude > 1e-4f ? dirSum.normalized : outward;
+            LastSite = new FiresWaterfallMist.Site
+            {
+                Lip = lipSum / n,
+                Foot = footSum / n + meanDir * (Mathf.Min(Thickness, Mathf.Max(s_along[n - 1], MinThickness)) * 0.5f),
+                Outward = meanDir,
+                Width = s_along[n - 1],
+                Drop = shaped,
+                FadeLength = fadeLength,
+                Dissolves = fadeLength > 0f && !anyLanded,
+            };
 
             float sideArc = Mathf.PI * thickness * 0.5f;
             Vector3 leftSide = SideDirection(columns[0].Base - columns[1].Base, s_dirs[0]);
@@ -223,6 +342,7 @@ namespace VerdantsAscent.Terrain.Voxel
             int rear = s_verts.Count;
             for (int c = n - 1; c >= 0; c--) AppendRear(curtain, c, firstFallRow, 2f * sideArc + width + (width - s_along[c]));
             Stitch(rear, n, rows - firstFallRow, inward);
+            return true;
         }
 
         // Columns running left to right as seen from outside the fall wind its faces outward; the other order winds
@@ -273,7 +393,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Vector3 normal = fallen < 0f
                     ? Vector3.Lerp(dir, Vector3.up, Mathf.Clamp01(-fallen * 2f / ApproachLength)).normalized
                     : dir;
-                AddVertex(s_rear[i] + dir * thick, normal, across, fallen, EdgeDistance(openEdge, thick), s_lengths[c], curtain);
+                AddVertex(s_rear[i] + dir * thick, normal, across, fallen, EdgeDistance(openEdge, thick), s_lengths[c], s_plunges[c], curtain);
             }
         }
 
@@ -288,7 +408,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 int i = c * curtain.Rows + r;
                 float half = s_thick[i] * 0.5f;
                 Vector3 position = s_rear[i] + dir * (half + half * cos) + side * (half * sin);
-                AddVertex(position, normal, across, s_fallen[i], EdgeDistance(0f, s_thick[i]), s_lengths[c], curtain);
+                AddVertex(position, normal, across, s_fallen[i], EdgeDistance(0f, s_thick[i]), s_lengths[c], s_plunges[c], curtain);
             }
         }
 
@@ -300,16 +420,16 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int r = firstRow; r < curtain.Rows; r++)
             {
                 int i = c * curtain.Rows + r;
-                AddVertex(s_rear[i], normal, across, s_fallen[i], EdgeDistance(openEdge, s_thick[i]), s_lengths[c], curtain);
+                AddVertex(s_rear[i], normal, across, s_fallen[i], EdgeDistance(openEdge, s_thick[i]), s_lengths[c], s_plunges[c], curtain);
             }
         }
 
         private static void AddVertex(Vector3 position, Vector3 normal, float across, float fallen, float edgeDistance,
-            float length, in CurtainPart curtain)
+            float length, float plunge, in CurtainPart curtain)
         {
             s_verts.Add(position);
             s_norms.Add(normal);
-            s_uv0.Add(new Vector4(across, fallen, ApproachLength, 0f));
+            s_uv0.Add(new Vector4(across, fallen, ApproachLength, plunge));
             s_uv1.Add(new Vector4(edgeDistance, length, curtain.FadeLength, curtain.Seed));
             s_cols.Add(new Color32(255, 255, 255, 255));
         }
@@ -417,10 +537,14 @@ namespace VerdantsAscent.Terrain.Voxel
             return new Vector3(middle.Base.x, middle.LipY - drop, middle.Base.z) + outward * EdgeLipOut;
         }
 
-        // Replaces the sounds a falls object carries (its only children) with one per site.
+        // Replaces the sounds a falls object carries (its children besides the mist) with one per site.
         internal static void SetSounds(Transform falls, List<Vector3> sites)
         {
-            for (int i = falls.childCount - 1; i >= 0; i--) Object.Destroy(falls.GetChild(i).gameObject);
+            for (int i = falls.childCount - 1; i >= 0; i--)
+            {
+                var child = falls.GetChild(i).gameObject;
+                if (child.name != FiresWaterfallMist.RootName) Object.Destroy(child);
+            }
             var source = SoundSource();
             if (source == null) return;
             foreach (var site in sites)

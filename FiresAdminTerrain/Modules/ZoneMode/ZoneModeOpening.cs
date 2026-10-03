@@ -65,9 +65,11 @@ namespace VerdantsAscent.Terrain.Zones
 
         // ── Server ──────────────────────────────────────────────────────────
         internal static List<Vector2s> Open(IList<Vector2s> zones, ZoneOpenReason reason, long actorId, string context,
-            IDictionary<Vector2s, Vector2s> sources = null, IDictionary<Vector2s, ZoneSystem.LocationInstance> locations = null)
+            IDictionary<Vector2s, Vector2s> sources = null, IDictionary<Vector2s, ZoneSystem.LocationInstance> locations = null,
+            IDictionary<Vector2s, ZoneShift> shifts = null)
         {
-            var opened = ZoneModeRegistry.AddOpenZones(zones, reason, actorId, sources);
+            var land = WithParkedLand(zones, sources, shifts, out var landShifts);
+            var opened = ZoneModeRegistry.AddOpenZones(zones, reason, actorId, land, landShifts);
             if (opened.Count == 0) return opened;
             if (sources != null) ZoneModeSwaps.OnOpened(opened, sources, locations);
 
@@ -103,6 +105,31 @@ namespace VerdantsAscent.Terrain.Zones
             return opened;
         }
 
+        // A parked zone that was a swapped zone returns on the land it stood on when it was taken back (its source and
+        // shift, kept in its parked record), whatever opens it, unless a seed chose other land for it. Its location stays
+        // as it was parked: the location hand-over of a fresh swap (ZoneModeSwaps.OnOpened) is not run for it.
+        private static IDictionary<Vector2s, Vector2s> WithParkedLand(IList<Vector2s> zones, IDictionary<Vector2s, Vector2s> sources,
+            IDictionary<Vector2s, ZoneShift> shifts, out IDictionary<Vector2s, ZoneShift> landShifts)
+        {
+            landShifts = shifts;
+            Dictionary<Vector2s, Vector2s> land = null;
+            foreach (var zone in zones)
+            {
+                if (sources != null && sources.ContainsKey(zone)) continue;
+                if (!ZoneModePark.TryGetParked(zone, out var parked) || !parked.Swapped) continue;
+                if (land == null)
+                {
+                    land = sources != null ? new Dictionary<Vector2s, Vector2s>(sources) : new Dictionary<Vector2s, Vector2s>();
+                    landShifts = shifts != null ? new Dictionary<Vector2s, ZoneShift>(shifts) : new Dictionary<Vector2s, ZoneShift>();
+                }
+                land[zone] = parked.Source;
+                landShifts[zone] = parked.Shift;
+                FiresLogger.LogInfo($"[FiresZones] ({zone.x},{zone.y}) returns on the land it stood on: ({parked.Source.x},{parked.Source.y}), "
+                    + $"lift {parked.Shift.Lift:0.0} m, slide ({parked.Shift.Dx:0.0},{parked.Shift.Dz:0.0}) m.");
+            }
+            return land ?? sources;
+        }
+
         // Taking a chunk placement back takes its zone with it: the land the stamp laid down is already gone, and the
         // zone stops being open and stops being generated, so it is closed sea again and a different chunk can be laid
         // there. Nothing waits on peers here — a zone closing shows nothing that a piece could stand on.
@@ -135,6 +162,7 @@ namespace VerdantsAscent.Terrain.Zones
             pkg.Write(opened.Count);
             foreach (var zone in opened) pkg.Write(zone);
             ZoneModeRegistry.WriteSources(pkg, ZoneModeRegistry.CurrentSources());
+            ZoneModeRegistry.WriteShifts(pkg, ZoneModeRegistry.CurrentShifts());
             ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.Everybody, RpcZoneUpdate, pkg);
         }
 
@@ -251,13 +279,15 @@ namespace VerdantsAscent.Terrain.Zones
             bool parked = ZoneModePark.TryGetParked(zone, out var park);
             if (parked && (!choosingLand || ZoneModePark.SeedMatches(seed, zone, park)))
                 return TryOpenAsItWas(zone, seed, park, actor, who, out message);
+            if (seed.RestoresOnly) return TryOpenAsWorldMadeIt(zone, seed, actor, who, out message);
 
             Vector2s source;
+            ZoneShift centring = default;
             bool faithful;
             Dictionary<Vector2s, ZoneSystem.LocationInstance> locations = null;
             if (seed.IsLocation)
             {
-                if (!ZoneModeSwaps.TryChooseLocationSource(zone, seed.Location, out source, out faithful, out var instance, out message))
+                if (!ZoneModeSwaps.TryChooseLocationSource(zone, seed.Location, out source, out centring, out faithful, out var instance, out message))
                 {
                     message = message ?? $"Nothing in this world matches the {seed.Name}: there is no such place to copy.";
                     return false;
@@ -270,8 +300,17 @@ namespace VerdantsAscent.Terrain.Zones
                 return false;
             }
             var sources = faithful ? null : new Dictionary<Vector2s, Vector2s> { [zone] = source };
+            Dictionary<Vector2s, ZoneShift> shifts = null;
+            string moved = string.Empty;
+            if (!faithful)
+            {
+                float lift = ZoneModeLift.Choose(zone, source, centring, out string how);
+                shifts = new Dictionary<Vector2s, ZoneShift> { [zone] = new ZoneShift(lift, centring.Dx, centring.Dz) };
+                moved = (centring.Slides ? $" slid ({centring.Dx:0.0},{centring.Dz:0.0}) m to centre the location" : "")
+                    + (lift == 0f ? $", at its own height ({how})" : $", {(lift > 0f ? "raised" : "lowered")} {Mathf.Abs(lift):0.0} m ({how})");
+            }
             var opened = Open(new[] { zone }, ZoneOpenReason.Bought, actor,
-                $"{seed.Name} used by {who}" + (faithful ? ", its own land" : $", the land of ({source.x},{source.y})"), sources, locations);
+                $"{seed.Name} used by {who}" + (faithful ? ", its own land" : $", the land of ({source.x},{source.y}){moved}"), sources, locations, shifts);
             if (opened.Count != 1)
             {
                 message = "The land did not answer.";
@@ -298,6 +337,22 @@ namespace VerdantsAscent.Terrain.Zones
             }
             message = $"The sea gives way — ({zone.x},{zone.y}) returns as it was"
                 + (park.Pieces > 0 ? $", with the {park.Pieces} pieces built there." : ".");
+            // Fire (10-03, popup b): the rule stays; the reason is said.
+            if (seed.RestoresOnly) message += $" (The {seed.Name} restores only.)";
+            else if (!ZoneModePark.SeedMatches(seed, zone, park)) message += $" (Parked land: wear the Eye of the Beholder to raise {seed.Land} here.)";
+            return true;
+        }
+
+        // The plain seed on a zone nothing was parked in: its own generation, its own planned location, nothing swapped.
+        private static bool TryOpenAsWorldMadeIt(Vector2s zone, ChunkSeed seed, long actor, string who, out string message)
+        {
+            var opened = Open(new[] { zone }, ZoneOpenReason.Bought, actor, $"{seed.Name} used by {who}, its own land");
+            if (opened.Count != 1)
+            {
+                message = "The land did not answer.";
+                return false;
+            }
+            message = $"The sea gives way — ({zone.x},{zone.y}) rises as the world made it.";
             return true;
         }
 
@@ -337,7 +392,12 @@ namespace VerdantsAscent.Terrain.Zones
             var opened = new List<Vector2s>(count);
             for (int i = 0; i < count; i++) opened.Add(pkg.ReadVector2s());
             List<KeyValuePair<Vector2s, Vector2s>> sources;
-            try { sources = ZoneModeRegistry.ReadSources(pkg); }
+            List<KeyValuePair<Vector2s, ZoneShift>> shifts;
+            try
+            {
+                sources = ZoneModeRegistry.ReadSources(pkg);
+                shifts = ZoneModeRegistry.ReadShifts(pkg);
+            }
             catch (Exception ex)
             {
                 FiresLogger.LogError($"[FiresZones] zone update v{version} has unreadable zone sources ({ex.Message}) — ignored.");
@@ -351,7 +411,7 @@ namespace VerdantsAscent.Terrain.Zones
             }
             var words = new ulong[ZoneOpenSet.WordCount];
             Buffer.BlockCopy(bytes, 0, words, 0, bytes.Length);
-            if (!ZoneModeRegistry.ApplyClientUpdate(words, version, sources)) return;
+            if (!ZoneModeRegistry.ApplyClientUpdate(words, version, sources, shifts)) return;
 
             FiresLogger.LogInfo($"[FiresZones] zone update v{version}: {Describe(opened)} opened — rebuilding terrain.");
             ZoneModeTerrainRefresh.RebuildOpenedZones(opened,

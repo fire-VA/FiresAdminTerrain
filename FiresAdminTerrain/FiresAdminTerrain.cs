@@ -1,4 +1,4 @@
-﻿using BepInEx;
+using BepInEx;
 using FiresCore.Sync;
 using HarmonyLib;
 using System;
@@ -36,12 +36,16 @@ namespace VerdantsAscent
     // assembly ref), so this attribute is purely load-ordering (FTS Awake
     // before ours, so the bridge is live when we ask) + Thunderstore metadata.
     [BepInDependency("com.Fire.FiresTossinShade", BepInDependency.DependencyFlags.SoftDependency)]
-    [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, "0.2.55")]
+    [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, "0.2.138")]
+    // ValheimPerformanceOptimizations replaces vanilla's zone spawn and heightmap render / collision builds outright, which
+    // undoes FAT's own terrain pipeline (voxel ground, zone mode, the dedi's off-map refusal). FAT does its own optimizing;
+    // Fire 2026-09-30: listed as incompatible, so BepInEx refuses to load FAT beside it.
+    [BepInIncompatibility("dev.ontrigger.vpo")]
     public class FiresAdminTerrain : BaseUnityPlugin
     {
         public const string PluginGUID = "com.Fire.FiresAdminTerrain";
         public const string PluginName = "FiresAdminTerrain";
-        public const string PluginVersion = "0.2.560";
+        public const string PluginVersion = "0.2.702";
 
         public static readonly Harmony harmony = new Harmony(PluginGUID);
         public static FiresAdminTerrain Instance { get; private set; }
@@ -56,6 +60,11 @@ namespace VerdantsAscent
         // BepInEx log source — banner emitters route through this (not Debug.Log)
         // so banner lines don't stdout-echo a raw white console duplicate.
         public static BepInEx.Logging.ManualLogSource Log;
+
+        private static bool s_applicationQuitting;
+
+        /// <summary>0.2.701: the game is quitting (Application.quitting has fired): teardown must not touch the scene's managers.</summary>
+        internal static bool ApplicationQuitting => s_applicationQuitting;
 
         private void Awake()
         {
@@ -74,14 +83,10 @@ namespace VerdantsAscent
 
             FiresLogger.LogInfo($"Awake() entered — version {PluginVersion}");
             Instance = this;
+            Application.quitting += () => s_applicationQuitting = true;
 
-            // Declared before any world loads, so the offer is ready the moment
-            // a peer connects.
-            try { VerdantsAscent.Terrain.Voxel.FiresWorldGenBase.RegisterCacheSync(); }
-            catch (Exception ex)
-            {
-                FiresLogger.LogWarning($"WorldCacheSync registration failed: {ex.Message}");
-            }
+            // Declared before any world loads, so the offer is ready the moment a peer connects. (A studio bake goes through
+            // FAT's own join sync, before PeerInfo: BcJoinSync, D14.)
             try { VerdantsAscent.Terrain.Voxel.FiresSkyIslands.RegisterSync(); }
             catch (Exception ex)
             {
@@ -92,6 +97,16 @@ namespace VerdantsAscent
             catch (Exception ex)
             {
                 FiresLogger.LogWarning($"Wear gate registration failed: {ex.Message} — pieces on voxel ground keep vanilla's wear timing.");
+            }
+            try { VerdantsAscent.Terrain.Voxel.FatSeasons.Register(); }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"Season hookup failed: {ex.Message}; FAT ground keeps its summer look under Vedr.");
+            }
+            try { VerdantsAscent.Terrain.Voxel.FiresWaterfalls.OfferShaders(); }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"Waterfall mist shader offer failed: {ex.Message}; other mods draw without it.");
             }
 
             InstallLogFilter();
@@ -117,6 +132,8 @@ namespace VerdantsAscent
             VerdantsAscent.Terrain.Zones.ZoneModeConfig.Bind(Config);
             VerdantsAscent.Terrain.Zones.ZoneModeCoreBridge.Register();
             VerdantsAscent.Terrain.Paint.DistantPaintCache.Bind(Config); // paint on distant-LOD terrain
+            VerdantsAscent.Terrain.Persistence.TileAnchorHeal.Bind(Config); // duplicate tile anchors: DryRun (default) | Apply
+            VerdantsAscent.Terrain.Zones.OffMapZones.Bind(Config); // saved objects beyond the world edge: Off (default) | List | Remove
 
             ConfigManager.Instance.configPresetToLoad.SettingChanged += (_, __) => ApplySelectedPreset();
             ConfigManager.Instance.configPresetSaveNow.SettingChanged += (_, __) => SaveNamedPreset();
@@ -207,7 +224,10 @@ namespace VerdantsAscent
 
         private void FinishInit()
         {
-            bool isDedicatedServer = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
+            // The dedicated server executable, not "no graphics device": the headless test bot is a client, so it gets the
+            // menus and the ice, snow and biome-painter pipelines a player has, and reads what a player would
+            // ([visual] 2026-09-28, admintools_test).
+            bool isDedicatedServer = FiresCore.Lifecycle.FiresMod.IsDedicatedServer;
             FiresCore.Logging.StatusBanner.Register("FAT", VerdantsAscent.Terrain.FatStatus.Line);
             if (!isDedicatedServer) VerdantsAscent.Terrain.Voxel.FiresWorldMenu.Register();
             if (!isDedicatedServer) VerdantsAscent.Terrain.BcImport.BcWorldListMenu.Register();
@@ -467,7 +487,10 @@ namespace VerdantsAscent
                 RootObject = null;
             }
 
-            try { harmony?.UnpatchSelf(); } catch { }
+            // On an application quit Unity destroys the plugins before ZNet; unpatching here would drop FAT's ZNet.OnDestroy
+            // and other teardown hooks (R44-R46). Application.quitting fires first, and the process is ending anyway.
+            if (!s_applicationQuitting)
+                try { harmony?.UnpatchSelf(); } catch { }
 
             try { ConfigManager.Instance?.Dispose(); } catch { }
 

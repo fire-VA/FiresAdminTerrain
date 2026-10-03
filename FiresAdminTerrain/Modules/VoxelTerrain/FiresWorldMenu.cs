@@ -43,7 +43,17 @@ namespace VerdantsAscent.Terrain.Voxel
             // then hid the other three choices behind a different right-click, so whichever you took you lost the
             // rest. The dialog already offers all of them, so the preset is "as the original" and every choice is
             // made in one place.
-            yield return Row("Clone...", refusal, () => ShowCloneDialog(world, "-Copy", KeepOriginal, false));
+            // The "Clone..." row is GONE, merged into BcWorldListMenu's "Convert..." (2026-09-26, Fire's call:
+            // "instead of clone and convert being two separate options they both handle either converting a bc
+            // world or cloning/updating a normal world"). That row already clones first, never touches the
+            // original, and offers this same set of terrain options, so two entries was one too many - and a
+            // normal world could be greyed out by both at once for different reasons.
+            //
+            // This provider contributes NO ROW now. It must not yield its own "Convert..." or the world list
+            // would show two identical entries from two owners - which is the two-rows problem again wearing
+            // one name. ShowCloneDialog below stays reachable for callers that want the clone dialog directly.
+            _ = refusal;
+            yield break;
         }
 
         private static ContextMenuItem Row(string label, string refusal, System.Action onPick)

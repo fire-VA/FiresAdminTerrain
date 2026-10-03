@@ -388,6 +388,77 @@ namespace VerdantsAscent.Water.Core
                     PerformDebouncedSave();
                 }
             }
+
+            if (_reseatPending) TickReseat();
+        }
+
+        // 0.2.682 ([lead] H10, 10-01: a va_pool pond saved by the server came back DRY after a restart, its anchors present).
+        // A restored combiner replays the surface/terrain grid of whoever saved it, and only the server saves. A dedicated
+        // server samples terrain as min(WorldGenerator height, GetGroundHeight) with no voxel colliders (VoxelWrap), so its
+        // grid never sees a carved bed and puts the pond above the ground. A peer with real terrain rebuilds a restored
+        // combiner from its disks once, when the bed under every disk is loaded (a terrain ray at the disk centre lands
+        // below its surface, the test the pool tool uses before laying water), or after ReseatCapSeconds anyway.
+        // Gelled / settling volumes keep their grid (Round-56: it is authoritative data).
+        private const float ReseatPollSeconds = 0.5f, ReseatCapSeconds = 30f, ReseatBedMargin = 0.3f;
+        private const int ReseatProbes = 8;
+        private bool _reseatPending;
+        private float _reseatSince, _reseatNextPoll;
+        private static int s_reseatTerrainMask;
+
+        // 0.2.683: the dedicated server reseats too, against VoxelWorld's density (TryVoxelGround) instead of colliders. Its
+        // zone data exists only near players, so there it waits, uncapped and polling slowly, until the density under every
+        // probed disk is loaded.
+        private const float ReseatPollSecondsServer = 2f;
+
+        private bool ReseatGroundReady(Vector3 p, float maxDepth, int mask)
+        {
+            if (ZNet.instance != null && ZNet.instance.IsDedicated())
+                return VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleSurfaceY(p.x, p.z, p.y + 2f, p.y - 30f - maxDepth, out _, out bool wall) || wall;
+            return Physics.Raycast(new Vector3(p.x, p.y + 20f, p.z), Vector3.down, out RaycastHit hit, 30f + maxDepth, mask)
+                && hit.point.y <= p.y - ReseatBedMargin;
+        }
+
+        private void ArmReseat()
+        {
+            if (ZNet.instance == null) return;
+            // A dedicated server without voxel terrain has no density to wait for; it keeps vanilla's sample as before.
+            if (ZNet.instance.IsDedicated() && !VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.StreamerRuns) return;
+            _reseatPending = true;
+            _reseatSince = Time.realtimeSinceStartup;
+            _reseatNextPoll = 0f;
+        }
+
+        private void TickReseat()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < _reseatNextPoll) return;
+            bool server = ZNet.instance != null && ZNet.instance.IsDedicated();
+            _reseatNextPoll = now + (server ? ReseatPollSecondsServer : ReseatPollSeconds);
+            if (_isGelled || _isSettling) { _reseatPending = false; return; }
+            float waited = now - _reseatSince;
+            if (_waterDisks.Count == 0) { if (waited >= ReseatCapSeconds) _reseatPending = false; return; }
+            // The dedicated server has no colliders to fall back on: it waits for the density, however long that takes.
+            float cap = server ? float.PositiveInfinity : ReseatCapSeconds;
+            if (s_reseatTerrainMask == 0) s_reseatTerrainMask = LayerMask.GetMask("terrain");
+            // At most ReseatProbes disks, spread along the list (an auto river can hold hundreds).
+            int stride = Mathf.Max(1, _waterDisks.Count / ReseatProbes), probed = 0, seen = 0;
+            for (int i = 0; i < _waterDisks.Count; i += stride)
+            {
+                probed++;
+                if (ReseatGroundReady(_waterDisks[i].Position, _waterDisks[i].MaxDepth, s_reseatTerrainMask)) seen++;
+            }
+            if (seen < probed && waited < cap) return;
+            _reseatPending = false;
+            // Only a grid that is dry where its own disks stand is rebuilt: restored water that already reads wet (hydrology,
+            // auto water, anything saved on a peer that saw the same terrain) keeps its grid, so a world load costs nothing.
+            int dry = 0;
+            for (int i = 0; i < _waterDisks.Count; i += stride)
+                if (GetWaterSurfaceAt(_waterDisks[i].Position) < _waterDisks[i].Position.y - ReseatBedMargin) dry++;
+            if (dry == 0) return;
+            ForceRegenerate();
+            FiresLogger.LogDebug($"[FiresWater] restored water at ({transform.position.x:F0},{transform.position.y:F1},{transform.position.z:F0}) "
+                + $"read dry at {dry}/{probed} probed disk centre(s) of {_waterDisks.Count} on its saved grid; rebuilt from its disks on {(server ? "the server's voxel data" : "this peer's terrain")} after {waited:F1} s "
+                + (seen == probed ? "(bed loaded under every probed disk)" : $"(the {ReseatCapSeconds:F0} s cap; bed seen under {seen}/{probed})"));
         }
 
         #endregion
@@ -401,6 +472,7 @@ namespace VerdantsAscent.Water.Core
         public void SetRestoredFromPersistence(bool restored)
         {
             _restoredFromPersistence = restored;
+            if (restored) ArmReseat();
         }
 
         /// <summary>

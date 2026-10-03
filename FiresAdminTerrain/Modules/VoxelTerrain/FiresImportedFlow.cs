@@ -31,13 +31,15 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static void Clear() { s_xz = null; s_n = 0; }
 
         // Sidecar for a baked cache: same path, ".flow" instead of ".bin".
-        internal static void TryLoadFor(string cachePath)
+        internal static void TryLoadFor(string cachePath) => TryLoad(Path.ChangeExtension(cachePath, ".flow"));
+
+        // A flow field at its own path (a client's copy of the server's, from the join sync); none when null or absent.
+        internal static void TryLoad(string p)
         {
             Clear();
             try
             {
-                string p = Path.ChangeExtension(cachePath, ".flow");
-                if (!File.Exists(p)) return;
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return;
                 using (var br = new BinaryReader(File.OpenRead(p)))
                 {
                     if (br.ReadUInt32() != 0x574F4C46u) return;   // "FLOW"

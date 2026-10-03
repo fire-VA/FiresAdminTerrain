@@ -322,12 +322,14 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             carvedY = groundY;
             level = float.MinValue;
-            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz);
+            // A lifted chunk (ZoneModeLift) carries its bowls up with its ground: the level and floor are its source's.
+            Zones.ZoneModeGate.TranslateToSource(ref wx, ref wz, out float lift);
             if (!Find(wx, wz, out Bowl b, out float t)) return false;
-            level = b.Level;
+            level = b.Level + lift;
 
             float target = b.Level - DepthAt(b, t);
             if (target < SeaFloorMin) target = SeaFloorMin;
+            target += lift;
             if (target >= groundY) return false;
             carvedY = target;
             return true;

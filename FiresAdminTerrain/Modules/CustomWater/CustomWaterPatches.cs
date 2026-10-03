@@ -595,6 +595,8 @@ namespace VerdantsAscent.Water.Core
             {
                 // Initialize RPC handlers for real-time operations
                 WaterOperationRPC.Initialize();
+                global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // 0.2.689: va_ground_probe
+                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // 0.2.699: wavematch_test server step
                 WaterPersistence.Initialize();
 
                 // Initialize file-based water cache (mirrors DirtFloorCombinerCache)
@@ -650,6 +652,8 @@ namespace VerdantsAscent.Water.Core
             try
             {
                 WaterOperationRPC.Initialize();
+                global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // 0.2.689: va_ground_probe
+                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // 0.2.699: wavematch_test server step
                 WaterPersistence.Initialize();
             }
             catch (System.Exception ex)
@@ -799,11 +803,9 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// Save water data when the world saves.
+        /// Save water data when the world saves. Called from FAT's one ZNet.SaveWorld hook (FatVanillaHooks).
         /// </summary>
-        [HarmonyPatch(typeof(ZNet), "SaveWorld")]
-        [HarmonyPostfix]
-        private static void ZNet_SaveWorld_Postfix(ZNet __instance, bool sync)
+        internal static void OnWorldSave()
         {
             try
             {

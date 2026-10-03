@@ -70,6 +70,8 @@ namespace VerdantsAscent.Terrain.Voxel
             private const int CoastMaxPoints = 1024;
             private readonly Bone[] m_bones;
             private readonly float m_wobbleFreq, m_wobbleSeed;
+            // The coast noise's world seed, for an island raised from another world; null is this world's.
+            private readonly int? m_noiseSeed;
             internal readonly Vector2[] Coast;
             internal readonly Vector2[] CoastNormal;
             internal readonly float Perimeter;
@@ -78,10 +80,11 @@ namespace VerdantsAscent.Terrain.Voxel
             internal readonly float HeartWidth;
             internal readonly float Reach;
 
-            internal SkylandShape(Bone[] bones, float cx, float cz, float wobbleSeed)
+            internal SkylandShape(Bone[] bones, float cx, float cz, float wobbleSeed, int? noiseSeed)
             {
                 m_bones = bones;
                 m_wobbleSeed = wobbleSeed;
+                m_noiseSeed = noiseSeed;
                 float widest = 0f, reach = 0f;
                 float x0 = float.MaxValue, x1 = float.MinValue, z0 = float.MaxValue, z1 = float.MinValue;
                 foreach (var b in bones)
@@ -122,7 +125,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 width = (float)(weighted / sum);
                 float interior = (float)(-Blend * System.Math.Log(sum));
-                return interior * (1f + SkylandCoastWobble * (2f * VoxelCaveNoise.Noise01(wx * m_wobbleFreq, m_wobbleSeed, wz * m_wobbleFreq) - 1f));
+                float wobble = m_noiseSeed.HasValue
+                    ? VoxelCaveNoise.Noise01(wx * m_wobbleFreq, m_wobbleSeed, wz * m_wobbleFreq, m_noiseSeed.Value)
+                    : VoxelCaveNoise.Noise01(wx * m_wobbleFreq, m_wobbleSeed, wz * m_wobbleFreq);
+                return interior * (1f + SkylandCoastWobble * (2f * wobble - 1f));
             }
 
             internal float Interior(float wx, float wz) => Sample(wx, wz, out _);
@@ -273,14 +279,14 @@ namespace VerdantsAscent.Terrain.Voxel
         // The shape a shaped skyland derives from its persisted fields: the crescent its atoll gives it, or a family shape.
         private static SkylandShape ShapeFor(in Island isl)
         {
-            if (TryRingArcAt(isl.X, isl.Z, out float cx, out float cz, out float radius, out var arc))
-                return RingShape(cx, cz, radius, arc, ShapeKey(in isl));
-            return FamilyShape(ShapeKey(in isl), isl.X, isl.Z, isl.R, isl.R >= GreatMinRadius, out _);
+            if (TryRingArcAt(isl.X, isl.Z, ShapeSeedOf(in isl), out float cx, out float cz, out float radius, out var arc))
+                return RingShape(cx, cz, radius, arc, ShapeKey(in isl), NoiseSeedOf(in isl));
+            return FamilyShape(ShapeKey(in isl), isl.X, isl.Z, isl.R, isl.R >= GreatMinRadius, out _, NoiseSeedOf(in isl));
         }
 
         // One of the families (blob, bean, crescent, spit, star, ridge, twin, and for a great skyland the massif) from the key,
         // turned, and fitted inside the bounding radius r round (x, z).
-        private static SkylandShape FamilyShape(int key, float x, float z, float r, bool great, out string family)
+        private static SkylandShape FamilyShape(int key, float x, float z, float r, bool great, out string family, int? noiseSeed = null)
         {
             var bones = new List<Bone>();
             var weights = great ? GreatFamilyWeights : ShapeFamilyWeights;
@@ -336,7 +342,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     bones.Add(new Bone(-0.75f, 0f, far.x, far.y, 0.28f, 0.24f));
                     break;
             }
-            return FitShape(bones, Hash(0, 0, key, ShapeSalt + 9) * Mathf.PI * 2f, x, z, r, key);
+            return FitShape(bones, Hash(0, 0, key, ShapeSalt + 9) * Mathf.PI * 2f, x, z, r, key, noiseSeed);
         }
 
         // Bones along an arc (curving towards +z) of `degrees` on a circle of radius `bend`, widest in the middle.
@@ -371,7 +377,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // Turns unit-size bones, centres their bounds on (x, z) and scales them so the whole coast fits in radius r.
-        private static SkylandShape FitShape(List<Bone> bones, float spin, float x, float z, float r, int key)
+        private static SkylandShape FitShape(List<Bone> bones, float spin, float x, float z, float r, int key, int? noiseSeed)
         {
             float c = Mathf.Cos(spin), s = Mathf.Sin(spin);
             Vector2 Turn(float px, float pz) => new Vector2(px * c - pz * s, px * s + pz * c);
@@ -398,7 +404,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 var e = (t.b - middle) * scale;
                 fitted[i] = new Bone(x + a.x, z + a.y, x + e.x, z + e.y, t.ra * scale, t.rb * scale);
             }
-            return new SkylandShape(fitted, x, z, key * 0.0001f + 17.3f);
+            return new SkylandShape(fitted, x, z, key * 0.0001f + 17.3f, noiseSeed);
         }
 
         // How far out a point sits: 0 on the skeleton (a round skyland's centre), 1 on the coast; and the half-width there.
@@ -424,7 +430,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             float size = isl.Shape != null ? isl.Shape.HeartWidth : isl.R;
             float f = 1f / Mathf.Max(6f, size * EdgeFeature);
-            return Mathf.Clamp01((VoxelCaveNoise.Noise01(wx * f + 71f, isl.Seed + 61f, wz * f) - 0.5f) * EdgeContrast + 0.5f);
+            return Mathf.Clamp01((N(in isl, wx * f + 71f, isl.Seed + 61f, wz * f) - 0.5f) * EdgeContrast + 0.5f);
         }
 
         private static float Lerp3(float cutout, float slope, float cliff, float edge)
@@ -554,7 +560,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // One crescent of an atoll: the ring's arc, widest in its middle and running out to points at both ends.
-        private static SkylandShape RingShape(float cx, float cz, float radius, RingArc arc, int key)
+        private static SkylandShape RingShape(float cx, float cz, float radius, RingArc arc, int key, int? noiseSeed = null)
         {
             int segments = Mathf.Max(3, Mathf.CeilToInt(arc.Half * 2f * Mathf.Rad2Deg / RingSegmentDegrees));
             var bones = new Bone[segments];
@@ -566,20 +572,20 @@ namespace VerdantsAscent.Terrain.Voxel
                 bones[s] = new Bone(cx + Mathf.Cos(a0) * radius, cz + Mathf.Sin(a0) * radius, cx + Mathf.Cos(a1) * radius, cz + Mathf.Sin(a1) * radius,
                     tip + (arc.Width - tip) * Mathf.Sin(Mathf.PI * t0), tip + (arc.Width - tip) * Mathf.Sin(Mathf.PI * t1));
             }
-            return new SkylandShape(bones, cx + Mathf.Cos(arc.Mid) * radius, cz + Mathf.Sin(arc.Mid) * radius, key * 0.0001f + 17.3f);
+            return new SkylandShape(bones, cx + Mathf.Cos(arc.Mid) * radius, cz + Mathf.Sin(arc.Mid) * radius, key * 0.0001f + 17.3f, noiseSeed);
         }
 
         [System.ThreadStatic] private static List<RingArc> t_arcs;
 
-        // The atoll crescent anchored exactly here, when this point is one.
-        private static bool TryRingArcAt(float x, float z, out float cx, out float cz, out float radius, out RingArc arc)
+        // The atoll crescent anchored exactly here in the world of `shapeSeed`, when this point is one.
+        private static bool TryRingArcAt(float x, float z, int shapeSeed, out float cx, out float cz, out float radius, out RingArc arc)
         {
             radius = 0f;
             arc = default;
             int ax = Mathf.FloorToInt(x / ArchipelagoCell), az = Mathf.FloorToInt(z / ArchipelagoCell);
-            if (!TryArchipelagoCentre(ax, az, ShapeSeed, out cx, out cz) || !IsRing(ax, az, ShapeSeed)) return false;
+            if (!TryArchipelagoCentre(ax, az, shapeSeed, out cx, out cz) || !IsRing(ax, az, shapeSeed)) return false;
             var arcs = t_arcs ??= new List<RingArc>(8);
-            radius = RingArcs(ax, az, ShapeSeed, arcs);
+            radius = RingArcs(ax, az, shapeSeed, arcs);
             foreach (var candidate in arcs)
             {
                 float dx = cx + Mathf.Cos(candidate.Mid) * radius - x, dz = cz + Mathf.Sin(candidate.Mid) * radius - z;
@@ -776,9 +782,9 @@ namespace VerdantsAscent.Terrain.Voxel
             foreach (int k in list)
             {
                 var isl = s_islands[k];
-                if (!IsSkyland(isl.Kind) || !SkylandColumn(in isl, wx, wz, out float top, out float bottom, out float side)) continue;
+                if (!IsSkyland(isl.Kind) || !SkylandColumn(in isl, wx - isl.OffX, wz - isl.OffZ, out float top, out float bottom, out float side)) continue;
                 if (!SolidSpan(top, bottom, side, out float low, out float high)) continue;
-                into.Add((low, high, isl.Biome));
+                into.Add((low + isl.OffY, high + isl.OffY, isl.Biome));
             }
             into.Sort((a, b) => a.bottom.CompareTo(b.bottom));
             return into.Count;
@@ -866,8 +872,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         [System.ThreadStatic] private static ColumnCache t_column;
 
-        // The chunk workers walk a column from the bottom up, so the same column comes back for every voxel in it.
-        private static bool CachedColumn(int index, in Island isl, float wx, float wz, out float top, out float bottom, out float side)
+        // The chunk workers walk a column from the bottom up, so the same column comes back for every voxel in it. Keyed by
+        // the world column (wx, wz); the island is sampled at (sx, sz), the same column in its source frame.
+        private static bool CachedColumn(int index, in Island isl, float wx, float wz, float sx, float sz, out float top, out float bottom, out float side)
         {
             var cache = t_column ??= new ColumnCache();
             if (cache.X != wx || cache.Z != wz)
@@ -884,7 +891,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 side = cache.Side[c];
                 return cache.Solid[c];
             }
-            bool solid = SkylandColumn(in isl, wx, wz, out top, out bottom, out side);
+            bool solid = SkylandColumn(in isl, sx, sz, out top, out bottom, out side);
             if (cache.Count < ColumnCache.Size)
             {
                 int c = cache.Count++;
@@ -907,7 +914,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!HoldsCaves(in isl) || !FiresVoxelConfig.GeneratesCaves) return d;
             float depth = Mathf.Min(top - wy, wy - bottom);
             if (depth <= 0f) return d;
-            float carve = VoxelCaveNoise.CarveSdf(wx, wy, wz, depth, false);
+            float carve = isl.OwnSeeds ? VoxelCaveNoise.CarveSdf(wx, wy, wz, depth, isl.NoiseSeed) : VoxelCaveNoise.CarveSdf(wx, wy, wz, depth, false);
             return carve > -1.5f ? Mathf.Min(d, -carve) : d;
         }
     }

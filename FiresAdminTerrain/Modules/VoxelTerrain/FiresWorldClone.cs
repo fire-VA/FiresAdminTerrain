@@ -229,8 +229,12 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 FiresWorldRecords.ClearLeftovers(cloneName);
                 carried = CarryRecords(source, cloneName, profile);
-                if (!BcImport.BcConvert.TryCarryTerrainToClone(source.m_name, cloneName, out string terrain))
-                    FiresLogger.LogWarning($"[FiresWorldGen] {terrain}");
+                // BC's file is named after the SAVE ("<save name>.BetterContinents"), and a renamed world's save name is not
+                // the name inside it: CratersAshlands.BetterContinents holds 'CratersAshlands', so looking it up by the inner
+                // name found nothing and the clone silently lost its whole BC map (2026-09-29, -firesclone CratersBCWrap).
+                string bcName = BcImport.BcSaveLocator.TryLocate(saveName, out _) ? saveName : source.m_name;
+                if (!BcImport.BcConvert.TryCarryTerrainToClone(bcName, cloneName, out string terrain))
+                    FiresLogger.LogError($"[FiresWorldGen] {terrain}");
                 else if (terrain != null)
                     FiresLogger.LogInfo($"[FiresWorldGen] {terrain}");
                 profile.CreatedUtc = DateTime.UtcNow;
@@ -579,6 +583,61 @@ namespace VerdantsAscent.Terrain.Voxel
             if (options.Caves.HasValue) profile.Caves = options.Caves;
             profile.Source = FiresWorldProfile.CloneSourcePrefix + sourceName;
             return profile;
+        }
+
+        // ── Launch argument: -firesclone <world> <new name> [options…] ──────────────
+        // The same clone as the console command, run once at the main menu, after which the game quits: the rig makes a
+        // converted test world with one unattended client launch (2026-09-29, the voxel-wrapped BC world). The words after
+        // the argument, up to the next one starting with '-', are the console command's own words.
+        private const string LaunchArgument = "-firesclone";
+        private const int LaunchSettleFrames = 30;
+        private static bool s_launchRan;
+
+        [HarmonyLib.HarmonyPatch(typeof(FejdStartup), "Start")]
+        private static class FejdStartup_Start_LaunchClone
+        {
+            private static void Postfix(FejdStartup __instance)
+            {
+                if (s_launchRan || __instance == null) return;
+                string[] words = LaunchWords();
+                if (words == null) return;
+                s_launchRan = true;
+                __instance.StartCoroutine(RunLaunchClone(words));
+            }
+        }
+
+        // The console command's word layout: [0] the command, [1] the world, [2] the new name, [3..] options. Null when the
+        // argument is absent.
+        private static string[] LaunchWords()
+        {
+            string[] args = Environment.GetCommandLineArgs();
+            int at = Array.FindIndex(args, a => string.Equals(a, LaunchArgument, StringComparison.OrdinalIgnoreCase));
+            if (at < 0) return null;
+            var words = new List<string> { CommandName };
+            for (int i = at + 1; i < args.Length && !args[i].StartsWith("-", StringComparison.Ordinal); i++) words.Add(args[i]);
+            return words.ToArray();
+        }
+
+        private static IEnumerator RunLaunchClone(string[] words)
+        {
+            for (int i = 0; i < LaunchSettleFrames; i++) yield return null;
+            string report;
+            bool ok = false;
+            if (words.Length < 3) report = $"{LaunchArgument} needs <world> <new name> [options]; got '{string.Join(" ", words, 1, words.Length - 1)}'.";
+            else if (!TryParseOptions(words, out var options, out string problem)) report = problem;
+            else
+            {
+                FiresLogger.LogInfo($"[FiresWorldGen] {LaunchArgument}: cloning '{words[1]}' to '{words[2]}' ({string.Join(" ", words, 3, words.Length - 3)}).");
+                string result = null;
+                var run = CloneAsync(words[1], words[2], options,
+                    step => FiresLogger.LogInfo($"[FiresWorldGen] {LaunchArgument}: {step}"),
+                    (done, text) => { ok = done; result = text; });
+                while (run.MoveNext()) yield return run.Current;
+                report = result ?? "the clone ended without a report.";
+            }
+            if (ok) FiresLogger.LogInfo($"[FiresWorldGen] {LaunchArgument} DONE: {report} Quitting.");
+            else FiresLogger.LogError($"[FiresWorldGen] {LaunchArgument} FAILED: {report} Quitting.");
+            UnityEngine.Application.Quit();
         }
     }
 }

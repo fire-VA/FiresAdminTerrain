@@ -10,7 +10,7 @@ namespace VerdantsAscent.Water.Tools
     // authority for its data so it persists and replicates exactly as a console
     // command's would:
     //   ground  -> VoxelWorld.ApplyBrush            (VoxelChunkAnchor ZDO edit blob)
-    //   water   -> CustomWaterManager.CreateDiskOfType (combiner anchor + cache)
+    //   water   -> CustomWaterManager.CreateDiskOfType (through WaterOperationRPC to the server: anchor + cache, 0.2.681)
     //   clutter -> ClutterSystem.ResetGrass         (client-local by design)
     //
     // Clutter is deliberately the one thing NOT synced: vanilla regenerates it
@@ -102,25 +102,37 @@ namespace VerdantsAscent.Water.Tools
         }
 
         // ── Vpool — level, carve, fill, reseed; connect on the next click ──
+        // A click ON existing water (generated hydrology, a FAT pond, a lake or the sea: FatWaterChecks.TryWaterAt, at least
+        // ExistingWaterDepth deep) adopts that water instead of digging a pool: its surface becomes the anchor and nothing is
+        // carved or poured there, so two clicks on two waters cut and fill a river between them (Fire 10-01: "click on two
+        // different water sources and automatically carve and fill a river between them").
+        private const float ExistingWaterDepth = 0.3f;
+
+        /// <summary>Whether the last Vpool click adopted existing water (river_carve_test reads it).</summary>
+        internal static bool LastClickAdopted { get; private set; }
+
         public static void PoolClick(Vector3 surfacePos, float radius)
         {
             if (!Sane(surfacePos, radius, "Vpool")) return;
             var center = new Vector3(surfacePos.x, surfacePos.y + LevelOffset, surfacePos.z);
 
-            ShapePool(center, radius);
+            LastClickAdopted = FatWaterChecks.TryWaterAt(surfacePos.x, surfacePos.z, ExistingWaterDepth, true, out float waterLevel, out float waterBed);
+            if (LastClickAdopted) center.y = waterLevel;
+            else ShapePool(center, radius, tiered: true);
 
+            string what = LastClickAdopted
+                ? $"existing water adopted at ({center.x:F0},{center.y:F1},{center.z:F0}), {waterLevel - waterBed:F1}m deep"
+                : $"pool placed at ({center.x:F0},{center.y:F0},{center.z:F0}) r={radius:F1}";
             if (s_hasAnchor)
             {
                 int segments = ConnectChannel(s_anchor, s_anchorRadius, center, radius);
                 FiresLogger.LogInfo(
-                    $"[FiresWater] pool connected ({s_anchor.x:F0},{s_anchor.y:F0},{s_anchor.z:F0}) "
-                    + $"-> ({center.x:F0},{center.y:F0},{center.z:F0}) | drop {s_anchor.y - center.y:F1}m, {segments} segment(s).");
+                    $"[FiresWater] {what}; connected from ({s_anchor.x:F0},{s_anchor.y:F1},{s_anchor.z:F0}) "
+                    + $"| drop {s_anchor.y - center.y:F1}m, {segments} segment(s).");
             }
             else
             {
-                FiresLogger.LogInfo(
-                    $"[FiresWater] pool placed at ({center.x:F0},{center.y:F0},{center.z:F0}) r={radius:F1} "
-                    + "— click downstream to connect the next one.");
+                FiresLogger.LogInfo($"[FiresWater] {what} — click downstream (a new spot or another water) to connect.");
             }
 
             s_anchor = center;
@@ -132,18 +144,69 @@ namespace VerdantsAscent.Water.Tools
         // slope, so the lip is cleared the way a location pad flattens its site:
         // everything inside the ring above the waterline goes first, then the
         // bowl is dug under it.
-        private static void ShapePool(Vector3 center, float radius)
+        // A POOL (a click, tiered) is cut for life, from vanilla's own runtime bands (R47, 10-01; FiresClutterWaterEcology):
+        // an outer bowl FishDepth deep (Fish1 spawns on a bed 1.5-3 m down) around an inner well WellDepth deep across
+        // WellRatio of the radius (instanced_waterlilies needs a bed 3.2-4.5 m down, instanced_vass 3.1-4.0 m). A pool
+        // smaller than TieredMinRadius, and every channel stamp, keeps the single bowl of before.
+        private const float FishDepth = 2.2f, WellDepth = 3.8f, WellRatio = 0.55f, TieredMinRadius = 4f;
+
+        private static void ShapePool(Vector3 center, float radius, bool tiered = false)
         {
-            float depth = Mathf.Max(PoolMinDepth, radius * PoolDepthRatio);
+            bool twoTier = tiered && radius >= TieredMinRadius;
+            float depth = twoTier ? FishDepth : Mathf.Max(PoolMinDepth, radius * PoolDepthRatio);
 
             var lip = new Vector3(center.x, center.y + LevelClearHeight * 0.5f, center.z);
             VoxelWorld.ApplyBrush(lip, radius, LevelClearHeight, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
 
             var bowl = new Vector3(center.x, center.y - depth * 0.5f, center.z);
             VoxelWorld.ApplyBrush(bowl, radius, depth, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
+            if (twoTier)
+            {
+                var well = new Vector3(center.x, center.y - WellDepth * 0.5f, center.z);
+                VoxelWorld.ApplyBrush(well, radius * WellRatio, WellDepth, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
+                depth = WellDepth;
+            }
 
             RefreshClutter(center, radius);
-            LayWater(center, radius, depth);
+            QueueWater(center, radius, depth);
+        }
+
+        // 0.2.678 (H5, 10-01: "pool placed … r=6.0" yet the water read "no water", depth -43.7 m). The WaterMeshCombiner shapes
+        // a disk to the terrain it samples when it builds (min of the generator height and ZoneSystem.GetGroundHeight, a
+        // raycast onto the colliders), and the carve's colliders are rebuilt asynchronously, so a disk laid in the same frame
+        // as its carve sat on the UNCARVED ground, about 0 m deep. The water now waits until a terrain ray at the pool centre
+        // reaches the carved bed (below centre - depth/2), at most WaterWaitCap seconds, then is laid and logged.
+        private const float WaterWaitMin = 0.3f, WaterWaitCap = 10f, BedProbeAbove = 50f, BedProbeLength = 100f;
+        private static int s_terrainMask;
+
+        private sealed class PendingWater { public Vector3 Center; public float Radius, Depth, QueuedAt; }
+        private static readonly System.Collections.Generic.List<PendingWater> s_pendingWater = new System.Collections.Generic.List<PendingWater>();
+
+        private static void QueueWater(Vector3 center, float radius, float depth)
+            => s_pendingWater.Add(new PendingWater { Center = center, Radius = radius, Depth = depth, QueuedAt = Time.realtimeSinceStartup });
+
+        private static void DrainPendingWater()
+        {
+            if (s_pendingWater.Count == 0) return;
+            if (s_terrainMask == 0) s_terrainMask = LayerMask.GetMask("terrain");
+            float now = Time.realtimeSinceStartup;
+            for (int i = s_pendingWater.Count - 1; i >= 0; i--)
+            {
+                var w = s_pendingWater[i];
+                float waited = now - w.QueuedAt;
+                if (waited < WaterWaitMin) continue;
+                float bedLine = w.Center.y - w.Depth * 0.5f;
+                float bed = float.NaN;
+                if (Physics.Raycast(new Vector3(w.Center.x, w.Center.y + BedProbeAbove, w.Center.z), Vector3.down, out RaycastHit hit, BedProbeLength, s_terrainMask))
+                    bed = hit.point.y;
+                bool seen = !float.IsNaN(bed) && bed <= bedLine;
+                if (!seen && waited < WaterWaitCap) continue;
+                s_pendingWater.RemoveAt(i);
+                LayWater(w.Center, w.Radius, w.Depth);
+                FiresLogger.LogInfo($"[FiresWater] pool water laid at ({w.Center.x:F0},{w.Center.y:F1},{w.Center.z:F0}) r={w.Radius:F1} d={w.Depth:F1} "
+                    + (seen ? $"after {waited:F1} s (bed seen at y {bed:F1})"
+                            : $"after the {WaterWaitCap:F0} s cap, bed still at y {(float.IsNaN(bed) ? "none" : bed.ToString("F1"))} (wanted <= {bedLine:F1})"));
+            }
         }
 
         // Straight-line grade from one pool to the next: lerping the anchor Y
@@ -235,6 +298,7 @@ namespace VerdantsAscent.Water.Tools
         // player stops dragging and nothing else calls in.
         public static void Tick()
         {
+            DrainPendingWater();
             if (!s_clutterPending) return;
             if (Time.realtimeSinceStartup - s_lastClutterFlush < ClutterFlushSeconds) return;
 

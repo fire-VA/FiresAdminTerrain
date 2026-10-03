@@ -187,7 +187,6 @@ namespace VerdantsAscent.Terrain.Voxel
             bool pooled = TrySeedCavePool(rng);
 
             VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
-            VoxelCaveRecord.SaveIfDirty();
             s_report.Add(tally);
             s_reportZones++;
             s_reportSpots += s_spots.Count;
@@ -594,7 +593,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return cleared;
         }
 
-        private static List<ZDO> ZoneObjects(Vector2s zone)
+        internal static List<ZDO> ZoneObjects(Vector2s zone)
         {
             s_zoneObjects.Clear();
             ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(0, 0), s_zoneObjects);

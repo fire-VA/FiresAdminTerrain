@@ -153,6 +153,13 @@ namespace VerdantsAscent.Terrain.Voxel
         private float[] _genGround;    // SAMPLESxSAMPLES world ground heights
         private Color32[] _genBiome;   // SAMPLESxSAMPLES biome colors
         private bool _genCaves;
+        // Ground carrying a Vedr quake scar or crater heals back, so it is neither
+        // read from nor written to the cache: the chunk's one cache file keeps
+        // the lasting ground.
+        private bool _genCacheable;
+        // Vedr's open quake fissures over this chunk's column (FatCracks), the
+        // same array the streamer folded into LastGenHash; null when none.
+        private float[] _genCracks;
         public bool PendingGenerate { get; private set; }
 
         // Change-gate: hash of the last executed generate inputs. A zone
@@ -160,17 +167,37 @@ namespace VerdantsAscent.Terrain.Voxel
         // avoids remesh + collider swaps under the player (rubber-banding).
         public uint LastGenHash;
 
-        public void PrepareGenerate(float[] ground, Color32[] biome, bool caves)
+        public void PrepareGenerate(float[] ground, Color32[] biome, bool caves, float[] cracks)
         {
-            lock (_lock)
+            EnterTimed(nameof(PrepareGenerate));
+            try
             {
                 _genGround = ground;
                 _genBiome = biome;
                 _genCaves = caves;
+                _genCracks = cracks;
+                _genCacheable = !FatSeasons.IsScarred(WorldOrigin) && cracks == null;
                 _genOverrides = null;
                 GenFailCount = 0;
                 PendingGenerate = true;
             }
+            finally { System.Threading.Monitor.Exit(_lock); }
+        }
+
+        // Diagnostic (R8a, 2026-09-28: a 1.8 s dedi stall in BuildZoneChunks, 98% of it blocked). The streamer re-arms chunks
+        // on the main thread through here and SetBorderOverrides, while a worker holds the same lock for a whole generate or
+        // mesh, so a wait at or over LockWaitReportMs is logged with the chunk: that tells a lock wait from page-ins.
+        private const long LockWaitReportMs = 50;
+
+        private void EnterTimed(string caller)
+        {
+            if (System.Threading.Monitor.TryEnter(_lock)) return;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            System.Threading.Monitor.Enter(_lock);
+            long waited = clock.ElapsedMilliseconds;
+            if (waited < LockWaitReportMs) return;
+            try { FiresLogger.LogWarning($"[FiresVoxel] {caller} waited {waited} ms for chunk {Key}'s lock, held by a worker."); }
+            catch (System.Exception) { }
         }
 
         // -- Canonical border ownership (the REAL seam fix) -------------------
@@ -197,10 +224,12 @@ namespace VerdantsAscent.Terrain.Voxel
 
         public void SetBorderOverrides(BorderOverrideSet overrides)
         {
-            lock (_lock)
+            EnterTimed(nameof(SetBorderOverrides));
+            try
             {
                 if (PendingGenerate) _genOverrides = overrides;
             }
+            finally { System.Threading.Monitor.Exit(_lock); }
         }
 
         // Main-thread only (reads neighbour arrays without their locks - all
@@ -373,7 +402,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // re-takes it. A hit skips the whole generate below: noise, cave
             // SDF and carves over 34^3 samples. Any failure just falls through
             // and generates, so a bad entry can never block terrain.
-            if (PendingGenerate && VoxelChunkCache.TryLoad(Key, LastGenHash, out var cachedKind, out var cachedBlob)
+            if (PendingGenerate && _genCacheable && VoxelChunkCache.TryLoad(Key, LastGenHash, out var cachedKind, out var cachedBlob)
                 && CacheRestore(cachedKind, cachedBlob))
                 return;
 
@@ -532,6 +561,13 @@ namespace VerdantsAscent.Terrain.Voxel
                                 _genWater[col] = isLvl;
                             }
                         }
+                        // QUAKE CRACKS - dry, open, real columns only: a crack
+                        // under stored water would open a void below the sheet
+                        // (swim trigger without water), and river banks and
+                        // bowls keep their own profile.
+                        bool cracked = _genCracks != null && columnReal && !inChannel && bankCarve <= 0f
+                            && (_genWater == null || _genWater[col] == 0f)
+                            && FatCracks.Reaches(_genCracks, col, g, WorldOrigin.y);
                         for (int y = -1; y <= CELLS; y++)
                         {
                             float wy = WorldOrigin.y + y;
@@ -571,6 +607,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             {
                                 if (dens > -6) dens = -6;   // ~0.3m of air bitten into the bank
                             }
+                            if (cracked) dens = FatCracks.Carve(dens, _genCracks, col, wx, wy, wz, g);
                             _density[i] = dens;
                         }
                     }
@@ -596,6 +633,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // edits like vcarve are always included.)
                 _genGround = null;
                 _genBiome = null;
+                _genCracks = null;
                 PendingGenerate = false;
                 GenFailCount = 0;
                 Version++;
@@ -605,7 +643,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // edits are NOT in here: they arrive later and persist through the
             // ZDO snapshot path, and a cached edit could otherwise resurrect a
             // carve the player deleted.
-            if (!HasBrushEdits)
+            if (!HasBrushEdits && _genCacheable)
                 VoxelChunkCache.Store(Key, LastGenHash, Kind, CacheCapture(), swGen.Elapsed.TotalMilliseconds);
         }
 
@@ -898,7 +936,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (_editLo != null) return false;
                     Kind = kind;
                     _density = null; _seed = null; _biome = null; _genWater = null; _genWaterMop = null;
-                    _genGround = null; _genBiome = null; _genOverrides = null;
+                    _genGround = null; _genBiome = null; _genOverrides = null; _genCracks = null;
                     PendingGenerate = false;
                     Version++;
                     return true;
@@ -963,7 +1001,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 Kind = kind;
                 _density = null; _seed = null; _biome = null; _genWater = null;
-                _genGround = null; _genBiome = null; _genOverrides = null;
+                _genGround = null; _genBiome = null; _genOverrides = null; _genCracks = null;
                 PendingGenerate = false;
                 Version++;
             }
@@ -973,6 +1011,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static int Idx(int x, int y, int z)
             => (x + 1) + SAMPLES * ((y + 1) + SAMPLES * (z + 1));
+
+        // Local sample coordinates run -1..CELLS, the ring included.
+        internal static int SampleIndex(int x, int y, int z) => Idx(x, y, z);
 
         // -- Seeding - density from the CURRENT ground surface ---------------
         // d = groundY - sampleY (positive below ground = solid), so an unedited
@@ -1169,6 +1210,85 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (_genWater == null) RebuildGenWaterBaselineLocked();
                     SpreadGenWaterLocked();
                     HasBrushEdits = true;
+                }
+            }
+            return changed;
+        }
+
+        // A sample an area stamp leaves exactly as it is. No stored density is ever this value.
+        internal const sbyte KeepSample = sbyte.MinValue;
+
+        // An area blueprint laid down: like ApplyDensityStamp, but only the samples it names change; KeepSample ones are
+        // left alone, edit bounds and all, so the land outside the saved cylinder stays free to regenerate.
+        public bool ApplyMaskedStamp(sbyte[] density)
+        {
+            if (density == null || density.Length != SampleCount) return false;
+            bool changed = false;
+            lock (_lock)
+            {
+                EnsureBrushEditsLocked();
+                for (int i = 0; i < SampleCount; i++)
+                {
+                    sbyte wanted = density[i];
+                    if (wanted == KeepSample) continue;
+                    if (_editLo[i] == wanted && _editHi[i] == wanted && _density[i] == wanted) continue;
+                    _editLo[i] = wanted;
+                    _editHi[i] = wanted;
+                    _density[i] = wanted;
+                    changed = true;
+                }
+                if (changed)
+                {
+                    Version++;
+                    if (_genWater == null) RebuildGenWaterBaselineLocked();
+                    SpreadGenWaterLocked();
+                    HasBrushEdits = true;
+                }
+            }
+            return changed;
+        }
+
+        // ── Skyland blueprints: edits as bounds, sparse ─────────────────────
+        // A skyland's edits are its brush bounds over the density it generates, so they travel as bounds: laid down on a
+        // copy of the island, they clamp the same rock the copy regenerates.
+        internal static bool IsEdited(sbyte lo, sbyte hi) => lo != EditLoNone || hi != EditHiNone;
+
+        // The bounds of an anchor blob (ExportBrushEdits' layout), read without a chunk.
+        internal static bool TryReadEditBounds(byte[] raw, out sbyte[] lo, out sbyte[] hi)
+        {
+            lo = hi = null;
+            if (raw == null || raw.Length < SampleCount * 2) return false;
+            lo = new sbyte[SampleCount];
+            hi = new sbyte[SampleCount];
+            System.Buffer.BlockCopy(raw, 0, lo, 0, SampleCount);
+            System.Buffer.BlockCopy(raw, SampleCount, hi, 0, SampleCount);
+            return true;
+        }
+
+        // Bounds set on the samples named and on no others. `clear` takes the named samples' bounds off instead.
+        public bool ApplyEditBounds(List<int> samples, List<sbyte> lo, List<sbyte> hi, bool clear)
+        {
+            bool changed = false;
+            lock (_lock)
+            {
+                if (_density == null) return false;
+                EnsureBrushEditsLocked();
+                for (int k = 0; k < samples.Count; k++)
+                {
+                    int i = samples[k];
+                    sbyte wantLo = clear ? EditLoNone : lo[k], wantHi = clear ? EditHiNone : hi[k];
+                    if (_editLo[i] == wantLo && _editHi[i] == wantHi) continue;
+                    _editLo[i] = wantLo;
+                    _editHi[i] = wantHi;
+                    _density[i] = ClampToBounds(_editBase[i], wantLo, wantHi);
+                    changed = true;
+                }
+                if (changed)
+                {
+                    Version++;
+                    if (_genWater == null) RebuildGenWaterBaselineLocked();
+                    SpreadGenWaterLocked();
+                    HasBrushEdits = AnyBrushEditsLocked();
                 }
             }
             return changed;

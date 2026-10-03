@@ -41,7 +41,15 @@ namespace VerdantsAscent.Terrain.Persistence
             if (s_initialized) return;
             s_initialized = true;
 
-            var commandType = AccessTools.TypeByName(TerrainCommandType);
+            // Assembly.GetType per assembly is a lookup; AccessTools.TypeByName walks every type of every assembly when the
+            // type is missing, which was most of ZNetScene.Awake's 123 ms "drag + ruler" step on a dedi without WEC (R44).
+            Type commandType = null;
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { commandType = assembly.GetType(TerrainCommandType, false); }
+                catch (Exception) { continue; }
+                if (commandType != null) break;
+            }
             if (commandType == null)
             {
                 FiresLogger.LogVerbose($"{Tag} World Edit Commands not loaded - not needed.");
@@ -49,7 +57,7 @@ namespace VerdantsAscent.Terrain.Persistence
             }
 
             var getCompilers = AccessTools.Method(commandType, GetCompilersMethod);
-            var parametersType = AccessTools.TypeByName(TerrainParametersType);
+            var parametersType = commandType.Assembly.GetType(TerrainParametersType, false);
             var parametersCtor = parametersType != null
                 ? AccessTools.Constructor(parametersType, new[] { typeof(Terminal.ConsoleEventArgs) })
                 : null;
@@ -114,6 +122,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // aimed under a tile still edits the ground.
         private static bool IsTargetingTile(Vector3 position)
         {
+            if (TileAnchor.Retired) return false;   // the 2D tile layer is retired: every command edits the ground
             if (!TileAnchorRegistry.TrySampleHeightAtWorld(position, out float tileY)) return false;
             if (!Heightmap.GetHeight(position, out float groundY)) return true;
             return Mathf.Abs(position.y - tileY) <= Mathf.Abs(position.y - groundY);

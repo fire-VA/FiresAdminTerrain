@@ -642,8 +642,67 @@ namespace VerdantsAscent.Water.Core
 
         #region Terrain Sampling
 
+        // 0.2.683 ([lead] H10 follow-up, 10-01): the terrain under the water, from VoxelWorld's EDITED density where it is
+        // loaded. A VoxelWrap dedicated server builds voxel data (VAVoxel edits imported per zone) but no voxel colliders,
+        // so GetGroundHeight there is vanilla's uncarved ground and a carved pond read dry in the server's grid. The
+        // density read is a dictionary lookup plus one column scan: it never builds a zone, only answers where a column is
+        // already loaded, and falls back to the old sample otherwise. The window runs from just above this combiner's
+        // highest disk surface (so an overhang above the water is ignored) down VoxelProbeBelow metres.
+        private const float VoxelProbeAbove = 2f, VoxelProbeBelow = 80f;
+        private float _voxelProbeTop = float.NaN;
+        private static bool s_voxelSampleLogged;
+
+        // 0.2.685 (H12: no "water grids sample the edited voxel ground" line on the dedi): on a dedicated server, every grid
+        // build reports how many of its cells the voxel density answered, so "the server never builds a grid" and "it builds
+        // one but no column is loaded" can be told apart. One line per build; builds are rare (create, restore, reseat).
+        private int _voxelAnswered, _voxelAsked;
+
+        private void ReportServerSample()
+        {
+            if (ZNet.instance == null || !ZNet.instance.IsDedicated()) return;
+            FiresLogger.LogDebug($"[FiresWater] server water grid at ({transform.position.x:F0},{transform.position.y:F1},{transform.position.z:F0}): "
+                + $"{_waterDisks.Count} disk(s), voxel density answered {_voxelAnswered}/{_voxelAsked} cell(s)"
+                + (float.IsNaN(_voxelProbeTop) ? " (no disk to set the probe window)" : $" in y {_voxelProbeTop - VoxelProbeBelow:F0}..{_voxelProbeTop:F0}")
+                + (_voxelAnswered == 0 ? "; the rest use the vanilla ground (no voxel column loaded here)" : "") + ".");
+        }
+
+        private void SetVoxelProbeTop()
+        {
+            _voxelAnswered = _voxelAsked = 0;
+            _voxelProbeTop = float.NaN;
+            foreach (var d in _waterDisks)
+                if (d != null && (float.IsNaN(_voxelProbeTop) || d.Position.y + VoxelProbeAbove > _voxelProbeTop))
+                    _voxelProbeTop = d.Position.y + VoxelProbeAbove;
+        }
+
+        private bool TryVoxelGround(Vector3 worldPos, out float ground)
+        {
+            ground = 0f;
+            if (float.IsNaN(_voxelProbeTop)) return false;
+            _voxelAsked++;
+            if (!VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleSurfaceY(worldPos.x, worldPos.z, _voxelProbeTop, _voxelProbeTop - VoxelProbeBelow,
+                    out float surf, out bool solidAtTop))
+            {
+                // Solid at the top of the window: the bank stands above the water there (a dry cell).
+                if (!solidAtTop) return false;
+                surf = _voxelProbeTop;
+            }
+            _voxelAnswered++;
+            ground = surf;
+            if (!s_voxelSampleLogged)
+            {
+                s_voxelSampleLogged = true;
+                float gen = WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(worldPos.x, worldPos.z) : float.NaN;
+                FiresLogger.LogInfo($"[FiresWater] water grids sample the edited voxel ground (first at ({worldPos.x:F0},{worldPos.z:F0}): "
+                    + $"y {surf:F1}{(solidAtTop ? " (bank above the water)" : "")}, generated {gen:F1}; "
+                    + $"{(ZNet.instance != null && ZNet.instance.IsDedicated() ? "dedicated server" : "this peer")}); first of this session.");
+            }
+            return true;
+        }
+
         private void SampleTerrainHeights()
         {
+            SetVoxelProbeTop();
             for (int z = 0; z < _gridHeight; z++)
             {
                 for (int x = 0; x < _gridWidth; x++)
@@ -653,12 +712,14 @@ namespace VerdantsAscent.Water.Core
                     _terrainHeights[idx] = SampleTerrainHeightAt(worldPos);
                 }
             }
+            ReportServerSample();
         }
 
         private IEnumerator SampleTerrainHeightsAsync()
         {
             const int BATCH_SIZE = 500;
             int processed = 0;
+            SetVoxelProbeTop();
 
             for (int z = 0; z < _gridHeight; z++)
             {
@@ -675,6 +736,7 @@ namespace VerdantsAscent.Water.Core
                     }
                 }
             }
+            ReportServerSample();
         }
 
         /// <summary>
@@ -704,6 +766,10 @@ namespace VerdantsAscent.Water.Core
             {
                 return customY;
             }
+
+            // 0.2.683: the edited voxel ground where it is loaded (see TryVoxelGround).
+            if (TryVoxelGround(worldPos, out float voxelY))
+                return voxelY;
 
             float baseTerrainHeight;
 
@@ -2670,6 +2736,8 @@ namespace VerdantsAscent.Water.Core
         /// Players must be within this distance below the water surface to trigger swimming.
         /// </summary>
         private const float SWIM_TRIGGER_MAX_DEPTH = 3f;
+        // 0.2.683: below that, down to the bed (minus a margin), but never deeper than this under the surface.
+        private const float SWIM_TRIGGER_BED_MARGIN = 0.5f, SWIM_TRIGGER_BED_LIMIT = 30f;
 
         /// <summary>
         /// Maximum size of a single swim trigger BoxCollider segment (meters per axis).
@@ -2807,7 +2875,7 @@ namespace VerdantsAscent.Water.Core
                     float segMaxZ = segMinZ + segSizeZ;
 
                     // Find local Y range within this segment
-                    float segMinSurfY = float.MaxValue, segMaxSurfY = float.MinValue;
+                    float segMinSurfY = float.MaxValue, segMaxSurfY = float.MinValue, segMinBed = float.MaxValue;
                     bool segHasWater = false;
 
                     for (int gz = 0; gz < _gridHeight; gz++)
@@ -2822,6 +2890,8 @@ namespace VerdantsAscent.Water.Core
                                 continue;
                             segHasWater = true;
                             float sy = _surfaceHeights[idx];
+                            if (_terrainHeights != null && idx < _terrainHeights.Length && _terrainHeights[idx] < segMinBed)
+                                segMinBed = _terrainHeights[idx];
                             if (sy < segMinSurfY) segMinSurfY = sy;
                             if (sy > segMaxSurfY) segMaxSurfY = sy;
                         }
@@ -2830,7 +2900,12 @@ namespace VerdantsAscent.Water.Core
                     if (!segHasWater) continue;
 
                     // KEY FIX: segment top is at the resting water surface for this segment
+                    // 0.2.683 (H11, 10-01: a Fish2 lay on a 3.8 m pool well "given level never set"): the trigger reaches the
+                    // deepest bed in the segment, so a fish or a drop on the floor of water deeper than SWIM_TRIGGER_MAX_DEPTH
+                    // is still in it (vanilla's WaterVolume reaches the seabed too). Bounded to SWIM_TRIGGER_BED_LIMIT.
                     float segBottom = segMinSurfY - SWIM_TRIGGER_MAX_DEPTH;
+                    if (segMinBed < float.MaxValue)
+                        segBottom = Mathf.Min(segBottom, Mathf.Max(segMinBed - SWIM_TRIGGER_BED_MARGIN, segMinSurfY - SWIM_TRIGGER_BED_LIMIT));
                     float segTop = segMaxSurfY;
                     Vector3 segCenter = new Vector3(
                         (segMinX + segMaxX) * 0.5f,
@@ -3158,7 +3233,7 @@ namespace VerdantsAscent.Water.Core
             _inWater.Clear();
             _combiner = null;
 
-            FiresLogger.LogInfo("[WaterCombinerTrigger] OnDestroy: Cleaned up all tracked water interactables");
+            FiresLogger.LogDebug("[WaterCombinerTrigger] OnDestroy: Cleaned up all tracked water interactables");
         }
 
         /// <summary>
@@ -3282,7 +3357,7 @@ namespace VerdantsAscent.Water.Core
 
             if (toRemove.Count > 0)
             {
-                FiresLogger.LogInfo($"[WaterCombinerTrigger] RevalidateTrackedInteractables: Removed {toRemove.Count} interactables no longer in water");
+                FiresLogger.LogDebug($"[WaterCombinerTrigger] RevalidateTrackedInteractables: Removed {toRemove.Count} interactables no longer in water");
             }
         }
     }

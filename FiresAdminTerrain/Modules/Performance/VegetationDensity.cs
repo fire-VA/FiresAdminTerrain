@@ -70,6 +70,21 @@ namespace VerdantsAscent.Terrain.Performance
             return exempt;
         }
 
+        // The first zone a server generated used to classify every vegetation prefab here ([perf] R32: 197 ms inside the
+        // first explorer's zone). ZoneSystem.Start does it instead, while the world loads; a prefab added to the list later
+        // (Expand World Data) is classified when first met. Only a server or host generates zones.
+        internal static void WarmExemptions(ZoneSystem zoneSystem)
+        {
+            if (Mathf.Approximately(Scale, 1f) || ZNet.instance == null || !ZNet.instance.IsServer()) return;
+            var veg = zoneSystem != null ? zoneSystem.m_vegetation : null;
+            if (veg == null || veg.Count == 0) return;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            foreach (var item in veg)
+                if (item != null) IsExempt(item.m_prefab);
+            FiresLogger.LogInfo($"[FiresVeg] classified {s_exempt.Count} vegetation prefab(s) for the density scale while the world "
+                + $"loads, in {clock.ElapsedMilliseconds} ms, so the first new zone does not.");
+        }
+
         internal static void Apply(ZoneSystem __instance)
         {
             s_scaled = false;
@@ -84,8 +99,8 @@ namespace VerdantsAscent.Terrain.Performance
             for (int i = 0; i < veg.Count; i++)
             {
                 var v = veg[i];
-                s_minBackup.Add(v.m_min);
-                s_maxBackup.Add(v.m_max);
+                s_minBackup.Add(v != null ? v.m_min : 0f);
+                s_maxBackup.Add(v != null ? v.m_max : 0f);
                 if (v == null || IsExempt(v.m_prefab)) { exempt++; continue; }
                 v.m_min *= k;
                 v.m_max *= k;
@@ -110,6 +125,7 @@ namespace VerdantsAscent.Terrain.Performance
             int n = Mathf.Min(veg.Count, s_minBackup.Count);
             for (int i = 0; i < n; i++)
             {
+                if (veg[i] == null) continue;
                 veg[i].m_min = s_minBackup[i];
                 veg[i].m_max = s_maxBackup[i];
             }

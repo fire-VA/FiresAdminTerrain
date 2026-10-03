@@ -17,8 +17,8 @@ namespace VerdantsAscent.Terrain.Zones
     //   server — whenever the open set changes, switch on every skyland site now within reach, publish the
     //            grown set, and dress each new skyland once with real objects (it floats over closed sea,
     //            where vanilla population never runs), including the vanilla location a skyland may hold;
-    //   client — a far-view mesh of every skyland on the horizon until its voxel chunks are in, and the
-    //            short fall from its rim that thins out in mid-air.
+    //   client — a far-view mesh of every skyland on the horizon (its ponds and rivers dug in and filled) until
+    //            its voxel chunks are in, and the short fall from its rim that thins out in mid-air.
     internal static class ZoneModeSkylands
     {
         private const float ServerCheckSeconds = 2f;
@@ -26,6 +26,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const float VisualRange = 1600f;
         private const float FallFade = 0.8f;
         private const float FallLipOut = 0.6f;
+        private const string RisingRpc = "FiresZones_SkylandsRising";
 
         private static int s_lastVersion = -1;
         private static float s_nextServerCheck;
@@ -34,6 +35,8 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly Dictionary<Heightmap.Biome, int> s_dressedBiomes = new Dictionary<Heightmap.Biome, int>();
         private static readonly HashSet<string> s_missingPrefabs = new HashSet<string>();
         private static readonly List<int> s_added = new List<int>();
+        private static readonly List<Disc> s_rising = new List<Disc>();
+        private static ZRoutedRpc s_risingBus;
         private static readonly List<Vector3> s_pos = new List<Vector3>(128);
         private static readonly List<Quaternion> s_rot = new List<Quaternion>(128);
         private static readonly List<string> s_name = new List<string>(128);
@@ -83,13 +86,21 @@ namespace VerdantsAscent.Terrain.Zones
             }
         }
 
+        private sealed class FarPiece
+        {
+            internal Vector2s Zone;
+            internal GameObject View;
+            internal Mesh Mesh;
+        }
+
         private sealed class Visual
         {
-            internal GameObject Far;
-            internal Mesh FarMesh;
+            internal Heightmap.Biome Biome;
+            internal readonly List<FarPiece> FarPieces = new List<FarPiece>();
+            internal readonly List<FarPiece> FarWater = new List<FarPiece>();
+            internal bool WaterBuilt;
             internal GameObject Fall;
             internal Mesh FallMesh;
-            internal readonly List<Vector2s> Zones = new List<Vector2s>();
         }
 
         private static readonly Dictionary<uint, Visual> s_visuals = new Dictionary<uint, Visual>();
@@ -97,9 +108,11 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly List<int> s_nearIndices = new List<int>();
         private static readonly HashSet<uint> s_nearSet = new HashSet<uint>();
         private static readonly List<uint> s_dropIds = new List<uint>();
+        private static readonly List<Color32> s_pieceColours = new List<Color32>();
         private static readonly List<FiresWaterfalls.Column> s_fallColumns = new List<FiresWaterfalls.Column>(8);
         private static readonly List<FiresSkyIslands.SkylandFall> s_falls = new List<FiresSkyIslands.SkylandFall>(4);
         private static readonly List<Vector3> s_fallSites = new List<Vector3>(1);
+        private static readonly List<FiresWaterfallMist.Site> s_mistSites = new List<FiresWaterfallMist.Site>(2);
         private static GameObject s_root;
         private static float s_nextClientTick;
         private static bool s_headless;
@@ -117,6 +130,7 @@ namespace VerdantsAscent.Terrain.Zones
         // ── Server ──────────────────────────────────────────────────────────────────────────────────
         internal static void ServerTick()
         {
+            EnsureRisingRpc();
             if (Time.time < s_nextServerCheck) return;
             s_nextServerCheck = Time.time + ServerCheckSeconds;
             var net = ZNet.instance;
@@ -134,6 +148,7 @@ namespace VerdantsAscent.Terrain.Zones
             FiresSkyIslands.ActivateZoneSkylands(view.Open.OpenZones(), ZNet.World.m_seed, RealGround, RealWet, s_added);
             if (s_added.Count > 0)
             {
+                AnnounceRising(s_added);
                 var lines = new List<string>();
                 FiresSkyIslands.PublishSkylands(before, lines);
                 FiresLogger.LogInfo($"[FiresZones] {s_added.Count} skyland(s) rose around the open land. {string.Join(" ", lines)}");
@@ -342,9 +357,21 @@ namespace VerdantsAscent.Terrain.Zones
             catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] could not save the skyland dressing record: {ex.Message}"); }
         }
 
+        // A skyland raised from a blueprint (ZoneModeSkylandBlueprint) brings its own saved objects, its location's pieces
+        // included, so it is recorded as fully dressed and neither dressed nor given a location a second time.
+        internal static void MarkDressed(uint id, Heightmap.Biome biome)
+        {
+            EnsureDressedLoaded();
+            s_dressed[id] = new DressRecord(FiresSkyIslands.DressAll | FiresSkyIslands.DressSiteLayout | FiresSkyIslands.DressLocation
+                | FiresSkyIslands.DressRolledRims | FiresSkyIslands.DressGround | FiresSkyIslands.DressNames, biome);
+            s_sitesPending.Remove(id);
+            SaveDressed();
+        }
+
         // ── Client ──────────────────────────────────────────────────────────────────────────────────
         internal static void ClientTick()
         {
+            EnsureRisingRpc();
             if (!s_headlessKnown)
             {
                 s_headless = SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null;
@@ -375,31 +402,130 @@ namespace VerdantsAscent.Terrain.Zones
                     visual = Build(s_nearIndices[i]);
                     s_visuals[id] = visual;
                 }
-                bool voxelIn = true;
-                foreach (var zone in visual.Zones)
-                    if (!VoxelZoneStreamer.IsZoneSolid(zone)) { voxelIn = false; break; }
-                if (visual.Far != null && visual.Far.activeSelf == voxelIn) visual.Far.SetActive(!voxelIn);
+                if (!visual.WaterBuilt && VoxelChunkView.BoundSheetMaterial != null) BuildFarWater(s_nearIndices[i], visual);
+                ShowFarPieces(visual.FarPieces);
+                ShowFarPieces(visual.FarWater);
             }
             s_dropIds.Clear();
             foreach (var kv in s_visuals) if (!s_nearSet.Contains(kv.Key)) s_dropIds.Add(kv.Key);
             foreach (uint id in s_dropIds) { Destroy(s_visuals[id]); s_visuals.Remove(id); }
         }
 
+        private static void ShowFarPieces(List<FarPiece> pieces)
+        {
+            foreach (var piece in pieces)
+            {
+                bool voxelTerritory = VoxelZoneStreamer.IsZoneKnown(piece.Zone);
+                if (piece.View.activeSelf == voxelTerritory) piece.View.SetActive(!voxelTerritory);
+            }
+        }
+
+        // The water sheet's material is bound by the near system some time after load, so the far water waits for it
+        // (a piece built without it would render in the error colour).
+        private static void BuildFarWater(int index, Visual visual)
+        {
+            visual.WaterBuilt = true;
+            string name = "SkylandFarWater_" + FiresSkyIslands.IslandId(index).ToString("x8");
+            var whole = new Mesh { name = name, indexFormat = IndexFormat.UInt32 };
+            if (FiresSkyIslands.BuildSkylandFarWater(index, whole)) SplitFarMeshByZone(whole, name, visual.FarWater, water: true);
+            Object.Destroy(whole);
+        }
+
+        // One far-view piece per zone, so each piece hides as soon as its own zone turns voxel instead of the whole island
+        // waiting on zones past the wrap radius that never build. Normals come from the whole mesh, so pieces meet smoothly.
+        private static void SplitFarMeshByZone(Mesh whole, string name, List<FarPiece> pieces, bool water = false)
+        {
+            var vertices = whole.vertices;
+            var normals = whole.normals;
+            var tangents = whole.tangents;
+            var colors = whole.colors32;
+            var uv0 = new List<Vector2>();
+            var uv1 = new List<Vector2>();
+            whole.GetUVs(0, uv0);
+            whole.GetUVs(1, uv1);
+            var triangles = whole.triangles;
+
+            var triangleStartsByZone = new Dictionary<Vector2s, List<int>>();
+            for (int start = 0; start < triangles.Length; start += 3)
+            {
+                var centroid = (vertices[triangles[start]] + vertices[triangles[start + 1]] + vertices[triangles[start + 2]]) / 3f;
+                var zone = ZoneSystem.GetZone(centroid);
+                if (!triangleStartsByZone.TryGetValue(zone, out var starts)) triangleStartsByZone[zone] = starts = new List<int>();
+                starts.Add(start);
+            }
+
+            var pieceIndexOf = new Dictionary<int, int>();
+            foreach (var zoneTriangles in triangleStartsByZone)
+            {
+                pieceIndexOf.Clear();
+                var pieceVertices = new List<Vector3>();
+                var pieceNormals = new List<Vector3>();
+                var pieceTangents = new List<Vector4>();
+                var pieceColors = new List<Color32>();
+                var pieceUv0 = new List<Vector2>();
+                var pieceUv1 = new List<Vector2>();
+                var pieceTriangles = new List<int>(zoneTriangles.Value.Count * 3);
+                foreach (int start in zoneTriangles.Value)
+                {
+                    for (int corner = 0; corner < 3; corner++)
+                    {
+                        int source = triangles[start + corner];
+                        if (!pieceIndexOf.TryGetValue(source, out int target))
+                        {
+                            target = pieceVertices.Count;
+                            pieceIndexOf[source] = target;
+                            pieceVertices.Add(vertices[source]);
+                            pieceNormals.Add(normals[source]);
+                            pieceTangents.Add(tangents[source]);
+                            pieceColors.Add(colors[source]);
+                            pieceUv0.Add(uv0[source]);
+                            pieceUv1.Add(uv1[source]);
+                        }
+                        pieceTriangles.Add(target);
+                    }
+                }
+
+                var zone = zoneTriangles.Key;
+                var mesh = new Mesh { name = name + "_" + zone.x + "_" + zone.y };
+                mesh.SetVertices(pieceVertices);
+                mesh.SetNormals(pieceNormals);
+                mesh.SetTangents(pieceTangents);
+                mesh.SetColors(pieceColors);
+                mesh.SetUVs(0, pieceUv0);
+                mesh.SetUVs(1, pieceUv1);
+                mesh.SetTriangles(pieceTriangles, 0, calculateBounds: true);
+
+                var view = new GameObject(mesh.name);
+                view.transform.SetParent(s_root.transform, false);
+                view.AddComponent<MeshFilter>().sharedMesh = mesh;
+                var renderer = view.AddComponent<MeshRenderer>();
+                if (water)
+                {
+                    renderer.sharedMaterial = VoxelChunkView.BoundSheetMaterial;
+                    renderer.shadowCastingMode = ShadowCastingMode.Off;
+                    renderer.receiveShadows = false;
+                }
+                else
+                {
+                    renderer.sharedMaterial = TerrainMaterialCache.GetCurrentMaterial();
+                    VoxelChunkView.ApplyShadowMode(renderer);
+                }
+                VoxelRenderGroup.Apply(renderer);
+                pieces.Add(new FarPiece { Zone = zone, View = view, Mesh = mesh });
+            }
+        }
+
         private static Visual Build(int index)
         {
             if (s_root == null) s_root = new GameObject("FiresSkylands");
-            var visual = new Visual();
-            FiresSkyIslands.SkylandZones(index, visual.Zones);
-
-            visual.Far = new GameObject("SkylandFar_" + FiresSkyIslands.IslandId(index).ToString("x8"));
-            visual.Far.transform.SetParent(s_root.transform, false);
-            visual.FarMesh = new Mesh { name = visual.Far.name };
-            FiresSkyIslands.BuildSkylandFarMesh(index, visual.FarMesh, Heightmap.GetBiomeColor(FiresSkyIslands.SkylandBiome(index)));
-            visual.Far.AddComponent<MeshFilter>().sharedMesh = visual.FarMesh;
-            var farRenderer = visual.Far.AddComponent<MeshRenderer>();
-            farRenderer.sharedMaterial = TerrainMaterialCache.GetCurrentMaterial();
-            VoxelChunkView.ApplyShadowMode(farRenderer);
-            VoxelRenderGroup.Apply(farRenderer);
+            var visual = new Visual { Biome = FiresSkyIslands.SkylandBiome(index) };
+            uint islandId = FiresSkyIslands.IslandId(index);
+            string farName = "SkylandFar_" + islandId.ToString("x8");
+            var whole = new Mesh { name = farName };
+            FiresSkyIslands.BuildSkylandFarMesh(index, whole, FatSeasons.BiomeColour(visual.Biome));
+            SplitFarMeshByZone(whole, farName, visual.FarPieces);
+            Object.Destroy(whole);
+            FiresLogger.LogVerbose($"[FiresZones] skyland {islandId:x8}: far view built as {visual.FarPieces.Count} zone piece(s).");
 
             var material = FiresWaterfalls.Material;
             FiresSkyIslands.CollectSkylandFalls(index, s_falls);
@@ -407,7 +533,8 @@ namespace VerdantsAscent.Terrain.Zones
             {
                 FiresWaterfalls.BeginMesh();
                 s_fallSites.Clear();
-                int inland = 0;
+                s_mistSites.Clear();
+                int inland = 0, caught = 0;
                 foreach (var fall in s_falls)
                 {
                     if (!IsSpillway(fall.Lip, fall.Outward)) { inland++; continue; }
@@ -418,13 +545,18 @@ namespace VerdantsAscent.Terrain.Zones
                         float offset = (k / 4f - 0.5f) * fall.Width;
                         s_fallColumns.Add(new FiresWaterfalls.Column { Base = fall.Lip + across * offset, LipY = fall.Lip.y, FallLength = fall.Drop });
                     }
-                    FiresWaterfalls.AppendCurtain(s_fallColumns, fall.Outward, FallLipOut, fall.Drop * FallFade,
-                        Mathf.Repeat(fall.Lip.x * 0.37f + fall.Lip.z * 0.11f, 97f), SkylandFace);
+                    if (!FiresWaterfalls.AppendCurtain(s_fallColumns, fall.Outward, FallLipOut, fall.Drop * FallFade,
+                            Mathf.Repeat(fall.Lip.x * 0.37f + fall.Lip.z * 0.11f, 97f), SkylandFace))
+                    {
+                        caught++;
+                        continue;
+                    }
                     s_fallSites.Add(FiresWaterfalls.SoundSite(s_fallColumns, fall.Outward));
+                    s_mistSites.Add(FiresWaterfalls.LastSite);
                 }
-                if (inland > 0)
-                    FiresLogger.LogVerbose($"[FiresZones] skyland {FiresSkyIslands.IslandId(index):x8}: {inland} of {s_falls.Count} "
-                        + "planned fall(s) do not reach the rim and are not drawn.");
+                FiresLogger.LogInfo($"[FiresZones] skyland {islandId:x8}: drew {s_fallSites.Count} of {s_falls.Count} mouth fall(s)"
+                    + (inland > 0 ? $"; {inland} stop short of the rim" : "")
+                    + (caught > 0 ? $"; {caught} caught by the rock at the lip" : "") + ".");
                 visual.FallMesh = new Mesh { name = "SkylandFall" };
                 if (FiresWaterfalls.EndMesh(visual.FallMesh) > 0)
                 {
@@ -434,9 +566,10 @@ namespace VerdantsAscent.Terrain.Zones
                     var fallRenderer = visual.Fall.AddComponent<MeshRenderer>();
                     fallRenderer.shadowCastingMode = ShadowCastingMode.Off;
                     fallRenderer.receiveShadows = false;
-                    fallRenderer.sharedMaterial = material;
+                    fallRenderer.sharedMaterials = FiresWaterfalls.Materials;
                     VoxelRenderGroup.Apply(fallRenderer);
                     FiresWaterfalls.SetSounds(visual.Fall.transform, s_fallSites);
+                    FiresWaterfallMist.SetEmitters(visual.Fall.transform, s_mistSites);
                 }
             }
             return visual;
@@ -480,10 +613,20 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void Destroy(Visual visual)
         {
-            if (visual.FarMesh != null) Object.Destroy(visual.FarMesh);
-            if (visual.Far != null) Object.Destroy(visual.Far);
+            DestroyPieces(visual.FarPieces);
+            DestroyPieces(visual.FarWater);
             if (visual.FallMesh != null) Object.Destroy(visual.FallMesh);
             if (visual.Fall != null) Object.Destroy(visual.Fall);
+        }
+
+        private static void DestroyPieces(List<FarPiece> pieces)
+        {
+            foreach (var piece in pieces)
+            {
+                Object.Destroy(piece.Mesh);
+                Object.Destroy(piece.View);
+            }
+            pieces.Clear();
         }
 
         private static void ClearVisuals()
@@ -492,11 +635,35 @@ namespace VerdantsAscent.Terrain.Zones
             s_visuals.Clear();
         }
 
+        // Vedr seasons: a skyland's far view is one colour, its biome's or the snow splat, repainted in place.
+        internal static void CollectSeasonRecolours(List<FatSeasons.Recolour> into)
+        {
+            foreach (var kv in s_visuals)
+            {
+                var biome = kv.Value.Biome;
+                foreach (var piece in kv.Value.FarPieces)
+                {
+                    var target = piece;
+                    into.Add(new FatSeasons.Recolour(target.Mesh.bounds.center, () => RecolourPiece(target, biome)));
+                }
+            }
+        }
+
+        private static void RecolourPiece(FarPiece piece, Heightmap.Biome biome)
+        {
+            if (piece.Mesh == null) return;
+            var colour = FatSeasons.BiomeColour(biome);
+            s_pieceColours.Clear();
+            for (int i = 0; i < piece.Mesh.vertexCount; i++) s_pieceColours.Add(colour);
+            piece.Mesh.SetColors(s_pieceColours);
+        }
+
         internal static void RefreshVisibility()
         {
             foreach (var kv in s_visuals)
             {
-                if (kv.Value.Far != null) VoxelRenderGroup.Apply(kv.Value.Far.GetComponent<MeshRenderer>());
+                foreach (var piece in kv.Value.FarPieces) VoxelRenderGroup.Apply(piece.View.GetComponent<MeshRenderer>());
+                foreach (var piece in kv.Value.FarWater) VoxelRenderGroup.Apply(piece.View.GetComponent<MeshRenderer>());
                 if (kv.Value.Fall != null) VoxelRenderGroup.Apply(kv.Value.Fall.GetComponent<MeshRenderer>());
             }
         }
@@ -510,6 +677,97 @@ namespace VerdantsAscent.Terrain.Zones
             s_dressedLoaded = false;
             s_dressed.Clear();
             s_sitesPending.Clear();
+            s_rising.Clear();
+        }
+
+        // ── Rising skylands: announced ahead of their dressing ──────────────────────────────────────────
+        // A new skyland's dressing reaches clients as ZDOs before the new island set does (that comes as a file), so a
+        // client would build its vines and veg over what it still takes for open air: static physics dropped the veg to
+        // the ground far below and the vines broke for want of support. The server announces each rising skyland's disc
+        // first, on the same connection and ahead of the dressing; the client holds wear and static physics inside it
+        // until the island set lands, then the voxel wear gate holds on until the island's chunks are built.
+        private readonly struct Disc
+        {
+            internal readonly float X, Z, R;
+
+            internal Disc(float x, float z, float r)
+            {
+                X = x;
+                Z = z;
+                R = r;
+            }
+
+            internal bool Holds(Vector3 point)
+            {
+                float dx = point.x - X, dz = point.z - Z;
+                return dx * dx + dz * dz <= R * R;
+            }
+
+            internal bool Touches(Vector3 zoneCentre)
+            {
+                float nx = Mathf.Clamp(X, zoneCentre.x - ZoneSystem.c_ZoneSizeHalf, zoneCentre.x + ZoneSystem.c_ZoneSizeHalf) - X;
+                float nz = Mathf.Clamp(Z, zoneCentre.z - ZoneSystem.c_ZoneSizeHalf, zoneCentre.z + ZoneSystem.c_ZoneSizeHalf) - Z;
+                return nx * nx + nz * nz <= R * R;
+            }
+        }
+
+        private static void EnsureRisingRpc()
+        {
+            var bus = ZRoutedRpc.instance;
+            if (bus == null || bus == s_risingBus) return;
+            bus.Register<ZPackage>(RisingRpc, OnRising);
+            s_risingBus = bus;
+            s_rising.Clear();
+        }
+
+        private static void AnnounceRising(List<int> added)
+        {
+            if (s_risingBus == null) return;
+            var pkg = new ZPackage();
+            pkg.Write(added.Count);
+            foreach (int index in added)
+            {
+                FiresSkyIslands.SkylandDisc(index, out float x, out float z, out float radius);
+                pkg.Write(x);
+                pkg.Write(z);
+                pkg.Write(radius);
+            }
+            s_risingBus.InvokeRoutedRPC(ZRoutedRpc.Everybody, RisingRpc, pkg);
+        }
+
+        // The server holds the island set already; only clients wait for it.
+        private static void OnRising(long sender, ZPackage pkg)
+        {
+            if (ZNet.instance == null || ZNet.instance.IsServer()) return;
+            int count = pkg.ReadInt();
+            for (int i = 0; i < count; i++)
+            {
+                float x = pkg.ReadSingle(), z = pkg.ReadSingle(), radius = pkg.ReadSingle();
+                s_rising.Add(new Disc(x, z, radius));
+            }
+            FiresLogger.LogInfo($"[FiresZones] {count} skyland(s) rising: vines and veg under them wait until the island set arrives.");
+        }
+
+        /// <summary>The island set arrived: the voxel wear gate takes over from the rising discs.</summary>
+        internal static void RisingArrived()
+        {
+            if (s_rising.Count == 0) return;
+            FiresLogger.LogInfo($"[FiresZones] island set arrived: {s_rising.Count} rising skyland(s) handed to the voxel wear gate.");
+            s_rising.Clear();
+        }
+
+        internal static bool RisingAt(Vector3 point)
+        {
+            foreach (var disc in s_rising) if (disc.Holds(point)) return true;
+            return false;
+        }
+
+        internal static bool RisingOver(Vector2s zone)
+        {
+            if (s_rising.Count == 0) return false;
+            Vector3 centre = ZoneSystem.GetZonePos(zone);
+            foreach (var disc in s_rising) if (disc.Touches(centre)) return true;
+            return false;
         }
 
         // A terrain modifier standing on a skyland (a location's levelling, smoothing and paint) belongs to the skyland,

@@ -49,7 +49,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 var size = CreatureSize(chosen);
                 var zdo = VoxelCaveContent.Spawn(chosen, spot.Floor, VoxelCaveContent.RandomYaw(rng), 1f, CaveContentKind.Spawner);
                 if (zdo == null) continue;
-                VoxelCaveRecord.AddSpawner(zdo.m_uid);
+                VoxelCaveRecord.AddSpawner(chosen.name, spot.Floor, zdo.m_uid);
                 VoxelCaveContent.ClaimBigItem(spot.Floor, size.x);
                 s_placed.Add(spot.Floor);
                 tally.Spawners++;
@@ -64,7 +64,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Time.time < s_nextTick) return;
             s_nextTick = Time.time + TickSeconds;
             if (ZNet.instance == null || !ZNet.instance.IsServer() || ZDOMan.instance == null || ZNetScene.instance == null) return;
-            if (!CaveContentConfig.MonstersEnabled || !CaveContentConfig.MonstersRespawn || ZNet.World == null) return;
+            if (!CaveContentConfig.MonstersEnabled || !CaveContentConfig.MonstersRespawn || ZNet.World == null || !VoxelCaveRecord.Bound) return;
 
             long now = CaveRestockClock.NowMilliseconds();
             int rearmed = 0;
@@ -72,7 +72,8 @@ namespace VerdantsAscent.Terrain.Voxel
             s_scratch.AddRange(VoxelCaveRecord.Spawners);
             foreach (var entry in s_scratch)
             {
-                var zdo = ZDOMan.instance.GetZDO(entry.Id);
+                if (!VoxelCaveRecord.InOpenZone(entry.Position)) continue;
+                var zdo = VoxelCaveRecord.Resolve(entry);
                 if (zdo == null)
                 {
                     VoxelCaveRecord.RemoveSpawner(entry);
@@ -97,7 +98,6 @@ namespace VerdantsAscent.Terrain.Voxel
                 VoxelCaveRecord.MarkDirty();
                 rearmed++;
             }
-            VoxelCaveRecord.SaveIfDirty();
             if (rearmed > 0) FiresLogger.LogInfo($"[FiresVoxel] cave monsters: {rearmed} spawner(s) re-armed after their creature died.");
         }
 

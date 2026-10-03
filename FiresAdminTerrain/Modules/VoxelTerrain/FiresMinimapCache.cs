@@ -130,7 +130,10 @@ namespace VerdantsAscent.Terrain.Voxel
             MetaPath(map) = CompletePath(dir, "cacheMinimapMeta");
         }
 
-        private static string CompletePath(string dir, string name)
+        internal static bool HasPaths(Minimap map, string mask, string biome, string height, string meta)
+            => MaskPath(map) == mask && BiomePath(map) == biome && HeightPath(map) == height && MetaPath(map) == meta;
+
+        internal static string CompletePath(string dir, string name)
         {
             if (s_completePath == null)
                 s_completePath = AccessTools.Method(typeof(Minimap), "GetCompleteTexturePath");

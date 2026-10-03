@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using FiresCore.Services;
 using FiresCore.World;
@@ -31,6 +32,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const string ChaosGlowSource = "StaffOrbofAhri";
         private const string ChaosGlowPath = "attach/chaosglow/stafffx";
         private const string FxAttach = "attach";
+        private const string InstanceSuffix = " (Instance)";
         private const int NestedDataDepth = 3;
 
         private static readonly AccessTools.FieldRef<ObjectDB, Dictionary<int, GameObject>> ItemByHash =
@@ -51,11 +53,19 @@ namespace VerdantsAscent.Terrain.Zones
         internal static void RegisterInScene(ZNetScene scene)
         {
             if (scene == null || !Load()) return;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var costs = new List<KeyValuePair<string, long>>();
             foreach (var prefab in s_prefabs.Values)
             {
+                long before = clock.ElapsedTicks;
                 CopyVanillaWiring(scene, prefab);
                 NetworkPrefabs.RegisterByName(scene, prefab);
+                costs.Add(new KeyValuePair<string, long>(prefab.name, clock.ElapsedTicks - before));
             }
+            costs.Sort((a, b) => b.Value.CompareTo(a.Value));
+            double TicksToMs(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            FiresLogger.LogInfo($"[FiresZones] scene wiring: {s_prefabs.Count} prefab(s) in {clock.ElapsedMilliseconds} ms; slowest: "
+                + string.Join(", ", costs.Take(5).Select(c => $"{c.Key} {TicksToMs(c.Value):0.0} ms")) + ".");
         }
 
         // The way ObjectDB.UpdateRegisters lists an item, so inventories, equipment and the menu's character preview
@@ -82,6 +92,10 @@ namespace VerdantsAscent.Terrain.Zones
             [HarmonyPriority(Priority.First)]
             private static void Postfix(ObjectDB __instance) => RegisterItems(__instance);
         }
+
+        internal static bool IsLoaded => s_prefabs.Count > 0;
+
+        internal static bool EnsureLoaded() => Load();
 
         private static bool Load()
         {
@@ -119,11 +133,15 @@ namespace VerdantsAscent.Terrain.Zones
                 : null;
         }
 
+        private static bool IsChunkTool(string name)
+            => name == ZoneModeChunkTools.CopyToolPrefab || name == ZoneModeChunkTools.PlaceToolPrefab
+                || name == ZoneModeChunkTools.RemoveToolPrefab || name == ZoneModeChunkTools.UndoToolPrefab
+                || name == ZoneModeChunkTools.RedoToolPrefab;
+
         private static void CopyVanillaWiring(ZNetScene scene, GameObject prefab)
         {
             // The registry anchor and the Chaos Hammer's tool pieces have no vanilla source and nothing to carry from one.
-            if (prefab.name == ZoneModeRegistryMirror.PrefabName
-                || prefab.name == ZoneModeChunkTools.CopyToolPrefab || prefab.name == ZoneModeChunkTools.PlaceToolPrefab) return;
+            if (prefab.name == ZoneModeRegistryMirror.PrefabName || IsChunkTool(prefab.name)) return;
             string sourceName = VanillaSourceOf(prefab.name);
             var source = sourceName != null ? scene.GetPrefab(sourceName) : null;
             if (source == null)
@@ -144,7 +162,9 @@ namespace VerdantsAscent.Terrain.Zones
                     smoke.m_smokePrefab = sourceSmoke.m_smokePrefab;
             RebindBrokenShaders(source.transform, prefab);
             if (prefab.name == ChaosHammerPrefab) RebindFxFromStaff(scene, prefab);
-            LiveAudioRouting.RouteWorldSfx(prefab);
+            // A dedicated server plays no sound. The first call also runs Core's one-time mixer harvest over every ZNetScene
+            // prefab, which landed in this join frame on the dedi (R51: 34 ms of the 44 ms scene wiring).
+            if (!FiresCore.Lifecycle.FiresMod.IsDedicatedServer) LiveAudioRouting.RouteWorldSfx(prefab);
         }
 
         // A ripped vanilla shader carries no compiled programs, so a material that ships in our bundle pointing at one
@@ -152,9 +172,25 @@ namespace VerdantsAscent.Terrain.Zones
         // matching shader NAME against the loaded supported ones; this repairs them from the vanilla TWIN instead, which
         // is the same shader instance the game is actually rendering with and so cannot match the wrong copy.
         //
-        // Only a null or unsupported shader is touched. The bundle's own materials - the rune bands and the chaos core,
-        // authored on Standard - are supported and keep exactly what they shipped with, as does every deliberate retint:
-        // swapping the material wholesale would throw those away, so the material is kept and only its shader replaced.
+        // "Unsupported" alone misses most of them: a ripped shader that names a Fallback reports isSupported and draws
+        // through it. The rip's Custom/Vegetation falls back to Legacy Shaders/Diffuse, so FiresSkyVines drew with no
+        // alpha test, as solid cards (RenderDoc, 2026-09-27 frame 13501). So a bundle copy is recognised by identity: a
+        // shader that is not the twin's live instance yet carries its name, or sits on the baked copy of the twin's
+        // material. The bundle's own materials - the rune bands and the chaos core, authored on Standard - match
+        // neither and keep exactly what they shipped with, as does every deliberate retint: the material is kept and
+        // only its shader replaced.
+        private static bool IsBundleCopyOfLive(Material mine, Material live)
+        {
+            if (mine.shader == live.shader) return false;
+            if (mine.shader == null || !mine.shader.isSupported) return true;
+            return mine.shader.name == live.shader.name || BakedName(mine.name) == BakedName(live.name);
+        }
+
+        private static string BakedName(string materialName) =>
+            materialName.EndsWith(InstanceSuffix, StringComparison.Ordinal)
+                ? materialName.Substring(0, materialName.Length - InstanceSuffix.Length)
+                : materialName;
+
         private static void RebindBrokenShaders(Transform sourceRoot, GameObject prefab)
         {
             int repaired = 0;
@@ -172,7 +208,7 @@ namespace VerdantsAscent.Terrain.Zones
                     var mine = ours[i];
                     var live = theirs[i];
                     if (mine == null || live == null || live.shader == null || !live.shader.isSupported) continue;
-                    if (mine.shader != null && mine.shader.isSupported) continue;
+                    if (!IsBundleCopyOfLive(mine, live)) continue;
                     mine.shader = live.shader;
                     // Keywords travel with the shader. A ripped shader asset may not declare one the material needs, and
                     // Unity then files it under m_InvalidKeywords - the bake of FirTree_Sapling lands _ALPHATEST_ON
@@ -183,8 +219,8 @@ namespace VerdantsAscent.Terrain.Zones
                 }
             }
             if (repaired > 0)
-                FiresLogger.LogInfo($"[FiresZones] {prefab.name}: rebound {repaired} broken shader"
-                    + (repaired == 1 ? "" : "s") + " from its vanilla source.");
+                FiresLogger.LogInfo($"[FiresZones] {prefab.name}: rebound {repaired} bundle shader"
+                    + (repaired == 1 ? "" : "s") + " to its vanilla source's live shader.");
         }
 
         // The Chaos Hammer wears the wizard staff FX, and its vanilla source is the Hammer, so those renderers have no

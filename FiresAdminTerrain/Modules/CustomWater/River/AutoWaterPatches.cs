@@ -17,8 +17,8 @@ namespace VerdantsAscent.Water.Core
     /// 2. Game.Logout() - cancels any in-progress generation
     /// 3. ZNet.Start Postfix - registers the auto water generation RPC
     /// 4. ZoneSystem.SpawnZone Postfix - one-shot cleanup on first zone load after generation
+    /// All four are called from FAT's one hook per vanilla method (FatVanillaHooks); this class patches nothing itself.
     /// </summary>
-    [HarmonyPatch]
     public static class AutoWaterPatches
     {
         private const string RPC_REQUEST_AUTO_WATER = "FiresAdminTerrain_AutoWater_RequestGenerate";
@@ -57,11 +57,10 @@ namespace VerdantsAscent.Water.Core
         /// 
         /// Caching runs on ALL peers (server + clients) so the status command works everywhere.
         /// Only the actual generation (disk placement + anchor creation) is server-only.
+        /// From FAT's one WorldGenerator.Pregenerate hook (FatVanillaHooks), after RiverSync, so a client that replayed the
+        /// server's lists counts them.
         /// </summary>
-        [HarmonyPatch(typeof(WorldGenerator), "Pregenerate")]
-        [HarmonyPostfix]
-        [HarmonyPriority(Priority.Low)]
-        private static void WorldGenerator_Pregenerate_Postfix(WorldGenerator __instance)
+        internal static void OnPregenerated(WorldGenerator __instance)
         {
             if (WorldGeneratorAccess.IsMenuWorld(__instance))
                 return;

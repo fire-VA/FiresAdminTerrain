@@ -38,6 +38,10 @@ namespace VerdantsAscent.Terrain.Zones
         private const byte SectionOpenZones = 1;
         private const byte SectionZoneSources = 2;
         private const byte SectionStartCave = 3;
+        // Written only when a swapped zone carries a shift (ZoneShift: its lift and its location centring), so a world
+        // without one reads in any build.
+        private const byte SectionZoneShifts = 4;
+        private const int ShiftEntryBytes = 2 + 2 + 4 + 4 + 4;
         private const byte FlagSeeded = 1;
         private const int HeaderBytes = 4 + 1 + 1 + 8 + 4 + 4 + 8 + 1;
         private const int SectionHeaderBytes = 1 + 4;
@@ -49,7 +53,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const string RejectedSuffix = ".rejected";
         private const string DefaultStartLocation = "StartTemple";
         private const float WaterLevel = 30f;
-        private const byte HandshakeProtocol = 6;
+        private const byte HandshakeProtocol = 8;
         private const int HealSampleCount = 8;
 
         private struct ZoneEntry
@@ -59,6 +63,7 @@ namespace VerdantsAscent.Terrain.Zones
             public long ActorId;
             public bool Swapped;
             public Vector2s Source;
+            public ZoneShift Shift;
         }
 
         private sealed class HandshakeState
@@ -72,6 +77,7 @@ namespace VerdantsAscent.Terrain.Zones
             public int OpenCount;
             public ulong[] Words;
             public List<KeyValuePair<Vector2s, Vector2s>> Sources;
+            public List<KeyValuePair<Vector2s, ZoneShift>> Shifts;
             public ZoneModeStartCave.Site StartCave;
             public ZoneModePark.ClientState Park;
             public Voxel.FiresWorldProfile Profile;
@@ -88,6 +94,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static bool s_authority;
         private static bool s_recovering;
         private static bool s_seedingSubscribed;
+        private static bool s_settlesAfterReplan;
         private static int s_version;
         private static long s_createdUtcTicks;
         private static float s_coastWidth;
@@ -106,18 +113,44 @@ namespace VerdantsAscent.Terrain.Zones
         // The save's objects are loaded and no terrain is built yet: a zone world whose registry file went missing is
         // restored from the copy in its save, a world with parked zones settles them and only then checks its save, and
         // every zone world's copy is brought up to date.
+        // An older save has its locations placed again first (ZNet.ServerLoadWorld). Parking before that would show
+        // Valheim every explored zone as never generated, and it would plan new locations into land that returns as it
+        // was and never spawns them, so a world that is being re-planned parks when the plan is finished.
         internal static void MarkWorldLoaded()
         {
             WorldLoaded = true;
-            if (!s_authority || s_world == null) return;
+            if (!s_authority || s_world == null || FiresWorldLoadGuard.Refused) return;
             if (s_awaitingMirror) RestoreFromMirror();
             if (ZoneModePark.WaitsForObjects)
             {
-                try { ZoneModePark.OnObjectsLoaded(ZoneSystem.instance, s_modeActive); }
-                catch (Exception ex) { FiresLogger.LogError($"[FiresZones] parked zones could not be settled: {ex}"); }
-                if (s_modeActive) CheckGeneratedZones(ZoneSystem.instance);
+                var zoneSystem = ZoneSystem.instance;
+                if (zoneSystem != null && !zoneSystem.LocationsGenerated)
+                {
+                    s_settlesAfterReplan = true;
+                    zoneSystem.GenerateLocationsCompleted += SettleAfterReplan;
+                    FiresLogger.LogInfo($"[FiresZones] '{s_world.m_name}' is an older save whose locations Valheim places again now; "
+                        + "its explored zones are set aside once that is done, so no new location lands in them.");
+                    return;
+                }
+                SettleParkAndCheck(zoneSystem);
             }
             if (s_modeActive) ZoneModeRegistryMirror.Write(CurrentBytes(), s_world.m_uid);
+        }
+
+        private static void SettleAfterReplan()
+        {
+            s_settlesAfterReplan = false;
+            if (!s_authority || s_world == null) return;
+            SettleParkAndCheck(ZoneSystem.instance);
+            ZoneModePark.ReportUnspawnedLocations(ZoneSystem.instance);
+            if (s_modeActive) ZoneModeRegistryMirror.Write(CurrentBytes(), s_world.m_uid);
+        }
+
+        private static void SettleParkAndCheck(ZoneSystem zoneSystem)
+        {
+            try { ZoneModePark.OnObjectsLoaded(zoneSystem, s_modeActive); }
+            catch (Exception ex) { FiresLogger.LogError($"[FiresZones] parked zones could not be settled: {ex}"); }
+            if (s_modeActive) CheckGeneratedZones(zoneSystem);
         }
 
         private static void RestoreFromMirror()
@@ -183,6 +216,10 @@ namespace VerdantsAscent.Terrain.Zones
             return false;
         }
 
+        // The flag decides only for a world with no profile chosen for it; a chosen profile says it itself.
+        internal static bool LaunchFlagDecides(Voxel.FiresWorldProfile profile)
+            => LaunchFlagPresent() && (profile == null || !profile.Chosen);
+
         internal static string RegistryPath(string worldName)
         {
             string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
@@ -202,11 +239,21 @@ namespace VerdantsAscent.Terrain.Zones
             }
             var net = ZNet.instance;
             if (net == null) return;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             Voxel.FiresWorldProfile.OnWorldInitialize(world);
+            long profileMs = clock.ElapsedMilliseconds;
             Voxel.FiresWaterGuards.OnWorldInitialize(world, net.IsServer());
+            long guardsMs = clock.ElapsedMilliseconds;
             ZoneModePark.OnWorldInitialize(world, net.IsServer());
+            long parkMs = clock.ElapsedMilliseconds;
             if (net.IsServer()) InitializeAuthoritative(world);
             else BindHandshake(world);
+            if (!net.IsServer()) return;
+            // A server's first start after a reboot met a cold file cache here: 10.5 s (R9a, 2026-09-28). Which step, is this line.
+            FiresLogger.LogInfo($"[FiresZones] world init: profile {profileMs} ms, water guards {guardsMs - profileMs} ms, park "
+                + $"{parkMs - guardsMs} ms ({ZoneModePark.ParkedCount:N0} parked in {ZoneModePark.StoreDescription}; index "
+                + $"{ZoneModePark.IndexReadMs} ms" + (ZoneModePark.RepackMs > 0 ? $", one-time repack {ZoneModePark.RepackMs:N0} ms" : "")
+                + $"), registry {clock.ElapsedMilliseconds - parkMs} ms.");
         }
 
         internal static void OnWorldTeardown()
@@ -217,6 +264,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void ResetState()
         {
+            s_handshake = null;
             s_entries.Clear();
             WorldLoaded = false;
             s_world = null;
@@ -225,6 +273,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_authority = false;
             s_recovering = false;
             s_seedingSubscribed = false;
+            s_settlesAfterReplan = false;
             s_version = 0;
             s_createdUtcTicks = 0;
             s_clientOpenSet = null;
@@ -250,7 +299,7 @@ namespace VerdantsAscent.Terrain.Zones
             string path = RegistryPath(world.m_name);
             string file = Path.GetFileName(path);
             bool profiled = Voxel.FiresWorldProfile.Current != null && Voxel.FiresWorldProfile.Current.ZoneMode;
-            if (!File.Exists(path) && (LaunchFlagPresent() || profiled) && IsNeverSaved(world))
+            if (!File.Exists(path) && (LaunchFlagDecides(Voxel.FiresWorldProfile.Current) || profiled) && IsNeverSaved(world))
             {
                 if (CreateForNewWorld(world, out _))
                     FiresLogger.LogInfo($"[FiresZones] {(profiled ? "its profile" : LaunchFlag)}: '{world.m_name}' has never been saved, so it "
@@ -410,11 +459,25 @@ namespace VerdantsAscent.Terrain.Zones
             zoneSystem.GenerateLocationsCompleted += SeedStartArea;
         }
 
+        // An older save's ZoneSystem.LoadOld raises "locations generated" BEFORE it reads the locations, so the start
+        // temple is not in the list yet; and a world still to be parked settles first. Either way the seeding goes
+        // back to waiting, and the settled load subscribes it again.
+        private static bool StartAreaMustWait(ZoneSystem zoneSystem)
+        {
+            bool locationsNotRead = !WorldLoaded && zoneSystem.m_locationInstances.Count == 0;
+            if (!locationsNotRead && !s_settlesAfterReplan) return false;
+            s_seedingSubscribed = false;
+            FiresLogger.LogInfo(locationsNotRead
+                ? "[FiresZones] the start area waits: Valheim reported this save's locations before reading them."
+                : "[FiresZones] the start area waits until the explored zones are set aside.");
+            return true;
+        }
+
         private static void SeedStartArea()
         {
             if (!s_modeActive || !s_authority || s_seeded) return;
             var zoneSystem = ZoneSystem.instance;
-            if (zoneSystem == null) return;
+            if (zoneSystem == null || StartAreaMustWait(zoneSystem)) return;
 
             Vector3 spawn;
             string startName = Game.instance != null && !string.IsNullOrEmpty(Game.instance.m_StartLocation)
@@ -460,13 +523,13 @@ namespace VerdantsAscent.Terrain.Zones
             if (cave != null) FiresLogger.LogInfo($"[FiresZones] start cave: {ZoneModeStartCave.Describe(cave)}.");
             else if (ZoneModePark.Converted)
                 FiresLogger.LogInfo("[FiresZones] start cave: none, since this world was converted and its land is already built on; "
-                    + "the first Chunk Hammer's chest goes beside the starter generator.");
+                    + "the first Chunk Hammer's chest is placed near the spawn and pinned on the map.");
             else if (Voxel.FiresVoxelConfig.GeneratesCaves)
                 FiresLogger.LogError("[FiresZones] start cave: no site fits inside the start area; this world has no guaranteed cave, and "
-                    + "the first Chunk Hammer's chest goes beside the starter generator.");
+                    + "the first Chunk Hammer's chest stands in the open near the StartTemple and is pinned on the map.");
             else
                 FiresLogger.LogWarning("[FiresZones] start cave: caves are off ([VoxelTerrain World] Generate Caves), so this world gets no "
-                    + "start cave; the first Chunk Hammer's chest goes beside the starter generator.");
+                    + "start cave; the first Chunk Hammer's chest stands in the open near the StartTemple and is pinned on the map.");
             // Seeding runs inside location placement's planning scope; the refresh must see the gate.
             int suspended = ZoneModeGate.SuspendPlanning();
             try { ZoneModeTerrainRefresh.AfterViewChanged("seeded"); }
@@ -491,13 +554,19 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void Publish()
         {
-            ZoneModeGate.SetView(ZoneOpenSet.Build(s_entries.Keys, s_version, SwappedSources()), s_coastWidth, s_seaFloorY);
+            ZoneModeGate.SetView(ZoneOpenSet.Build(s_entries.Keys, s_version, SwappedSources(), EntryShifts()), s_coastWidth, s_seaFloorY);
         }
 
         private static IEnumerable<KeyValuePair<Vector2s, Vector2s>> SwappedSources()
         {
             foreach (var pair in s_entries)
                 if (pair.Value.Swapped) yield return new KeyValuePair<Vector2s, Vector2s>(pair.Key, pair.Value.Source);
+        }
+
+        private static IEnumerable<KeyValuePair<Vector2s, ZoneShift>> EntryShifts()
+        {
+            foreach (var pair in s_entries)
+                if (pair.Value.Swapped && !pair.Value.Shift.IsZero) yield return new KeyValuePair<Vector2s, ZoneShift>(pair.Key, pair.Value.Shift);
         }
 
         // The zone whose land an open zone shows: its own, or the source a chunk seed of another biome gave it.
@@ -517,11 +586,22 @@ namespace VerdantsAscent.Terrain.Zones
             return true;
         }
 
+        // How far a swapped zone's land was raised (or lowered) as a whole when it opened; 0 for any other zone.
+        internal static float LiftOf(Vector2s zone) => ShiftOf(zone).Lift;
+
+        // How a swapped zone's land is moved beyond the whole-zone offset to its source (ZoneShift).
+        internal static ZoneShift ShiftOf(Vector2s zone)
+        {
+            if (!s_modeActive) return default;
+            if (s_authority) return s_entries.TryGetValue(zone, out var entry) && entry.Swapped ? entry.Shift : default;
+            return s_clientOpenSet?.ShiftOf(zone.x, zone.y) ?? default;
+        }
+
         // Server: records the zones as open, saves, and republishes the gate view. Returns the zones
         // that were actually closed before (already-open and out-of-world zones are skipped). A zone listed in
-        // `sources` with another zone shows that zone's land.
+        // `sources` with another zone shows that zone's land, moved by its entry in `shifts`.
         internal static List<Vector2s> AddOpenZones(IEnumerable<Vector2s> zones, ZoneOpenReason reason, long actorId,
-            IDictionary<Vector2s, Vector2s> sources = null)
+            IDictionary<Vector2s, Vector2s> sources = null, IDictionary<Vector2s, ZoneShift> shifts = null)
         {
             var opened = new List<Vector2s>();
             if (!s_modeActive || !s_authority || !s_seeded) return opened;
@@ -535,6 +615,7 @@ namespace VerdantsAscent.Terrain.Zones
                 {
                     entry.Swapped = true;
                     entry.Source = source;
+                    if (shifts != null && shifts.TryGetValue(zone, out var shift) && shift.IsFinite) entry.Shift = shift;
                 }
                 s_entries[zone] = entry;
                 opened.Add(zone);
@@ -566,6 +647,9 @@ namespace VerdantsAscent.Terrain.Zones
         internal static List<KeyValuePair<Vector2s, Vector2s>> CurrentSources()
             => new List<KeyValuePair<Vector2s, Vector2s>>((ZoneModeGate.Current?.Open ?? ZoneOpenSet.Empty).Sources());
 
+        internal static List<KeyValuePair<Vector2s, ZoneShift>> CurrentShifts()
+            => new List<KeyValuePair<Vector2s, ZoneShift>>((ZoneModeGate.Current?.Open ?? ZoneOpenSet.Empty).Shifts());
+
         internal static void WriteSources(ZPackage pkg, List<KeyValuePair<Vector2s, Vector2s>> sources)
         {
             pkg.Write(sources.Count);
@@ -585,8 +669,35 @@ namespace VerdantsAscent.Terrain.Zones
             return sources;
         }
 
+        internal static void WriteShifts(ZPackage pkg, List<KeyValuePair<Vector2s, ZoneShift>> shifts)
+        {
+            pkg.Write(shifts.Count);
+            foreach (var pair in shifts)
+            {
+                pkg.Write(pair.Key);
+                pkg.Write(pair.Value.Lift);
+                pkg.Write(pair.Value.Dx);
+                pkg.Write(pair.Value.Dz);
+            }
+        }
+
+        internal static List<KeyValuePair<Vector2s, ZoneShift>> ReadShifts(ZPackage pkg)
+        {
+            int count = pkg.ReadInt();
+            if (count < 0 || count > MaxZoneEntries) throw new InvalidDataException($"{count} zone shifts");
+            var shifts = new List<KeyValuePair<Vector2s, ZoneShift>>(count);
+            for (int i = 0; i < count; i++)
+            {
+                var zone = pkg.ReadVector2s();
+                float lift = pkg.ReadSingle(), dx = pkg.ReadSingle(), dz = pkg.ReadSingle();
+                shifts.Add(new KeyValuePair<Vector2s, ZoneShift>(zone, new ZoneShift(lift, dx, dz)));
+            }
+            return shifts;
+        }
+
         // Client: a full open set from the server replaces the local one.
-        internal static bool ApplyClientUpdate(ulong[] words, int version, List<KeyValuePair<Vector2s, Vector2s>> sources)
+        internal static bool ApplyClientUpdate(ulong[] words, int version, List<KeyValuePair<Vector2s, Vector2s>> sources,
+            List<KeyValuePair<Vector2s, ZoneShift>> shifts)
         {
             if (!s_modeActive || s_authority) return false;
             if (version <= s_version)
@@ -594,7 +705,7 @@ namespace VerdantsAscent.Terrain.Zones
                 FiresLogger.LogVerbose($"[FiresZones] ignored zone update v{version} — already at v{s_version}.");
                 return false;
             }
-            var open = ZoneOpenSet.FromWords(words, version, sources);
+            var open = ZoneOpenSet.FromWords(words, version, sources, shifts);
             if (open == null)
             {
                 FiresLogger.LogError($"[FiresZones] zone update v{version} has a malformed open set — ignored.");
@@ -608,7 +719,57 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── Handshake (server → client, before PeerInfo) ────────────────────
-        internal static ZPackage BuildHandshake(out string summary)
+        // Every joining peer gets the same handshake until the zone state changes. On a converted world it is large (R20:
+        // 262,495 bytes for 54,302 parked zones) and building it took 21 ms of the join frame, so it is built once per
+        // state and the same package goes to every peer (ZRpc.Invoke copies it out and never reads it). The stamp covers
+        // everything BuildHandshake reads.
+        private static ZPackage s_handshake;
+        private static string s_handshakeSummary;
+        private static HandshakeStamp s_handshakeStamp;
+
+        private struct HandshakeStamp
+        {
+            internal World World;
+            internal Voxel.FiresWorldProfile Profile;
+            internal ZoneModeStartCave.Site Cave;
+            internal bool ModeActive, Seeded, GuardsKnown;
+            internal int Version, Epoch, ParkGeneration, GuardsHash;
+            internal string Guards;
+
+            internal bool Matches(in HandshakeStamp other)
+                => ReferenceEquals(World, other.World) && ReferenceEquals(Profile, other.Profile) && ReferenceEquals(Cave, other.Cave)
+                   && ModeActive == other.ModeActive && Seeded == other.Seeded && GuardsKnown == other.GuardsKnown
+                   && Version == other.Version && Epoch == other.Epoch && ParkGeneration == other.ParkGeneration
+                   && GuardsHash == other.GuardsHash && Guards == other.Guards;
+        }
+
+        internal static ZPackage HandshakeFor(out string summary, out bool reused)
+        {
+            var stamp = new HandshakeStamp
+            {
+                World = s_world,
+                Profile = Voxel.FiresWorldProfile.Current,
+                Cave = ZoneModeStartCave.Current,
+                ModeActive = s_modeActive,
+                Seeded = s_seeded,
+                GuardsKnown = Voxel.FiresWaterGuards.Known,
+                Version = s_version,
+                Epoch = ZoneModeGate.CurrentEpoch,
+                ParkGeneration = ZoneModePark.IndexGeneration,
+                GuardsHash = Voxel.FiresWaterGuards.Hash,
+                Guards = Voxel.FiresWaterGuards.Describe(),
+            };
+            reused = s_handshake != null && stamp.Matches(s_handshakeStamp);
+            if (!reused)
+            {
+                s_handshake = BuildHandshake(out s_handshakeSummary);
+                s_handshakeStamp = stamp;
+            }
+            summary = s_handshakeSummary;
+            return s_handshake;
+        }
+
+        private static ZPackage BuildHandshake(out string summary)
         {
             var pkg = new ZPackage();
             pkg.Write(HandshakeProtocol);
@@ -636,11 +797,12 @@ namespace VerdantsAscent.Terrain.Zones
             pkg.Write(open.OpenCount);
             pkg.Write(bytes);
             WriteSources(pkg, new List<KeyValuePair<Vector2s, Vector2s>>(open.Sources()));
+            WriteShifts(pkg, new List<KeyValuePair<Vector2s, ZoneShift>>(open.Shifts()));
             var cave = ZoneModeStartCave.Current;
             pkg.Write(cave != null);
             if (cave != null) ZoneModeStartCave.Write(pkg, cave);
             ZoneModePark.WriteHandshake(pkg);
-            summary = $"zone mode, v{s_version}, {open.OpenCount} open ({open.SourceCount} swapped)"
+            summary = $"zone mode, v{s_version}, {open.OpenCount} open ({open.SourceCount} swapped, {open.ShiftCount} shifted)"
                 + (cave != null ? ", start cave" : "") + (ZoneModePark.ParkedCount > 0 ? $", {ZoneModePark.ParkedCount} parked" : "")
                 + $", {pkg.Size()} bytes";
             return pkg;
@@ -678,6 +840,7 @@ namespace VerdantsAscent.Terrain.Zones
                     state.Words = new ulong[ZoneOpenSet.WordCount];
                     Buffer.BlockCopy(bytes, 0, state.Words, 0, bytes.Length);
                     state.Sources = ReadSources(pkg);
+                    state.Shifts = ReadShifts(pkg);
                     if (pkg.ReadBool()) state.StartCave = ZoneModeStartCave.Read(pkg);
                     state.Park = ZoneModePark.ReadHandshake(pkg);
                 }
@@ -723,7 +886,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_version = state.Version;
             s_coastWidth = state.CoastWidth;
             s_seaFloorY = state.SeaFloorY;
-            s_clientOpenSet = ZoneOpenSet.FromWords(state.Words, state.Version, state.Sources);
+            s_clientOpenSet = ZoneOpenSet.FromWords(state.Words, state.Version, state.Sources, state.Shifts);
             if (s_clientOpenSet == null || s_clientOpenSet.OpenCount != state.OpenCount)
             {
                 FiresLogger.LogError($"[FiresZones] the server's open set failed its count check "
@@ -787,6 +950,7 @@ namespace VerdantsAscent.Terrain.Zones
 
                     bool sawZones = false;
                     var sources = new List<KeyValuePair<Vector2s, Vector2s>>();
+                    var shifts = new List<KeyValuePair<Vector2s, ZoneShift>>();
                     for (int section = 0; section < sectionCount; section++)
                     {
                         byte id = reader.ReadByte();
@@ -801,6 +965,22 @@ namespace VerdantsAscent.Terrain.Zones
                                 return false;
                             }
                             startCave = ZoneModeStartCave.Read(reader);
+                            continue;
+                        }
+                        if (id == SectionZoneShifts)
+                        {
+                            int shiftCount = reader.ReadInt32();
+                            if (shiftCount < 0 || shiftCount > MaxZoneEntries || length != 4 + (long)shiftCount * ShiftEntryBytes)
+                            {
+                                failure = $"zone-shift section claims {shiftCount} entries in {length} bytes";
+                                return false;
+                            }
+                            for (int i = 0; i < shiftCount; i++)
+                            {
+                                short zx = reader.ReadInt16(), zy = reader.ReadInt16();
+                                float lift = reader.ReadSingle(), dx = reader.ReadSingle(), dz = reader.ReadSingle();
+                                shifts.Add(new KeyValuePair<Vector2s, ZoneShift>(new Vector2s(zx, zy), new ZoneShift(lift, dx, dz)));
+                            }
                             continue;
                         }
                         if (id == SectionZoneSources)
@@ -846,6 +1026,17 @@ namespace VerdantsAscent.Terrain.Zones
                         if (!ZoneOpenSet.InRange(pair.Value.x, pair.Value.y)) { failure = $"zone source ({pair.Value.x},{pair.Value.y}) is outside the world"; return false; }
                         entry.Swapped = true;
                         entry.Source = pair.Value;
+                        loaded[pair.Key] = entry;
+                    }
+                    foreach (var pair in shifts)
+                    {
+                        if (!loaded.TryGetValue(pair.Key, out var entry) || !entry.Swapped)
+                        {
+                            failure = $"zone shift for ({pair.Key.x},{pair.Key.y}), which is not a swapped open zone";
+                            return false;
+                        }
+                        if (!pair.Value.IsFinite) { failure = $"zone ({pair.Key.x},{pair.Key.y}) has a shift that is not a number"; return false; }
+                        entry.Shift = pair.Value;
                         loaded[pair.Key] = entry;
                     }
                     if (reader.BaseStream.Position != bytes.Length)
@@ -895,9 +1086,14 @@ namespace VerdantsAscent.Terrain.Zones
                 writer.Write(seed);
                 writer.Write(version);
                 writer.Write(createdUtcTicks);
-                int swapped = 0;
-                foreach (var pair in entries) if (pair.Value.Swapped) swapped++;
-                writer.Write((byte)(1 + (swapped > 0 ? 1 : 0) + (startCave != null ? 1 : 0)));
+                int swapped = 0, shifted = 0;
+                foreach (var pair in entries)
+                {
+                    if (!pair.Value.Swapped) continue;
+                    swapped++;
+                    if (!pair.Value.Shift.IsZero) shifted++;
+                }
+                writer.Write((byte)(1 + (swapped > 0 ? 1 : 0) + (shifted > 0 ? 1 : 0) + (startCave != null ? 1 : 0)));
                 writer.Write(SectionOpenZones);
                 writer.Write(4 + entries.Count * ZoneEntryBytes);
                 writer.Write(entries.Count);
@@ -921,6 +1117,21 @@ namespace VerdantsAscent.Terrain.Zones
                         writer.Write(pair.Key.y);
                         writer.Write(pair.Value.Source.x);
                         writer.Write(pair.Value.Source.y);
+                    }
+                }
+                if (shifted > 0)
+                {
+                    writer.Write(SectionZoneShifts);
+                    writer.Write(4 + shifted * ShiftEntryBytes);
+                    writer.Write(shifted);
+                    foreach (var pair in entries)
+                    {
+                        if (!pair.Value.Swapped || pair.Value.Shift.IsZero) continue;
+                        writer.Write(pair.Key.x);
+                        writer.Write(pair.Key.y);
+                        writer.Write(pair.Value.Shift.Lift);
+                        writer.Write(pair.Value.Shift.Dx);
+                        writer.Write(pair.Value.Shift.Dz);
                     }
                 }
                 if (startCave != null)

@@ -7,10 +7,9 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // THE IH DIVORCE — the V-tools are OUR OWN pieces with our own input:
     // no infinity_tools.yaml, no IH ruler, no console-command round-trip.
-    //   * Pieces register straight into the HAMMER's piece table, admin-gated,
-    //     so FAP's build-menu tabs can carry them and its vanilla-friendly
-    //     toggle can hide them. The seam is Core (AdminSyncing), never FAP —
-    //     FAT takes no dependency on it and gates itself when it is absent.
+    //   * They live on the Chaos Hammer's Voxel tab, admin-gated, with every other admin terrain tool (Fire,
+    //     2026-09-27, Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md); ZoneModeChunkTools puts them in its table. The vanilla
+    //     Hammer no longer carries them. The admin seam is Core (AdminSyncing), never FAP.
     //   * Selecting one never places anything (TryPlacePiece blocked); the
     //     VoxelBrushDrag pump owns every click.
     //   * Plain scroll = radius (camera zoom suppressed while selected),
@@ -18,7 +17,13 @@ namespace VerdantsAscent.Terrain.Voxel
     //     only visual.
     internal static class VoxelToolPieces
     {
-        private const string HostItemName = "Hammer";
+        private const string OldHostItemName = "Hammer";
+        private const string ToolObjectPrefix = "fires_vtool_";
+
+        private static readonly List<GameObject> s_tools = new List<GameObject>();
+
+        // The tool pieces, in menu order, for the Chaos Hammer's Voxel tab.
+        internal static IReadOnlyList<GameObject> Tools => s_tools;
 
         internal static readonly HashSet<string> Names = new HashSet<string>
         { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vriver", "Vpour", "Vpool" };
@@ -49,47 +54,53 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void Register(ObjectDB odb)
         {
             if (odb == null || odb.m_items == null || odb.m_items.Count == 0) return;
-            var host = odb.GetItemPrefab(HostItemName);
-            if (host == null) return;
-            var table = host.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_buildPieces;
-            if (table == null) return;
+            ClearFromVanillaHammer(odb);
+            s_tools.RemoveAll(tool => tool == null);
+            if (s_tools.Count > 0) return;
 
-            // Drop any same-named entries (IH yaml leftovers) so ours are the
-            // single source of the tool.
-            table.m_pieces.RemoveAll(p =>
+            AddTool("Vcarve", "Carve TRUE 3D terrain — sphere dig at the cursor: what the ghost "
+                + "shows is exactly what gets removed. Hold LMB and DRAG to paint trenches/tunnels. "
+                + "Scroll = size, PgUp/PgDn = cylinder mode (explicit height).");
+            AddTool("Vfill", "Fill TRUE 3D terrain — sphere fill at the cursor: what the ghost "
+                + "shows is exactly what gets placed. Hold LMB and DRAG to raise runs. "
+                + "Scroll = size, PgUp/PgDn = cylinder mode (explicit height).");
+            AddTool("Vdelete", "Restore voxel terrain to its generated state in the brush. "
+                + "Scroll = radius.");
+            AddTool("Vcube", "3D CUBE voxel brush — click to stamp, hold LMB + drag to paint runs "
+                + "of blocks. Scroll = size. Hold LeftAlt = CARVE (lines-only ghost).");
+            AddTool("Vsphere", "3D SPHERE voxel brush — click to stamp, drag for smooth tubes. "
+                + "Scroll = size. Hold LeftAlt = CARVE (lines-only ghost).");
+
+            AddTool("Vriver", "Carve a river bed — hold LMB and DRAG the spine you want. Sweeps a "
+                + "channel between samples and clears vegetation across the wet width, so vanilla's shore "
+                + "sand and water ecology take over. Scroll = width, PgUp/PgDn = depth below the cursor.");
+            AddTool("Vpour", "Pour a water ribbon — hold LMB and DRAG to lay a smoothed water "
+                + "surface along the path. Scroll = width, PgUp/PgDn = surface offset from the terrain hit.");
+            AddTool("Vpool", "Pool shaper (all-in-one) — click to level, carve, fill and seed a pool. "
+                + "Click again downstream to auto-connect the two with a graded channel. "
+                + "Scroll = size, PgUp/PgDn = water level.");
+
+            FiresLogger.LogInfo($"[FiresVoxel] {s_tools.Count} V-tools built for the Chaos Hammer's Voxel tab (IH-free, admin-gated).");
+        }
+
+        // A world saved with an older FAT, or IH yaml leftovers, may still list same-named tools on the vanilla
+        // Hammer; the Chaos Hammer is their only home now.
+        private static void ClearFromVanillaHammer(ObjectDB odb)
+        {
+            var hammer = odb.GetItemPrefab(OldHostItemName);
+            var table = hammer != null ? hammer.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_buildPieces : null;
+            if (table == null) return;
+            int removed = table.m_pieces.RemoveAll(p =>
             {
                 var pc = p != null ? p.GetComponent<Piece>() : null;
                 return pc != null && Names.Contains(pc.m_name);
             });
-
-            AddTool(table, "Vcarve", "Carve TRUE 3D terrain — sphere dig at the cursor: what the ghost "
-                + "shows is exactly what gets removed. Hold LMB and DRAG to paint trenches/tunnels. "
-                + "Scroll = size, PgUp/PgDn = cylinder mode (explicit height).");
-            AddTool(table, "Vfill", "Fill TRUE 3D terrain — sphere fill at the cursor: what the ghost "
-                + "shows is exactly what gets placed. Hold LMB and DRAG to raise runs. "
-                + "Scroll = size, PgUp/PgDn = cylinder mode (explicit height).");
-            AddTool(table, "Vdelete", "Restore voxel terrain to its generated state in the brush. "
-                + "Scroll = radius.");
-            AddTool(table, "Vcube", "3D CUBE voxel brush — click to stamp, hold LMB + drag to paint runs "
-                + "of blocks. Scroll = size. Hold LeftAlt = CARVE (lines-only ghost).");
-            AddTool(table, "Vsphere", "3D SPHERE voxel brush — click to stamp, drag for smooth tubes. "
-                + "Scroll = size. Hold LeftAlt = CARVE (lines-only ghost).");
-
-            AddTool(table, "Vriver", "Carve a river bed — hold LMB and DRAG the spine you want. Sweeps a "
-                + "channel between samples and clears vegetation across the wet width, so vanilla's shore "
-                + "sand and water ecology take over. Scroll = width, PgUp/PgDn = depth below the cursor.");
-            AddTool(table, "Vpour", "Pour a water ribbon — hold LMB and DRAG to lay a smoothed water "
-                + "surface along the path. Scroll = width, PgUp/PgDn = surface offset from the terrain hit.");
-            AddTool(table, "Vpool", "Pool shaper (all-in-one) — click to level, carve, fill and seed a pool. "
-                + "Click again downstream to auto-connect the two with a graded channel. "
-                + "Scroll = size, PgUp/PgDn = water level.");
-
-            FiresLogger.LogInfo($"[FiresVoxel] {Names.Count} V-tools registered as native {HostItemName} pieces (IH-free, admin-gated).");
+            if (removed > 0) FiresLogger.LogInfo($"[FiresVoxel] {removed} V-tool(s) taken off the vanilla {OldHostItemName}.");
         }
 
-        private static void AddTool(PieceTable table, string name, string desc)
+        private static void AddTool(string name, string desc)
         {
-            var go = new GameObject($"fires_vtool_{name}");
+            var go = new GameObject(ToolObjectPrefix + name);
             Object.DontDestroyOnLoad(go);
             go.SetActive(false);
             var piece = go.AddComponent<Piece>();
@@ -100,7 +111,7 @@ namespace VerdantsAscent.Terrain.Voxel
             piece.m_repairPiece = false;
             piece.m_groundPiece = false;
             piece.m_canBeRemoved = false;
-            table.m_pieces.Add(go);
+            s_tools.Add(go);
         }
 
         // Borrow readable vanilla icons: dig-style for carve/delete,
@@ -217,7 +228,8 @@ namespace VerdantsAscent.Terrain.Voxel
             private static void Postfix(ref float __result)
             {
                 if (__result == 0f) return;
-                if (OurToolSelected(Player.m_localPlayer)) __result = 0f;
+                var player = Player.m_localPlayer;
+                if (OurToolSelected(player) || Zones.ZoneModeAreaTool.WantsWheel(player)) __result = 0f;
             }
         }
     }

@@ -482,7 +482,9 @@ namespace VerdantsAscent.Utilities
         /// 1. Environment Box biome overrides (temporary, while player is inside)
         /// 2. Persistent biome paint overrides (permanent, stored in TerrainComp ZDO)
         /// 
-        /// Priority: Persistent paints > Env Box overrides > World biome
+        /// Priority: Persistent paints > Env Box overrides > the colour vanilla drew (world biome, corner blend and
+        /// Vedr's winter), which every other vertex keeps. A painted or boxed vertex wears its biome, with snow while
+        /// Vedr snows over that biome (FatSeasons.BiomeColour).
         /// This ensures painted areas stay painted even inside env boxes.
         ///
         /// The Priority.Last postfix of FAT's one Heightmap.RebuildRenderMesh hook (FatVanillaHooks).
@@ -570,49 +572,29 @@ namespace VerdantsAscent.Utilities
             {
                 int num = width + 1;
                 bool anyChanged = false;
-                int changedCount = 0;
 
-                // Clear and reuse the static temp colors list
-                tempColors.Clear();
+                // Start from the colours already on the mesh (vanilla's, and any earlier postfix's); vertex order is
+                // vanilla's, row by row along z, each row along x.
+                renderMesh.GetColors(tempColors);
+                if (tempColors.Count != num * num) return;
 
-                // Iterate through each vertex position
                 for (int z = 0; z < num; z++)
                 {
                     for (int x = 0; x < num; x++)
                     {
-                        // Calculate world position for this vertex
                         float worldX = origin.x + x * scale;
                         float worldZ = origin.z + z * scale;
 
-                        // Priority 1: Check for persistent biome paint
+                        Heightmap.Biome forced;
                         var paintData = BiomePaintPersistence.GetPaintAtPosition(worldX, worldZ);
-                        if (paintData != null)
-                        {
-                            // Apply painted biome color
-                            tempColors.Add(Heightmap.GetBiomeColor(paintData.Biome));
-                            anyChanged = true;
-                            changedCount++;
-                            continue;
-                        }
+                        if (paintData != null) forced = paintData.Biome;
+                        else if (envBoxBiome != Heightmap.Biome.None
+                                 && worldX >= envMinX && worldX <= envMaxX && worldZ >= envMinZ && worldZ <= envMaxZ)
+                            forced = envBoxBiome;
+                        else continue;
 
-                        // Priority 2: Check for env box override
-                        if (envBoxBiome != Heightmap.Biome.None)
-                        {
-                            bool insideEnvBox = worldX >= envMinX && worldX <= envMaxX &&
-                                                worldZ >= envMinZ && worldZ <= envMaxZ;
-
-                            if (insideEnvBox)
-                            {
-                                tempColors.Add(Heightmap.GetBiomeColor(envBoxBiome));
-                                anyChanged = true;
-                                changedCount++;
-                                continue;
-                            }
-                        }
-
-                        // Priority 3: Use original world biome color
-                        Heightmap.Biome biome = WorldGenerator.instance.GetBiome(worldX, worldZ);
-                        tempColors.Add(Heightmap.GetBiomeColor(biome));
+                        tempColors[z * num + x] = VerdantsAscent.Terrain.Voxel.FatSeasons.BiomeColour(forced);
+                        anyChanged = true;
                     }
                 }
 

@@ -53,6 +53,281 @@ namespace VerdantsAscent.Terrain.Voxel
             s_lastCommandTime = Time.realtimeSinceStartup;
         }
 
+        // ── Virtual press (admintools `only tools`, FDT's `bot tool voxel`) ──────────────────────────────────────
+        // A held LMB at a fixed cursor for a few seconds, fed into THIS Update: the same selected V-tool, admin gate, Core
+        // place gate, dab pump and Dispatch a player's click runs. It acts only while the local player holds the Chaos Hammer
+        // with a V-tool selected, so the bot's equip and pick are proven too (Fire, 2026-09-29: prove the tools in the bot's
+        // hands). The end of every press logs one line FDT reads back:
+        //   [FiresVoxel] virtual press: <tool> at (x,y,z) for <s> s -> <n> dab(s)
+        private const string PressCommand = "va_voxel_press";
+        private static float s_pressUntil;
+        private static float s_pressSeconds;
+        private static Vector3 s_pressCursor;
+        private static bool s_pressAlt;
+        private static bool s_pressing;
+        private static int s_pressDabs;
+        private static string s_pressTool;
+
+        private static bool Pressing => s_pressing && Time.realtimeSinceStartup < s_pressUntil;
+
+        // Null when the press started; else why not.
+        public static string VirtualPress(Vector3 cursor, float seconds, bool alt, float size)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null) return "no local player";
+            if (SelectedTool(player) == Tool.None) return "no V-tool selected: hold the Chaos Hammer and pick one";
+            if (!FiresCore.Sync.AdminSyncing.IsLocalAdmin()) return "not an admin";
+            if (s_pressing) return "a press is already running";
+            if (size > 0f)
+            {
+                VoxelToolPieces.ToolRadius = Mathf.Clamp(size, 0.5f, 32f);
+                GizmoSize = VoxelToolPieces.ToolRadius * 2f;
+            }
+            s_pressTool = player.m_buildPieces.GetSelectedPiece().m_name;
+            s_pressCursor = cursor;
+            s_pressAlt = alt;
+            s_pressSeconds = Mathf.Clamp(seconds, 0.1f, 10f);
+            s_pressUntil = Time.realtimeSinceStartup + s_pressSeconds;
+            s_pressDabs = 0;
+            s_pressing = true;
+            return null;
+        }
+
+        private void EndPressIfDue()
+        {
+            if (!s_pressing || Time.realtimeSinceStartup < s_pressUntil) return;
+            s_pressing = false;
+            _strokeActive = false;
+            FiresLogger.LogInfo(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[FiresVoxel] virtual press: {0} at ({1:0.00},{2:0.00},{3:0.00}) for {4:0.0} s -> {5} dab(s)",
+                s_pressTool, s_pressCursor.x, s_pressCursor.y, s_pressCursor.z, s_pressSeconds, s_pressDabs));
+        }
+
+        // `va_voxel_press <x> <y> <z> <seconds> [alt] [size]`: no devcommands needed; the V-tool's own admin gate decides.
+        internal static void RegisterPressCommand()
+        {
+            new Terminal.ConsoleCommand(PressCommand,
+                "<x> <y> <z> <seconds> [alt] [size] - hold the selected V-tool's LMB at a point (test bot)",
+                args =>
+                {
+                    var inv = System.Globalization.CultureInfo.InvariantCulture;
+                    var style = System.Globalization.NumberStyles.Float;
+                    if (args.Args.Length < 5
+                        || !float.TryParse(args.Args[1], style, inv, out float x) || !float.TryParse(args.Args[2], style, inv, out float y)
+                        || !float.TryParse(args.Args[3], style, inv, out float z) || !float.TryParse(args.Args[4], style, inv, out float seconds))
+                    {
+                        args.Context.AddString($"{PressCommand} <x> <y> <z> <seconds> [alt] [size]");
+                        return;
+                    }
+                    bool alt = false;
+                    float size = 0f;
+                    for (int i = 5; i < args.Args.Length; i++)
+                    {
+                        if (args.Args[i].Equals("alt", System.StringComparison.OrdinalIgnoreCase)) alt = true;
+                        else float.TryParse(args.Args[i], style, inv, out size);
+                    }
+                    string refused = VirtualPress(new Vector3(x, y, z), seconds, alt, size);
+                    if (refused != null) FiresLogger.LogWarning($"[FiresVoxel] virtual press refused: {refused}");
+                    args.Context.AddString(refused == null ? $"{PressCommand}: pressing for {seconds:0.0} s" : $"{PressCommand} refused: {refused}");
+                });
+        }
+
+        // ── Level a rectangular pad (FDT's obstacle_field levels its own site; Fire, 2026-09-29: "we could also just level a
+        // spot and place the test") ──────────────────────────────────────────────────────────────────────────────────────
+        // `va_voxel_level <x> <z> <sizeX> <sizeZ> <y|auto> [depth]`: every column of the rectangle ends at y. Ground under it is
+        // filled up to y from no deeper than `depth` below (default 8, vanilla's level limit, so a cave under the pad stays
+        // open) and ground above it is cut down to y, with the same V-tool brush a player's Vfill/Vcarve uses, stamped as
+        // radius-4 cylinders on a 4 m grid (they reach up to 2 m past the rectangle's edge). `auto` = the median ground height
+        // over the rectangle. Admin only, like the V-tools; no devcommands needed. The edit saves with its chunks' anchors
+        // (0.75 s debounce) and every peer applies it from them. One line when done:
+        //   [FiresVoxel] level pad at (x,z) SXxSZ m to y=Y: ground LO-HI, filled A-Y, cut Y-B, N stamp(s), skirt W m (M stamp(s))
+        // The skirt (0.2.655): without it a pad on a slope was a walled pit on the cut side and a sheer drop on the fill side, a
+        // trap for players, companions and the navmesh alike. Around the rectangle the ground now blends from y back to the
+        // natural ground over W m (auto: wide enough for <= 30 deg at the edge's largest step, up to 20 m; 0 = no skirt),
+        // stamped as radius-2 cylinders on a 2 m grid, cut where the ground stands above the blend and filled where below.
+        private const string LevelCommand = "va_voxel_level";
+        private const float LevelStampRadius = 4f, LevelStampSpacing = 4f, LevelDefaultDepth = 8f, LevelSurfaceReach = 24f;
+        private const float SkirtStampRadius = 2f, SkirtStampSpacing = 2f, SkirtMaxWidth = 20f, SkirtMinStep = 0.3f;
+        private const float PadWaterProbeStep = 4f, PadWaterMargin = 0.2f;
+        private static readonly float SkirtSlope = Mathf.Tan(30f * Mathf.Deg2Rad);
+
+        private static float LevelGround(WorldGenerator generator, float gx, float gz)
+        {
+            float gen = generator.GetHeight(gx, gz);
+            return VoxelWorld.TryFindSurfaceY(gx, gz, gen, LevelSurfaceReach, out float surface) ? surface : gen;
+        }
+
+        internal static void RegisterLevelCommand()
+        {
+            new Terminal.ConsoleCommand(LevelCommand,
+                "<x> <z> <sizeX> <sizeZ> <y|auto> [depth=8] [skirt=auto] - level a rectangular pad to y with the V-tool brush, sloped edges (admin)",
+                args =>
+                {
+                    var inv = System.Globalization.CultureInfo.InvariantCulture;
+                    var style = System.Globalization.NumberStyles.Float;
+                    if (args.Args.Length < 6
+                        || !float.TryParse(args.Args[1], style, inv, out float x) || !float.TryParse(args.Args[2], style, inv, out float z)
+                        || !float.TryParse(args.Args[3], style, inv, out float sx) || !float.TryParse(args.Args[4], style, inv, out float sz))
+                    {
+                        args.Context.AddString($"{LevelCommand} <x> <z> <sizeX> <sizeZ> <y|auto> [depth]");
+                        return;
+                    }
+                    float y = float.NaN;
+                    if (!args.Args[5].Equals("auto", System.StringComparison.OrdinalIgnoreCase)
+                        && !float.TryParse(args.Args[5], style, inv, out y))
+                    {
+                        args.Context.AddString($"{LevelCommand}: y must be a number or 'auto'");
+                        return;
+                    }
+                    float depth = LevelDefaultDepth;
+                    if (args.Args.Length > 6) float.TryParse(args.Args[6], style, inv, out depth);
+                    float skirt = float.NaN;
+                    if (args.Args.Length > 7 && !args.Args[7].Equals("auto", System.StringComparison.OrdinalIgnoreCase)
+                        && !float.TryParse(args.Args[7], style, inv, out skirt))
+                    {
+                        args.Context.AddString($"{LevelCommand}: skirt must be a width in m, 0 (none) or 'auto'");
+                        return;
+                    }
+                    string line;
+                    // Anything outside the stamps (the ground survey, the skirt plan) logs its stack too, not only a message.
+                    try { line = LevelPad(x, z, sx, sz, y, Mathf.Clamp(depth, 0.5f, 24f), skirt); }
+                    catch (System.Exception ex)
+                    {
+                        line = $"[FiresVoxel] level pad threw before or after its stamps: {ex.GetType().Name}: {ex.Message}";
+                        FiresLogger.LogError(line + "\n" + ex);
+                    }
+                    args.Context?.AddString(line);
+                });
+        }
+
+        // The line logged (and returned); starts "refused:" when nothing was done.
+        public static string LevelPad(float x, float z, float sizeX, float sizeZ, float y, float depth, float skirt = float.NaN)
+        {
+            if (!FiresCore.Sync.AdminSyncing.IsLocalAdmin())
+                return Refused("not an admin");
+            if (sizeX < 1f || sizeZ < 1f || sizeX > 128f || sizeZ > 128f) return Refused("size must be 1-128 m each way");
+            var generator = WorldGenerator.instance;
+            if (generator == null) return Refused("no world generator");
+
+            var heights = new System.Collections.Generic.List<float>();
+            float lo = float.MaxValue, hi = float.MinValue;
+            for (float dz = -sizeZ * 0.5f; dz <= sizeZ * 0.5f + 0.01f; dz += 1f)
+                for (float dx = -sizeX * 0.5f; dx <= sizeX * 0.5f + 0.01f; dx += 1f)
+                {
+                    float h = LevelGround(generator, x + dx, z + dz);
+                    heights.Add(h);
+                    lo = Mathf.Min(lo, h);
+                    hi = Mathf.Max(hi, h);
+                }
+            heights.Sort();
+            if (float.IsNaN(y)) y = heights[heights.Count / 2];
+
+            // The skirt is planned on the ground as it stands BEFORE any stamp (the pad's own stamps reach 2 m past the edge).
+            float halfX = sizeX * 0.5f, halfZ = sizeZ * 0.5f;
+            if (float.IsNaN(skirt))
+            {
+                float edgeStep = 0f;
+                for (float dz = -halfZ - 1f; dz <= halfZ + 1.01f; dz += 2f)
+                    for (float dx = -halfX - 1f; dx <= halfX + 1.01f; dx += 2f)
+                        if (Mathf.Abs(dx) > halfX || Mathf.Abs(dz) > halfZ)
+                            edgeStep = Mathf.Max(edgeStep, Mathf.Abs(LevelGround(generator, x + dx, z + dz) - y));
+                // + one stamp radius: overlapping stamps land each point at the blend of the stamp one radius nearer the pad
+                skirt = edgeStep < SkirtMinStep ? 0f : Mathf.Min(SkirtMaxWidth, edgeStep / SkirtSlope + SkirtStampRadius);
+            }
+            skirt = Mathf.Clamp(skirt, 0f, SkirtMaxWidth);
+
+            // 0.2.679 (H7, 10-01: a 76x76 pad levelled to y 75.90 beside a hydrology pond at 77.8 flooded the whole yard).
+            // A cut below standing water that it borders becomes that water's bed: the voxel water store spreads generated
+            // water into every dug pocket it touches, as a real lake would. So no pad is cut under water: any inland water
+            // within the pad and its skirt whose surface stands above y is refused, naming the spot. Pass a y above it, or
+            // move the pad.
+            for (float dz = -halfZ - skirt; dz <= halfZ + skirt + 0.01f; dz += PadWaterProbeStep)
+                for (float dx = -halfX - skirt; dx <= halfX + skirt + 0.01f; dx += PadWaterProbeStep)
+                    if (VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(x + dx, z + dz, 0.05f, false, out float surface, out _)
+                        && surface > y + PadWaterMargin)
+                        return Refused(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "the pad at y {0:0.00} would sit under water: inland water at ({1:0},{2:0}) stands at {3:0.00}. A cut below water it "
+                            + "touches floods. Level to y >= {4:0.00}, or move the pad away from that water", y, x + dx, z + dz, surface, surface + 0.5f));
+            var skirtStamps = new System.Collections.Generic.List<Vector4>();   // x, z, ground, blend target
+            if (skirt > 0f)
+                for (float cz = z - halfZ - skirt + SkirtStampSpacing * 0.5f; cz < z + halfZ + skirt; cz += SkirtStampSpacing)
+                    for (float cx = x - halfX - skirt + SkirtStampSpacing * 0.5f; cx < x + halfX + skirt; cx += SkirtStampSpacing)
+                    {
+                        float ox = Mathf.Max(0f, Mathf.Abs(cx - x) - halfX), oz = Mathf.Max(0f, Mathf.Abs(cz - z) - halfZ);
+                        float d = Mathf.Sqrt(ox * ox + oz * oz);
+                        if (d <= 0f || d > skirt) continue;
+                        float g = LevelGround(generator, cx, cz);
+                        float target = Mathf.Lerp(y, g, d / skirt);
+                        if (Mathf.Abs(g - target) > 0.05f) skirtStamps.Add(new Vector4(cx, cz, g, target));
+                    }
+
+            int stamps = 0;
+            s_stampFailures = 0;
+            s_firstStampFailure = null;
+            float bottom = Mathf.Max(lo, y - depth), top = Mathf.Min(hi, y + depth) + 1f;
+            bool fill = lo < y - 0.05f, cut = hi > y + 0.05f;
+            for (float cz = z - sizeZ * 0.5f + LevelStampSpacing * 0.5f; cz < z + sizeZ * 0.5f + LevelStampSpacing * 0.5f; cz += LevelStampSpacing)
+                for (float cx = x - sizeX * 0.5f + LevelStampSpacing * 0.5f; cx < x + sizeX * 0.5f + LevelStampSpacing * 0.5f; cx += LevelStampSpacing)
+                {
+                    if (fill)
+                        LevelStamp(new Vector3(cx, (bottom + y) * 0.5f, cz), LevelStampRadius, y - bottom, VoxelBrushShape.Cylinder, VoxelBrushMode.Fill);
+                    if (cut)
+                        LevelStamp(new Vector3(cx, (y + top) * 0.5f, cz), LevelStampRadius, top - y, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
+                    stamps++;
+                }
+            foreach (var s in skirtStamps)
+            {
+                float g = s.z, target = s.w;
+                if (g > target)
+                    LevelStamp(new Vector3(s.x, (target + g + 1f) * 0.5f, s.y), SkirtStampRadius, g + 1f - target, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
+                else
+                {
+                    float from = Mathf.Max(g, target - depth);
+                    LevelStamp(new Vector3(s.x, (from + target) * 0.5f, s.y), SkirtStampRadius, target - from, VoxelBrushShape.Cylinder, VoxelBrushMode.Fill);
+                }
+            }
+            string done = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[FiresVoxel] level pad at ({0:0.0},{1:0.0}) {2:0}x{3:0} m to y={4:0.00}: ground {5:0.00}-{6:0.00}, {7}, {8}, {9} stamp(s), {10}",
+                x, z, sizeX, sizeZ, y, lo, hi,
+                fill ? string.Format(System.Globalization.CultureInfo.InvariantCulture, "filled {0:0.00}-{1:0.00}", bottom, y) : "no fill",
+                cut ? string.Format(System.Globalization.CultureInfo.InvariantCulture, "cut {0:0.00}-{1:0.00}", y, top) : "no cut", stamps,
+                skirt > 0f ? string.Format(System.Globalization.CultureInfo.InvariantCulture, "skirt {0:0.0} m ({1} stamp(s))", skirt, skirtStamps.Count) : "no skirt");
+            if (s_stampFailures > 0)
+            {
+                done += $"; {s_stampFailures} stamp(s) THREW, the pad is incomplete (first: {s_firstStampFailure})";
+                FiresLogger.LogWarning(done);
+                return done;
+            }
+            FiresLogger.LogInfo(done);
+            return done;
+        }
+
+        // 0.2.676 (H4, 10-01: "va_voxel_level -232.9 230.0 76 76 auto threw Object reference not set…", and FDT kept no
+        // stack): one stamp that throws no longer aborts the pad. The first failure is logged WITH its stack, stamp and
+        // chunk key, the other stamps still run, and the result line counts the failures, so a partial pad is visible.
+        private static int s_stampFailures;
+        private static string s_firstStampFailure;
+
+        private static void LevelStamp(Vector3 c, float radius, float height, VoxelBrushShape shape, VoxelBrushMode mode)
+        {
+            try { VoxelWorld.ApplyBrush(c, radius, height, shape, mode); }
+            catch (System.Exception ex)
+            {
+                s_stampFailures++;
+                if (s_firstStampFailure != null) return;
+                var key = new Vector3Int(Mathf.FloorToInt(c.x / 32f), Mathf.FloorToInt(c.y / 32f), Mathf.FloorToInt(c.z / 32f));
+                s_firstStampFailure = $"{mode} r={radius:0.0} at ({c.x:0.0},{c.y:0.0},{c.z:0.0}) chunk {key}: {ex.GetType().Name}: {ex.Message}";
+                FiresLogger.LogError($"[FiresVoxel] level pad stamp threw: {s_firstStampFailure}\n{ex}");
+            }
+        }
+
+        private static string Refused(string why)
+        {
+            string line = $"[FiresVoxel] level pad refused: {why}";
+            FiresLogger.LogWarning(line);
+            return line;
+        }
+
         private Vector3 _lastDabPos;
         private bool _strokeActive;
         private float _dabBudget;
@@ -65,6 +340,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private void Update()
         {
             WaterShapingTools.Tick();
+            EndPressIfDue();
+            bool virtualPress = Pressing;
 
             var player = Player.m_localPlayer;
             Tool tool = player != null ? SelectedTool(player) : Tool.None;
@@ -103,13 +380,14 @@ namespace VerdantsAscent.Terrain.Voxel
             // THE IH DIVORCE — our own cursor (crosshair raycast) and our own
             // scroll radius. No ruler, no console arming.
             Vector3 cursor;
-            if (!TileBrush.TryGetPointerWorldPosition(out cursor))
+            if (virtualPress) cursor = s_pressCursor;
+            else if (!TileBrush.TryGetPointerWorldPosition(out cursor))
             {
                 SetGizmo(Tool.None, Vector3.zero, false);
                 return;
             }
 
-            bool carveMod = Input.GetKey(KeyCode.LeftAlt);
+            bool carveMod = Input.GetKey(KeyCode.LeftAlt) || (virtualPress && s_pressAlt);
             SetRulerVisualHidden(true);   // IH's white ring never draws under our ghosts
 
             // Plain scroll = UNIFORM size (camera zoom is suppressed by the
@@ -173,7 +451,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_cylMode = SelectedCylMode(player);
             }
 
-            if (!Input.GetMouseButton(0))
+            // A virtual press has no real button to release after the pick: it counts as a fresh press.
+            if (virtualPress && !Input.GetMouseButton(0)) _armAfterRelease = false;
+            if (!Input.GetMouseButton(0) && !virtualPress)
             {
                 _strokeActive = false;
                 _armAfterRelease = false;   // selecting-click released — a fresh press now carves
@@ -223,6 +503,12 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private void Dispatch(Tool tool, Vector3 pos, bool carveMod)
+        {
+            if (s_pressing) s_pressDabs++;
+            DispatchNow(tool, pos, carveMod);
+        }
+
+        private void DispatchNow(Tool tool, Vector3 pos, bool carveMod)
         {
             try
             {

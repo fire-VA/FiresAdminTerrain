@@ -255,6 +255,27 @@ namespace VerdantsAscent.Terrain.Persistence
             }
         }
 
+        private Color32 VertexColour(int idx) => Voxel.FatSeasons.BiomeColour(
+            _tile.BiomeModified != null && _tile.BiomeModified[idx] ? (Heightmap.Biome)_tile.Biome[idx] : Heightmap.Biome.Meadows);
+
+        // Vedr seasons: every live tile repaints its render mesh in place (the collider mesh carries no colour).
+        internal static void CollectSeasonRecolours(System.Collections.Generic.List<Voxel.FatSeasons.Recolour> into)
+        {
+            foreach (var tile in Object.FindObjectsByType<TileMeshRenderer>(FindObjectsSortMode.None))
+            {
+                var target = tile;
+                into.Add(new Voxel.FatSeasons.Recolour(target.transform.position, () => { if (target != null) target.RecolourForSeason(); }));
+            }
+        }
+
+        // A tile that has not built its mesh yet takes the season when it does.
+        private void RecolourForSeason()
+        {
+            if (_tile == null || _renderMesh == null || _colors == null || _colors.Length != _renderMesh.vertexCount) return;
+            for (int idx = 0; idx < _colors.Length; idx++) _colors[idx] = VertexColour(idx);
+            _renderMesh.colors32 = _colors;
+        }
+
         private void OnDestroy()
         {
             if (_meshCollider != null) _meshCollider.sharedMesh = null;
@@ -470,6 +491,8 @@ namespace VerdantsAscent.Terrain.Persistence
             //   - Else → Meadows (0,0,0,0) so the shader renders the
             //     default biome texture (grass) — same default vanilla
             //     uses for unpainted heightmap verts.
+            //   - In Vedr's winter a biome it snows over draws the snow
+            //     splat instead (FatSeasons.BiomeColour).
             //
             // PAINT (dirt/cultivated/paved) belongs in the _ClearedMaskTex
             // texture per-tile, not in vertex colors. The Paint[] field
@@ -478,7 +501,6 @@ namespace VerdantsAscent.Terrain.Persistence
             // `PaintModified` path that writes Paint colors into vertex
             // would clobber the biome — we intentionally do NOT do that
             // any more.
-            Color32 meadowsDefault = Heightmap.GetBiomeColor(Heightmap.Biome.Meadows);
 
             for (int j = 0; j < size; j++)
             for (int i = 0; i < size; i++)
@@ -512,9 +534,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 // textures (dirt/cultivated/paved) are a SEPARATE channel
                 // via the per-tile paint mask texture — not implemented
                 // yet, so Paint[] is just persisted for the future port.
-                _colors[idx] = (_tile.BiomeModified != null && _tile.BiomeModified[idx])
-                    ? Heightmap.GetBiomeColor((Heightmap.Biome)_tile.Biome[idx])
-                    : meadowsDefault;
+                _colors[idx] = VertexColour(idx);
             }
 
             // Triangle indices — two triangles per quad, CCW winding for

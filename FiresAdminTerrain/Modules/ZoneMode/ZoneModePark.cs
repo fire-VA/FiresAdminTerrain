@@ -5,18 +5,20 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
+using Unity.Profiling;
 using UnityEngine;
 using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
     // A world cloned into one zone at a time keeps everything it had. At its first server load every generated zone is
-    // PARKED: its objects are written in vanilla's own save format to FiresWorldGen\firesgen_<world>_park\<x>_<y>.zdos and
-    // leave the live world, and the zone stops being generated, so it is closed sea like any other. Opening a parked zone
+    // PARKED: its objects are written in vanilla's own save format into FiresWorldGen\firesgen_<world>_park\zones.pack
+    // (ZoneModeParkPack; parks written before D6c are one file per zone until their first load repacks them) and leave
+    // the live world, and the zone stops being generated, so it is closed sea like any other. Opening a parked zone
     // RESTORES it: the objects load back the way a world load brings them (new ids, links re-made from their saved hashes)
     // and the zone is marked generated, so the land returns as it was, builds and all. Only a seed planted while wearing
     // the Eye of the Beholder, onto land it does not match, raises other land there and discards what was parked.
-    // A restored zone's file waits as <x>_<y>.restored until a load finds the zone saved as generated; a load that finds
+    // A restored zone's bytes wait in its Restored slot until a load finds the zone saved as generated; a load that finds
     // it not generated (the session ended before a save) restores it again.
     internal static class ZoneModePark
     {
@@ -24,6 +26,11 @@ namespace VerdantsAscent.Terrain.Zones
         {
             internal int Pieces;
             internal int LocationHash;
+            // The land a swapped zone stood on when it was taken back (its source zone and how that land was moved:
+            // ZoneShift), so it returns on that land with its builds, not on the zone's own (format 2).
+            internal bool Swapped;
+            internal Vector2s Source;
+            internal ZoneShift Shift;
         }
 
         internal sealed class ClientState
@@ -32,7 +39,7 @@ namespace VerdantsAscent.Terrain.Zones
             internal readonly Dictionary<Vector2s, ParkedZone> Details = new Dictionary<Vector2s, ParkedZone>();
         }
 
-        private struct ZoneFileHeader
+        internal struct ZoneFileHeader
         {
             internal long WorldUid;
             internal global::Version.World WorldVersion;
@@ -43,13 +50,8 @@ namespace VerdantsAscent.Terrain.Zones
 
         private const string FolderSuffix = "_park";
         private const string MarkerSuffix = ".convert";
-        private const string ParkedExtension = ".zdos";
-        private const string RestoredExtension = ".restored";
-        private const string UnreadableExtension = ".unreadable";
-        private const string IndexFileName = "index.bin";
         private const string StagingSuffix = ".staging";
         private const string RejectedSuffix = ".rejected";
-        private const string TempSuffix = ".tmp";
         private const string MarkerPark = "park";
         private const string MarkerParked = "parked";
         private const string MarkerFailed = "failed";
@@ -57,9 +59,11 @@ namespace VerdantsAscent.Terrain.Zones
         private const int MarkerUidLine = 1;
         private const int MarkerSourceLine = 2;
         private const uint ZoneFileMagic = 0x445A5046u;
-        private const uint IndexFileMagic = 0x58495046u;
-        private const byte FileFormat = 1;
-        private const int FileBufferBytes = 1 << 20;
+        // Format 2 adds a swapped zone's land to the parked record; format 1 records read as never swapped.
+        internal const byte FirstRecordFormat = 1;
+        private const byte LandRecordFormat = 2;
+        internal const byte RecordFormat = LandRecordFormat;
+        private const double BytesPerMegabyte = 1024d * 1024d;
         private const int LoggedZoneSample = 8;
 
         private static readonly AccessTools.FieldRef<ZDOMan, Dictionary<ZDOID, ZDO>> ObjectsByIdRef =
@@ -76,19 +80,29 @@ namespace VerdantsAscent.Terrain.Zones
             AccessTools.FieldRefAccess<ZoneSystem, HashSet<Vector2s>>("m_generatedZones");
 
         private static readonly Dictionary<Vector2s, ParkedZone> s_index = new Dictionary<Vector2s, ParkedZone>();
+
+        // The park's phases as profiler scopes, so an allocation or timing capture attributes each one on its own.
+        private static readonly ProfilerMarker CollectMarker = new ProfilerMarker("Fires.Park.Collect");
+        private static readonly ProfilerMarker SerialiseMarker = new ProfilerMarker("Fires.Park.Serialise");
+        private static readonly ProfilerMarker DiskWaitMarker = new ProfilerMarker("Fires.Park.DiskWait");
+        private static readonly ProfilerMarker RemoveMarker = new ProfilerMarker("Fires.Park.Remove");
         private static World s_world;
         private static bool s_server;
         private static bool s_converted;
-        private static bool s_restoredFilesWaiting;
+        private static bool s_restoredWaiting;
         private static string s_marker;
         private static ClientState s_client;
+        private static IParkStore s_store;
 
         internal static bool Converted => s_converted;
 
         internal static int ParkedCount => s_index.Count;
 
+        // Moves on at every change to the parked set, so the zone handshake built for one set is never sent for another.
+        internal static int IndexGeneration { get; private set; }
+
         internal static bool WaitsForObjects
-            => s_server && (s_marker == MarkerPark || s_marker == MarkerParked || s_index.Count > 0 || s_restoredFilesWaiting);
+            => s_server && (s_marker == MarkerPark || s_marker == MarkerParked || s_index.Count > 0 || s_restoredWaiting);
 
         internal static string FolderFor(string worldName) => FiresWorldRecords.PathFor(worldName, FolderSuffix);
 
@@ -97,12 +111,14 @@ namespace VerdantsAscent.Terrain.Zones
         internal static void Reset()
         {
             s_index.Clear();
+            IndexGeneration++;
             s_world = null;
             s_server = false;
             s_converted = false;
-            s_restoredFilesWaiting = false;
+            s_restoredWaiting = false;
             s_marker = null;
             s_client = null;
+            s_store = null;
             ZoneModeLandmarks.Reset();
         }
 
@@ -116,7 +132,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_converted = FiresWorldProfile.Current?.IsClone == true;
             if (!server) return;
             s_marker = ReadMarker(world);
-            LoadIndex(world);
+            LoadStore(world);
             s_converted |= s_marker != null || s_index.Count > 0;
             ZoneModeLandmarks.OnWorldInitialize(FolderFor(world.m_name), world.m_uid);
         }
@@ -129,7 +145,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (!zoneMode) ReturnEverything();
             else if (s_marker == MarkerPark) ParkEverything(zoneSystem);
             else if (s_marker == MarkerParked) SettleFirstSave(zoneSystem);
-            SettleRestoredFiles(zoneSystem);
+            SettleRestored(zoneSystem);
             if (zoneMode) SettleParkedZones(zoneSystem);
         }
 
@@ -158,40 +174,65 @@ namespace VerdantsAscent.Terrain.Zones
             var parked = new Dictionary<Vector2s, List<ZDO>>();
             var index = new Dictionary<Vector2s, ParkedZone>();
             int beyondGrid = 0;
+            bool liveView = false;
+            long snapshotMs = 0, writeMs = 0, indexMs = 0, diskWaitMs = 0, diskBytes = 0;
+            int diskZones = 0;
+            ZoneModeParkPack pack;
+            FiresLogger.LogInfo($"[FiresZones] setting aside the {generated.Count:N0} explored zone(s) of '{s_world.m_name}' "
+                + "(its first load since it was converted); a large world takes minutes.");
             try
             {
                 if (Directory.Exists(staging)) Directory.Delete(staging, true);
                 Directory.CreateDirectory(staging);
-                ZDOExtraData.PrepareSave();
-                try
+                liveView = ZoneModeParkSnapshot.Begin();
+                snapshotMs = clock.ElapsedMilliseconds;
+                var serializer = new ZoneSerializer();
+                using (var disk = new ZoneModeParkWriter(Path.Combine(staging, ZoneModeParkPack.PackFileName), s_world.m_uid))
                 {
-                    foreach (var zone in generated)
+                    try
                     {
-                        if (!ZoneOpenSet.InRange(zone.x, zone.y))
+                        foreach (var zone in generated)
                         {
-                            beyondGrid++;
-                            continue;
+                            if (!ZoneOpenSet.InRange(zone.x, zone.y))
+                            {
+                                beyondGrid++;
+                                continue;
+                            }
+                            var objects = new List<ZDO>();
+                            var portals = new List<ZDO>();
+                            ParkedZone entry;
+                            byte[] bytes;
+                            using (CollectMarker.Auto())
+                            {
+                                CollectZone(zdoMan, zone, objects, portals);
+                                entry = new ParkedZone
+                                {
+                                    Pieces = CountBuiltPieces(objects) + CountBuiltPieces(portals),
+                                    LocationHash = LocationHashAt(zoneSystem, zone),
+                                };
+                            }
+                            using (SerialiseMarker.Auto()) bytes = serializer.Serialize(entry, objects, portals);
+                            using (DiskWaitMarker.Auto()) disk.Enqueue(zone, entry, bytes);
+                            ZoneModeLandmarks.Record(zone, objects, portals);
+                            index[zone] = entry;
+                            objects.AddRange(portals);
+                            parked[zone] = objects;
                         }
-                        var objects = new List<ZDO>();
-                        var portals = new List<ZDO>();
-                        CollectZone(zdoMan, zone, objects, portals);
-                        var entry = new ParkedZone
-                        {
-                            Pieces = CountBuiltPieces(objects) + CountBuiltPieces(portals),
-                            LocationHash = LocationHashAt(zoneSystem, zone),
-                        };
-                        WriteZoneFile(ZoneFile(staging, zone, ParkedExtension), entry, objects, portals);
-                        ZoneModeLandmarks.Record(zone, objects, portals);
-                        index[zone] = entry;
-                        objects.AddRange(portals);
-                        parked[zone] = objects;
                     }
+                    finally { ZDOExtraData.ClearSave(); }
+                    using (DiskWaitMarker.Auto()) disk.Finish();
+                    diskWaitMs = disk.WaitedMs;
+                    diskZones = disk.ZonesWritten;
+                    diskBytes = disk.BytesWritten;
+                    pack = ZoneModeParkPack.FromWritten(staging, s_world.m_uid, disk.Written);
                 }
-                finally { ZDOExtraData.ClearSave(); }
-                WriteIndex(staging, index);
+                writeMs = clock.ElapsedMilliseconds - snapshotMs;
+                pack.WriteIndex();
                 ZoneModeLandmarks.Write(staging);
                 if (Directory.Exists(folder)) Directory.Delete(folder, true);
                 Directory.Move(staging, folder);
+                pack.Rebase(folder);
+                indexMs = clock.ElapsedMilliseconds - snapshotMs - writeMs;
             }
             catch (Exception ex)
             {
@@ -202,20 +243,70 @@ namespace VerdantsAscent.Terrain.Zones
             }
 
             int objectCount = 0, pieceCount = 0;
-            foreach (var pair in parked)
+            using (RemoveMarker.Auto())
             {
-                RemoveFromLiveWorld(zdoMan, pair.Key, pair.Value);
-                generated.Remove(pair.Key);
-                objectCount += pair.Value.Count;
-                pieceCount += index[pair.Key].Pieces;
+                foreach (var pair in parked)
+                {
+                    RemoveFromLiveWorld(zdoMan, pair.Key, pair.Value);
+                    generated.Remove(pair.Key);
+                    objectCount += pair.Value.Count;
+                    pieceCount += index[pair.Key].Pieces;
+                }
+                ResetChunkStore(zdoMan);
             }
-            ResetChunkStore(zdoMan);
+            long removeMs = clock.ElapsedMilliseconds - snapshotMs - writeMs - indexMs;
             foreach (var pair in index) s_index[pair.Key] = pair.Value;
+            IndexGeneration++;
+            s_store = pack;
             WriteMarkerState(MarkerParked);
             FiresLogger.LogInfo($"[FiresZones] PARKED '{s_world.m_name}': {parked.Count} explored zone(s) holding {objectCount:N0} "
                 + $"object(s) ({pieceCount:N0} built piece(s)) are set aside in {Path.GetFileName(folder)} "
-                + $"({clock.ElapsedMilliseconds} ms). Each returns as it was when its zone is opened."
+                + $"({clock.ElapsedMilliseconds} ms: snapshot {snapshotMs} ({(liveView ? "live view" : "cloned")}), collect+serialise "
+                + $"{writeMs - diskWaitMs}, waiting on disk {diskWaitMs} ({diskZones:N0} zone(s), {diskBytes / BytesPerMegabyte:N0} MB "
+                + $"written alongside into {ZoneModeParkPack.PackFileName}), index {indexMs}, remove {removeMs}). Each returns as it was "
+                + "when its zone is opened."
                 + (beyondGrid > 0 ? $" {beyondGrid} explored zone(s) beyond the zone grid (±{ZoneOpenSet.ZoneExtent}) stay as they are." : ""));
+            ZoneModeParkMemory.ReleaseAfterPark(zdoMan);
+        }
+
+        // A parked zone returns as it was and is marked generated, so a location planned inside it but never placed can
+        // never spawn. Run after Valheim has placed this world's locations again; a first park waits for that plan, so it
+        // finds none, while a converted world re-planned later (a game update) can, and those are named.
+        internal static void ReportUnspawnedLocations(ZoneSystem zoneSystem)
+        {
+            if (!s_server || zoneSystem == null || s_index.Count == 0) return;
+            var unspawned = new List<Vector2s>();
+            var names = new List<string>();
+            foreach (var pair in zoneSystem.m_locationInstances)
+            {
+                if (pair.Value.m_placed || !s_index.ContainsKey(pair.Key)) continue;
+                unspawned.Add(pair.Key);
+                if (names.Count < LoggedZoneSample) names.Add($"{pair.Value.m_location?.m_prefabName ?? "?"} at ({pair.Key.x},{pair.Key.y})");
+            }
+            if (unspawned.Count == 0)
+            {
+                FiresLogger.LogInfo($"[FiresZones] park check: 0 planned locations inside the {s_index.Count} parked zone(s) are unspawned.");
+                return;
+            }
+            FiresLogger.LogWarning($"[FiresZones] park check: {unspawned.Count} planned location(s) inside parked zones were never "
+                + $"spawned and will not appear when their zone returns: {string.Join(", ", names.ToArray())}"
+                + (unspawned.Count > names.Count ? " ..." : "") + ".");
+        }
+
+        // True when this world's next load parks everything it has explored: a clone whose convert marker still says so.
+        internal static bool ConvertsOnNextLoad(World world)
+        {
+            if (world == null || string.IsNullOrEmpty(world.m_name)) return false;
+            string path = MarkerPathFor(world.m_name);
+            if (!File.Exists(path)) return false;
+            try
+            {
+                string[] lines = File.ReadAllLines(path);
+                return lines.Length > MarkerUidLine && lines[MarkerStateLine].Trim() == MarkerPark
+                    && long.TryParse(lines[MarkerUidLine], NumberStyles.Integer, CultureInfo.InvariantCulture, out long uid)
+                    && uid == world.m_uid;
+            }
+            catch (IOException) { return false; }
         }
 
         // The first save after parking has happened once the save lists no parked zone as generated. Until then the save
@@ -248,34 +339,38 @@ namespace VerdantsAscent.Terrain.Zones
             ResetChunkStore(zdoMan);
             FiresLogger.LogWarning($"[FiresZones] '{s_world.m_name}' closed before its first save after parking, so the save still "
                 + $"held {stale.Count} parked zone(s): their {removed:N0} object(s) left the live world again. The parked copies are kept.");
+            ZoneModeParkMemory.ReleaseAfterPark(zdoMan);
         }
 
-        private static void SettleRestoredFiles(ZoneSystem zoneSystem)
+        // A zone's bytes stay in its Restored slot after it returns, until a load finds the zone saved as generated. A load
+        // that finds it open but not generated (the session ended before a save) brings it back again; one that finds it
+        // closed parks it again.
+        private static void SettleRestored(ZoneSystem zoneSystem)
         {
-            string folder = FolderFor(s_world.m_name);
-            if (!Directory.Exists(folder)) return;
+            s_restoredWaiting = false;
+            if (s_store == null) return;
             var generated = GeneratedZonesRef(zoneSystem);
-            bool indexChanged = false;
-            foreach (string path in Directory.GetFiles(folder, "*" + RestoredExtension))
+            bool changed = false;
+            foreach (var zone in s_store.ZonesIn(ParkSlot.Restored))
             {
-                if (!TryParseZone(path, out var zone)) continue;
                 if (generated.Contains(zone))
                 {
-                    File.Delete(path);
+                    s_store.Remove(zone, ParkSlot.Restored);
+                    changed = true;
                     continue;
                 }
                 if (ZoneModeRegistry.IsOpen(zone))
                 {
-                    RestoreFromFile(zone, path, zoneSystem, "its return was never saved");
+                    changed |= !RestoreFromStore(zone, ParkSlot.Restored, zoneSystem, "its return was never saved");
                     continue;
                 }
-                string parkedPath = ZoneFile(folder, zone, ParkedExtension);
-                if (!TryMove(path, parkedPath)) continue;
-                s_index[zone] = ReadHeader(parkedPath).Parked;
-                indexChanged = true;
+                if (!s_store.Move(zone, ParkSlot.Restored, ParkSlot.Parked)) continue;
+                s_store.TryGetDetails(zone, ParkSlot.Parked, out var parked);
+                s_index[zone] = parked;
+                IndexGeneration++;
+                changed = true;
             }
-            s_restoredFilesWaiting = false;
-            if (indexChanged) WriteIndexSafely();
+            if (changed) s_store.Commit(s_index);
         }
 
         private static void SettleParkedZones(ZoneSystem zoneSystem)
@@ -297,62 +392,80 @@ namespace VerdantsAscent.Terrain.Zones
         // ── Restoring ───────────────────────────────────────────────────────
         internal static int RestoreZones(IList<Vector2s> zones, string context)
         {
-            if (!s_server || s_index.Count == 0) return 0;
+            if (!s_server || s_index.Count == 0 || s_store == null) return 0;
             var zoneSystem = ZoneSystem.instance;
-            string folder = FolderFor(s_world.m_name);
             int restored = 0;
             bool indexChanged = false;
             foreach (var zone in zones)
             {
                 if (!s_index.Remove(zone)) continue;
+                IndexGeneration++;
                 indexChanged = true;
-                string path = ZoneFile(folder, zone, ParkedExtension);
-                if (!RestoreFromFile(zone, path, zoneSystem, context)) continue;
-                TryMove(path, ZoneFile(folder, zone, RestoredExtension));
+                if (!RestoreFromStore(zone, ParkSlot.Parked, zoneSystem, context)) continue;
+                s_store.Move(zone, ParkSlot.Parked, ParkSlot.Restored);
                 restored++;
             }
-            if (indexChanged) WriteIndexSafely();
+            if (indexChanged) s_store.Commit(s_index);
             return restored;
         }
 
-        private static bool RestoreFromFile(Vector2s zone, string path, ZoneSystem zoneSystem, string context)
+        // False when the bytes could not be read or loaded: they move to the Unreadable slot, named, and the zone rises as
+        // new land. The caller commits the store.
+        private static bool RestoreFromStore(Vector2s zone, ParkSlot slot, ZoneSystem zoneSystem, string context)
         {
             var restored = new List<ZDO>();
             ZoneFileHeader header;
             try
             {
-                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferBytes))
-                using (var reader = new BinaryReader(stream))
+                if (!s_store.TryRead(zone, slot, out byte[] payload, out string problem)) throw new InvalidDataException(problem);
+                var pkg = ReaderOver(payload);
+                header = ReadHeader(pkg);
+                int total = header.Objects + header.Portals;
+                for (int i = 0; i < total; i++)
                 {
-                    var pkg = new ZPackage();
-                    pkg.SetReader(reader);
-                    header = ReadHeader(pkg);
-                    int total = header.Objects + header.Portals;
-                    for (int i = 0; i < total; i++)
-                    {
-                        var zdo = ZDOPool.Create();
-                        restored.Add(zdo);
-                        zdo.Load(pkg, header.WorldVersion);
-                    }
+                    var zdo = ZDOPool.Create();
+                    restored.Add(zdo);
+                    zdo.Load(pkg, header.WorldVersion);
                 }
             }
             catch (Exception ex)
             {
                 foreach (var zdo in restored) ZDOPool.Release(zdo);
-                string kept = Path.ChangeExtension(path, UnreadableExtension);
-                TryMove(path, kept);
+                bool kept = s_store.Move(zone, slot, ParkSlot.Unreadable);
                 FiresLogger.LogError($"[FiresZones] could not bring ({zone.x},{zone.y}) back as it was ({ex.GetType().Name}: {ex.Message}), "
-                    + $"so it rises as new land instead. The file is kept as {Path.GetFileName(kept)}.");
+                    + "so it rises as new land instead."
+                    + (kept ? $" Its bytes are kept as unreadable in {s_store.Describe()}." : ""));
                 return false;
             }
             var zdoMan = ZDOMan.instance;
             AddToLiveWorld(zdoMan, restored, header.Objects);
             ConnectRestored(restored);
             ZoneModeLandmarks.OnRestored(zone, restored, header.Objects);
+            RaiseZoneRestored(zone, restored);
             GeneratedZonesRef(zoneSystem).Add(zone);
             FiresLogger.LogInfo($"[FiresZones] ({zone.x},{zone.y}) returned as it was: {restored.Count:N0} object(s), "
                 + $"{header.Parked.Pieces:N0} built piece(s) ({context}).");
             return true;
+        }
+
+        // A zone's objects are live again. Load-time passes never saw them while they were parked (the chunk generator
+        // swaps old biome machines here, [generator] 2026-09-27). Subscribers hold no ZDO past the call: pooled objects
+        // are released after a park (ZoneModeParkMemory). A subscriber's fault is logged and never stops the restore.
+        internal static event Action<Vector2s, List<ZDO>> ZoneRestored;
+
+        private static void RaiseZoneRestored(Vector2s zone, List<ZDO> restored)
+        {
+            var handlers = ZoneRestored;
+            if (handlers == null) return;
+            foreach (Action<Vector2s, List<ZDO>> handler in handlers.GetInvocationList())
+            {
+                try { handler(zone, restored); }
+                catch (Exception ex)
+                {
+                    FiresLogger.LogError($"[FiresZones] ({zone.x},{zone.y}) restored, but a ZoneRestored handler "
+                        + $"({handler.Method.DeclaringType?.Name}.{handler.Method.Name}) threw: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
         }
 
         // ── What a park holds, read without bringing it back ─────────────────
@@ -362,29 +475,23 @@ namespace VerdantsAscent.Terrain.Zones
         // the object is a portal. Returns how many objects were read, or -1 if the file could not be read.
         internal static int TryReadZone(Vector2s zone, Action<ZDO, bool> visit)
         {
-            if (!s_server || s_world == null) return -1;
-            string path = ZoneFile(FolderFor(s_world.m_name), zone, ParkedExtension);
-            if (!File.Exists(path)) return -1;
+            if (!s_server || s_world == null || s_store == null || !s_store.Has(zone, ParkSlot.Parked)) return -1;
             int read = 0;
             try
             {
-                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferBytes))
-                using (var reader = new BinaryReader(stream))
+                if (!s_store.TryRead(zone, ParkSlot.Parked, out byte[] payload, out string problem)) throw new InvalidDataException(problem);
+                var pkg = ReaderOver(payload);
+                var header = ReadHeader(pkg);
+                int total = header.Objects + header.Portals;
+                for (; read < total; read++)
                 {
-                    var pkg = new ZPackage();
-                    pkg.SetReader(reader);
-                    var header = ReadHeader(pkg);
-                    int total = header.Objects + header.Portals;
-                    for (; read < total; read++)
+                    var zdo = ZDOPool.Create();
+                    try
                     {
-                        var zdo = ZDOPool.Create();
-                        try
-                        {
-                            zdo.Load(pkg, header.WorldVersion);
-                            visit(zdo, read >= header.Objects);
-                        }
-                        finally { ZDOPool.Release(zdo); }
+                        zdo.Load(pkg, header.WorldVersion);
+                        visit(zdo, read >= header.Objects);
                     }
+                    finally { ZDOPool.Release(zdo); }
                 }
                 return read;
             }
@@ -397,39 +504,33 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // Every object the parked zones hold, loaded one at a time for `visit` and released again; returns how many
-        // `visit` counted.
+        // `visit` counted. One pass over the store, in the order it reads fastest.
         internal static int ForEachParkedObject(Func<ZDO, bool> visit)
         {
-            if (!s_server || s_index.Count == 0) return 0;
-            string folder = FolderFor(s_world.m_name);
+            if (!s_server || s_index.Count == 0 || s_store == null) return 0;
             int counted = 0;
-            foreach (var zone in s_index.Keys)
+            foreach (var read in s_store.ReadAll(ParkSlot.Parked, s_index.Keys))
             {
-                string path = ZoneFile(folder, zone, ParkedExtension);
                 try
                 {
-                    using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferBytes))
-                    using (var reader = new BinaryReader(stream))
+                    if (read.Problem != null) throw new InvalidDataException(read.Problem);
+                    var pkg = ReaderOver(read.Payload);
+                    var header = ReadHeader(pkg);
+                    int total = header.Objects + header.Portals;
+                    for (int i = 0; i < total; i++)
                     {
-                        var pkg = new ZPackage();
-                        pkg.SetReader(reader);
-                        var header = ReadHeader(pkg);
-                        int total = header.Objects + header.Portals;
-                        for (int i = 0; i < total; i++)
+                        var zdo = ZDOPool.Create();
+                        try
                         {
-                            var zdo = ZDOPool.Create();
-                            try
-                            {
-                                zdo.Load(pkg, header.WorldVersion);
-                                if (visit(zdo)) counted++;
-                            }
-                            finally { ZDOPool.Release(zdo); }
+                            zdo.Load(pkg, header.WorldVersion);
+                            if (visit(zdo)) counted++;
                         }
+                        finally { ZDOPool.Release(zdo); }
                     }
                 }
                 catch (Exception ex)
                 {
-                    FiresLogger.LogWarning($"[FiresZones] could not read parked zone ({zone.x},{zone.y}) ({ex.GetType().Name}: {ex.Message}).");
+                    FiresLogger.LogWarning($"[FiresZones] could not read parked zone ({read.Zone.x},{read.Zone.y}) ({ex.GetType().Name}: {ex.Message}).");
                 }
             }
             return counted;
@@ -537,17 +638,137 @@ namespace VerdantsAscent.Terrain.Zones
             return found;
         }
 
+        /// <summary>True when this zone has an overwritten chunk set aside that could be brought back.</summary>
+        internal static bool HasOverridden(Vector2s zone)
+            => s_server && s_world != null && s_store != null && s_store.Has(zone, ParkSlot.Overridden);
+
+        // ── UNDO: the exact reverse of Discard ──────────────────────────────────────────────────────
+        // Moves the Overridden bytes back to the Parked slot and puts the index entry back, which is all
+        // "parked" means. Everything downstream then works unchanged: the zone reads as parked, the Eye
+        // offers to bring it back, and the existing matching-seed restore path does the actual work.
+        // Writing a second restore path would have meant two ways to un-park a zone that could disagree.
+        //
+        // The zone must be CLOSED afterwards for this to be visible - a zone that is already open has
+        // the replacement land in it, and the caller closes it so the chunk can be planted again.
+        internal static bool TryRecoverOverridden(Vector2s zone, out string report)
+        {
+            report = null;
+            if (!s_server) { report = "Only the server holds the set-aside chunks."; return false; }
+            if (s_world == null) { report = "No world is loaded."; return false; }
+
+            if (s_store == null || !s_store.Has(zone, ParkSlot.Overridden))
+            {
+                report = $"({zone.x},{zone.y}) has no set-aside chunk - nothing was overwritten there, "
+                    + "or it was overwritten before chunks were kept.";
+                return false;
+            }
+            if (s_store.Has(zone, ParkSlot.Parked))
+            {
+                report = $"({zone.x},{zone.y}) is already parked, so there is nothing to undo.";
+                return false;
+            }
+            if (!s_store.Move(zone, ParkSlot.Overridden, ParkSlot.Parked))
+            {
+                report = $"could not move the set-aside chunk of ({zone.x},{zone.y}) back into place.";
+                return false;
+            }
+
+            s_store.TryGetDetails(zone, ParkSlot.Parked, out var parked);
+            s_index[zone] = parked;
+            IndexGeneration++;
+            s_store.Commit(s_index);
+            report = $"({zone.x},{zone.y}) is parked again with its {parked.Pieces:N0} built piece(s). "
+                + "Plant the matching seed to bring it back.";
+            FiresLogger.LogWarning($"[FiresZones] UNDO: {report}");
+            return true;
+        }
+
+        // ── Taking an OPEN zone back out (the Chaos Hammer's remover) ───────
+        // The same set-aside Discard leaves behind a wrong seed: everything the zone holds, voxel anchors included, is
+        // written to its Overridden slot, outside the parked set, so fires_zones_undo can bring it back. Then every object
+        // is destroyed the way vanilla destroys one, owned first, so every peer drops it too. The caller closes the zone.
+        internal static bool TrySetAsideOpenZone(Vector2s zone, out int removed, out string problem)
+        {
+            removed = 0;
+            problem = null;
+            var zdoMan = ZDOMan.instance;
+            if (!s_server || s_world == null || zdoMan == null) { problem = "only the server can take a chunk back"; return false; }
+
+            var objects = new List<ZDO>();
+            var portals = new List<ZDO>();
+            CollectZone(zdoMan, zone, objects, portals);
+            var entry = new ParkedZone
+            {
+                Pieces = CountBuiltPieces(objects) + CountBuiltPieces(portals),
+                LocationHash = ZoneSystem.instance != null ? LocationHashAt(ZoneSystem.instance, zone) : 0,
+            };
+            if (ZoneModeRegistry.TryGetSource(zone, out var source))
+            {
+                entry.Swapped = true;
+                entry.Source = source;
+                entry.Shift = ZoneModeRegistry.ShiftOf(zone);
+            }
+            try
+            {
+                EnsureStore();
+                byte[] bytes;
+                ZDOExtraData.PrepareSave();
+                try { bytes = new ZoneSerializer().Serialize(entry, objects, portals); }
+                finally { ZDOExtraData.ClearSave(); }
+                s_store.Write(zone, ParkSlot.Overridden, entry, bytes);
+            }
+            catch (Exception ex)
+            {
+                problem = $"could not be written ({ex.GetType().Name}: {ex.Message})";
+                return false;
+            }
+
+            // A zone restored this session still has its pre-restore bytes waiting; a later load would park them again.
+            if (s_store.Has(zone, ParkSlot.Restored)) s_store.Remove(zone, ParkSlot.Restored);
+            s_store.Commit(s_index);
+
+            long self = ZDOMan.GetSessionID();
+            objects.AddRange(portals);
+            foreach (var zdo in objects)
+            {
+                if (!zdo.IsOwner()) zdo.SetOwner(self);
+                zdoMan.DestroyZDO(zdo);
+                removed++;
+            }
+            FiresLogger.LogInfo($"[FiresZones] ({zone.x},{zone.y}) taken back: {removed:N0} object(s), {entry.Pieces:N0} built "
+                + $"piece(s), set aside in {s_store.Describe()}"
+                + (entry.Swapped ? $" with the land it stood on ({entry.Source.x},{entry.Source.y}), {Describe(entry.Shift)}" : "")
+                + $". fires_zones_undo {zone.x} {zone.y} parks it again.");
+            return true;
+        }
+
+        // A world that never parked gets its park (an empty pack) the first time something is set aside in it.
+        private static void EnsureStore()
+        {
+            if (s_store != null) return;
+            s_store = ZoneModeParkPack.CreateEmpty(FolderFor(s_world.m_name), s_world.m_uid);
+        }
+
         // ── Raising other land over a parked zone ───────────────────────────
         internal static void Discard(Vector2s zone, string who)
         {
             if (!s_server || !s_index.TryGetValue(zone, out var parked)) return;
             s_index.Remove(zone);
-            string path = ZoneFile(FolderFor(s_world.m_name), zone, ParkedExtension);
-            try { File.Delete(path); }
-            catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] could not delete {Path.GetFileName(path)}: {ex.Message}"); }
-            WriteIndexSafely();
+            IndexGeneration++;
+
+            // KEPT, NOT DELETED. The chunk used to be deleted here, which made a mis-swing permanently
+            // destructive: no clear, undo or replant could ever bring it back. The index entry still goes,
+            // so the zone stops reading as parked and the Eye does not offer land the player already
+            // replaced, but the bytes survive in the Overridden slot, so clearing the zone and replanting
+            // the right seed has something to put back.
+            bool retained = s_store != null && s_store.Has(zone, ParkSlot.Parked) && s_store.Move(zone, ParkSlot.Parked, ParkSlot.Overridden);
+            s_store?.Commit(s_index);
+
             FiresLogger.LogInfo($"[FiresZones] ({zone.x},{zone.y}) was raised as other land by {who}; what was parked there "
-                + $"({parked.Pieces:N0} built piece(s)) is gone.");
+                + $"({parked.Pieces:N0} built piece(s)) is no longer in the world"
+                + (retained
+                    ? " but is KEPT in the park - clear the zone and plant the matching seed to bring it back."
+                    : ". Its parked bytes could not be set aside, so it is gone."));
         }
 
         // ── Queries (server, host and client) ───────────────────────────────
@@ -561,13 +782,18 @@ namespace VerdantsAscent.Terrain.Zones
             return true;
         }
 
-        // A seed matches a parked zone when it would raise that zone's own land: its planned biome, or the place it held.
+        // A seed matches a parked zone when it would raise the land that zone showed: the land it stood on when it was a
+        // swapped zone, else its own planned biome, or the place it held.
         internal static bool SeedMatches(ChunkSeed seed, Vector2s zone, ParkedZone parked)
         {
+            if (seed.RestoresOnly) return true;
             if (seed.IsLocation) return parked.LocationHash != 0 && parked.LocationHash == seed.Location.GetStableHashCode();
-            ZoneModeChunkTiers.ZoneTier(zone, out var planned);
+            ZoneModeChunkTiers.ZoneTier(parked.Swapped ? parked.Source : zone, out var planned);
             return planned == seed.Tier.Biome;
         }
+
+        private static string Describe(in ZoneShift shift)
+            => shift.IsZero ? "at its own height" : $"lift {shift.Lift:0.0} m, slide ({shift.Dx:0.0},{shift.Dz:0.0}) m";
 
         // ── Handshake ───────────────────────────────────────────────────────
         internal static void WriteHandshake(ZPackage pkg)
@@ -581,13 +807,12 @@ namespace VerdantsAscent.Terrain.Zones
             pkg.Write(bytes);
             var detailed = new List<KeyValuePair<Vector2s, ParkedZone>>();
             foreach (var pair in s_index)
-                if (pair.Value.Pieces > 0 || pair.Value.LocationHash != 0) detailed.Add(pair);
+                if (pair.Value.Pieces > 0 || pair.Value.LocationHash != 0 || pair.Value.Swapped) detailed.Add(pair);
             pkg.Write(detailed.Count);
             foreach (var pair in detailed)
             {
                 pkg.Write(pair.Key);
-                pkg.Write(pair.Value.Pieces);
-                pkg.Write(pair.Value.LocationHash);
+                WriteParked(pkg.Write, pkg.Write, pkg.Write, pkg.Write, pair.Value);
             }
         }
 
@@ -604,7 +829,7 @@ namespace VerdantsAscent.Terrain.Zones
             for (int i = 0; i < count; i++)
             {
                 var zone = pkg.ReadVector2s();
-                state.Details[zone] = new ParkedZone { Pieces = pkg.ReadInt(), LocationHash = pkg.ReadInt() };
+                state.Details[zone] = ReadParked(pkg.ReadInt, pkg.ReadShort, pkg.ReadSingle, pkg.ReadBool, RecordFormat);
             }
             return state;
         }
@@ -668,84 +893,69 @@ namespace VerdantsAscent.Terrain.Zones
             return source;
         }
 
-        // ── Index: <park>\index.bin ─────────────────────────────────────────
-        private static void LoadIndex(World world)
+        // ── Loading the park: <park>\zones.index + zones.pack ───────────────
+        // How long the last world load's index read and one-time repack took (ZoneModeRegistry's world-init line).
+        internal static long IndexReadMs { get; private set; }
+        internal static long RepackMs { get; private set; }
+        internal static string StoreDescription => s_store?.Describe() ?? "no park";
+
+        // A park still kept as zone files is repacked here, once (ZoneModeParkPack.TryRepack); if that cannot finish, the
+        // world plays on its zone files as before and the next load tries again.
+        private static void LoadStore(World world)
         {
+            IndexReadMs = 0;
+            RepackMs = 0;
             string folder = FolderFor(world.m_name);
+            ZoneModeParkPack.CompleteInterruptedRepack(folder);
             if (!Directory.Exists(folder)) return;
-            try
+            var clock = Stopwatch.StartNew();
+            string setAside;
+            if (ZoneModeParkPack.IsPacked(folder))
             {
-                using (var reader = new BinaryReader(File.OpenRead(Path.Combine(folder, IndexFileName))))
-                {
-                    if (reader.ReadUInt32() != IndexFileMagic || reader.ReadByte() != FileFormat) throw new InvalidDataException("not a park index");
-                    long uid = reader.ReadInt64();
-                    if (uid != world.m_uid)
-                    {
-                        SetAside(folder, $"it belongs to world uid {uid}, a deleted world that had this name");
-                        return;
-                    }
-                    int count = reader.ReadInt32();
-                    for (int i = 0; i < count; i++)
-                    {
-                        var zone = new Vector2s(reader.ReadInt16(), reader.ReadInt16());
-                        s_index[zone] = new ParkedZone { Pieces = reader.ReadInt32(), LocationHash = reader.ReadInt32() };
-                    }
-                }
+                s_store = ZoneModeParkPack.Load(folder, world.m_uid, world.m_name, out setAside);
+                IndexReadMs = clock.ElapsedMilliseconds;
             }
-            catch (Exception ex)
+            else
             {
-                s_index.Clear();
-                if (!TryRebuildIndex(world, folder)) return;
-                FiresLogger.LogWarning($"[FiresZones] the park index of '{world.m_name}' was unreadable ({ex.Message}); rebuilt from its "
-                    + $"{s_index.Count} parked zone file(s).");
-                WriteIndexSafely();
+                var files = ZoneModeParkZoneFiles.Load(folder, world.m_uid, world.m_name, out setAside);
+                IndexReadMs = clock.ElapsedMilliseconds;
+                clock.Restart();
+                if (files != null) s_store = (IParkStore)ZoneModeParkPack.TryRepack(files, world.m_name) ?? files;
+                RepackMs = clock.ElapsedMilliseconds;
             }
-            s_restoredFilesWaiting = Directory.GetFiles(folder, "*" + RestoredExtension).Length > 0;
+            if (s_store == null)
+            {
+                SetAside(folder, setAside);
+                return;
+            }
+            foreach (var pair in s_store.Parked()) s_index[pair.Key] = pair.Value;
+            IndexGeneration++;
+            s_restoredWaiting = s_store.ZonesIn(ParkSlot.Restored).Count > 0;
         }
 
-        private static bool TryRebuildIndex(World world, string folder)
+        // A parked record, the same in the index, a zone file and the handshake, through each one's own reads and writes.
+        internal static void WriteParked(Action<int> writeInt, Action<short> writeShort, Action<float> writeFloat, Action<bool> writeBool,
+            in ParkedZone parked)
         {
-            foreach (string path in Directory.GetFiles(folder, "*" + ParkedExtension))
-            {
-                if (!TryParseZone(path, out var zone)) continue;
-                var header = ReadHeader(path);
-                if (header.WorldUid != world.m_uid)
-                {
-                    s_index.Clear();
-                    SetAside(folder, $"its zones belong to world uid {header.WorldUid}, a deleted world that had this name");
-                    return false;
-                }
-                s_index[zone] = header.Parked;
-            }
-            return true;
+            writeInt(parked.Pieces);
+            writeInt(parked.LocationHash);
+            writeBool(parked.Swapped);
+            if (!parked.Swapped) return;
+            writeShort((short)parked.Source.x);
+            writeShort((short)parked.Source.y);
+            writeFloat(parked.Shift.Lift);
+            writeFloat(parked.Shift.Dx);
+            writeFloat(parked.Shift.Dz);
         }
 
-        private static void WriteIndex(string folder, Dictionary<Vector2s, ParkedZone> index)
+        internal static ParkedZone ReadParked(Func<int> readInt, Func<short> readShort, Func<float> readFloat, Func<bool> readBool, byte format)
         {
-            string path = Path.Combine(folder, IndexFileName);
-            string temp = path + TempSuffix;
-            using (var writer = new BinaryWriter(File.Create(temp)))
-            {
-                writer.Write(IndexFileMagic);
-                writer.Write(FileFormat);
-                writer.Write(s_world.m_uid);
-                writer.Write(index.Count);
-                foreach (var pair in index)
-                {
-                    writer.Write((short)pair.Key.x);
-                    writer.Write((short)pair.Key.y);
-                    writer.Write(pair.Value.Pieces);
-                    writer.Write(pair.Value.LocationHash);
-                }
-            }
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(temp, path);
-        }
-
-        private static void WriteIndexSafely()
-        {
-            try { WriteIndex(FolderFor(s_world.m_name), s_index); }
-            catch (Exception ex) { FiresLogger.LogError($"[FiresZones] could not write the park index of '{s_world.m_name}': {ex.Message}"); }
+            var parked = new ParkedZone { Pieces = readInt(), LocationHash = readInt() };
+            if (format < LandRecordFormat || !readBool()) return parked;
+            parked.Swapped = true;
+            parked.Source = new Vector2s(readShort(), readShort());
+            parked.Shift = new ZoneShift(readFloat(), readFloat(), readFloat());
+            return parked;
         }
 
         private static void SetAside(string folder, string why)
@@ -803,49 +1013,77 @@ namespace VerdantsAscent.Terrain.Zones
                     if (zdo.Persistent) portals.Add(zdo);
         }
 
-        private static void WriteZoneFile(string path, ParkedZone entry, List<ZDO> objects, List<ZDO> portals)
+        private static void WriteZone(ZPackage pkg, ParkedZone entry, List<ZDO> objects, List<ZDO> portals)
         {
-            using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, FileBufferBytes))
-            using (var writer = new BinaryWriter(stream))
+            pkg.Write(ZoneFileMagic);
+            pkg.Write(RecordFormat);
+            pkg.Write(s_world.m_uid);
+            pkg.Write((short)global::Version.c_WorldVersion);
+            WriteParked(pkg.Write, pkg.Write, pkg.Write, pkg.Write, entry);
+            pkg.Write(objects.Count);
+            pkg.Write(portals.Count);
+            foreach (var zdo in objects) zdo.Save(pkg);
+            foreach (var zdo in portals) zdo.Save(pkg);
+        }
+
+        // One zone file's bytes, built in a buffer that is reused from zone to zone.
+        private sealed class ZoneSerializer
+        {
+            private readonly MemoryStream _buffer = new MemoryStream();
+            private readonly BinaryWriter _writer;
+            private readonly ZPackage _package = new ZPackage();
+
+            internal ZoneSerializer()
             {
-                var pkg = new ZPackage();
-                pkg.SetWriter(writer);
-                pkg.Write(ZoneFileMagic);
-                pkg.Write(FileFormat);
-                pkg.Write(s_world.m_uid);
-                pkg.Write((short)global::Version.c_WorldVersion);
-                pkg.Write(entry.Pieces);
-                pkg.Write(entry.LocationHash);
-                pkg.Write(objects.Count);
-                pkg.Write(portals.Count);
-                foreach (var zdo in objects) zdo.Save(pkg);
-                foreach (var zdo in portals) zdo.Save(pkg);
+                _writer = new BinaryWriter(_buffer);
+                _package.SetWriter(_writer);
+            }
+
+            internal byte[] Serialize(ParkedZone entry, List<ZDO> objects, List<ZDO> portals)
+            {
+                _buffer.SetLength(0);
+                WriteZone(_package, entry, objects, portals);
+                _writer.Flush();
+                return _buffer.ToArray();
             }
         }
 
-        private static ZoneFileHeader ReadHeader(ZPackage pkg)
+        internal static ZoneFileHeader ReadHeader(ZPackage pkg)
         {
             if (pkg.ReadUInt() != ZoneFileMagic) throw new InvalidDataException("not a parked zone");
             byte format = pkg.ReadByte();
-            if (format != FileFormat) throw new InvalidDataException($"parked zone format {format}, this build reads {FileFormat}");
+            if (format < FirstRecordFormat || format > RecordFormat) throw new InvalidDataException($"parked zone format {format}, this build reads up to {RecordFormat}");
             return new ZoneFileHeader
             {
                 WorldUid = pkg.ReadLong(),
                 WorldVersion = (global::Version.World)pkg.ReadShort(),
-                Parked = new ParkedZone { Pieces = pkg.ReadInt(), LocationHash = pkg.ReadInt() },
+                Parked = ReadParked(pkg.ReadInt, pkg.ReadShort, pkg.ReadSingle, pkg.ReadBool, format),
                 Objects = pkg.ReadInt(),
                 Portals = pkg.ReadInt(),
             };
         }
 
-        private static ZoneFileHeader ReadHeader(string path)
+        // A zone's bytes as the park stores them: its record and the world it was written for, without loading an object.
+        internal static bool TryReadRecordHeader(byte[] payload, out ParkedZone parked, out long worldUid)
         {
-            using (var reader = new BinaryReader(File.OpenRead(path)))
+            parked = default;
+            worldUid = 0;
+            try
             {
-                var pkg = new ZPackage();
-                pkg.SetReader(reader);
-                return ReadHeader(pkg);
+                var header = ReadHeader(ReaderOver(payload));
+                parked = header.Parked;
+                worldUid = header.WorldUid;
+                return true;
             }
+            catch (Exception) { return false; }
+        }
+
+        // A package reading straight from a zone's bytes (ZPackage(byte[]) would copy them first).
+        private static ZPackage ReaderOver(byte[] payload)
+        {
+            var pkg = new ZPackage();
+            pkg.SetReader(new BinaryReader(new MemoryStream(payload, false)));
+            return pkg;
         }
 
         private static void RemoveFromLiveWorld(ZDOMan zdoMan, Vector2s zone, List<ZDO> zdos)
@@ -889,35 +1127,6 @@ namespace VerdantsAscent.Terrain.Zones
             => zoneSystem.m_locationInstances.TryGetValue(zone, out var instance) && instance.m_placed && instance.m_location != null
                 ? ZoneModeSwaps.NameOf(instance.m_location).GetStableHashCode()
                 : 0;
-
-        private static string ZoneFile(string folder, Vector2s zone, string extension)
-            => Path.Combine(folder, zone.x.ToString(CultureInfo.InvariantCulture) + "_" + zone.y.ToString(CultureInfo.InvariantCulture) + extension);
-
-        private static bool TryParseZone(string path, out Vector2s zone)
-        {
-            zone = default;
-            string[] parts = Path.GetFileNameWithoutExtension(path).Split('_');
-            if (parts.Length != 2
-                || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int x)
-                || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int y)) return false;
-            zone = new Vector2s(x, y);
-            return true;
-        }
-
-        private static bool TryMove(string from, string to)
-        {
-            try
-            {
-                if (File.Exists(to)) File.Delete(to);
-                File.Move(from, to);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                FiresLogger.LogWarning($"[FiresZones] could not rename {Path.GetFileName(from)} to {Path.GetFileName(to)}: {ex.Message}");
-                return false;
-            }
-        }
 
         private static string Sample(List<Vector2s> zones)
         {

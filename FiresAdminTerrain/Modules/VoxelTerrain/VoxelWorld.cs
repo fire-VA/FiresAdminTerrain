@@ -314,6 +314,194 @@ namespace VerdantsAscent.Terrain.Voxel
             return volume;
         }
 
+        // ── Area blueprints: any whole-metre box, masked ─────────────────────
+        // A box of world samples, one per metre, x fastest then y then z. `keep(x, y, z)` (world metres) says which
+        // samples belong to the capture; the rest are VoxelChunk.KeepSample. Chunks not built yet are generated here.
+        internal static sbyte[] CaptureBox(Vector3Int origin, Vector3Int size, System.Func<int, int, int, bool> keep)
+        {
+            var grid = new sbyte[size.x * size.y * size.z];
+            for (int i = 0; i < grid.Length; i++) grid[i] = VoxelChunk.KeepSample;
+            int cells = VoxelChunk.CELLS;
+            Vector3Int lo = ChunkOf(origin), hi = ChunkOf(origin + size - Vector3Int.one);
+            for (int kz = lo.z; kz <= hi.z; kz++)
+                for (int ky = lo.y; ky <= hi.y; ky++)
+                    for (int kx = lo.x; kx <= hi.x; kx++)
+                    {
+                        var chunk = EnsureChunkWithEdits(new Vector3Int(kx, ky, kz));
+                        var density = chunk?.ExportDensity();
+                        if (density == null) continue;
+                        for (int lz = 0; lz < cells; lz++)
+                            for (int ly = 0; ly < cells; ly++)
+                                for (int lx = 0; lx < cells; lx++)
+                                {
+                                    int wx = kx * cells + lx, wy = ky * cells + ly, wz = kz * cells + lz;
+                                    int gx = wx - origin.x, gy = wy - origin.y, gz = wz - origin.z;
+                                    if (gx < 0 || gy < 0 || gz < 0 || gx >= size.x || gy >= size.y || gz >= size.z) continue;
+                                    if (!keep(wx, wy, wz)) continue;
+                                    grid[gx + size.x * (gy + size.y * gz)] = density[VoxelChunk.SampleIndex(lx, ly, lz)];
+                                }
+                    }
+            return grid;
+        }
+
+        // A captured box laid down with its origin at `origin`. Only the samples it holds change; every chunk that
+        // shares one of them, ring samples included, takes it, so the seams agree.
+        internal static int StampBox(sbyte[] grid, Vector3Int origin, Vector3Int size)
+        {
+            int cells = VoxelChunk.CELLS, touched = 0;
+            Vector3Int lo = ChunkOf(origin - Vector3Int.one), hi = ChunkOf(origin + size);
+            var wanted = new sbyte[VoxelChunk.SampleCount];
+            for (int kz = lo.z; kz <= hi.z; kz++)
+                for (int ky = lo.y; ky <= hi.y; ky++)
+                    for (int kx = lo.x; kx <= hi.x; kx++)
+                    {
+                        bool any = false;
+                        for (int lz = -1; lz <= cells; lz++)
+                            for (int ly = -1; ly <= cells; ly++)
+                                for (int lx = -1; lx <= cells; lx++)
+                                {
+                                    int gx = kx * cells + lx - origin.x, gy = ky * cells + ly - origin.y, gz = kz * cells + lz - origin.z;
+                                    sbyte value = VoxelChunk.KeepSample;
+                                    if (gx >= 0 && gy >= 0 && gz >= 0 && gx < size.x && gy < size.y && gz < size.z)
+                                        value = grid[gx + size.x * (gy + size.y * gz)];
+                                    wanted[VoxelChunk.SampleIndex(lx, ly, lz)] = value;
+                                    any |= value != VoxelChunk.KeepSample;
+                                }
+                        if (!any) continue;
+                        var chunk = EnsureChunkWithEdits(new Vector3Int(kx, ky, kz));
+                        if (chunk == null || !chunk.ApplyMaskedStamp(wanted)) continue;
+                        touched++;
+                        MarkSaveDirty(chunk);
+                        VoxelMeshPipeline.EnqueueRemesh(chunk);
+                        VoxelZoneStreamer.MarkZoneBrushed(chunk.Key);
+                    }
+            if (touched > 0)
+            {
+                var centre = new Vector3(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f, origin.z + size.z * 0.5f);
+                FarVegImpostors.Invalidate(centre.x, centre.z);
+                try { VerdantsAscent.Terrain.Clutter.ClutterManager.RespawnInRadius(centre, Mathf.Max(size.x, size.z) * 0.75f); }
+                catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] clutter refresh threw: {ex.Message}"); }
+            }
+            return touched;
+        }
+
+        private static Vector3Int ChunkOf(Vector3Int world)
+            => new Vector3Int(FloorDiv(world.x, VoxelChunk.CELLS), FloorDiv(world.y, VoxelChunk.CELLS), FloorDiv(world.z, VoxelChunk.CELLS));
+
+        // A chunk to read or stamp, carrying every edit its anchor records. One built fresh here starts from its generated
+        // land alone: captured like that it loses its edits, and stamped and saved like that it writes its anchor over with
+        // the stamp alone, taking every other edit in the chunk with it. A loaded chunk already carries its anchor's edits.
+        private static VoxelChunk EnsureChunkWithEdits(Vector3Int key)
+        {
+            bool loaded = s_chunks.ContainsKey(key);
+            var chunk = EnsureFullChunk(key);
+            if (chunk == null || loaded) return chunk;
+            var packed = ReadAnchorEdits(key);
+            if (packed != null) chunk.ImportBrushEdits(Utils.Decompress(packed));
+            return chunk;
+        }
+
+        private static byte[] ReadAnchorEdits(Vector3Int key)
+        {
+            var zdo = VoxelAnchorPrefab.FindZdo(key, ChunkCentre(key));
+            if (zdo == null || zdo.GetInt(VoxelAnchorPrefab.ZDO_VER, 0) != VoxelAnchorPrefab.EditsFormatVersion) return null;
+            return zdo.GetByteArray(VoxelAnchorPrefab.ZDO_EDITS);
+        }
+
+        // The point SaveChunk files a chunk's anchor under.
+        private static Vector3 ChunkCentre(Vector3Int key)
+        {
+            float half = VoxelChunk.CELLS * 0.5f;
+            return new Vector3(key.x * VoxelChunk.CELLS + half, key.y * VoxelChunk.CELLS + half, key.z * VoxelChunk.CELLS + half);
+        }
+
+        // ── Skyland blueprints: edits travel as bounds ───────────────────────
+        internal struct EditBound
+        {
+            internal int X, Y, Z;
+            internal sbyte Lo, Hi;
+        }
+
+        // Every edited sample of the chunks between `min` and `max` (world metres) that `keep` accepts, at its world
+        // sample. A loaded chunk with edits is read live; any other from its anchor, the record every peer restores from.
+        internal static void CaptureEditBounds(Vector3Int min, Vector3Int max, System.Func<int, int, int, bool> keep, List<EditBound> into)
+        {
+            into.Clear();
+            int cells = VoxelChunk.CELLS;
+            Vector3Int lo = ChunkOf(min), hi = ChunkOf(max);
+            for (int kz = lo.z; kz <= hi.z; kz++)
+                for (int ky = lo.y; ky <= hi.y; ky++)
+                    for (int kx = lo.x; kx <= hi.x; kx++)
+                    {
+                        var key = new Vector3Int(kx, ky, kz);
+                        byte[] raw;
+                        if (s_chunks.TryGetValue(key, out var chunk) && chunk.HasBrushEdits) raw = chunk.ExportBrushEdits();
+                        else
+                        {
+                            var packed = ReadAnchorEdits(key);
+                            raw = packed != null ? Utils.Decompress(packed) : null;
+                        }
+                        if (!VoxelChunk.TryReadEditBounds(raw, out var los, out var his)) continue;
+                        for (int lz = 0; lz < cells; lz++)
+                            for (int ly = 0; ly < cells; ly++)
+                                for (int lx = 0; lx < cells; lx++)
+                                {
+                                    int i = VoxelChunk.SampleIndex(lx, ly, lz);
+                                    if (!VoxelChunk.IsEdited(los[i], his[i])) continue;
+                                    int wx = kx * cells + lx, wy = ky * cells + ly, wz = kz * cells + lz;
+                                    if (keep(wx, wy, wz)) into.Add(new EditBound { X = wx, Y = wy, Z = wz, Lo = los[i], Hi = his[i] });
+                                }
+                    }
+        }
+
+        // Captured bounds laid down `shift` metres from where they were taken, or, with `clear`, taken off there. Only the
+        // samples named change. Returns the chunks touched.
+        internal static int StampEditBounds(List<EditBound> bounds, Vector3Int shift, bool clear)
+        {
+            int cells = VoxelChunk.CELLS;
+            var byChunk = new Dictionary<Vector3Int, (List<int> Samples, List<sbyte> Lo, List<sbyte> Hi)>();
+            foreach (var bound in bounds)
+            {
+                var at = new Vector3Int(bound.X + shift.x, bound.Y + shift.y, bound.Z + shift.z);
+                var key = ChunkOf(at);
+                if (!byChunk.TryGetValue(key, out var group))
+                    byChunk[key] = group = (new List<int>(), new List<sbyte>(), new List<sbyte>());
+                group.Samples.Add(VoxelChunk.SampleIndex(at.x - key.x * cells, at.y - key.y * cells, at.z - key.z * cells));
+                group.Lo.Add(bound.Lo);
+                group.Hi.Add(bound.Hi);
+            }
+            int touched = 0;
+            foreach (var pair in byChunk)
+            {
+                var chunk = EnsureChunkWithEdits(pair.Key);
+                if (chunk == null || !chunk.ApplyEditBounds(pair.Value.Samples, pair.Value.Lo, pair.Value.Hi, clear)) continue;
+                touched++;
+                MarkSaveDirty(chunk);
+                VoxelMeshPipeline.EnqueueRemesh(chunk);
+                VoxelZoneStreamer.MarkZoneBrushed(chunk.Key);
+            }
+            return touched;
+        }
+
+        // Every loaded chunk of a zone's columns forgotten, edits and all, so the streamer seeds them again from what
+        // the world generates there now. A destroyed anchor never reverts its chunk, so a zone taken back with the Chaos
+        // Hammer's remover runs this on every peer once its anchors are gone.
+        internal static int DropZoneChunks(Vector2s zone)
+        {
+            ZoneChunkOrigin(zone, out int kx0, out int kz0);
+            var keys = new List<Vector3Int>();
+            foreach (var key in s_chunks.Keys)
+                if (key.x >= kx0 && key.x < kx0 + ZoneChunksPerAxis && key.z >= kz0 && key.z < kz0 + ZoneChunksPerAxis)
+                    keys.Add(key);
+            foreach (var key in keys)
+            {
+                if (s_chunks.TryGetValue(key, out var chunk)) s_saveDirty.Remove(chunk);
+                DropChunk(key);
+            }
+            if (keys.Count > 0) FarVegImpostors.Invalidate(ZoneSystem.GetZonePos(zone).x, ZoneSystem.GetZonePos(zone).z);
+            return keys.Count;
+        }
+
         // A saved volume, dropped on a zone as it was. Chunks above what was saved are cleared to air and chunks below
         // it filled with rock, so the saved land meets the target's own ground instead of floating over it or being
         // buried. Nothing is blended into the zones around it - a step at the border is the point
@@ -627,6 +815,14 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             foreach (var kv in s_views)
                 if (kv.Value != null) kv.Value.RefreshShadowMode();
+        }
+
+        // Every live chunk view, for a pass spread over frames (Vedr season recolour).
+        internal static void CollectViews(List<VoxelChunkView> into)
+        {
+            into.Clear();
+            foreach (var kv in s_views)
+                if (kv.Value != null) into.Add(kv.Value);
         }
 
         // Vanilla's overworld render group flipped (interior entered or left).

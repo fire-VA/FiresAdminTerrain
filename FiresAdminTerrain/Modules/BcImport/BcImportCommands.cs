@@ -168,14 +168,15 @@ namespace VerdantsAscent.Terrain.BcImport
             float lowest = float.MaxValue;
             float highest = float.MinValue;
             double total = 0.0;
-            foreach (float value in map.Values)
+            for (int index = 0; index < map.Count; index++)
             {
+                float value = map[index];
                 if (value < lowest) lowest = value;
                 if (value > highest) highest = value;
                 total += value;
             }
             lines.Add($"{name} map {map.Size} x {map.Size}: min {lowest:0.####} max {highest:0.####} "
-                + $"mean {total / map.Values.Length:0.####}");
+                + $"mean {total / map.Count:0.####}");
         }
 
         private static void DescribeBiomeCoverage(List<string> lines, BcBiomeMap map)
