@@ -1,0 +1,24 @@
+# C# / .NET build outputs
+bin/
+obj/
+*.pdb
+*.dll.config
+
+# Visual Studio workspace
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# JetBrains Rider
+.idea/
+
+# OS / editor scratch
+*~
+.DS_Store
+Thumbs.db
+
+# Local secrets (none expected in this project but defensive)
+*.env
+*.secret
