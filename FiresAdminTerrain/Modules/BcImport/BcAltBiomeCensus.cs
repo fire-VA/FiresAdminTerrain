@@ -39,6 +39,8 @@ namespace VerdantsAscent.Terrain.BcImport
 
         private static void Report(AltBiomeWorldData data)
         {
+            // Only where locations get placed (server or singleplayer); on a joining client the answer changes nothing.
+            if (ZNet.instance != null && !ZNet.instance.IsServer()) return;
             int defined = AltBiomeList.m_altBiomes != null ? AltBiomeList.m_altBiomes.Count : 0;
             if (defined == 0)
             {
@@ -86,7 +88,8 @@ namespace VerdantsAscent.Terrain.BcImport
                 return;
             }
 
-            FiresLogger.LogWarning($"[AltBiome] {starved.Count} alt-biome(s) are asked for by locations but exist in NO "
+            // Info, not Warning: an alt-biome with no sector is normal for some seeds (Fire 10-10).
+            FiresLogger.LogInfo($"[AltBiome] {starved.Count} alt-biome(s) are asked for by locations but exist in NO "
                 + $"sector, so those locations can never place: {string.Join(", ", starved.ToArray())}.");
         }
 

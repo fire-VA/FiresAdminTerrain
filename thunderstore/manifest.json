@@ -1,10 +1,10 @@
 {
     "name":  "FiresAdminTerrain",
-    "version_number":  "0.2.873",
+    "version_number":  "0.2.874",
     "website_url":  "https://discord.gg/zQRgHbqms4",
     "description":  "Admin world-shaping toolkit: sculpt terrain, dig 3D caves and tunnels, place water, lava, ice and snow at any height, paint biomes, carve rivers and lakes, and create FIRES worlds, including one-zone-at-a-time worlds.",
     "dependencies":  [
                          "denikson-BepInExPack_Valheim-5.4.2350",
-                         "VerdantsAscent-FiresUnifiedCore-0.2.387"
+                         "VerdantsAscent-FiresUnifiedCore-0.2.388"
                      ]
 }

@@ -1,4 +1,4 @@
-* v0.2.873 - updates and fixes
+* v0.2.874 - updates and fixes
   - better caves, sinkholes, waterfalls and location placement
 
 * v0.2.728 - first release for Valheim 1.0
