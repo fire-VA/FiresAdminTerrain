@@ -32,9 +32,23 @@ namespace VerdantsAscent.Terrain.Voxel
     // plane when the pivot lies inside the mesh, because vanilla grounds its props at the pivot.
     internal static class VoxelSurfaceSnap
     {
-        internal const string DefaultAttachSides = "caverock_ice_stalagtite:top,CreepProp_hanging01:top,hanging_hairstrands:top,Pickable_FrostCoreHanger:top,CreepProp_wall01:front";
+        // The crypt roots (root07/08/11/12) hang by their TOP (placed the other way, the top of the root
+        // poked out instead of the root itself). A survey found them ambiguous in vanilla (50-75 %) and the lineup
+        // render read as 'lying flat', so they had the bottom default: on a ceiling that buried their base and pointed the tip
+        // end into the cave.
+        // YggdrasilRoot (the Mistlands sky root, as a mini cave root) hung by its top too, but that left it upside down on
+        // the ceiling; it should sit with the ends buried a bit in the mesh: it is modelled as
+        // an arch whose two ends meet the ground, so it attaches by its BOTTOM like on a floor: on a ceiling the ends go into the
+        // rock and the arch hangs down. Greydwarf_Root stays on the bottom default: its base goes into the rock and it grows down.
+        internal const string DefaultAttachSides = "caverock_ice_stalagtite:top,CreepProp_hanging01:top,hanging_hairstrands:top,Pickable_FrostCoreHanger:top,CreepProp_wall01:front,root07:top,root08:top,root11:top,root12:top";
+        private static readonly string[] OldDefaultAttachSides =
+        {
+            "caverock_ice_stalagtite:top,CreepProp_hanging01:top,hanging_hairstrands:top,Pickable_FrostCoreHanger:top,CreepProp_wall01:front",
+            "caverock_ice_stalagtite:top,CreepProp_hanging01:top,hanging_hairstrands:top,Pickable_FrostCoreHanger:top,CreepProp_wall01:front,root07:top,root08:top,root11:top,root12:top,YggdrasilRoot:top",
+        };
 
-        private const string Section = "VoxelTerrain Surface Mounting";
+        private const string Section = "Voxel Terrain";   // was "VoxelTerrain Surface Mounting" (one key); value carried over
+        private const string OldSection = "VoxelTerrain Surface Mounting";
         private const float RayStep = 0.25f;
         private const float NormalStep = 0.6f;
         private const float MinGradient = 1e-3f;
@@ -63,6 +77,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 + "bottom, top, back (-Z), front (+Z), left (-X) or right (+X) of the prefab as modelled. Unlisted prefabs attach "
                 + "by their bottom, so on a ceiling they hang upside down and on a wall they stick straight out. List a prefab "
                 + "that is modelled already hanging (top) or modelled lying against a wall (its wall side).");
+            FatConfigRetire.Move(cfg, OldSection, "Attach sides", s_attachSides);
+            // A cfg still holding the old default (untouched by its owner) takes the new one, so the roots' fix reaches it.
+            if (Array.IndexOf(OldDefaultAttachSides, s_attachSides.Value) >= 0)
+            {
+                s_attachSides.Value = DefaultAttachSides;
+                FiresLogger.LogInfo($"[FiresVoxel] '{Section} / Attach sides' was an old default: now hangs the crypt roots and YggdrasilRoot by their top.");
+            }
         }
 
         internal static SurfaceAnchor Anchor(GameObject prefab)
@@ -74,6 +95,9 @@ namespace VerdantsAscent.Terrain.Voxel
             s_anchors[prefab] = anchor;
             return anchor;
         }
+
+        // The anchor a prefab would have with a given attach side (not cached): how an older mount placed it.
+        internal static SurfaceAnchor AnchorAs(GameObject prefab, AttachSide side) => prefab == null ? default : Measure(prefab, side);
 
         // Pose for the prefab with its attach face on the rock at `surface`, `normal` pointing out of the rock. Fails
         // where a corner of the face would hang off an edge or the prefab would run into rock.

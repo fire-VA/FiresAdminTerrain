@@ -43,9 +43,9 @@ namespace VerdantsAscent.Terrain.Voxel
             // then hid the other three choices behind a different right-click, so whichever you took you lost the
             // rest. The dialog already offers all of them, so the preset is "as the original" and every choice is
             // made in one place.
-            // The "Clone..." row is GONE, merged into BcWorldListMenu's "Convert..." (2026-09-26, Fire's call:
-            // "instead of clone and convert being two separate options they both handle either converting a bc
-            // world or cloning/updating a normal world"). That row already clones first, never touches the
+            // The "Clone..." row is GONE, merged into BcWorldListMenu's "Convert..." (clone and convert
+            // are one option that handles either converting a BC
+            // world or cloning/updating a normal world). That row already clones first, never touches the
             // original, and offers this same set of terrain options, so two entries was one too many - and a
             // normal world could be greyed out by both at once for different reasons.
             //

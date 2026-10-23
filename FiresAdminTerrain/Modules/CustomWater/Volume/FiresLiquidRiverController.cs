@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // Round-82 — FiresLiquidRiver. Replaces vanilla LiquidVolume's flat-settle
+    // FiresLiquidRiver. Replaces vanilla LiquidVolume's flat-settle
     // sim with a SOURCE-DISK + BANK-FOLLOWING sim so a spring makes a sloped
     // river instead of one flat pool. We keep the vanilla LiquidVolume whole —
     // its threaded mesh builder (the look), terrain raycast (m_heights),
@@ -30,11 +30,11 @@ namespace VerdantsAscent.Water.Core
         public float m_bankOffset = 1f;   // X — surface sits this far below the local bank
         public float m_sourceRadius;      // ruler radius (world m) — the PRIMARY source
         public Vector3 m_sourceCenter;    // ruler center (world) — the PRIMARY source
-        public bool m_frozen;             // round-84 — sim frozen: mesh held, no flow/overflow
+        public bool m_frozen;             // sim frozen: mesh held, no flow/overflow
         public bool m_still;              // still water (lakes/ponds): dead-level cap at the source level, not bank-following
         private float _stillLevelRel;     // highest source fill, transform-relative (RecomputeSourceMask)
 
-        // Round-85 — MULTI-SOURCE. A spring dropped inside an existing pour's
+        // MULTI-SOURCE. A spring dropped inside an existing pour's
         // grid MERGES here as an extra source disk (one continuous mesh, no
         // overlapping-sheet seam / double-blend) rather than spawning a second
         // LiquidVolume. Each source pins its own disk to its own fill level;
@@ -52,7 +52,7 @@ namespace VerdantsAscent.Water.Core
         private LiquidVolume _lv;
         private bool _init;
         private bool[] _isSource;
-        private bool[] _blocked;     // round-84 — DAM cells: never fill, no flow across (mop barrier)
+        private bool[] _blocked;     // DAM cells: never fill, no flow across (mop barrier)
         private float[] _bankRel;   // bank height RELATIVE to base Y (max m_heights in scan)
         private int _num;
         private bool _loggedInit;
@@ -84,7 +84,8 @@ namespace VerdantsAscent.Water.Core
         // heights. Transform access is legal here (main thread).
         private void Update()
         {
-            if (_init || _lv == null) return;
+            if (_init) { FollowZdoFlags(); return; }
+            if (_lv == null) return;
             if (!FiresLiquidGridOps.HaveHeights(_lv)) return;
 
             var heights = FiresLiquidGridOps.Heights(_lv);
@@ -103,7 +104,7 @@ namespace VerdantsAscent.Water.Core
             {
                 _loggedInit = true;
                 int src = 0; for (int i = 0; i < _isSource.Length; i++) if (_isSource[i]) src++;
-                // Round-90 — second skin pass now that the world is fully up
+                // Second skin pass now that the world is fully up
                 // (the ocean material is captured by now, so the texture copy
                 // lands even if the Awake-time pass ran before capture).
                 FiresLiquidWaterPrefab.ApplyFiresLiquidSkin(gameObject);
@@ -121,7 +122,7 @@ namespace VerdantsAscent.Water.Core
 
             // Sources: prefer the persisted blob (merged rivers survive reload),
             // else seed the primary source from the spawn fields (fresh spawn or
-            // a pre-round-85 pour that predates the blob).
+            // an older pour that predates the blob).
             if (_sources.Count == 0) LoadSources();
             if (_sources.Count == 0)
                 _sources.Add(new RiverSource { x = m_sourceCenter.x, z = m_sourceCenter.z, radius = m_sourceRadius, fillY = m_fillY });
@@ -156,9 +157,9 @@ namespace VerdantsAscent.Water.Core
             }
 
             // HEAL + INVARIANT: a source obeys the SAME ceiling as every other
-            // cell — the local bank cap. The first heal round capped at
+            // cell: the local bank cap. A cap at
             // bed+10m, which still left 8-10m pinned domes standing over the
-            // settled water (user screenshots), and frozen pours never
+            // settled water, and frozen pours never
             // redistributed their persisted blob depths at all. Now: fill ≤
             // bank − bankOffset at the source cell (never below bed+0.3 so a
             // spring still springs), and any heal UNFREEZES the sim so the
@@ -331,6 +332,35 @@ namespace VerdantsAscent.Water.Core
 
         private ZNetView Nview() => GetComponentInChildren<ZNetView>(true);
 
+        // The freeze and still toggles are written to the ZDO by the peer that ran them (it claims ownership first), but
+        // every peer read them only once, at init, so a spring frozen on one client kept flowing on the others until a reload
+        // (this client SpringFrozen 1, another peer 0). A peer that does not own the spring now follows
+        // its ZDO, checked twice a second.
+        private const float FlagFollowSeconds = 0.5f;
+        private float _nextFlagFollow;
+
+        private void FollowZdoFlags()
+        {
+            if (Time.time < _nextFlagFollow) return;
+            _nextFlagFollow = Time.time + FlagFollowSeconds;
+            var nv = Nview();
+            if (nv == null || !nv.IsValid() || nv.IsOwner()) return;
+            var zdo = nv.GetZDO();
+            bool frozen = zdo.GetInt(FiresLiquidGridOps.ZDO_SPRING_FROZEN, m_frozen ? 1 : 0) != 0;
+            bool still = zdo.GetInt(FiresLiquidGridOps.ZDO_SPRING_STILL, m_still ? 1 : 0) != 0;
+            if (frozen != m_frozen)
+            {
+                m_frozen = frozen;
+                FiresLogger.LogDebug($"[FiresLiquidRiver] '{name}' sim {(frozen ? "FROZEN" : "UNFROZEN")} by its owner (followed from the ZDO).");
+            }
+            if (still != m_still)
+            {
+                m_still = still;
+                RecomputeSourceMask();
+                FiresLogger.LogDebug($"[FiresLiquidRiver] '{name}' {(still ? "still water" : "flowing water")} by its owner (followed from the ZDO).");
+            }
+        }
+
         // STILL WATER (lakes/ponds): the cap becomes a dead-level line at the
         // highest source level instead of bank-following — the surface levels
         // out exactly like standing water should, and equal-level merged
@@ -346,7 +376,7 @@ namespace VerdantsAscent.Water.Core
             if (m_frozen) SetFrozen(false);
         }
 
-        // Round-84 — freeze/unfreeze the sim. Frozen = the mesh holds its
+        // Freeze/unfreeze the sim. Frozen = the mesh holds its
         // current shape and no flow/overflow runs (SimStep no-ops). Persisted.
         private static readonly System.Reflection.MethodInfo s_lvSave =
             AccessTools.Method(typeof(LiquidVolume), "Save");
@@ -492,7 +522,7 @@ namespace VerdantsAscent.Water.Core
         public bool SimStep(float dt)
         {
             if (!_init) return false;
-            if (m_frozen) return false;   // round-84 — sim frozen: hold the mesh, no flow
+            if (m_frozen) return false;   // sim frozen: hold the mesh, no flow
 
             var depths = FiresLiquidGridOps.Depths(_lv);
             var heights = FiresLiquidGridOps.Heights(_lv);
@@ -517,17 +547,17 @@ namespace VerdantsAscent.Water.Core
             }
 
             // 2) Flow relaxation — water moves toward lower SURFACE neighbours
-            //    (vanilla EvenDepth ported). More water goes to the steeper
+            //    (SettlePair below: pairwise settling). More water goes to the steeper
             //    drop, so the stream heads out the open/downhill side. Water
             //    can NOT flow across a blocked (dam) cell.
             for (int pass = 0; pass < FLOW_PASSES; pass++)
             {
                 for (int z = 0; z < num - 1; z++)
                     for (int x = 0; x < num - 1; x++)
-                        moved |= EvenDepth(depths, heights, _blocked, z * num + x, z * num + x + 1, visc);
+                        moved |= SettlePair(depths, heights, _blocked, z * num + x, z * num + x + 1, visc);
                 for (int x = 0; x < num - 1; x++)
                     for (int z = 0; z < num - 1; z++)
-                        moved |= EvenDepth(depths, heights, _blocked, z * num + x, (z + 1) * num + x, visc);
+                        moved |= SettlePair(depths, heights, _blocked, z * num + x, (z + 1) * num + x, visc);
             }
 
             // 3) Bank cap — no non-source cell may rise above (bank − X). On
@@ -568,34 +598,30 @@ namespace VerdantsAscent.Water.Core
             return moved;
         }
 
-        // Ported from LiquidVolume.EvenDepth — move water from the higher-
-        // surface cell to the lower until within 1mm, transfer limited by
-        // viscosity. Returns true if it moved water.
-        private static bool EvenDepth(List<float> depths, List<float> heights, bool[] blocked, int i0, int i1, float visc)
-        {
-            if (blocked[i0] || blocked[i1]) return false;   // dam — no flow across
-            float d0 = depths[i0], d1 = depths[i1];
-            if (d0 <= 0f && d1 <= 0f) return false;
-            float s0 = heights[i0] + d0, s1 = heights[i1] + d1;
-            if (Mathf.Abs(s1 - s0) < 0.001f) return false;
+        // Two neighbouring cells settle toward one water surface: the cell standing higher passes water to the lower one.
+        // How much moves in one step: the square root of (surface gap x viscosity), never more than half the gap (so the
+        // pair cannot overshoot and swap sides) and never more water than the giver holds. A dam cell on either side, or
+        // surfaces already within a millimetre, moves nothing. True when water moved.
+        private const float SettledGap = 0.001f;
 
-            float b0, b1;
-            if (s0 > s1)
-            {
-                if (d0 <= 0f) return false;
-                float diff = s0 - s1;
-                float t = Mathf.Min(Mathf.Min(Mathf.Pow(diff * visc, 0.5f), diff * 0.5f), d0);
-                b0 = d0 - t; b1 = d1 + t;
-            }
-            else
-            {
-                if (d1 <= 0f) return false;
-                float diff = s1 - s0;
-                float t = Mathf.Min(Mathf.Min(Mathf.Pow(diff * visc, 0.5f), diff * 0.5f), d1);
-                b1 = d1 - t; b0 = d0 + t;
-            }
-            depths[i0] = Mathf.Max(0f, b0);
-            depths[i1] = Mathf.Max(0f, b1);
+        private static bool SettlePair(List<float> depths, List<float> heights, bool[] blocked, int i0, int i1, float visc)
+        {
+            if (blocked[i0] || blocked[i1]) return false;
+            float depthA = depths[i0], depthB = depths[i1];
+            if (depthA <= 0f && depthB <= 0f) return false;
+            float surfaceA = heights[i0] + depthA, surfaceB = heights[i1] + depthB;
+            if (Mathf.Abs(surfaceB - surfaceA) < SettledGap) return false;
+
+            bool aGives = surfaceA > surfaceB;
+            int giver = aGives ? i0 : i1, taker = aGives ? i1 : i0;
+            float held = aGives ? depthA : depthB;
+            if (held <= 0f) return false;
+            float gap = aGives ? surfaceA - surfaceB : surfaceB - surfaceA;
+            float flow = Mathf.Min(Mathf.Min(Mathf.Pow(gap * visc, 0.5f), gap * 0.5f), held);
+            float giverAfter = held - flow;
+            float takerAfter = (aGives ? depthB : depthA) + flow;
+            depths[giver] = Mathf.Max(0f, giverAfter);
+            depths[taker] = Mathf.Max(0f, takerAfter);
             return true;
         }
 
@@ -616,8 +642,12 @@ namespace VerdantsAscent.Water.Core
                 // pin the source cells to their fill levels, then let the
                 // REAL vanilla UpdateLiquid run the settle.
                 if (c.m_frozen) return false;                       // frozen: hold the mesh
+                // Pours must not spread everywhere (rivers are meant to be laid out purposefully):
+                // a spring keeps its own circle full at its level and NOTHING spreads
+                // it. The vanilla settle used to carry every pinned top-up downhill across the pour's whole grid, every
+                // session, so each spring grew without end. Water already spread stays as it was; none is added.
                 c.PinSources();
-                return true;                                        // vanilla settle owns the flow
+                return false;
             }
         }
 
@@ -643,7 +673,7 @@ namespace VerdantsAscent.Water.Core
                 c.m_sourceRadius = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_RADIUS, 3f);
                 var p = root.transform.position;
                 c.m_sourceCenter = new Vector3(p.x, c.m_fillY, p.z);
-                // Round-90 — the restored instance wears the TEMPLATE's
+                // The restored instance wears the TEMPLATE's
                 // vanilla water_liquid; re-apply our FiresLiquid skin.
                 FiresLiquidWaterPrefab.ApplyFiresLiquidSkin(root);
                 FiresLogger.LogInfo($"[FiresLiquidRiver] restored controller on '{root.name}' at {p} fillY={c.m_fillY:F1} bankOffset={c.m_bankOffset:F1} r={c.m_sourceRadius:F1}");

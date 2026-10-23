@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The Chunk Generator's body and dressing (Tools\CHUNK_GENERATOR.md, "The look"). The bake (FiresZonesBuilder with
+    // The Chunk Generator's body and dressing. The bake (FiresZonesBuilder with
     // FiresChunkGeneratorLook) strips every IronGate mesh, material, sound and texture off the prefab, so the bundle
     // carries none. At registration the body takes each back from the live vanilla smelter, matched by child path and
     // type, and its two stone materials are tinted grey again; each dressing anchor under "dress" takes its mesh and
@@ -24,8 +24,8 @@ namespace VerdantsAscent.Terrain.Zones
         private const float GlowStrength = 1.6f;
         private const float SpinDegreesPerSecond = 24f;
         private const float SpinRange = 40f;
-        // The plain recipe makes seeds of no one biome, so its glow walks every biome's colour in turn (Fire, 2026-09-28:
-        // "multicolor, pulsing gently in and out of different colors"): each colour swells and fades over one period, and
+        // The plain recipe makes seeds of no one biome, so its glow walks every biome's colour in turn, pulsing gently:
+        // each colour swells and fades over one period, and
         // blends into the next through the dim half.
         private const float CycleSecondsPerColour = 3.5f;
         private const float CycleDimBrightness = 0.45f;
@@ -53,7 +53,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         // Anchor name prefix -> live source prefab and the child path of its renderer (the paths the editor's survey
         // logs as "source ...: '<path>'"). The rune halo is our own ribbon and cutout material; it borrows only the rune
-        // tile's glow map, turned into a runes-only mask (Fire, 2026-09-27: just the runes floating, no ring).
+        // tile's glow map, turned into a runes-only mask (just the runes floating, no ring).
         private static readonly Binding[] Bindings =
         {
             new Binding("RuneTile", "LastBossGate_RuneTile", "attach/model", true),
@@ -110,7 +110,7 @@ namespace VerdantsAscent.Terrain.Zones
         internal static void Dress(GameObject machine)
         {
             if (ZNetScene.instance == null) return;
-            // R51: "raven + look" was 46 ms on the bot (12 on the dedi); these laps say which part.
+            // "raven + look" measured up to 46 ms on a client; these laps say which part.
             var clock = System.Diagnostics.Stopwatch.StartNew();
             BindBody(machine);
             long bodyMs = clock.ElapsedMilliseconds;
@@ -244,7 +244,7 @@ namespace VerdantsAscent.Terrain.Zones
             }
         }
 
-        // The smelter's stone keeps the grey the plain generator has worn since 2026-09-27; one tinted copy per material.
+        // The smelter's stone keeps the grey the plain generator has always worn; one tinted copy per material.
         private static Material[] Tinted(Material[] live)
         {
             var materials = new Material[live.Length];
@@ -381,8 +381,8 @@ namespace VerdantsAscent.Terrain.Zones
         // Once per game: the live rune sheet's glow map, cropped to the halo's rune columns, becomes a white texture whose
         // alpha is the runes, levelled so the brightest stroke is solid. Read back through the GPU, so the game's texture
         // need not be readable. A headless server draws nothing and skips it.
-        // Built OFF the join frame (R53: the synchronous ReadPixels + two passes over 917k pixels + a mipmapped Apply were 49 ms
-        // of the bot's ZNetScene.Awake). The glow patch is read back asynchronously, the maths runs on a worker, and only the
+        // Built OFF the join frame (the synchronous ReadPixels + two passes over 917k pixels + a mipmapped Apply were 49 ms
+        // of a client's ZNetScene.Awake). The glow patch is read back asynchronously, the maths runs on a worker, and only the
         // texture upload returns to the main thread. Until then a halo stays hidden (Apply already does that for a missing
         // mask) and is lit when the mask lands. A 1x2 probe read back beside it tells whether this API returns rows flipped
         // relative to ReadPixels, so the runes can never come out mirrored.
@@ -401,7 +401,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static bool EnsureRuneMask(Binding binding)
         {
-            // No halo where nobody sees it: no graphics device, or a batch-mode client (the headless autoplay bot, R55: its readback
+            // No halo where nobody sees it: no graphics device, or a batch-mode client (the headless autoplay bot: its readback
             // callbacks threw NullReferenceException in RenderTexture.Release).
             if (s_runeMask != null || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null || Application.isBatchMode)
                 return true;

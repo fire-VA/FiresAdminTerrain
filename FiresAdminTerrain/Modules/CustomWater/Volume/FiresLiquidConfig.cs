@@ -4,16 +4,16 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // Round-84 — live-tunable look for Custom/FiresLiquid. Every slider is a
+    // Live-tunable look for Custom/FiresLiquid. Every slider is a
     // BepInEx config entry (hot-reloads from the .cfg while in-game); on any
-    // change we re-skin all live pours so you see it immediately. Dial it in,
-    // then hand me the values and I bake them as the shader/material defaults.
+    // change we re-skin all live pours so you see it immediately. Tuned values
+    // can then be baked in as the shader/material defaults.
     // Defaults here mirror the shader's own defaults (calm-water look).
     public static class FiresLiquidConfig
     {
         private const string S = "FiresLiquid Look";
 
-        // Round-86 — dev-only pour lifecycle tracing (FiresLiquidWaterDebug).
+        // Dev-only pour lifecycle tracing (FiresLiquidWaterDebug).
         // Off by default; the origin-destroy bug it hunted is long fixed, so on
         // a healthy world it's just noisy Warning+stack spam on every unload.
         public static ConfigEntry<bool> Diagnostics;
@@ -36,8 +36,9 @@ namespace VerdantsAscent.Water.Core
             if (_bound || cfg == null) return;
             _bound = true;
 
-            Diagnostics = cfg.Bind("FiresLiquid Diagnostics", "Verbose pour tracing", false,
+            Diagnostics = cfg.Bind("01 - General", "03 Verbose pour tracing", false,   // formerly [FiresLiquid Diagnostics] Verbose pour tracing
                 "Dev-only: trace custom-water pour spawn/destroy/ZDO-reset lifecycle (noisy Warning+stack). Off = quiet.");
+            FatConfigRetire.Move(cfg, "FiresLiquid Diagnostics", "Verbose pour tracing", Diagnostics);
 
             // TUNED FOR POND DEPTH, NOT OCEAN DEPTH. Everything the shader does
             // with colour scales with the water column: absorption runs
@@ -87,7 +88,7 @@ namespace VerdantsAscent.Water.Core
             DepthFade    = cfg.Bind(S, "Depth Fade (m)", 100f,  new ConfigDescription("Distance the deep colour ramps over", new AcceptableValueRange<float>(1f, 300f)));
             EdgeSoftness = cfg.Bind(S, "Bank Edge Softness", 0.55f, new ConfigDescription("Soft wash-out at the bank (higher = softer)", new AcceptableValueRange<float>(0.1f, 0.9f)));
 
-            // Round-86 — FOAM controls. The HD foam texture is denser than the
+            // FOAM controls. The HD foam texture is denser than the
             // vanilla one, so at the shared global intensity it blankets the
             // liquid white and the additive foam whites-out whatever is seen
             // through the surface. These override the shared _FiresFoam* globals
@@ -180,7 +181,7 @@ namespace VerdantsAscent.Water.Core
                 "How fast the rolls travel downstream. 0 = frozen ridges, higher = faster rolling.",
                 new AcceptableValueRange<float>(0f, 3f)));
 
-            // Round-86 — master surface transparency (drives the shader's
+            // Master surface transparency (drives the shader's
             // _FiresLiquidOpacity). Lower = the water is less opaque/glassy and
             // you see through it more. Foam/crests stay defined.
             Opacity      = cfg.Bind(S, "Water Opacity",  0.85f, new ConfigDescription("Surface opacity — lower = more see-through, less solid sheet", new AcceptableValueRange<float>(0.1f, 1.2f)));

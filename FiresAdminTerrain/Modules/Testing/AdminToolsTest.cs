@@ -13,10 +13,10 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // `admintools_test` (Tools\ADMINTOOLS_TEST.md), Fire 2026-09-28: every terrain tool, FAT's and vanilla's, applied on
+    // `admintools_test`: every terrain tool, FAT's and vanilla's, applied on
     // voxel ground at fixed places, read back here, compared with what the test bot and the server read, checked again
-    // after both walk away and come back (and after a server restart with `verify`), with its cost and a screenshot.
-    // An F5 contract test (Tools\FIRES_F5_TESTS.md), on demand: it edits the world, so it runs on test worlds only unless
+    // after both walk away and come back (and after a server restart with `verify`), with its cost and a SHOT.
+    // An F5 contract test, on demand: it edits the world, so it runs on test worlds only unless
     // `anyworld`, and each run starts by resetting its own cells.
     internal static class AdminToolsTest
     {
@@ -36,6 +36,7 @@ namespace VerdantsAscent.Terrain.Testing
         private const float ArriveSettleSeconds = 4f;
         private const float GroundWaitSeconds = 20f;
         private const float CaseSettleSeconds = 8f;
+        private const float BeforeReadWait = 6f;
         private const float PeerSettleSeconds = 12f;
         private const float PeerRetrySeconds = 1f;
         private const float PeerLateSeconds = 30f;       // how long past the settle a lagging peer is still timed
@@ -48,7 +49,7 @@ namespace VerdantsAscent.Terrain.Testing
         // World Edit Commands' vanilla-terrain reset (the IH "Reset Terrain" tool); without it, the hoe levels the cell
         // back to the generator's height and the cultivator's grass resets its paint.
         private const string TerrainResetCommand = "terrain";
-        // Each water, ice and snow tool's own undo, over a cell ([visual]'s WATER_TOOLS_REFERENCE.md): delete removes the
+        // Each water, ice and snow tool's own undo, over a cell (WATER_TOOLS_REFERENCE.md): delete removes the
         // disks and the pour depth, two mops take what's left of a pour, and each ice and snow kind has its delete.
         private static readonly string[] WaterResetLines =
         {
@@ -65,7 +66,7 @@ namespace VerdantsAscent.Terrain.Testing
         private static readonly AccessTools.FieldRef<ZDOMan, Dictionary<ZDOID, ZDO>> ObjectsById =
             AccessTools.FieldRefAccess<ZDOMan, Dictionary<ZDOID, ZDO>>("m_objectsByID");
 
-        // FDT's runner ends a test that outlives its wait with `<command> stop` (Tools\FIRES_F5_TESTS.md).
+        // FDT's runner ends a test that outlives its wait with `<command> stop`.
         private const string StopArgument = "stop";
 
         private static bool s_registered;
@@ -87,8 +88,8 @@ namespace VerdantsAscent.Terrain.Testing
         {
             internal bool Find, Keep, AnyWorld, CleanOnly, Verify;
             internal Vector3? Near;
-            // 'a' or 'b': both clients run at once at the same places, each its half of the cases (Fire, 2026-09-29: "run both
-            // the player and the bot as bots"); '\0' = one tester runs them all.
+            // 'a' or 'b': both clients run at once at the same places, each its half of the cases (the player and the bot both
+            // run as bots); '\0' = one tester runs them all.
             internal char Split;
             internal HashSet<PlaceKind> Places = new HashSet<PlaceKind>();
             internal HashSet<string> Families = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -209,7 +210,7 @@ namespace VerdantsAscent.Terrain.Testing
                     yield break;
                 }
 
-                // The tester only observes (teleports, edits, reads) and must not die doing it (Fire, 2026-09-29): caves and
+                // The tester only observes (teleports, edits, reads) and must not die doing it: caves and
                 // islands have monsters. Guarded for the whole run; the previous state comes back in the finally.
                 if (Player.m_localPlayer != null && !s_godBefore.HasValue)
                 {
@@ -230,20 +231,20 @@ namespace VerdantsAscent.Terrain.Testing
                     Record(haveBot ? $"the bot answered 'bot follow' ({FatTestBot.BotUid})" : "no bot answered 'bot follow': bot comparisons SKIP");
                 }
 
-                // `find` only picks and saves the places (R69: it went on to run every case); run the cases separately.
+                // `find` only picks and saves the places (e.g. it went on to run every case); run the cases separately.
                 if (options.Find)
                 {
                     var oldSpots = new Dictionary<PlaceKind, Vector3>(spots);
                     yield return FindPlaces(options, spots, cases.Count, options.Near ?? home);
                     AdminToolsPlaces.Save(world, spots);
-                    // A new place has no expectations yet; the old place's would be read at the new one (R76 verify).
+                    // A new place has no expectations yet; the old place's would be read at the new one.
                     SaveExpect(world, new List<Recorded>(), spots.Keys.Where(p => !oldSpots.TryGetValue(p, out Vector3 was) || was != spots[p]));
                     yield break;
                 }
 
                 var recorded = options.Verify ? LoadExpect(world) : new List<Recorded>();
-                // Places whose cells were reset this run: their old expectations are void even when every case SKIPs (R76: R74's
-                // surface list outlived R75's clean and all-SKIP run, and verify read it against the cleaned ground).
+                // Places whose cells were reset this run: their old expectations are void even when every case SKIPs (e.g. an older
+                // surface list outlived a clean and all-SKIP run, and verify read it against the cleaned ground).
                 var reset = new HashSet<PlaceKind>();
                 foreach (PlaceKind place in Enum.GetValues(typeof(PlaceKind)))
                 {
@@ -288,7 +289,7 @@ namespace VerdantsAscent.Terrain.Testing
                         if (arrival != null) { Step(name, Skip, arrival); continue; }
                         if (i >= cells.Count) { Step(name, Skip, $"no room: only {cells.Count} usable cell(s) at this place"); continue; }
                         // Vanilla's heightmap is the ground only on the surface: under an island it is the sea floor, over a cave
-                        // the ground far above. R69's island ih_level raised it ~98 m, from the sea floor up to the island.
+                        // the ground far above. An island ih_level once raised it ~98 m, from the sea floor up to the island.
                         if (place != PlaceKind.Surface && VanillaGround(cases[i].Family))
                         { Step(name, Skip, $"vanilla-ground tool: its ground is not this {Name(place)}'s (surface only)"); continue; }
                         yield return RunCase(place, cases[i], cells[i], haveBot, placeResults);
@@ -363,7 +364,7 @@ namespace VerdantsAscent.Terrain.Testing
             if (haveBot) yield return PlaceBot(place, spot);
             yield return new WaitForSecondsRealtime(ArriveSettleSeconds);
             // Arrived for real: vanilla refuses a teleport within 2 s of the last one and says so only by returning false
-            // (R74: the tester stayed 1.5 km away while the surface run read "nothing" and the bot waited at the place).
+            // (e.g. the tester stayed 1.5 km away while the surface run read "nothing" and the bot waited at the place).
             var at = player != null ? player.transform.position : spot;
             float off = new Vector2(at.x - spot.x, at.z - spot.z).magnitude;
             if (off > ArrivedWithinMetres)
@@ -438,17 +439,17 @@ namespace VerdantsAscent.Terrain.Testing
                 case Heightmap.Biome.DeepNorth: return "SwordMistwalker";
                 case Heightmap.Biome.Meadows:
                 case Heightmap.Biome.None: return null;
-                default: return "SwordIron";   // Ocean under a sky island (R77: a Hatchling there), anything else
+                default: return "SwordIron";   // Ocean under a sky island (e.g. a Hatchling there), anything else
             }
         }
 
-        // The bot follows the tester outside the grid, so the stream sees it watching (Fire, R75); an FDT without
+        // The bot follows the tester outside the grid, so it is seen watching; an FDT without
         // verify-follow (before 1.1.173) or a refusal parks it BotStandOff east of the place, as before.
         private static IEnumerator PlaceBot(PlaceKind place, Vector3 spot)
         {
             var player = Player.m_localPlayer;
-            // The observer carries a weapon for the biome where it will stand: R77's mountain and island runs had it follow
-            // unarmed while wolves and a Hatchling mauled it on stream. It is guarded, not tested; arming it keeps the reads alive.
+            // The observer carries a weapon for the biome where it will stand: on mountain and island runs it followed
+            // unarmed while wolves and a Hatchling mauled it. It is guarded, not tested; arming it keeps the reads alive.
             string weapon = ObserverWeapon(spot);
             if (weapon != null)
             {
@@ -538,6 +539,23 @@ namespace VerdantsAscent.Terrain.Testing
             }
             var points = toolCase.Points(cell);
             float[] before = AdminToolsProbe.ReadLocal(points);
+            // A voxel case's centre reading must exist BEFORE the tool runs. An island/vcarve case (the first
+            // case after the teleport) read nothing before and 57.75 after, and failed "nothing to read": the column was
+            // still loading. Wait for it a little; if it never comes, the case SKIPs instead of failing on a missing reading.
+            if (toolCase.Family == AdminToolsCases.VoxelFamily && before.Length > 0 && float.IsNaN(before[0]))
+            {
+                float readUntil = Time.realtimeSinceStartup + BeforeReadWait;
+                while (float.IsNaN(before[0]) && Time.realtimeSinceStartup < readUntil)
+                {
+                    yield return new WaitForSecondsRealtime(0.25f);
+                    before = AdminToolsProbe.ReadLocal(points);
+                }
+                if (float.IsNaN(before[0]))
+                {
+                    Step(name, Skip, $"nothing to read at the centre before the tool ran ({AdminToolsProbe.Where(cell)}, waited {BeforeReadWait:0} s): the ground there is not loaded on this client");
+                    yield break;
+                }
+            }
             int errorsBefore = AdminToolsProbe.LocalErrors;
             var zdosBefore = Revisions(cell);
 
@@ -582,7 +600,7 @@ namespace VerdantsAscent.Terrain.Testing
 
             // The peers get an edit later than this client: a voxel brush rides its chunk's anchor ZDO (a 0.75 s save debounce,
             // the sync, a 2 Hz re-apply, a remesh), a tile its RPC. Asking them once, right after the local check passed, read
-            // every island voxel case as "the server kept the old surface" (R69); so ask again, re-reading here too, until they
+            // every island voxel case as "the server kept the old surface"; so ask again, re-reading here too, until they
             // agree or PeerSettleSeconds pass.
             List<PeerProbe> peers = null;
             string peerProblem, peerSummary;
@@ -596,7 +614,7 @@ namespace VerdantsAscent.Terrain.Testing
                 if ((verdict == null && peerProblem == null) || Time.realtimeSinceStartup >= peersUntil || s_stop) break;
                 yield return new WaitForSecondsRealtime(PeerRetrySeconds);
             }
-            // Still a FAIL when a peer lags past the settle, but measure by how much: R75's island vfill had the server 0.7 m
+            // Still a FAIL when a peer lags past the settle, but measure by how much: an island vfill had the server 0.7 m
             // low after 12 s, yet it agreed by the persist case minutes later.
             if (verdict == null && peerProblem != null && !s_stop)
             {
@@ -659,7 +677,7 @@ namespace VerdantsAscent.Terrain.Testing
             return problem;
         }
 
-        // Ground to within the brushes' own tolerance; water and ice to within two peers' waves ([visual]); kinds,
+        // Ground to within the brushes' own tolerance; water and ice to within two peers' waves; kinds,
         // flags and counts exactly.
         private static float Tolerance(ProbeKind kind)
         {
@@ -768,10 +786,10 @@ namespace VerdantsAscent.Terrain.Testing
         private const float ReloadSettleSeconds = 20f;
 
         // BEGIN's "~N s": the test runner stops a test after max(30 s, 2 x N), so N must cover the slow parts, not just
-        // the cases (R70: verify took 52 s and clean 38 s against "~18 s" and "~6 s"). Per place: arriving (a teleport, and
+        // the cases (e.g. verify took 52 s and clean 38 s against "~18 s" and "~6 s"). Per place: arriving (a teleport, and
         // a second local hop into a cave or onto an island), the cells' ground wait, then the mode's own work.
         private const float ArriveEstimate = 10f, VerifyPlaceEstimate = 32f, CleanPlaceEstimate = 45f, FindPlaceEstimate = 40f;
-        private const float RunPlaceOverhead = 90f, CaseEstimate = 22f;   // R74: 26 surface cases took 588 s
+        private const float RunPlaceOverhead = 90f, CaseEstimate = 22f;   // 26 surface cases took 588 s
 
         private static float EstimateSeconds(Options options, int cases, bool refused)
         {
@@ -803,7 +821,7 @@ namespace VerdantsAscent.Terrain.Testing
                || family == AdminToolsCases.ToolsFamily;   // the bot's tools run at the surface place: the hoe needs vanilla's ground
 
         // Each changed case names its first changed point, recorded -> read now, so a FAIL tells "back to the ground before the
-        // edit" (the edit never reached the save) from a transient recorded mid-remesh (R69 island persist_unload).
+        // edit" (the edit never reached the save) from a transient recorded mid-remesh.
         private static List<string> Lost(List<ProbePoint> points, List<float> wanted, List<string> owners, float[] mine)
         {
             var lost = new List<string>();
@@ -823,8 +841,8 @@ namespace VerdantsAscent.Terrain.Testing
             => Path.Combine(Paths.BepInExRootPath, ResultsFolder, string.Format(CultureInfo.InvariantCulture, ExpectFilePattern, world));
 
         // Replaces only the places this run recorded, keeping every other place's expectations: a run of one place (or one
-        // whose cases all SKIPped) used to rewrite the file and wipe the rest (R72's all-skip surface run erased the cave's
-        // and the island's, so R73's verify had nothing to compare).
+        // whose cases all SKIPped) used to rewrite the file and wipe the rest (an all-skip surface run erased the cave's
+        // and the island's, so the next verify had nothing to compare).
         // Replaces the expectations of every place in `recorded` and of every place in `voided` (reset or re-found: its old
         // expectations no longer describe its ground); other places keep theirs.
         private static void SaveExpect(string world, List<Recorded> recorded, IEnumerable<PlaceKind> voided = null)

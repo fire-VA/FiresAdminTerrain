@@ -46,7 +46,7 @@ namespace VerdantsAscent.Water.Core
         private static readonly int s_settledLevelHash = "va_water_settled_level".GetStableHashCode();
         private static readonly int s_isPondModeHash = "va_water_pond_mode".GetStableHashCode();
         private static readonly int s_waterDisksHash = "va_water_disks".GetStableHashCode();
-        // Round-56: gelled-volume flag — the combiner's surface grid is
+        // Gelled-volume flag: the combiner's surface grid is
         // authoritative (settled water volume), regen must never recompute
         // it from the disk list. Independent key: absent on old anchors
         // reads as false, no version bump needed.
@@ -189,14 +189,19 @@ namespace VerdantsAscent.Water.Core
         private static System.Collections.Generic.Dictionary<ZDOID, WaterMeshCombinerAnchor> s_anchorsByZdoId = new System.Collections.Generic.Dictionary<ZDOID, WaterMeshCombinerAnchor>();
 
         // Track anchors by approximate position to detect ZDO duplicates at similar positions
-        private static System.Collections.Generic.Dictionary<Vector2Int, WaterMeshCombinerAnchor> s_anchorsByPosition = new System.Collections.Generic.Dictionary<Vector2Int, WaterMeshCombinerAnchor>();
+        private static System.Collections.Generic.Dictionary<Vector3Int, WaterMeshCombinerAnchor> s_anchorsByPosition = new System.Collections.Generic.Dictionary<Vector3Int, WaterMeshCombinerAnchor>();
+
+        // The key was XZ only, so a sky-island pool's anchor and the
+        // ground water's anchor in the same column read as duplicates and one was DestroyPermanently'd. Height now counts,
+        // in 8 m bands: two copies of one water body share a band, an island and the ground below never do.
+        private const float PositionKeyHeightBand = 8f;
 
         /// <summary>
-        /// Gets a position key for deduplication (rounds to 1m grid).
+        /// Gets a position key for deduplication (1 m grid across, 8 m bands up).
         /// </summary>
-        private static Vector2Int GetPositionKey(Vector3 pos)
+        private static Vector3Int GetPositionKey(Vector3 pos)
         {
-            return new Vector2Int(Mathf.RoundToInt(pos.x), Mathf.RoundToInt(pos.z));
+            return new Vector3Int(Mathf.RoundToInt(pos.x), Mathf.RoundToInt(pos.y / PositionKeyHeightBand), Mathf.RoundToInt(pos.z));
         }
 
         private void Start()
@@ -230,7 +235,7 @@ namespace VerdantsAscent.Water.Core
             // CRITICAL DEDUPLICATION #2: Check if we already have an anchor at this POSITION
             // This handles the case where multiple different ZDOs exist at similar positions (legacy duplicates)
             Vector3 myPos = RealWaterPosition;
-            Vector2Int posKey = GetPositionKey(myPos);
+            Vector3Int posKey = GetPositionKey(myPos);
 
             if (s_anchorsByPosition.TryGetValue(posKey, out var existingAnchorByPos) && existingAnchorByPos != null && existingAnchorByPos != this)
             {
@@ -387,7 +392,7 @@ namespace VerdantsAscent.Water.Core
 
             // Remove from position tracking
             Vector3 myPos = _realWaterPosition.sqrMagnitude > 0.01f ? _realWaterPosition : transform.position;
-            Vector2Int posKey = GetPositionKey(myPos);
+            Vector3Int posKey = GetPositionKey(myPos);
             if (s_anchorsByPosition.TryGetValue(posKey, out var trackedByPos) && trackedByPos == this)
             {
                 s_anchorsByPosition.Remove(posKey);
@@ -525,10 +530,10 @@ namespace VerdantsAscent.Water.Core
                 zdo.Set(s_realPositionHash, _combiner.transform.position);
 
                 // Save common properties
-                zdo.Set(s_liquidTypeHash, (int)_combiner.LiquidType);
-                zdo.Set(s_customLiquidTypeHash, (int)_combiner.CustomLiquidType);
+                zdo.Set(s_liquidTypeHash, (int)(_combiner.SeasonalIce ? CustomLiquidType.Water.ToVanillaLiquidType() : _combiner.LiquidType));
+                zdo.Set(s_customLiquidTypeHash, (int)_combiner.SavedCustomLiquidType);   // seasonal ice saves as water
                 zdo.Set(s_waveIntensityHash, _combiner.WaveIntensity);
-                // Round-56: gelled volumes restore grid-authoritative.
+                // Gelled volumes restore grid-authoritative.
                 zdo.Set(s_isGelledHash, _combiner.IsGelled);
 
                 // CRITICAL: Save water disks FIRST - this is the source of truth
@@ -1036,7 +1041,7 @@ namespace VerdantsAscent.Water.Core
             _combiner.LiquidType = (LiquidType)zdo.GetInt(s_liquidTypeHash, 0);
             _combiner.CustomLiquidType = (CustomLiquidType)zdo.GetInt(s_customLiquidTypeHash, 0);
             _combiner.WaveIntensity = zdo.GetFloat(s_waveIntensityHash, 0.5f);
-            // Round-56: set the gelled flag BEFORE RestoreFromAnchorData /
+            // Set the gelled flag BEFORE RestoreFromAnchorData /
             // any regen so a later MarkDirty routes to the grid rebuild
             // instead of recomputing the settled surface from disks.
             // Old anchors have no key → false → unchanged behaviour.
@@ -1493,7 +1498,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private static System.Collections.Generic.HashSet<int> s_convertedInstanceIds = new System.Collections.Generic.HashSet<int>();
 
-        // Phase F (2026-05-25): CheckAndConvertToWaterAnchor(DirtFloorController)
+        // CheckAndConvertToWaterAnchor(DirtFloorController)
         // legacy fallback removed. With the DirtFloorController class deleted
         // there are no longer any objects spawning under that prefab to
         // convert. Water anchors are now created exclusively via the

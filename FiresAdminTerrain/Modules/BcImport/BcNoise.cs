@@ -1,190 +1,155 @@
-using System.Collections.Generic;
+using System;
 using UnityEngine;
 
 namespace VerdantsAscent.Terrain.BcImport
 {
-    // BetterContinents base-height noise, written against BC 0.7.31 SOURCE (Noise.cs, BlendOperations.cs) - a stack of
-    // layers, each a normalised FastNoiseLite sample blended onto the running value and optionally masked by a
-    // second sample. Every constant and every order of operations here is load-bearing for bit parity.
-    // Spec: Docs/BETTERCONTINENTS_IMPORT.md
-    internal static class BcBlend
+    // The layered base-height noise a BetterContinents world may carry (BcWorldSettings.BaseHeightNoise), evaluated so a
+    // converted world's ground matches the map it was made with. What a layer does, as the saved settings describe it:
+    //  - a FastNoiseLite field, its input warped by a second FastNoiseLite (a default one when the layer names none);
+    //  - its raw output rescaled to 0..1 by the range a 100x100 sweep across the whole world finds, so the size and the
+    //    seed shape the scaling too;
+    //  - then optional invert, smooth threshold, remap into a range, hard threshold and opacity, in that order;
+    //  - combined with the height so far by one of the usual image blend modes, and optionally faded in by a mask field.
+    // The order of every float operation is kept as the format needs it: the BcRefTest proof compares this ground with the
+    // original mod's to the millimetre. Spec: Docs/BETTERCONTINENTS_IMPORT.md
+    internal sealed class BcNoiseField
     {
-        private const int Normal = 0;
-        private const int Darken = 1;
-        private const int Multiply = 2;
-        private const int ColorBurn = 3;
-        private const int LinearBurn = 4;
-        private const int Lighten = 5;
-        private const int Screen = 6;
-        private const int ColorDodge = 7;
-        private const int LinearDodge = 8;
-        private const int Overlay = 9;
-        private const int HardLight = 10;
-        private const int SoftLight = 11;
-        private const int VividLight = 12;
-        private const int LinearLight = 13;
-        private const int PinLight = 14;
-        private const int HardMix = 15;
-        private const int Difference = 16;
-        private const int Exclusion = 17;
-        private const int Subtract = 18;
-        private const int Divide = 19;
+        private const int SweepSide = 100;
+        private const int WarpSeedShift = 127;
+        private const int MaskSeedFactor = 107;
+        private const int LayerSeedFactor = 31;
+        private const int LayerSeedBase = 3;
 
-        public static float Apply(float a, float b, int mode)
+        // One FastNoiseLite source with its warp, its 0..1 rescale and the post-processing its settings ask for.
+        private sealed class Channel
         {
-            switch (mode)
+            internal FastNoiseLite Source;
+            internal FastNoiseLite Warp;
+            internal BcNoiseSettings Shape;
+            internal float Lift;    // added to a raw sample before the rescale
+            internal float Gain;    // the rescale factor
+
+            internal float Sample(float x, float y)
             {
-                case Normal: return b;
-                case Darken: return Mathf.Min(a, b);
-                case Multiply: return a * b;
-                case ColorBurn: return 1f - (1f - a) / b;
-                case LinearBurn: return a + b - 1f;
-                case Lighten: return Mathf.Max(a, b);
-                case Screen: return 1f - (1f - a) * (1f - b);
-                case ColorDodge: return a / (1f - b);
-                case LinearDodge: return a + b;
-                case Overlay: return a > 0.5f ? 1f - 2f * (1f - a) * (1f - b) : 2f * a * b;
-                case HardLight: return b > 0.5f ? 1f - 2f * (1f - a) * (1f - b) : 2f * a * b;
-                case SoftLight: return (1f - 2f * b) * a * a + 2f * b * a;
-                case VividLight: return b > 0.5f ? a / (2f * (1f - b)) : 1f - (1f - a) / (2f * b);
-                case LinearLight: return a + 2f * b - 1f;
-                case PinLight: return a < 2f * b - 1f ? 2f * b - 1f : a > 2f * b ? 2f * b : a;
-                case HardMix: return b < 1f - a ? 0f : 1f;
-                case Difference: return Mathf.Abs(a - b);
-                case Exclusion: return a + b - 2f * a * b;
-                case Subtract: return a - b;
-                case Divide: return a / b;
-                default: return b;
+                y *= Shape.Aspect;
+                Warp.DomainWarp(ref x, ref y);
+                float v = (Source.GetNoise(x, y) + Lift) * Gain;
+                if (Shape.Invert) v = 1f - v;
+                if (Shape.UseSmoothThreshold) v = Mathf.InverseLerp(Shape.SmoothThresholdStart, Shape.SmoothThresholdEnd, v);
+                if (Shape.UseRange) v = Mathf.Lerp(Shape.RangeStart, Shape.RangeEnd, v);
+                if (Shape.UseThreshold) v = v < Shape.Threshold ? 0f : 1f;
+                if (Shape.UseOpacity) v *= Shape.Opacity;
+                return v;
             }
         }
-    }
 
-    internal sealed class BcWarpedNoise
-    {
-        private const int NormalisationSamples = 100;
-        private const int WarpSeedOffset = 127;
+        private readonly Channel[] _fields;
+        private readonly Channel[] _masks;      // null entries: that layer is unmasked
+        private readonly int[] _modes;
 
-        private readonly FastNoiseLite _noise;
-        private readonly FastNoiseLite _warp;
-        private readonly BcNoiseSettings _settings;
-        private readonly float _add;
-        private readonly float _mul;
-
-        /// <summary>The normalisation sweep is part of the output: BC samples a 100x100 grid across the whole
-        /// world to find this layer's range, then rescales every later sample into 0..1 with it. Change the world
-        /// size or the seed and the scaling changes with them.</summary>
-        public BcWarpedNoise(float size, int seed, BcNoiseSettings settings, BcNoiseSettings warpSettings, float globalScale)
+        public BcNoiseField(float worldSize, int worldSeed, BcNoiseStack stack, float globalScale)
         {
-            _settings = settings;
-            _noise = CreateNoise(settings, seed, globalScale);
-            _warp = warpSettings != null
-                ? CreateNoise(warpSettings, seed + WarpSeedOffset, globalScale)
-                : new FastNoiseLite();
-
-            float min = float.MaxValue;
-            float max = float.MinValue;
-            for (int y = 0; y < NormalisationSamples; y++)
+            int count = stack?.Layers?.Count ?? 0;
+            _fields = new Channel[count];
+            _masks = new Channel[count];
+            _modes = new int[count];
+            for (int i = 0; i < count; i++)
             {
-                float yp = (y / (float)NormalisationSamples - 0.5f) * size;
-                for (int x = 0; x < NormalisationSamples; x++)
+                BcNoiseLayer layer = stack.Layers[i];
+                int layerSeed = worldSeed * LayerSeedFactor * (i + LayerSeedBase);
+                _fields[i] = Build(layer.Noise, layer.NoiseWarp, layerSeed, worldSize, globalScale);
+                _masks[i] = layer.Mask == null ? null : Build(layer.Mask, layer.MaskWarp, layerSeed * MaskSeedFactor, worldSize, globalScale);
+                _modes[i] = layer.Noise.BlendMode;
+            }
+        }
+
+        public int LayerCount => _fields.Length;
+
+        // The running height through every layer in turn.
+        public float Apply(float x, float y, float height)
+        {
+            for (int i = 0; i < _fields.Length; i++)
+            {
+                float mixed = Mix(_modes[i], height, _fields[i].Sample(x, y));
+                height = _masks[i] == null ? mixed : Mathf.Lerp(height, mixed, _masks[i].Sample(x, y));
+            }
+            return height;
+        }
+
+        private static Channel Build(BcNoiseSettings shape, BcNoiseSettings warpShape, int seed, float worldSize, float globalScale)
+        {
+            var channel = new Channel
+            {
+                Shape = shape,
+                Source = Configure(shape, seed, globalScale),
+                Warp = warpShape != null ? Configure(warpShape, seed + WarpSeedShift, globalScale) : new FastNoiseLite(),
+            };
+            // The rescale comes from the extremes of a regular sweep over the world square (raw source, no warp).
+            float lowest = float.MaxValue, highest = float.MinValue;
+            for (int row = 0; row < SweepSide; row++)
+            {
+                float sy = (row / (float)SweepSide - 0.5f) * worldSize;
+                for (int col = 0; col < SweepSide; col++)
                 {
-                    float xp = (x / (float)NormalisationSamples - 0.5f) * size;
-                    float sample = _noise.GetNoise(xp, yp);
-                    min = Mathf.Min(min, sample);
-                    max = Mathf.Max(max, sample);
+                    float sx = (col / (float)SweepSide - 0.5f) * worldSize;
+                    float raw = channel.Source.GetNoise(sx, sy);
+                    lowest = Mathf.Min(lowest, raw);
+                    highest = Mathf.Max(highest, raw);
                 }
             }
-            _add = -min;
-            _mul = max != min ? 1 / (max - min) : 0f;
+            channel.Lift = -lowest;
+            channel.Gain = highest != lowest ? 1 / (highest - lowest) : 0f;
+            return channel;
         }
 
-        public float GetBlendedNoise(float x, float y, float baseNoise) =>
-            BcBlend.Apply(baseNoise, GetNoise(x, y), _settings.BlendMode);
-
-        /// <summary>The warp runs even when the layer has no warp settings: BC falls back to a default
-        /// FastNoiseLite and still calls DomainWarp on it, so the default amplitude is part of the output.</summary>
-        public float GetNoise(float x, float y)
+        private static FastNoiseLite Configure(BcNoiseSettings s, int seed, float globalScale)
         {
-            y *= _settings.Aspect;
-            _warp.DomainWarp(ref x, ref y);
-
-            float value = (_noise.GetNoise(x, y) + _add) * _mul;
-            if (_settings.Invert) value = 1f - value;
-            if (_settings.UseSmoothThreshold)
-                value = Mathf.InverseLerp(_settings.SmoothThresholdStart, _settings.SmoothThresholdEnd, value);
-
-            float ranged = _settings.UseRange
-                ? Mathf.Lerp(_settings.RangeStart, _settings.RangeEnd, value)
-                : value;
-            if (_settings.UseThreshold)
-                ranged = ranged < _settings.Threshold ? 0f : 1f;
-            return ranged * (_settings.UseOpacity ? _settings.Opacity : 1f);
+            var n = new FastNoiseLite(seed);
+            n.SetNoiseType((FastNoiseLite.NoiseType)s.NoiseType);
+            n.SetFrequency(s.Frequency / globalScale);
+            n.SetFractalType((FastNoiseLite.FractalType)s.FractalType);
+            n.SetFractalOctaves(s.FractalOctaves);
+            n.SetFractalLacunarity(s.FractalLacunarity);
+            n.SetFractalGain(s.FractalGain);
+            n.SetFractalWeightedStrength(s.FractalWeightedStrength);
+            n.SetFractalPingPongStrength(s.FractalPingPongStrength);
+            n.SetCellularDistanceFunction((FastNoiseLite.CellularDistanceFunction)s.CellularDistanceFunction);
+            n.SetCellularReturnType((FastNoiseLite.CellularReturnType)s.CellularReturnType);
+            n.SetCellularJitter(s.CellularJitter);
+            n.SetDomainWarpType((FastNoiseLite.DomainWarpType)s.DomainWarpType);
+            n.SetDomainWarpAmp(s.DomainWarpAmp);
+            return n;
         }
 
-        private static FastNoiseLite CreateNoise(BcNoiseSettings settings, int seed, float globalScale)
+        // The standard image blend formulas (base = what is below, top = the layer), by the mode number the format stores:
+        // 0 normal, 1 darken, 2 multiply, 3 colour burn, 4 linear burn, 5 lighten, 6 screen, 7 colour dodge, 8 linear dodge,
+        // 9 overlay, 10 hard light, 11 soft light, 12 vivid light, 13 linear light, 14 pin light, 15 hard mix, 16 difference,
+        // 17 exclusion, 18 subtract, 19 divide. An unknown mode shows the layer as it is.
+        private static readonly Func<float, float, float>[] BlendFormulas =
         {
-            var noise = new FastNoiseLite(seed);
-            noise.SetNoiseType((FastNoiseLite.NoiseType)settings.NoiseType);
-            noise.SetFrequency(settings.Frequency / globalScale);
-            noise.SetFractalType((FastNoiseLite.FractalType)settings.FractalType);
-            noise.SetFractalOctaves(settings.FractalOctaves);
-            noise.SetFractalLacunarity(settings.FractalLacunarity);
-            noise.SetFractalGain(settings.FractalGain);
-            noise.SetFractalWeightedStrength(settings.FractalWeightedStrength);
-            noise.SetFractalPingPongStrength(settings.FractalPingPongStrength);
-            noise.SetCellularDistanceFunction((FastNoiseLite.CellularDistanceFunction)settings.CellularDistanceFunction);
-            noise.SetCellularReturnType((FastNoiseLite.CellularReturnType)settings.CellularReturnType);
-            noise.SetCellularJitter(settings.CellularJitter);
-            noise.SetDomainWarpType((FastNoiseLite.DomainWarpType)settings.DomainWarpType);
-            noise.SetDomainWarpAmp(settings.DomainWarpAmp);
-            return noise;
-        }
-    }
+            (lo, hi) => hi,
+            (lo, hi) => Mathf.Min(lo, hi),
+            (lo, hi) => lo * hi,
+            (lo, hi) => 1f - (1f - lo) / hi,
+            (lo, hi) => lo + hi - 1f,
+            (lo, hi) => Mathf.Max(lo, hi),
+            (lo, hi) => 1f - (1f - lo) * (1f - hi),
+            (lo, hi) => lo / (1f - hi),
+            (lo, hi) => lo + hi,
+            (lo, hi) => lo > 0.5f ? 1f - 2f * (1f - lo) * (1f - hi) : 2f * lo * hi,
+            (lo, hi) => hi > 0.5f ? 1f - 2f * (1f - lo) * (1f - hi) : 2f * lo * hi,
+            (lo, hi) => (1f - 2f * hi) * lo * lo + 2f * hi * lo,
+            (lo, hi) => hi > 0.5f ? lo / (2f * (1f - hi)) : 1f - (1f - lo) / (2f * hi),
+            (lo, hi) => lo + 2f * hi - 1f,
+            (lo, hi) => lo < 2f * hi - 1f ? 2f * hi - 1f : lo > 2f * hi ? 2f * hi : lo,
+            (lo, hi) => hi < 1f - lo ? 0f : 1f,
+            (lo, hi) => Mathf.Abs(lo - hi),
+            (lo, hi) => lo + hi - 2f * lo * hi,
+            (lo, hi) => lo - hi,
+            (lo, hi) => lo / hi,
+        };
 
-    internal sealed class BcNoiseLayerRuntime
-    {
-        private const int MaskSeedFactor = 107;
-
-        private readonly BcWarpedNoise _noise;
-        private readonly BcWarpedNoise _mask;
-
-        public BcNoiseLayerRuntime(float size, int seed, BcNoiseLayer layer, float globalScale)
-        {
-            _noise = new BcWarpedNoise(size, seed, layer.Noise, layer.NoiseWarp, globalScale);
-            _mask = layer.Mask != null
-                ? new BcWarpedNoise(size, seed * MaskSeedFactor, layer.Mask, layer.MaskWarp, globalScale)
-                : null;
-        }
-
-        public float Apply(float wx, float wy, float inValue)
-        {
-            float blended = _noise.GetBlendedNoise(wx, wy, inValue);
-            return _mask == null ? blended : Mathf.Lerp(inValue, blended, _mask.GetNoise(wx, wy));
-        }
-    }
-
-    internal sealed class BcNoiseStackRuntime
-    {
-        private const int LayerSeedFactor = 31;
-        private const int LayerSeedOffset = 3;
-
-        private readonly List<BcNoiseLayerRuntime> _layers = new List<BcNoiseLayerRuntime>();
-
-        public BcNoiseStackRuntime(float size, int seed, BcNoiseStack stack, float globalScale)
-        {
-            if (stack?.Layers == null) return;
-            for (int index = 0; index < stack.Layers.Count; index++)
-                _layers.Add(new BcNoiseLayerRuntime(size, seed * LayerSeedFactor * (index + LayerSeedOffset),
-                    stack.Layers[index], globalScale));
-        }
-
-        public int LayerCount => _layers.Count;
-
-        public float Apply(float x, float y, float inValue)
-        {
-            float value = inValue;
-            foreach (BcNoiseLayerRuntime layer in _layers) value = layer.Apply(x, y, value);
-            return value;
-        }
+        private static float Mix(int mode, float under, float layer)
+            => mode >= 0 && mode < BlendFormulas.Length ? BlendFormulas[mode](under, layer) : layer;
     }
 }

@@ -5,8 +5,8 @@ using VerdantsAscent.Water.Core;
 namespace VerdantsAscent.Terrain.BcImport
 {
     // Times vanilla's world pre-generation (lakes, rivers, streams, Deep North streams), which WorldGenerator's constructor
-    // runs inside WorldGenerator.Initialize, so inside ZNet.RPC_PeerInfo on every join. FDT's join ledger could only call it
-    // "716 ms in this call, outside every timed child" (R5). One line per world load, with how many base heights were
+    // runs inside WorldGenerator.Initialize, so inside ZNet.RPC_PeerInfo on every join. A join timing ledger could only call it
+    // "716 ms in this call, outside every timed child". One line per world load, with how many base heights were
     // sampled through the BetterContinents generator meanwhile, which says whether that sampling is FAT's to speed up.
     internal static class PregenerationTiming
     {

@@ -16,8 +16,7 @@ namespace VerdantsAscent.Terrain.Zones
     // EMPTY world and save over the real one; when another live Valheim process on this machine already runs it; or when a
     // dedicated server's save does not load, where vanilla would create a NEW world under its name. Before loading, a save
     // folder left with several generations by a crash is sorted down to its newest complete one (FiresSaveGenerations).
-    // FAT's park and zone writes stand down for a refused load. Tools\WORLD_LOSS_20260927_RPGWORLD_CHUNKS.md,
-    // Tools\SAVE_SAFETY_AUDIT.md
+    // FAT's park and zone writes stand down for a refused load.
     internal static class FiresWorldLoadGuard
     {
         private const string LockSuffix = ".lock";
@@ -42,6 +41,9 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly HashSet<string> s_listWarned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private static string s_ownedLockPath;
+
+        // This process holds the loaded world's lock.
+        internal static bool OwnsLock => s_ownedLockPath != null;
         private static string s_pendingRefusalWorld;
         private static string s_pendingRefusal;
 
@@ -154,7 +156,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         // A dedicated server's first save lookup is World.HaveWorld / SaveSystem.TryGetSaveByName on its -world, and vanilla's
         // SaveCollection.Reload behind it (KeepOnlyNewest) DELETES every generation but the newest with all four main files.
-        // The crash series (2026-09-29, OPEN_BUGS #44) caught that lookup running before the sort, so nothing was set aside.
+        // If that lookup ran before the sort, nothing would be set aside.
         // This runs first, from the GetCreateWorld prefix.
         internal static void BeforeFirstLookup(string name)
         {

@@ -39,7 +39,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // v2 files load with Biome[] empty; TerrainTile.Initialize promotes
         // BiomeOverride into the per-vertex array if no per-vertex data
         // exists (full-tile-uniform upgrade), so v2 saves visually match.
-        // v4 (2026-05-26) added FloatingIslandMode bool — toggles "auto-round
+        // v4 added FloatingIslandMode bool — toggles "auto-round
         // underside when ≥50m above terrain" vs "always stretch underside
         // down to terrain" (default false = stretch). v3 files load with
         // FloatingIslandMode=false so the existing visual is preserved.
@@ -318,7 +318,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // 0 entries fall back to vanilla biome at query time.
         public ushort[] Biome;
         public bool[] BiomeModified;
-        // v4 (2026-05-26): per-tile floating-island mode toggle.
+        // v4: per-tile floating-island mode toggle.
         // false (default, matches v3 saves) → underside stretches down to
         //   meet vanilla terrain no matter how high the top sits.
         // true → underside auto-rounds into a domed teardrop bottom when

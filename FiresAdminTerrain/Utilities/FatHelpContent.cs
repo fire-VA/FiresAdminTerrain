@@ -37,7 +37,7 @@ namespace VerdantsAscent.Utilities
             w.Divider();
 
             w.SubHeader("Three Ways To Drive It");
-            w.Bullet("Hammer V-tools - eight voxel and water tools on the Hammer's Misc tab, for admins. Nothing " +
+            w.Bullet("V-tools - eight voxel and water tools on the Chaos Hammer (Voxel category), for admins. Nothing " +
                 "else needed.");
             w.Bullet("Console commands (F5) - the va_*, place_*, ice_*, paint_* and fires_* commands below. Most " +
                 "need devcommands; on a dedicated server an admin needs a mod like ServerDevcommands to run them.");
@@ -46,7 +46,7 @@ namespace VerdantsAscent.Utilities
             w.Divider();
 
             w.SubHeader("Before You Start");
-            w.Bullet("[VoxelTerrain World] Terrain Mode decides what the mod does to the world. See " +
+            w.Bullet("[Voxel Terrain - World] Terrain Mode decides what the mod does to the world. See " +
                 "Terrain Mode & New Worlds.");
             w.Bullet("va_tile_undo / va_tile_redo undo terrain brushes (100 steps, on this machine). Other edits " +
                 "have no undo, so back up the world before bulk commands.");
@@ -55,19 +55,18 @@ namespace VerdantsAscent.Utilities
         private static void BuildTerrainMode(FiresCore.Help.HelpContentWriter w)
         {
             w.AdminHeader("Terrain Mode & New Worlds");
-            w.Paragraph("[VoxelTerrain World] Terrain Mode is the master switch, and the server's value applies " +
+            w.Paragraph("[Voxel Terrain - World] Terrain Mode is the master switch, and the server's value applies " +
                 "to everyone.");
             w.Bullet("Off (default) - vanilla terrain. Brushes, water, ice and snow still work; voxel tools " +
                 "only add shapes.");
             w.Bullet("ZoneReplace - vanilla ground until you edit it: a zone becomes voxel terrain on its first " +
                 "voxel brush or pickaxe dig.");
-            w.Bullet("PlacedOnly - currently the same as ZoneReplace.");
             w.Bullet("FullVoxel - every nearby zone is voxel terrain with generated caves, caverns and " +
                 "sinkholes. Needed for FIRES worlds, sky islands and skylands.");
             w.Divider();
 
             w.SubHeader("Rivers & Lakes On Existing Worlds");
-            w.Bullet("In ZoneReplace and PlacedOnly on vanilla-generated worlds, Hydrology Enabled and Hydrology " +
+            w.Bullet("In ZoneReplace on vanilla-generated worlds, Hydrology Enabled and Hydrology " +
                 "Place Water (both on) carve winding rivers and dug-out lakes with beaches, and remove the trees " +
                 "and bushes standing in the new water. Turn both off if you only want tunnels.");
             w.Bullet("Shape them with River Threshold, River Width Min / Max, River Meander and Coarse Grid Bank " +
@@ -88,8 +87,8 @@ namespace VerdantsAscent.Utilities
         private static void BuildVTools(FiresCore.Help.HelpContentWriter w)
         {
             w.AdminHeader("Hammer V-Tools");
-            w.Paragraph("On the Hammer's Misc tab, for admins only. Selecting a tool never places a piece. Hide " +
-                "them with [VoxelTerrain (P0 prototype)] Show tools in build menu.");
+            w.Paragraph("On the Chaos Hammer, Voxel category, for admins only. Selecting a tool never places a piece. Hide " +
+                "them with [Voxel Terrain] Show tools in build menu.");
             w.Divider();
 
             w.SubHeader("Tools");
@@ -107,7 +106,7 @@ namespace VerdantsAscent.Utilities
             w.Bullet("Mouse wheel - brush size (0.5 to 32 m); the camera stops zooming while a V-tool is selected");
             w.Bullet("PgUp / PgDn - cylinder height (1 m steps, up to 24 m), or the water level for the water " +
                 "tools (0.5 m steps)");
-            w.Bullet("Hold left click and drag to apply continuously. [VoxelTerrain World] Brush Draw Speed sets " +
+            w.Bullet("Hold left click and drag to apply continuously. [Voxel Terrain - World] Brush Draw Speed sets " +
                 "the pace.");
         }
 
@@ -171,9 +170,9 @@ namespace VerdantsAscent.Utilities
             w.Bullet("Chests restock 3-10 in-game days after they are looted, adding a fresh roll to what is left. " +
                 "Stones, bones, crystals and other pickables that never regrow in vanilla come back after their own " +
                 "3-10 day roll, and so do slain cave creatures. Nothing restocks while a player is nearby.");
-            w.Bullet("Shape: [VoxelTerrain World] Generate Caves and the Cave*, Cavern* and Sinkhole* keys.");
-            w.Bullet("Content: [VoxelTerrain Cave Content] for chances, restock days and monsters, and " +
-                "[VoxelTerrain Cave Content <Biome>] for each biome's prefab lists.");
+            w.Bullet("Shape: [Voxel Terrain - World] Generate Caves and the Cave*, Cavern* and Sinkhole* keys.");
+            w.Bullet("Content: [Voxel Terrain - Cave content] for chances, restock days and monsters, and " +
+                "[Voxel Terrain - Cave content <Biome>] for each biome's prefab lists.");
             w.Divider();
 
             w.SubHeader("Diagnostics");
@@ -269,11 +268,11 @@ namespace VerdantsAscent.Utilities
             w.Divider();
 
             w.SubHeader("Opening Land");
-            w.Bullet("A Meadows Chunk Generator stands next to the start and can't be destroyed. Feed it any two " +
-                "different materials, 50 of each, for a Meadows Chunk Seed. It takes materials from every biome " +
-                "and burns no fuel.");
+            w.Bullet("A Chunk Generator stands next to the start and can't be destroyed. Each load is 100 materials: " +
+                "they make 2 plain Chunk Seeds, or 1 biome seed when you pick a biome recipe at the hopper (biome " +
+                "recipes unlock as you beat bosses). It takes materials from every biome and burns no fuel.");
             w.Bullet("Your first Chunk Hammer is in a chest in the start cave, inside the rocky hill beside the " +
-                "StartTemple; the cave mouth faces the temple. A world without a start cave (a converted world) hides " +
+                "StartTemple; the cave mouth faces the temple. A world without a start cave (one imported from another generator, e.g. a Gaea or Better Continents world) hides " +
                 "the chest instead: in a cave under the start if it has one, otherwise above ground among the trees and " +
                 "stones 24-72 m from the temple. Once you have held one, you can craft more with the " +
                 "same recipe as the build hammer. Neither the chest nor the starter generator can be broken; once the " +
@@ -344,7 +343,8 @@ namespace VerdantsAscent.Utilities
                 "_caves.txt, _hammer.txt, .mode, _baked.bin) along with the world save. The save also keeps a copy of " +
                 "the open zones, so a world moved without them stays one zone at a time, but skylands, cave dressing " +
                 "and the first-hammer chest keep their records in those files.");
-            w.Bullet("A zone can never be closed again, and existing worlds can't be converted yet.");
+            w.Bullet("A zone can never be closed again. To turn an existing world into one zone at a time, use Convert... in the " +
+                "world list: it copies the world first and converts the copy, so the original stays as it was.");
         }
 
         private static void BuildWorldgen(FiresCore.Help.HelpContentWriter w)
@@ -352,7 +352,8 @@ namespace VerdantsAscent.Utilities
             w.AdminHeader("FIRES Worlds & Sky Islands");
             w.Paragraph("FIRES worlds replace Valheim's terrain generation with their own continents, erosion, " +
                 "climate-driven biomes, carved rivers, lakes, volcanoes and sky islands. They need Terrain Mode = " +
-                "FullVoxel, and apply to worlds named Fires..., worlds you chose FIRES terrain for at creation, " +
+                "FullVoxel, and apply to worlds named Fires..., worlds created with Terrain generator = Fires in the " +
+                "New World panel, " +
                 "and worlds with a baked cache.");
             w.AdminDivider();
 
@@ -384,10 +385,11 @@ namespace VerdantsAscent.Utilities
         private static void BuildConfig(FiresCore.Help.HelpContentWriter w)
         {
             w.AdminHeader("Key Config Levers");
-            w.Paragraph("Everything is in the Fires config window (F8). These are the settings that matter most.");
+            w.Paragraph("Everything is in the config window: F1 › Config settings, or Mod Settings in the pause menu " +
+                "(most keys are under Show Advanced). These are the settings that matter most.");
             w.AdminDivider();
 
-            w.SubHeader("Performance (VoxelTerrain Performance)");
+            w.SubHeader("Performance (Voxel Terrain - Performance)");
             w.Bullet("Vegetation density scale (0.7) and Clutter density scale (0.55) - below vanilla by default: " +
                 "fewer trees and bushes in newly generated zones, and less grass. Set both to 1 for vanilla.");
             w.Bullet("Grass render distance (0 = vanilla) and Terrain casts shadows - big frame-rate levers");
@@ -407,7 +409,7 @@ namespace VerdantsAscent.Utilities
             w.SubHeader("Other");
             w.Bullet("03 - Water Engine / 10 OwnWavePhysics - FAT runs the wave clock (identical to vanilla); " +
                 "turn it off to hand waves back to vanilla");
-            w.Bullet("07 - Distant Paint / 01 Enabled - paint and river beds stay visible on distant terrain");
+            w.Bullet("02 - Terrain / 02 Distant paint - paint and river beds stay visible on distant terrain");
         }
     }
 }

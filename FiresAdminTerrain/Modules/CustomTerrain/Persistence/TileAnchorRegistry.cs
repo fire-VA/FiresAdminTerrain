@@ -19,7 +19,7 @@ namespace VerdantsAscent.Terrain.Persistence
         private static readonly Dictionary<Vector2i, TileAnchor> _byIndex
             = new Dictionary<Vector2i, TileAnchor>();
 
-        // Every live anchor per tile, duplicates included (OPEN_BUGS #47): the heal needs all of them, and when the
+        // Every live anchor per tile, duplicates included: the heal needs all of them, and when the
         // registered one unloads another takes its place instead of the server spawning a third.
         private static readonly Dictionary<Vector2i, List<TileAnchor>> _allByIndex
             = new Dictionary<Vector2i, List<TileAnchor>>();
@@ -207,10 +207,10 @@ namespace VerdantsAscent.Terrain.Persistence
         }
     }
 
-    // The duplicate-anchor heal (OPEN_BUGS #47). Several anchors for one tile each hold part of its edits (a multiplayer race
+    // The duplicate-anchor heal. Several anchors for one tile each hold part of its edits (a multiplayer race
     // before FAT 0.2.644) and a reload shows only one of them. Per tile, N-way: the anchor with the lowest ZDOID is kept, so
     // every peer picks the same one, and each vertex takes the MAJORITY value among the anchors that edited it, ties going to
-    // the keeper: the duplicates are the same ops applied on different peers, one of which missed some (R71: two anchors held
+    // the keeper: the duplicates are the same ops applied on different peers, one of which missed some (e.g. two anchors held
     // the same 38 vertices, the third 19 with 4 older values). Every peer logs the plan; only the server applies it, and only
     // with 'Heal duplicate tile anchors' = Apply: a snapshot of the world's save first (refusing without one), the merged
     // payload written to the keeper and read back, and only then the losers destroyed, at most MaxMergesPerSession tiles a
@@ -236,7 +236,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         internal static void Bind(BepInEx.Configuration.ConfigFile cfg)
         {
-            s_mode = cfg.Bind("08 - Tile Anchors", "01 Heal duplicate tile anchors", TileHealMode.DryRun,
+            s_mode = cfg.Bind("02 - Terrain", "03 Heal duplicate tile anchors", TileHealMode.DryRun,   // Was [08 - Tile Anchors]
                 "Before FAT 0.2.644 a multiplayer race could give one FAT tile several anchors, each holding part of its edits; a "
                 + "reload shows only one. DryRun (default) logs each such tile's merge plan ('[TileHeal] DRY RUN plan') and changes "
                 + "nothing. Apply (acts on the server only): snapshots the world's save into FiresWorldGen, merges each tile into its "
@@ -245,6 +245,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 + "once at world load, snapshots the save and every anchor's payload into FiresWorldGen, then removes EVERY tile "
                 + "anchor of the world ('[TileHeal] PURGED tile …' per tile and a total). The admin console command "
                 + PurgeCommand + " does the same on demand.");
+            FatConfigRetire.Move(cfg, "08 - Tile Anchors", "01 Heal duplicate tile anchors", s_mode);
         }
 
         private static bool Applying => s_mode != null && s_mode.Value == TileHealMode.Apply
@@ -462,7 +463,7 @@ namespace VerdantsAscent.Terrain.Persistence
             }
             // Tile-wide fields (the biome override, the floating-island mode): only anchors that HOLD edits vote. The empty
             // duplicates were spawned blank by other peers and carry the defaults, so letting them vote, or keeping a blank
-            // keeper's value, would undo a tile-wide choice (R72 (-29,-28): the edited anchor had the island's mode, the two
+            // keeper's value, would undo a tile-wide choice (e.g. the edited anchor had the island's mode, the two
             // empty ones did not). Majority among the editing anchors, a tie to the keeper when it edits, else the lowest.
             var editors = new List<int>();
             for (int j = 0; j < datas.Length; j++) if (HasEdits(datas[j])) editors.Add(j);
@@ -593,7 +594,7 @@ namespace VerdantsAscent.Terrain.Persistence
         private static int Compare(ZDOID a, ZDOID b) => a.UserID != b.UserID ? a.UserID.CompareTo(b.UserID) : a.ID.CompareTo(b.ID);
 
         // ── Purge ────────────────────────────────────────────────────────────────────────────────────────────────
-        // The 2D tile layer is retired (Fire, 2026-09-29: "we will clean them from any world they may exist in"). Purge removes
+        // The 2D tile layer is retired and cleaned from any world it may exist in. Purge removes
         // every tile anchor of the loaded world, on any world type, on the server only: the world's save is snapshotted into
         // FiresWorldGen first and every anchor's raw payload is kept beside it; without both nothing is removed, and nothing runs
         // while a world save does. Two ways in: mode Purge (once at world load) and the admin command fat_tile_purge.

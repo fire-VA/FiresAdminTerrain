@@ -9,7 +9,7 @@ using VerdantsAscent.Modules.Utilities;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The one Chunk Generator (Tools\CHUNK_GENERATOR.md): the starter's prefab from the "fireszones" bundle, wired here
+    // The one Chunk Generator: the starter's prefab from the "fireszones" bundle, wired here
     // and listed on the hammer in zone-mode worlds. Its front door takes fuel, picked from a grid of what the player
     // carries; its ore hopper picks the recipe (ZoneModeChunkTiers). The ZDO owner burns one fuel every two seconds and
     // turns each full load into seeds, with a rare location seed when a biome recipe burns later biomes' materials.
@@ -67,7 +67,7 @@ namespace VerdantsAscent.Terrain.Zones
         // ── Registration (FAT's ZNetScene.Awake / ObjectDB.Awake hooks) ──────────────────────────────────────────
         internal static void OnZNetSceneAwake()
         {
-            // ZNetScene.Awake's "chunk generator" step is 47-75 ms of one join frame (R45-R47); this says which part.
+            // ZNetScene.Awake's "chunk generator" step can take 47-75 ms of one join frame; this says which part.
             var steps = new StepTimes();
             try
             {
@@ -553,7 +553,7 @@ namespace VerdantsAscent.Terrain.Zones
             }
             if (amount > take) Drop(prefab, amount - take, Beside(smelter), cheated);
 
-            // One line per delivery on the owner (Fire's bot chunk-filling runs, via the lead): what, from whom, and where the batch stands.
+            // One line per delivery on the owner: what, from whom, and where the batch stands.
             var pos = smelter.transform.position;
             FiresLogger.LogInfo($"[FiresZones] chunk generator at ({pos.x:0},{pos.z:0}): +{take} {prefab} from {Sender(sender)}"
                 + (amount > take ? $" ({amount - take} set beside it)" : "")
@@ -652,7 +652,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal static void EmptyForTest(ZDO zdo) => Write(zdo, new FuelLoad(false), new FuelLoad(true));
 
-        // ── Old per-biome generators become the one machine where they stand (Fire, 2026-09-27) ──────────────────
+        // ── Old per-biome generators become the one machine where they stand ──────────────────
         // Once per world load for the live objects, and for every parked zone as it comes back (ZoneModePark).
         internal static void ServerTick()
         {

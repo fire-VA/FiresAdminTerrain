@@ -504,7 +504,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             x = (ax + 0.3f + 0.4f * Hash(ax, az, seed, ArchipelagoSalt + 1)) * ArchipelagoCell;
             z = (az + 0.3f + 0.4f * Hash(ax, az, seed, ArchipelagoSalt + 2)) * ArchipelagoCell;
-            float limit = 9300f - ArchipelagoExtent;
+            float limit = (FatWorldSize.Radius - 700f) - ArchipelagoExtent;   // The rim, 9300 at vanilla size
             return Hash(ax, az, seed, ArchipelagoSalt) < ArchipelagoChance && x * x + z * z < limit * limit;
         }
 

@@ -44,10 +44,10 @@ namespace VerdantsAscent.Terrain.Testing
         private const float SlopeMetres = 3f;
         private const float SlopeSmooth = 0f;
         // Inside the flat, so a ring of flat vertices is left for Patch Hole to copy from (it inherits from edited vertices
-        // up to 3 m away; R75 punched the whole flat and the patch correctly had nothing to copy).
+        // up to 3 m away; punching the whole flat leaves the patch nothing to copy).
         private const float HolePunchRadius = 1.5f;
         // Radians; TileBrush tilts along sin(angle)*x + cos(angle)*z, so a quarter turn falls along +x, where TilePoints'
-        // edge point sits (R75: angle 0 tilted along z and the edge read "+0.00 m").
+        // edge point sits (e.g. angle 0 tilted along z and the edge read "+0.00 m").
         private const float SlopeAngle = Mathf.PI / 2f;
         private const float VoxelSphereRadius = 2.5f;
         private const float VoxelCubeHalf = 2f;
@@ -62,7 +62,7 @@ namespace VerdantsAscent.Terrain.Testing
         internal static List<ToolCase> All()
         {
             var cases = new List<ToolCase>();
-            // No TileCases(): the 2D tile layer is retired in FAT 0.2.651 (Fire, 2026-09-29); its tools no longer exist to test.
+            // No TileCases(): the 2D tile layer is retired; its tools no longer exist to test.
             cases.AddRange(VoxelCases());
             cases.AddRange(VanillaCases());
             cases.AddRange(InfinityCases());
@@ -188,7 +188,7 @@ namespace VerdantsAscent.Terrain.Testing
                 Check = (c, b, a) => Expect(a[0], b[0], "the voxel surface back at the generated ground"),
             };
             // Judged by Standing (the ground a body lands on): the VoxelSurface probe searches from the cell's height and finds
-            // the ground under the cube (R69: VoxelSurface 60.00 on every peer while all stood at 64.00).
+            // the ground under the cube (e.g. VoxelSurface 60.00 on every peer while all stood at 64.00).
             yield return Voxel("vcube", c => VoxelWorld.ApplyBrush(c + Vector3.up * VoxelCubeHalf, VoxelCubeHalf, 0f, VoxelBrushShape.Cube, VoxelBrushMode.Fill),
                 (c, b, a) => Expect(a[2], c.y + VoxelCubeHalf * 2f, "the cube's top at the centre (standing on it)"));
             yield return Voxel("vsphere", c => VoxelWorld.ApplyBrush(c, VoxelSphereRadius, 0f, VoxelBrushShape.Sphere, VoxelBrushMode.Fill),
@@ -250,7 +250,7 @@ namespace VerdantsAscent.Terrain.Testing
             VanillaOps.Place(op(), cell);
         }
 
-        // ── The tools in the BOT's hands (`only tools`; Fire, 2026-09-29: "you keep testing the terrain tools on the player") ─
+        // ── The tools in the BOT's hands (`only tools`), not only the player's ─
         // FDT 1.1.176's `bot tool <kind> <mode> <x> <z> [size] [alt]` has the bot equip the real item, pick the mode from its
         // build menu and use it through vanilla's own input path (hoe/cultivator: the ghost + UpdatePlacement's place branch;
         // pickaxe: a real swing; the Chaos Hammer's V-tools: FAT's va_voxel_press into the same brush update a click runs).
@@ -440,7 +440,7 @@ namespace VerdantsAscent.Terrain.Testing
 
         // ── Checks and helpers ──────────────────────────────────────────────────────────────────────────────────
         // A tile raise/lower: TileBrush stamps the full delta inside radius - 1 m, then runs two 1-ring smoothing passes, so a
-        // 2.5 m brush's centre lands at ~75-80% of the delta (R75: 1.54 of 2 m on the island, both ways). Pass when the centre
+        // 2.5 m brush's centre lands at ~75-80% of the delta (e.g. 1.54 of 2 m on the island, both ways). Pass when the centre
         // moved the right way by at least DomeMinShare of the delta and not past it.
         private const float DomeMinShare = 0.6f;
 

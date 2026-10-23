@@ -7,7 +7,7 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.BcImport
 {
-    // A map image kept as independent bands of rows (D11 part 2, Tools\BC_CHUNK_CONVERSION.md). It holds the PNG's own
+    // A map image kept as independent bands of rows. It holds the PNG's own
     // scanlines, filtered the way PNG filters them, but each band starts from an empty row above and is deflated on its
     // own, so every band decodes on its own thread. A PNG only decodes one row after another, because each row and the
     // whole deflate stream lean on what came before: an 8192² 16-bit map took 3.5 s on one core at every load and join.

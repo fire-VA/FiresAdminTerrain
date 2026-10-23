@@ -8,7 +8,7 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // Valheim 1.0's AltBiomeWorldData.GenerateBiomePoints samples a 2048x2048 grid, 4.2 M GetBiome + GetBiomeHeight, one
     // after another on the main thread. A client pays it inside ZNet.RPC_PeerInfo on every join (its handshake World carries
-    // no save version, so VerifyBiomeData always runs): 5.7 s of an 11 s join freeze on a BC world ([perf], 2026-09-27).
+    // no save version, so VerifyBiomeData always runs): 5.7 s of an 11 s join freeze on a BC world.
     // Every point is independent, so this runs vanilla's loop across the cores: the same calls per point, each worker inside
     // the zone gate's planning scope exactly as the serial loop is (ZoneMode_AltBiome_GenerateBiomePoints), each writing only
     // its own row. The generators already answer these calls from HeightmapBuilder's worker. A prefix that already replaced
@@ -17,7 +17,8 @@ namespace VerdantsAscent.Terrain.Voxel
     internal static class AltBiomePointsParallel
     {
         private const int GridSize = 2048;
-        private const float EdgeRadiusSquared = 110250000f;
+        // The world's own edge (FatWorldSize); 10500^2 = 110250000 on a vanilla-size world.
+        private static float EdgeRadiusSquared => FatWorldSize.EdgeRadius * FatWorldSize.EdgeRadius;
         private const float BeyondEdgeHeight = -1000f;
         private const string StartStep = "start";
         private const string DoneStep = "AltBiome.GenerateBiomePoints";
@@ -43,11 +44,14 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void Fill(WorldGenerator generator, AltBiomeWorldData data, bool parallel)
         {
             var ocean = Heightmap.Biome.Ocean.ToBiomeIndex();
-            if (parallel) Parallel.For(0, GridSize, row => FillRow(generator, data, row, ocean));
-            else for (int row = 0; row < GridSize; row++) FillRow(generator, data, row, ocean);
+            float edgeSq = EdgeRadiusSquared;   // once per fill (one edge for every row, read on this thread)
+            if (parallel) Parallel.For(0, GridSize, row => FillRow(generator, data, row, ocean, edgeSq));
+            else for (int row = 0; row < GridSize; row++) FillRow(generator, data, row, ocean, edgeSq);
         }
 
-        private static void FillRow(WorldGenerator generator, AltBiomeWorldData data, int row, Heightmap.BiomeIndex ocean)
+        // The grid is vanilla's own (2048 px x 12 m, +-12288 m, constants inside AltBiomeWorldData): this mirrors vanilla's
+        // generation; on a world past that span only the edge mask moves (with a 20.5 km edge it masks nothing).
+        private static void FillRow(WorldGenerator generator, AltBiomeWorldData data, int row, Heightmap.BiomeIndex ocean, float edgeSq)
         {
             ZoneModeGate.EnterPlanning();
             try
@@ -56,7 +60,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int column = 0; column < GridSize; column++)
                 {
                     float x = AltBiomeWorldData.MapSpaceToWorldSpace(column);
-                    if (x * x + y * y > EdgeRadiusSquared)
+                    if (x * x + y * y > edgeSq)
                     {
                         data.PointBiomes[column, row] = ocean;
                         data.PointHeights[column, row] = BeyondEdgeHeight;

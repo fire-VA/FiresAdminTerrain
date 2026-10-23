@@ -8,7 +8,7 @@ namespace VerdantsAscent.Terrain.BcImport
     // What a migrated world's BetterContinents data actually holds, said once when it loads.
     //
     // Without this a missing map is invisible. BcImageMaps only logs when a decode FAILS, and an ABSENT map does
-    // not fail - BcWorldGen.GetBiomeOverride returns Heightmap.Biome.None when _maps.Biome is null, which is the
+    // not fail - BcWorldGen.MapBiomeAt returns Heightmap.Biome.None when _maps.Biome is null, which is the
     // same answer it gives for a black pixel on a real map. Vanilla's ring rules then take over, so biomes end up
     // where vanilla would put them on a map whose land is somewhere else entirely. The visible symptom is
     // location placement: 'GoblinHut02 placed 1 out of 30 with 56,583' is a Plains location failing 56,583 times
@@ -95,7 +95,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 for (int column = 0; column < CensusSamples; column++)
                 {
                     float wx = -half + column * step;
-                    Heightmap.Biome biome = generator.GetBiomeOverride(settings.Normalize(wx), settings.Normalize(wy));
+                    Heightmap.Biome biome = generator.MapBiomeAt(settings.Normalize(wx), settings.Normalize(wy));
                     int seen;
                     counts[biome] = counts.TryGetValue(biome, out seen) ? seen + 1 : 1;
                     total++;

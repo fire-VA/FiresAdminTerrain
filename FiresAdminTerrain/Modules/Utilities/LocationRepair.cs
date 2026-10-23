@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Utilities
 {
-    // ── `va_location_repair dry|apply <world>`: re-point damaged location proxies (0.2.700, [fgn] + [lead] 10-01) ─────────
+    // ── `va_location_repair dry|apply <world>`: re-point damaged location proxies ─────────
     // A location (dungeon, trader, altar...) lives in the world as one LocationProxy ZDO, which carries two ints: "location"
     // (the location prefab's name hash) and "seed" (world seed + zone.x * 4271 + zone.y * 9187, ZoneSystem.PlaceLocations).
     // Every load, the proxy re-spawns the location from those two, so a proxy whose ints were overwritten spawns the wrong

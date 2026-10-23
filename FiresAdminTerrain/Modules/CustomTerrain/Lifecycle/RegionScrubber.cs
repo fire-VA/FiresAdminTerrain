@@ -112,7 +112,7 @@ namespace VerdantsAscent.Terrain.Lifecycle
         {
             if (radius <= 0f || scope == Scope.None) return 0;
 
-            // ── MP dispatch (request pattern, per user choice 2026-05-25) ──
+            // ── MP dispatch (request pattern) ──
             //
             // SP / host / receiving-an-APPLY-broadcast → fall through to
             // local apply directly. Avoid the round trip when we're
@@ -191,8 +191,8 @@ namespace VerdantsAscent.Terrain.Lifecycle
                     {
                         // Critical: GetAt — NOT Spawn. Scrub never spawns
                         // anchors. If a zone has no anchor today, there's
-                        // nothing to clear there; lazy-spawn rules (per user
-                        // answer 2026-05-25) say anchors arrive only when a
+                        // nothing to clear there; lazy-spawn rules say
+                        // anchors arrive only when a
                         // brush PAINT touches them.
                         var anchor = TileAnchorRegistry.GetAt(tileXZ);
                         if (anchor == null) continue;

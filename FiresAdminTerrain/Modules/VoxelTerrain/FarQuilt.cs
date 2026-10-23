@@ -6,7 +6,7 @@ using FiresCore.Materials;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // W3-A4 — the FAR-TERRAIN QUILT. With vanilla near terrain never building
-    // (A1) and heights fully owned (0.2.69), this retires the last vanilla
+    // (A1) and heights fully owned, this retires the last vanilla
     // terrain in view: distant-LOD heightmaps stop rendering and the horizon
     // is drawn from OUR generator instead — render-only grid tiles in the
     // same captured terrain material as the voxel chunks.
@@ -23,7 +23,8 @@ namespace VerdantsAscent.Terrain.Voxel
     public static class FarQuilt
     {
         private const float TICK = 0.5f;
-        private const int BUILD_BUDGET = 2;        // tiles per tick
+        private static int s_triRebuildsThisTick;
+        private const int BUILD_BUDGET = 1;        // tiles per tick (~13 tiles turn over at each 64 m crossing)
         private const int NEAR_VERTS = 33;         // 2m step over 64m
         private const int FAR_VERTS = 33;          // 8m step over 256m
 
@@ -33,6 +34,7 @@ namespace VerdantsAscent.Terrain.Voxel
             public Mesh Mesh;
             public Texture2D Mask;      // per-tile paint mask (cache + wet band), pooled with the tile
             public bool MaskDone;       // false = mask (re)build queued
+            public long SolidMask = -1; // Far supertile: which zones under it were solid when its triangles were built
         }
 
         private static readonly Dictionary<Vector3Int, Tile> s_tiles = new Dictionary<Vector3Int, Tile>();
@@ -49,6 +51,12 @@ namespace VerdantsAscent.Terrain.Voxel
         // Vanilla's overworld render group flipped (interior entered or left).
         // The distant LOD it stands in for is a Heightmap, so it follows the
         // same group. Tiles are render-only, so the renderer is the whole state.
+        internal static bool DebugHidden;   // fat_seam_suspect
+        internal static void ApplyDebugHidden()
+        {
+            foreach (var kv in s_tiles) { var go = kv.Value != null ? kv.Value.Go : null; if (go != null && DebugHidden && go.activeSelf) go.SetActive(false); }
+        }
+
         internal static void RefreshVisibility()
         {
             foreach (var kv in s_tiles)
@@ -70,7 +78,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        // THE FIRES LOW-LOD (user mandate: we own generation, terrain and
+        // THE FIRES LOW-LOD (we own generation, terrain and
         // shaders — distance too; vanilla's TerrainLod is fully suppressed).
         // Resurrected from the quilt with every fix its failures taught us:
         // never builds before the worldgen grid is ready, never builds or
@@ -91,6 +99,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // The far field plus a chunk world's start-cave hill, so the far mesh agrees with the near voxels there.
         private static float FarHeight(float wx, float wz)
         {
+            if (FatSuperFlat.On) return FatSuperFlat.HeightAt(wx, wz);   // The far terrain is the same flat land + shore + sea floor
             float h = FiresWorldGenBase.SampleFinalMeters(wx, wz);
             Zones.ZoneModeStartCave.AddHill(wx, wz, ref h);
             return h;
@@ -187,6 +196,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             // Visibility: near tiles hide while their zone is voxel-solid;
             // far tiles hide where they overlap the near ring.
+            s_triRebuildsThisTick = 0;
             foreach (var kv in s_tiles)
                 UpdateVisibility(kv.Key, kv.Value, c, near);
 
@@ -195,7 +205,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // at holes for a minute. Ramp hard while the deficit is large
             // (login/teleport), settle to the trickle for steady-state.
             int missing = s_want.Count - s_tiles.Count;
-            int budget = missing > 60 ? 12 : BUILD_BUDGET;
+            int budget = missing > 60 ? 4 : BUILD_BUDGET;   // login/teleport ramp 12 -> 4 (each build is ~1.1k sampled vertices + a mesh upload)
             int built = 0;
             foreach (var key in s_want)
             {
@@ -219,7 +229,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     shown++;
                     // A VISIBLE near tile over SOLID voxel territory is the
                     // phantom analytic sheet (no carves, no collision) — the
-                    // exact artifact the user screenshotted. Never silent.
+                    // exact artifact that was seen in game. Never silent.
                     if (kv.Key.y == 0 && VoxelZoneStreamer.IsZoneSolid(new Vector2s(kv.Key.x, kv.Key.z)))
                         phantom++;
                 }
@@ -318,7 +328,7 @@ namespace VerdantsAscent.Terrain.Voxel
             foreach (var kv in s_tiles)
                 if (kv.Value.Go != null && !kv.Value.MaskDone) pending++;
             if (pending == 0) return;
-            int budget = pending > 60 ? 12 : 4;
+            int budget = pending > 60 ? 6 : 2;   // Mask builds (65x65 sampling + Texture2D.Apply) 4 -> 2 a tick, ramp 12 -> 6
             foreach (var kv in s_tiles)
             {
                 if (budget <= 0) break;
@@ -341,7 +351,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var px = s_maskPx;
             // In ASHLANDS the mask ALPHA is LAVA (vanilla GetVegetationMask
             // semantics) — the old flat 255 default rendered every far tile
-            // in the crescent fully molten (user screenshot: all low-LOD
+            // in the crescent fully molten (all low-LOD
             // Ashlands reads as lava). Ashlands texels take the WORLDGEN
             // lava value (caldera pools, flows, flats fields); everywhere
             // else keeps the 255 default the quilt shader expects.
@@ -428,6 +438,61 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
         }
 
+        // Pad seams that fix themselves up close: read-only, for fat_terrain_seam_test. The ACTIVE quilt
+        // tiles whose square contains (x,z), as "near"/"far" + their y offset, and the quilt surface height there (the generator's
+        // height + that offset), so the test can say where a drawn quilt tile stands ABOVE the edited voxel ground (poking through a
+        // levelled pad at range).
+        internal static int ActiveTilesAt(float x, float z, out float quiltY, out string kinds)
+        {
+            int n = 0; quiltY = float.MinValue; kinds = "";
+            foreach (var kv in s_tiles)
+            {
+                var t = kv.Value;
+                if (t == null || t.Go == null || !t.Go.activeInHierarchy) continue;
+                TileCenter(kv.Key, out float cx, out float cz, out float size);
+                float h = size * 0.5f;
+                if (x < cx - h || x > cx + h || z < cz - h || z > cz + h) continue;
+                n++;
+                float y = FiresWorldGenBase.SampleFinalMeters(x, z) + t.Go.transform.position.y - (kv.Key.y == 1 ? 2f : 0f);   // far tiles bake -2 m into their vertices
+                if (y > quiltY) quiltY = y;
+                kinds += kv.Key.y == 0 ? "near " : "far ";
+            }
+            return n;
+        }
+
+        // Pad seams at 20-30 m: the far ring (256 m supertiles at the generator's height, -2 m) has its quads
+        // over SOLID voxel zones left out, the way near tiles already hide per zone; quads over zones still streaming stay (no hole in
+        // the world). Mask bit = zone index inside the 5x5 zone window the supertile can touch.
+        private static int s_holedRebuilds;
+        internal static int HoledRebuilds => s_holedRebuilds;
+
+        private static long FarSolidMask(float ox, float oz)
+        {
+            long m = 0; int zx0 = Mathf.FloorToInt((ox + 32f) / 64f), zz0 = Mathf.FloorToInt((oz + 32f) / 64f), bit = 0;
+            for (int dz = 0; dz < 5; dz++)
+                for (int dx = 0; dx < 5; dx++, bit++)
+                    if (VoxelZoneStreamer.IsZoneSolid(new Vector2s(zx0 + dx, zz0 + dz))) m |= 1L << bit;
+            return m;
+        }
+
+        private static int[] BuildTris(bool far, int verts, float step, float ox, float oz)
+        {
+            var list = new List<int>((verts - 1) * (verts - 1) * 6);
+            for (int z = 0; z < verts - 1; z++)
+                for (int x = 0; x < verts - 1; x++)
+                {
+                    if (far)
+                    {
+                        float wx = ox + (x + 0.5f) * step, wz = oz + (z + 0.5f) * step;
+                        if (VoxelZoneStreamer.IsZoneSolid(new Vector2s(Mathf.FloorToInt((wx + 32f) / 64f), Mathf.FloorToInt((wz + 32f) / 64f)))) continue;
+                    }
+                    int i = z * verts + x;
+                    list.Add(i); list.Add(i + verts); list.Add(i + 1);
+                    list.Add(i + 1); list.Add(i + verts); list.Add(i + verts + 1);
+                }
+            return list.ToArray();
+        }
+
         private static void TileCenter(Vector3Int key, out float cx, out float cz, out float size)
         {
             if (key.y == 0) { size = 64f; cx = key.x * 64f; cz = key.z * 64f; }
@@ -447,7 +512,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // window the tile coexists with the growing voxel mesh
                 // (analytic ≈ uncarved surface, −0.8m under it) — a far,
                 // brief, tolerable overlap instead of a hole in the world.
-                show = !VoxelZoneStreamer.IsZoneSolid(new Vector2s(key.x, key.z));
+                show = !(FatSuperFlat.On && !FiresVoxelConfig.WrapsAllTerrain) && !VoxelZoneStreamer.IsZoneSolid(new Vector2s(key.x, key.z));   // No near quilt on a HEIGHTMAP super flat (the vanilla heightmaps are the ground); a voxel super flat keeps the normal wrap-in tiles (no void ring)
             }
             else
             {
@@ -455,13 +520,29 @@ namespace VerdantsAscent.Terrain.Voxel
                 // covers it. The old center-distance test hid tiles whose
                 // centers sat inside `near` while their outer halves were the
                 // sole cover for the 448–512m annulus — a land-free band that
-                // tracked the player (the "banding" screenshots). Overlap is
+                // tracked the player (the "banding"). Overlap is
                 // harmless (far ring sits −2m under the near tiles); a gap is
                 // a hole in the world.
                 TileCenter(key, out float cx, out float cz, out float fsize);
                 float half = fsize * 0.5f;
                 show = Mathf.Abs(cx - c.x) + half > near || Mathf.Abs(cz - c.z) + half > near;
             }
+            // A far supertile re-triangulates when a zone under it turns solid (or stops being solid), so it never draws over
+            // live voxel ground: no generator-height quilt poking through a levelled pad at range.
+            if (key.y == 1 && show && t.Mesh != null)
+            {
+                TileCenter(key, out float tcx, out float tcz, out float tsize);
+                float tox = tcx - tsize * 0.5f, toz = tcz - tsize * 0.5f;
+                long m = FarSolidMask(tox, toz);
+                // At most one far re-triangulation a tick; the others keep their old SolidMask and go next tick.
+                if (m != t.SolidMask && s_triRebuildsThisTick++ < 1)
+                {
+                    t.Mesh.triangles = BuildTris(true, FAR_VERTS, tsize / (FAR_VERTS - 1), tox, toz);
+                    t.SolidMask = m;
+                    s_holedRebuilds++;
+                }
+            }
+            if (DebugHidden) show = false;   // fat_seam_suspect quilt off (live, not saved)
             if (t.Go.activeSelf != show) t.Go.SetActive(show);
         }
 
@@ -528,17 +609,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     norms[i] = new Vector3(hl - hr, 2f * step, hd - hu).normalized;
                 }
             }
-            var tris = new int[(verts - 1) * (verts - 1) * 6];
-            int ti = 0;
-            for (int z = 0; z < verts - 1; z++)
-            {
-                for (int x = 0; x < verts - 1; x++)
-                {
-                    int i = z * verts + x;
-                    tris[ti++] = i; tris[ti++] = i + verts; tris[ti++] = i + 1;
-                    tris[ti++] = i + 1; tris[ti++] = i + verts; tris[ti++] = i + verts + 1;
-                }
-            }
+            long solidMask = key.y == 1 ? FarSolidMask(ox, oz) : 0L;
+            var tris = BuildTris(key.y == 1, verts, step, ox, oz);
 
             // Far ring: bake the −2.0m chord budget into the VERTICES (after
             // the normals loop — shading reads raw heights) and clamp samples
@@ -615,6 +687,7 @@ namespace VerdantsAscent.Terrain.Voxel
             tile.Mesh.uv = uvs;
             tile.Mesh.colors32 = cols;
             tile.Mesh.RecalculateBounds();
+            tile.SolidMask = solidMask;
             tile.Go.SetActive(true);
             s_tiles[key] = tile;
             UpdateVisibility(key, tile, c, near);

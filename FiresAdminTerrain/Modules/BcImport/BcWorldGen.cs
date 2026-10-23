@@ -10,274 +10,250 @@ namespace VerdantsAscent.Terrain.BcImport
         V3,
     }
 
-    // BetterContinents' terrain, written against BC's OWN SOURCE (JereKuusela/BetterContinents 0.7.31,
-    // BetterContinents.WorldGeneratorPatch.cs and BetterContinents.BetterContinentsSettings.cs) - not against a
-    // decompile. That matters for more than tidiness: the decompiler renders BC's float arithmetic as double
-    // expressions, and transcribing those changes the rounding, which showed up as ~1e-6 drift.
-    //
-    // BC's base-height patches are prefixes that return false, so they REPLACE vanilla's GetBaseHeight. That is
-    // why this can be an exact reproduction with none of BC's code and BC not installed.
-    // Spec: Docs/BETTERCONTINENTS_IMPORT.md
+    // The ground of a converted BetterContinents world, computed by FAT with BetterContinents not installed. Which recipe a
+    // world gets follows its saved settings version (VariantFor):
+    //  - V1 / V2 (settings 1-6): a procedural shape - two products of Perlin octaves for broad land, a domain-warped ridge
+    //    field mixed in by a logistic weight, a mountain curve, two detail products scaled by the height itself, then the
+    //    world's sea line; V2 adds the ridges instead of interpolating to them and honours a flat map (Shape below).
+    //  - V3 (settings 7+): the height map, then the layered noise (BcNoiseField), then the sea line.
+    // All three then sink the rim past the playable radius into a cliff at the world's edge and cap mountains near the
+    // centre. The maps (height, rough, flat, paint, lava, moss, heat, forest, biome) shape the rest as the map maker drew
+    // them. Floats are kept in the order the format needs, because BcRefTest compares this ground with the original mod's
+    // to the millimetre. Spec: Docs/BETTERCONTINENTS_IMPORT.md
     internal sealed class BcWorldGen
     {
-        private const float SeaLevel = 0.05f;
-        private const float V1V2WaterLine = 0.07f;
-        private const float V3WaterLine = 0.15f;
-        private const float EdgeDropoffHeight = -0.2f;
-        private const float EdgeCliffHeight = -2f;
-        private const float EdgeCliffMargin = 10f;
-        private const float MountainCapLow = 0.28f;
-        private const float MountainCapHigh = 0.38f;
-        private const float MountainCapSpan = 0.099999994f;
-        private const float MountainCapDistance = 400f;
-        private const float OceanChannelLow = 0.02f;
-        private const float OceanChannelHigh = 0.12f;
-        private const float OceanChannelNear = 744f;
-        private const float OceanChannelFar = 1000f;
-        private const float WarpScaleBase = 0.001f;
-        private const float WorldOffset = 100000f;
-        private const float ForestFactorMin = 0.145071f;
-        private const float ForestFactorMax = 1.850145f;
+        private const float WaterLineProcedural = 0.07f;
+        private const float WaterLineImage = 0.15f;
+        private const float MountainShift = 0.05f;
+        private const float RimFloor = -0.2f;
+        private const float CliffFloor = -2f;
+        private const float CliffWidth = 10f;
+        private const float CentreCapStart = 0.28f;
+        private const float CentreCapTop = 0.38f;
+        private const float CentreCapRange = 0.099999994f;
+        private const float CentreCapFade = 400f;
+        private const float ChannelBandLow = 0.02f;
+        private const float ChannelBandHigh = 0.12f;
+        private const float ChannelFadeStart = 744f;
+        private const float ChannelFadeEnd = 1000f;
+        private const float WarpFrequency = 0.001f;
+        private const float NoiseOrigin = 100000f;
+        private const float ForestFactorLow = 0.145071f;
+        private const float ForestFactorHigh = 1.850145f;
 
         private readonly BcWorldSettings _settings;
         private readonly BcDecodedMaps _maps;
-        private readonly BcNoiseStackRuntime _baseHeightNoise;
+        private readonly BcNoiseField _layers;
 
         public BcWorldGen(BcWorldSettings settings, BcDecodedMaps maps, int worldSeed)
         {
             _settings = settings;
             _maps = maps;
-            _baseHeightNoise = new BcNoiseStackRuntime(settings.TotalSize, worldSeed, settings.BaseHeightNoise, settings.GlobalScale);
+            _layers = new BcNoiseField(settings.TotalSize, worldSeed, settings.BaseHeightNoise, settings.GlobalScale);
         }
 
         public BcWorldSettings Settings => _settings;
         public BcDecodedMaps Maps => _maps;
 
-        /// <summary>Which base-height replacement a world gets, decided by the SETTINGS version - not Valheim's.
-        /// A v7+ world with neither a heightmap nor noise layers keeps vanilla's base height entirely.</summary>
+        /// <summary>Which recipe a world's base height follows, from its SETTINGS version (not Valheim's). A v7+ world
+        /// with neither a height map nor noise layers keeps vanilla's base height.</summary>
         public static BcBaseHeightVariant VariantFor(BcWorldSettings settings)
         {
             if (settings == null || !settings.EnabledForThisWorld) return BcBaseHeightVariant.None;
-            switch (settings.Version)
-            {
-                case 1:
-                case 2:
-                    return BcBaseHeightVariant.V1;
-                case 3:
-                case 4:
-                case 5:
-                case 6:
-                    return BcBaseHeightVariant.V2;
-                default:
-                    return settings.HeightMap != null || settings.BaseHeightNoise.Layers.Count > 0
-                        ? BcBaseHeightVariant.V3
-                        : BcBaseHeightVariant.None;
-            }
+            if (settings.Version >= 1 && settings.Version <= 2) return BcBaseHeightVariant.V1;
+            if (settings.Version >= 3 && settings.Version <= 6) return BcBaseHeightVariant.V2;
+            return settings.HeightMap != null || settings.BaseHeightNoise.Layers.Count > 0 ? BcBaseHeightVariant.V3 : BcBaseHeightVariant.None;
         }
 
+        /// <summary>The base height (vanilla's units, x200 = metres) at a world point; offsets and the mountain-free radius
+        /// are the world generator's own.</summary>
         public float GetBaseHeight(float wx, float wy, float offset0, float offset1, float minMountainDistance)
         {
             switch (VariantFor(_settings))
             {
-                case BcBaseHeightVariant.V1: return GetBaseHeightV1(wx, wy, offset0, offset1, minMountainDistance);
-                case BcBaseHeightVariant.V2: return GetBaseHeightV2(wx, wy, offset0, offset1, minMountainDistance);
-                case BcBaseHeightVariant.V3: return GetBaseHeightV3(wx, wy, minMountainDistance);
+                case BcBaseHeightVariant.V1: return Shape(wx, wy, offset0, offset1, minMountainDistance, false);
+                case BcBaseHeightVariant.V2: return Shape(wx, wy, offset0, offset1, minMountainDistance, true);
+                case BcBaseHeightVariant.V3: return ImageAndLayers(wx, wy, minMountainDistance);
                 default: return 0f;
             }
         }
 
-        public float GetBaseHeightV3(float wx, float wy, float minMountainDistance)
+        // V3: the height map, the noise layers over it, the sea line, then the rim and the centre cap.
+        private float ImageAndLayers(float wx, float wy, float minMountainDistance)
         {
-            float distance = Utils.Length(wx, wy);
-            float mapX = _settings.Normalize(wx);
-            float mapY = _settings.Normalize(wy);
-
-            float baseHeight = ApplyHeightmap(mapX, mapY, 0f);
-            float finalHeight = _baseHeightNoise != null ? _baseHeightNoise.Apply(wx, wy, baseHeight) : baseHeight;
-            finalHeight -= V3WaterLine;
-            finalHeight += _settings.SeaLevelAdjustment;
-
-            if (!_settings.DisableMapEdgeDropoff && distance > _settings.WorldSize)
-                finalHeight = DropOffAtEdge(finalHeight, distance);
-            if (!_settings.MountainsAllowedAtCenter && distance < minMountainDistance && finalHeight > MountainCapLow)
-                finalHeight = CapCentreMountains(finalHeight, distance, minMountainDistance);
-            return finalHeight;
+            float fromCentre = Utils.Length(wx, wy);
+            float h = HeightFromImage(_settings.Normalize(wx), _settings.Normalize(wy), 0f);
+            if (_layers != null) h = _layers.Apply(wx, wy, h);
+            h -= WaterLineImage;
+            h += _settings.SeaLevelAdjustment;
+            if (!_settings.DisableMapEdgeDropoff && fromCentre > _settings.WorldSize) h = SinkRim(h, fromCentre);
+            if (!_settings.MountainsAllowedAtCenter && fromCentre < minMountainDistance && h > CentreCapStart)
+                h = CapNearCentre(h, fromCentre, minMountainDistance);
+            return h;
         }
 
-        public float GetBaseHeightV2(float wx, float wy, float offset0, float offset1, float minMountainDistance)
+        // V1 and V2. `additive` is V2: ridges are added on top (V1 interpolates toward them), a flat map applies, the edge
+        // drop-off can be switched off and the centre cap follows the mountains-at-centre setting. V1 lets a height map that
+        // overrides everything switch the ridges, ocean channels and centre cap off instead.
+        private float Shape(float wx, float wy, float offset0, float offset1, float minMountainDistance, bool additive)
         {
-            float distance = Utils.Length(wx, wy);
+            float fromCentre = Utils.Length(wx, wy);
             float mapX = _settings.Normalize(wx);
             float mapY = _settings.Normalize(wy);
+            bool imageRules = _settings.HeightMapOverridesEverything;
 
             wx *= _settings.GlobalScale;
             wy *= _settings.GlobalScale;
+            float warpStep = WarpFrequency * _settings.RidgeScale;
+            float ridgeX = (Mathf.PerlinNoise(wx * warpStep, wy * warpStep) - 0.5f) * _settings.TotalRadius;
+            float ridgeY = (Mathf.PerlinNoise(wx * warpStep + 2f, wy * warpStep + 3f) - 0.5f) * _settings.TotalRadius;
+            wx += NoiseOrigin + offset0;
+            wy += NoiseOrigin + offset1;
 
-            float warpScale = WarpScaleBase * _settings.RidgeScale;
-            float warpX = (Mathf.PerlinNoise(wx * warpScale, wy * warpScale) - 0.5f) * _settings.TotalRadius;
-            float warpY = (Mathf.PerlinNoise(wx * warpScale + 2f, wy * warpScale + 3f) - 0.5f) * _settings.TotalRadius;
+            float land = HeightFromImage(mapX, mapY, OctavePair(wx, wy, 0.002f, 0.003f, 0.5f));
+            float ridges = OctavePair(ridgeX, ridgeY, 0.002f, 0.003f, 0.5f) * _settings.MaxRidgeHeight;
+            float ridgeWeight = !additive && imageRules ? 0 : Mathf.Clamp01(Logistic(
+                Mathf.PerlinNoise(wx * 0.005f - 10000, wy * 0.005f - 5000) - _settings.RidgeBlendSigmoidXOffset, _settings.RidgeBlendSigmoidB));
+            float relief = additive ? Mathf.Clamp01(land + ridges * ridgeWeight) : Mathf.Clamp01(Mathf.Lerp(land, ridges, ridgeWeight));
 
-            wx += WorldOffset + offset0;
-            wy += WorldOffset + offset1;
+            float h = 0f;
+            h += MountainCurve(relief - MountainShift, _settings.MountainsAmount) + MountainShift;
+            h += OctavePair(wx, wy, 0.002f, 0.003f, 1f) * h * 0.9f;
+            h += OctavePair(wx, wy, 0.005f, 0.01f, 1f) * 0.5f * h;
+            if (additive) h = FlattenFromImage(mapX, mapY, land, h);
+            h -= WaterLineProcedural;
+            h += _settings.SeaLevelAdjustment;
 
-            float bigFeatureNoiseHeight = Mathf.PerlinNoise(wx * 0.002f * 0.5f, wy * 0.002f * 0.5f)
-                * Mathf.PerlinNoise(wx * 0.003f * 0.5f, wy * 0.003f * 0.5f) * 1f;
-            float bigFeatureHeight = ApplyHeightmap(mapX, mapY, bigFeatureNoiseHeight);
-            float ridgeHeight = Mathf.PerlinNoise(warpX * 0.002f * 0.5f, warpY * 0.002f * 0.5f)
-                * Mathf.PerlinNoise(warpX * 0.003f * 0.5f, warpY * 0.003f * 0.5f) * _settings.MaxRidgeHeight;
-
-            float lerp = Mathf.Clamp01(SigmoidActivation(
-                Mathf.PerlinNoise(wx * 0.005f - 10000, wy * 0.005f - 5000) - _settings.RidgeBlendSigmoidXOffset,
-                0, _settings.RidgeBlendSigmoidB));
-
-            float bigFeature = Mathf.Clamp01(bigFeatureHeight + ridgeHeight * lerp);
-            float detailedFinalHeight = ApplyMountains(bigFeature - SeaLevel, _settings.MountainsAmount) + SeaLevel;
-
-            detailedFinalHeight += Mathf.PerlinNoise(wx * 0.002f * 1f, wy * 0.002f * 1f)
-                * Mathf.PerlinNoise(wx * 0.003f * 1f, wy * 0.003f * 1f) * detailedFinalHeight * 0.9f;
-            detailedFinalHeight += Mathf.PerlinNoise(wx * 0.005f * 1f, wy * 0.005f * 1f)
-                * Mathf.PerlinNoise(wx * 0.01f * 1f, wy * 0.01f * 1f) * 0.5f * detailedFinalHeight;
-
-            float finalHeight = ApplyFlatmap(mapX, mapY, bigFeatureHeight, detailedFinalHeight);
-            finalHeight -= V1V2WaterLine;
-            finalHeight += _settings.SeaLevelAdjustment;
-
-            if (_settings.OceanChannelsEnabled) finalHeight = CarveOceanChannels(finalHeight, wx, wy, distance);
-            if (!_settings.DisableMapEdgeDropoff && distance > _settings.WorldSize)
-                finalHeight = DropOffAtEdge(finalHeight, distance);
-            if (!_settings.MountainsAllowedAtCenter && distance < minMountainDistance && finalHeight > MountainCapLow)
-                finalHeight = CapCentreMountains(finalHeight, distance, minMountainDistance);
-            return finalHeight;
+            if (_settings.OceanChannelsEnabled && (additive || !imageRules)) h = CutChannels(h, wx, wy, fromCentre);
+            bool rim = additive ? !_settings.DisableMapEdgeDropoff : true;
+            if (rim && fromCentre > _settings.WorldSize) h = SinkRim(h, fromCentre);
+            bool capAllowed = additive ? !_settings.MountainsAllowedAtCenter : !imageRules;
+            if (capAllowed && fromCentre < minMountainDistance && h > CentreCapStart) h = CapNearCentre(h, fromCentre, minMountainDistance);
+            return h;
         }
 
-        public float GetBaseHeightV1(float wx, float wy, float offset0, float offset1, float minMountainDistance)
+        // Two Perlin octaves multiplied, at frequencies f1 and f2, both scaled by k.
+        private static float OctavePair(float x, float y, float f1, float f2, float k)
+            => Mathf.PerlinNoise(x * f1 * k, y * f1 * k) * Mathf.PerlinNoise(x * f2 * k, y * f2 * k);
+
+        private static float Logistic(float x, float steepness) => 1 / (1 + Mathf.Exp(steepness * x));
+
+        // Raises the shoulders of a 0..1 relief: n (the mountains amount) sharpens the peaks.
+        private static float MountainCurve(float x, float n) => x * (1 - Mathf.Pow(1 - x, 1.2f + n * 0.8f)) + x * (1 - x);
+
+        /// <summary>The height map over `under`: blended in, masked by itself and added, each by the world's own amounts.
+        /// With no map, or all three amounts zero, `under` is returned as it is.</summary>
+        private float HeightFromImage(float mapX, float mapY, float under)
         {
-            float distance = Utils.Length(wx, wy);
-            float mapX = _settings.Normalize(wx);
-            float mapY = _settings.Normalize(wy);
-
-            wx *= _settings.GlobalScale;
-            wy *= _settings.GlobalScale;
-
-            float warpScale = WarpScaleBase * _settings.RidgeScale;
-            float warpX = (Mathf.PerlinNoise(wx * warpScale, wy * warpScale) - 0.5f) * _settings.TotalRadius;
-            float warpY = (Mathf.PerlinNoise(wx * warpScale + 2f, wy * warpScale + 3f) - 0.5f) * _settings.TotalRadius;
-
-            wx += WorldOffset + offset0;
-            wy += WorldOffset + offset1;
-
-            float bigFeatureNoiseHeight = Mathf.PerlinNoise(wx * 0.002f * 0.5f, wy * 0.002f * 0.5f)
-                * Mathf.PerlinNoise(wx * 0.003f * 0.5f, wy * 0.003f * 0.5f) * 1f;
-            float bigFeatureHeight = ApplyHeightmap(mapX, mapY, bigFeatureNoiseHeight);
-            float ridgeHeight = Mathf.PerlinNoise(warpX * 0.002f * 0.5f, warpY * 0.002f * 0.5f)
-                * Mathf.PerlinNoise(warpX * 0.003f * 0.5f, warpY * 0.003f * 0.5f) * _settings.MaxRidgeHeight;
-
-            float lerp = _settings.HeightMapOverridesEverything
-                ? 0
-                : Mathf.Clamp01(SigmoidActivation(
-                    Mathf.PerlinNoise(wx * 0.005f - 10000, wy * 0.005f - 5000) - _settings.RidgeBlendSigmoidXOffset,
-                    0, _settings.RidgeBlendSigmoidB));
-
-            float finalHeight = 0f;
-            float bigFeature = Mathf.Clamp01(Mathf.Lerp(bigFeatureHeight, ridgeHeight, lerp));
-
-            finalHeight += ApplyMountains(bigFeature - SeaLevel, _settings.MountainsAmount) + SeaLevel;
-            finalHeight += Mathf.PerlinNoise(wx * 0.002f * 1f, wy * 0.002f * 1f)
-                * Mathf.PerlinNoise(wx * 0.003f * 1f, wy * 0.003f * 1f) * finalHeight * 0.9f;
-            finalHeight += Mathf.PerlinNoise(wx * 0.005f * 1f, wy * 0.005f * 1f)
-                * Mathf.PerlinNoise(wx * 0.01f * 1f, wy * 0.01f * 1f) * 0.5f * finalHeight;
-            finalHeight -= V1V2WaterLine;
-            finalHeight += _settings.SeaLevelAdjustment;
-
-            if (_settings.OceanChannelsEnabled && !_settings.HeightMapOverridesEverything)
-                finalHeight = CarveOceanChannels(finalHeight, wx, wy, distance);
-            if (distance > _settings.WorldSize) finalHeight = DropOffAtEdge(finalHeight, distance);
-            if (distance < minMountainDistance && finalHeight > MountainCapLow && !_settings.HeightMapOverridesEverything)
-                finalHeight = CapCentreMountains(finalHeight, distance, minMountainDistance);
-            return finalHeight;
+            if (_maps?.Height == null || (_settings.HeightmapBlend == 0 && _settings.HeightmapAdd == 0 && _settings.HeightmapMask == 0))
+                return under;
+            float pixel = _maps.Height.GetValue(mapX, mapY);
+            float blended = Mathf.Lerp(under, pixel * _settings.HeightmapAmount, _settings.HeightmapBlend);
+            return Mathf.Lerp(blended, blended * pixel, _settings.HeightmapMask) + pixel * _settings.HeightmapAdd;
         }
 
-        public float ApplyHeightmap(float x, float y, float height)
+        // Where the flat map (or the inverted rough map) is white, the broad land shape replaces the detailed height.
+        // A height map that overrides everything makes the whole world the broad shape.
+        private float FlattenFromImage(float mapX, float mapY, float broad, float detailed)
         {
-            if (_maps?.Height == null
-                || (_settings.HeightmapBlend == 0 && _settings.HeightmapAdd == 0 && _settings.HeightmapMask == 0))
-                return height;
-
-            float h = _maps.Height.GetValue(x, y);
-            float blendedHeight = Mathf.Lerp(height, h * _settings.HeightmapAmount, _settings.HeightmapBlend);
-            return Mathf.Lerp(blendedHeight, blendedHeight * h, _settings.HeightmapMask) + h * _settings.HeightmapAdd;
+            if (_settings.HeightMapOverridesEverything) return broad;
+            BcFloatMap source = _settings.UseRoughInvertedAsFlat ? _maps?.Rough : _maps?.Flat;
+            if (source == null) return detailed;
+            float flatness = source.GetValue(mapX, mapY);
+            if (_settings.UseRoughInvertedAsFlat) flatness = 1 - flatness;
+            return Mathf.Lerp(detailed, broad, flatness * _settings.FlatmapBlend);
         }
 
-        public float ApplyRoughmap(float x, float y, float smoothHeight, float roughHeight)
+        // Ocean channels: a band where two offset Perlin fields nearly agree is pressed toward 0, faded in from the centre.
+        private static float CutChannels(float h, float wx, float wy, float fromCentre)
         {
-            if (_maps?.Rough == null) return roughHeight;
-            return Mathf.Lerp(smoothHeight, roughHeight, _maps.Rough.GetValue(x, y) * _settings.RoughmapBlend);
-        }
-
-        /// <summary>0.7.31 dropped the RoughmapBlend == 0 short-circuit that 0.7.30 had here; this follows the
-        /// current source, so a flat-map world differs from the 0.7.30 binary on that one gate.</summary>
-        public float ApplyFlatmap(float x, float y, float flatHeight, float height)
-        {
-            if (_settings.HeightMapOverridesEverything) return flatHeight;
-            BcFloatMap image = _settings.UseRoughInvertedAsFlat ? _maps?.Rough : _maps?.Flat;
-            if (image == null) return height;
-
-            float f = _settings.UseRoughInvertedAsFlat ? 1 - image.GetValue(x, y) : image.GetValue(x, y);
-            return Mathf.Lerp(height, flatHeight, f * _settings.FlatmapBlend);
-        }
-
-        public float ApplyHeatmap(float x, float y) =>
-            _settings.HeatMapScale * (_maps?.Heat != null ? _maps.Heat.GetValue(x, y) : 0f);
-
-        public float ApplyForest(float x, float y, float forest)
-        {
-            float finalValue = forest;
-            if (_maps?.Forest != null)
-            {
-                float normalizedForestValue = Mathf.InverseLerp(ForestFactorMax, ForestFactorMin, forest);
-                float fmap = _maps.Forest.GetValue(x, y);
-                float calculatedValue = Mathf.Lerp(normalizedForestValue, normalizedForestValue * fmap, _settings.ForestmapMultiply)
-                    + fmap * _settings.ForestmapAdd;
-                finalValue = Mathf.Lerp(ForestFactorMax, ForestFactorMin, calculatedValue);
-            }
-            return Mathf.Clamp(finalValue + _settings.ForestAmountOffset, ForestFactorMin, ForestFactorMax);
-        }
-
-        public Heightmap.Biome GetBiomeOverride(float mapX, float mapY) =>
-            _maps?.Biome == null ? Heightmap.Biome.None : _maps.Biome.GetValue(mapX, mapY);
-
-        private float CarveOceanChannels(float finalHeight, float wx, float wy, float distance)
-        {
-            float v = Mathf.Abs(
+            float gap = Mathf.Abs(
                 Mathf.PerlinNoise(wx * 0.002f * 0.25f + 0.123f, wy * 0.002f * 0.25f + 0.15123f)
                 - Mathf.PerlinNoise(wx * 0.002f * 0.25f + 0.321f, wy * 0.002f * 0.25f + 0.231f));
-            return finalHeight * (1f - (1f - Utils.LerpStep(OceanChannelLow, OceanChannelHigh, v))
-                * Utils.SmoothStep(OceanChannelNear, OceanChannelFar, distance));
+            float inBand = 1f - Utils.LerpStep(ChannelBandLow, ChannelBandHigh, gap);
+            return h * (1f - inBand * Utils.SmoothStep(ChannelFadeStart, ChannelFadeEnd, fromCentre));
         }
 
-        private float DropOffAtEdge(float finalHeight, float distance)
+        // Past the playable radius the ground slopes down to the rim height, and its last ten metres drop into a cliff.
+        private float SinkRim(float h, float fromCentre)
         {
-            float t = Utils.LerpStep(_settings.WorldSize, _settings.TotalRadius, distance);
-            finalHeight = Mathf.Lerp(finalHeight, EdgeDropoffHeight, t);
-            float edge = _settings.TotalRadius - EdgeCliffMargin;
-            if (distance > edge)
+            h = Mathf.Lerp(h, RimFloor, Utils.LerpStep(_settings.WorldSize, _settings.TotalRadius, fromCentre));
+            float cliffStart = _settings.TotalRadius - CliffWidth;
+            if (fromCentre > cliffStart) h = Mathf.Lerp(h, CliffFloor, Utils.LerpStep(cliffStart, _settings.TotalRadius, fromCentre));
+            return h;
+        }
+
+        // Inside the mountain-free radius a high point is squeezed into the 0.28..0.38 band, fading out over its last 400 m.
+        private static float CapNearCentre(float h, float fromCentre, float minMountainDistance)
+        {
+            float squeezed = Mathf.Lerp(CentreCapStart, CentreCapTop, Mathf.Clamp01((h - CentreCapStart) / CentreCapRange));
+            return Mathf.Lerp(squeezed, h, Utils.LerpStep(minMountainDistance - CentreCapFade, minMountainDistance, fromCentre));
+        }
+
+        /// <summary>The ground height a converted world's maps give on top of vanilla's biome height (`height`, in metres, on
+        /// the way in). A height map that overrides everything makes the ground the base height x 200; a rough map blends
+        /// that smooth height into the biome height; paint, lava, moss and vegetation maps colour the terrain mask first.
+        /// Without this a converted world kept vanilla's biome height everywhere (dirt over builds, since a
+        /// save's terrain edits are deltas from it).</summary>
+        public void ApplyBiomeHeight(WorldGenerator generator, Heightmap.Biome biome, float wx, float wy, ref Color mask, ref float height)
+        {
+            if (_settings == null || !_settings.EnabledForThisWorld) return;
+            bool paints = _settings.PaintMap != null || _settings.LavaMap != null || _settings.MossMap != null || _settings.VegetationMap != null;
+            if (_settings.HeightMapOverridesEverything)
             {
-                float t2 = Utils.LerpStep(edge, _settings.TotalRadius, distance);
-                finalHeight = Mathf.Lerp(finalHeight, EdgeCliffHeight, t2);
+                if (paints) PaintMask(wx, wy, biome, ref mask);
+                height = generator.GetBaseHeight(wx, wy, false) * 200f;
+                return;
             }
-            return finalHeight;
+            if (_settings.RoughMap != null)
+            {
+                float smooth = generator.GetBaseHeight(wx, wy, false) * 200f;
+                if (paints) PaintMask(wx, wy, biome, ref mask);
+                height = _maps?.Rough == null
+                    ? height
+                    : Mathf.Lerp(smooth, height, _maps.Rough.GetValue(_settings.Normalize(wx), _settings.Normalize(wy)) * _settings.RoughmapBlend);
+                return;
+            }
+            if (paints) PaintMask(wx, wy, biome, ref mask);
         }
 
-        private static float CapCentreMountains(float finalHeight, float distance, float minMountainDistance)
+        // The paint map's colour onto the terrain mask (its alpha too, unless fully opaque), then the lava map in the Ashlands
+        // or the moss map in the Mistlands as the mask's alpha.
+        private void PaintMask(float wx, float wy, Heightmap.Biome biome, ref Color mask)
         {
-            float t3 = Mathf.Clamp01((finalHeight - MountainCapLow) / MountainCapSpan);
-            return Mathf.Lerp(Mathf.Lerp(MountainCapLow, MountainCapHigh, t3), finalHeight,
-                Utils.LerpStep(minMountainDistance - MountainCapDistance, minMountainDistance, distance));
+            float x = _settings.Normalize(wx), y = _settings.Normalize(wy);
+            if (_maps?.Paint != null && _maps.Paint.TryGetValue(x, y, out Color painted))
+            {
+                mask.r = painted.r;
+                mask.g = painted.g;
+                mask.b = painted.b;
+                if (painted.a != 1f) mask.a = painted.a;
+            }
+            if (_maps?.Lava != null && biome == Heightmap.Biome.AshLands) mask.a = _maps.Lava.GetValue(x, y);
+            else if (_maps?.Moss != null && biome == Heightmap.Biome.Mistlands) mask.a = _maps.Moss.GetValue(x, y);
         }
 
-        private static float SigmoidActivation(float x, float a, float b) => 1 / (1 + Mathf.Exp(a + b * x));
+        /// <summary>The heat map's value at a normalised map point, times the world's heat scale (0 with no heat map).
+        /// Above 0 means Ashlands.</summary>
+        public float HeatAt(float mapX, float mapY) => _settings.HeatMapScale * (_maps?.Heat != null ? _maps.Heat.GetValue(mapX, mapY) : 0f);
 
-        private static float ApplyMountains(float x, float n) =>
-            x * (1 - Mathf.Pow(1 - x, 1.2f + n * 0.8f)) + x * (1 - x);
+        /// <summary>Vanilla's forest factor reshaped by the forest map (multiplied and added by the world's amounts, in the
+        /// factor's 0..1 span), then offset and kept inside vanilla's range.</summary>
+        public float ForestFactorAt(float mapX, float mapY, float vanillaFactor)
+        {
+            float factor = vanillaFactor;
+            if (_maps?.Forest != null)
+            {
+                float share = Mathf.InverseLerp(ForestFactorHigh, ForestFactorLow, vanillaFactor);
+                float drawn = _maps.Forest.GetValue(mapX, mapY);
+                float reshaped = Mathf.Lerp(share, share * drawn, _settings.ForestmapMultiply) + drawn * _settings.ForestmapAdd;
+                factor = Mathf.Lerp(ForestFactorHigh, ForestFactorLow, reshaped);
+            }
+            return Mathf.Clamp(factor + _settings.ForestAmountOffset, ForestFactorLow, ForestFactorHigh);
+        }
+
+        /// <summary>The biome the map maker drew at a normalised map point; None where the map says nothing (or there is
+        /// no biome map), which leaves vanilla's rules to decide.</summary>
+        public Heightmap.Biome MapBiomeAt(float mapX, float mapY) => _maps?.Biome == null ? Heightmap.Biome.None : _maps.Biome.GetValue(mapX, mapY);
     }
 }

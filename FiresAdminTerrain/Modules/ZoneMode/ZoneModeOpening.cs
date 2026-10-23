@@ -52,6 +52,7 @@ namespace VerdantsAscent.Terrain.Zones
                 rpc.Register<ZPackage>(RpcOpenRequest, RPC_OpenRequest);
                 rpc.Register<string>(RpcReply, RPC_Reply);
                 rpc.Register<ZPackage>(RpcSpawnerResult, RPC_SpawnerResult);
+                ZoneModePark.RegisterParkDrop(rpc);
                 s_registeredOn = rpc;
             }
             catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] RPC register failed: {ex.Message}"); }
@@ -71,6 +72,9 @@ namespace VerdantsAscent.Terrain.Zones
             var land = WithParkedLand(zones, sources, shifts, out var landShifts);
             var opened = ZoneModeRegistry.AddOpenZones(zones, reason, actorId, land, landShifts);
             if (opened.Count == 0) return opened;
+            // Builds made over these zones while they were closed come down now (only the ones tagged for them).
+            try { ZoneModeOverClosed.TakeDown(opened); }
+            catch (Exception ex) { FiresLogger.LogError($"[FiresZones] builds over {Describe(opened)} could not be taken down: {ex}"); }
             if (sources != null) ZoneModeSwaps.OnOpened(opened, sources, locations);
 
             var awaiting = new HashSet<long>();
@@ -337,7 +341,6 @@ namespace VerdantsAscent.Terrain.Zones
             }
             message = $"The sea gives way — ({zone.x},{zone.y}) returns as it was"
                 + (park.Pieces > 0 ? $", with the {park.Pieces} pieces built there." : ".");
-            // Fire (10-03, popup b): the rule stays; the reason is said.
             if (seed.RestoresOnly) message += $" (The {seed.Name} restores only.)";
             else if (!ZoneModePark.SeedMatches(seed, zone, park)) message += $" (Parked land: wear the Eye of the Beholder to raise {seed.Land} here.)";
             return true;

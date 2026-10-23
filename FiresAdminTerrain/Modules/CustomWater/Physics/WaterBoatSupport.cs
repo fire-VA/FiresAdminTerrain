@@ -67,14 +67,13 @@ namespace VerdantsAscent.Water.Core
 
             // Use custom water if it's higher than vanilla result.
             //
-            // 2026-05-27 round-52 — REMOVED the SWIM_DEBUG diagnostic
+            // No diagnostic logging here. This Harmony postfix is called by every
             // Debug.LogWarning. This Harmony postfix is called by every
             // floating object every FixedUpdate — when the player is
             // near water with several ships + dropped items in range,
             // the per-frame Debug.LogWarning was firing thousands of
             // times per second and stalling the main thread on log
-            // I/O. The land-ice placement lock-up the user reported
-            // was actually this log spam, not the LandIceController.
+            // I/O and froze the game.
             if (customLevel > __result)
             {
                 __result = customLevel;

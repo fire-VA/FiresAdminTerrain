@@ -34,6 +34,42 @@ namespace VerdantsAscent.Terrain.BcImport
                 + " Usage: " + MapsCommand + " [worldName]",
                 args => Report(Describe(WorldNameFrom(args), true), args),
                 isCheat: true);
+
+            new Terminal.ConsoleCommand(HeightCommand,
+                "How BetterContinents' biome height shapes the ground here (read-only). Usage: " + HeightCommand
+                + " [x z] - defaults to where you stand.",
+                args => Report(HeightAt(args), args),
+                isCheat: true);
+        }
+
+        private const string HeightCommand = "fires_bc_height";
+
+        // The ground at one spot, BC side by side with vanilla: BC's smooth height (base x 200), the roughmap weight, the
+        // generated height (with BC's blend), vanilla's own biome height (solved back from the blend), and the live
+        // ground (with the save's terrain edits). Evidence for the roughmap fix.
+        private static List<string> HeightAt(Terminal.ConsoleEventArgs args)
+        {
+            var lines = new List<string>();
+            var gen = BcMigratedWorld.Generator;
+            var wg = WorldGenerator.instance;
+            if (gen == null || wg == null) { lines.Add($"{HeightCommand}: this world is not a converted BetterContinents world here."); return lines; }
+            Vector3 p = Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : Vector3.zero;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (args.Length > 2 && float.TryParse(args[1], System.Globalization.NumberStyles.Float, inv, out float ax)
+                && float.TryParse(args[2], System.Globalization.NumberStyles.Float, inv, out float az))
+                p = new Vector3(ax, 0f, az);
+            Heightmap.Biome biome = wg.GetBiome(p.x, p.z);
+            float generated = wg.GetBiomeHeight(biome, p.x, p.z, out Color _);
+            float smooth = wg.GetBaseHeight(p.x, p.z, false) * 200f;
+            var s = gen.Settings;
+            float k = gen.Maps?.Rough != null ? gen.Maps.Rough.GetValue(s.Normalize(p.x), s.Normalize(p.z)) * s.RoughmapBlend : -1f;
+            string vanilla = s.HeightMapOverridesEverything ? "not used (Override All)"
+                : k < 0f ? "= generated (no roughmap)"
+                : k > 0.01f ? ((generated - smooth * (1f - k)) / k).ToString("0.000", inv) : "not solvable (roughmap ~0 here)";
+            string live = Heightmap.GetHeight(p, out float h) ? h.ToString("0.000", inv) : "zone not loaded";
+            lines.Add(string.Format(inv, "{0} at ({1:0.0}, {2:0.0}) {3}: BC smooth {4:0.000}, roughmap weight {5}, generated {6:0.000}, vanilla biome height {7}, live ground {8}",
+                HeightCommand, p.x, p.z, biome, smooth, k < 0f ? "none" : k.ToString("0.000", inv), generated, vanilla, live));
+            return lines;
         }
 
         private static string WorldNameFrom(Terminal.ConsoleEventArgs args) =>

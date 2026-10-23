@@ -38,7 +38,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_nextTick = Time.time + TickSeconds;
             var player = Player.m_localPlayer;
             if (player == null || !ZoneModeChunkSpawner.TryAimedSeed(player, out var seed)
-                || !ZoneModeCommands.TryGetLookedAtZone(out var zone) || ZoneModeRegistry.IsOpen(zone))
+                || !ZoneModeChunkSpawner.TryGetTargetZone(player, out var zone) || ZoneModeRegistry.IsOpen(zone))
             {
                 Hide();
                 return;

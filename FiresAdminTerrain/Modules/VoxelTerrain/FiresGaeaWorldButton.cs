@@ -6,12 +6,12 @@ using UnityEngine.UI;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // The start panel's "New from Gaea" button: a copy of its Start/Join tab buttons, right of Join Game along the top
-    // (Fire, 2026-09-27: "next to the start/join tabs, theres room there"). It is a plain button, not a third tab: its
+    // (next to the start/join tabs, where there is room). It is a plain button, not a third tab: its
     // "Selected" look stays off and TabHandler never knows it. It hangs off the start panel itself, not the tab row, so the
     // row's layout and any clipping leave it alone, and it is placed from Join Game's corners as drawn, after a layout pass,
-    // each time the panel opens (0.2.594 read the tab's position before its row was laid out and landed out of sight). It
+    // each time the panel opens (reading the tab's position before its row was laid out landed it out of sight). It
     // opens New World in Gaea mode (FiresNewWorldOptions.OpenForGaea) and exists only while World Gen Studio is hosted
-    // here: FDT hosts it behind Core's WorldGenStudioBridge (FiresGaeaStudio.Available). Tools\GAEA_WORLD_BUTTON.md.
+    // here: FDT hosts it behind Core's WorldGenStudioBridge (FiresGaeaStudio.Available).
     [HarmonyPatch]
     internal static class FiresGaeaWorldButton
     {

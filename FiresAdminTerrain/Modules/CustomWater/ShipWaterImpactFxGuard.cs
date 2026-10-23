@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // Round-86 — heal a null-prefab crash in Ship's water-impact effect.
+    // Heal a null-prefab crash in Ship's water-impact effect.
     //
     // Vanilla Ship.UpdateWaterForce fires m_waterImpactEffect.Create on a hard
     // water impact (fast depth change). EffectList.Create Instantiates each

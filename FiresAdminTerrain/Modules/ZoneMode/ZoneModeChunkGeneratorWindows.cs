@@ -8,16 +8,18 @@ using UnityEngine.UI;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The Chunk Generator's windows in vanilla's own clothes (Fire, 2026-09-27: "use vanilla ui elements not our own", like
-    // a workbench; Tools\CHUNK_GENERATOR.md). The recipe window is a clone of the live crafting panel with its recipe rows,
+    // The Chunk Generator's windows in vanilla's own clothes (vanilla UI elements, like
+    // a workbench). The recipe window is a clone of the live crafting panel with its recipe rows,
     // requirement slots and Craft button; the fuel window is a clone of the chest panel whose grid shows the fuels the
     // player carries, with vanilla's stack-split dialog as the amount step. Everything is taken from InventoryGui at
     // runtime, so nothing of IronGate's ships. A clone is made inactive and keeps only UI components; every persistent
-    // listener is switched off and gamepad hints go (Tools\CLONED_VANILLA_UI_PERSISTENT_LISTENERS.md). Anything missing
+    // listener is switched off and gamepad hints go. Anything missing
     // returns false, and the caller falls back to its own window.
     internal static class ZoneModeChunkGeneratorWindows
     {
         private const string GuiUtilsAssembly = "assembly_guiutils";
+        // Names other mods give the nodes they add to vanilla's crafting panel (VAInventory InventoryTabs: tab buttons + views)
+        private static readonly string[] ForeignNamePrefixes = { "VATab_", "VAView_" };
         private const string GamepadHint = "gamepad_hint";
         private const string RowIcon = "icon";
         private const string RowName = "name";
@@ -96,6 +98,7 @@ namespace VerdantsAscent.Terrain.Zones
                 if (twin != null) requirements.Add(twin);
             }
             window.Requirements = requirements.ToArray();
+            ShowRecipePage(panel, window);
 
             foreach (var part in new Component[]
             {
@@ -227,6 +230,15 @@ namespace VerdantsAscent.Terrain.Zones
             var split = CloneUi((RectTransform)gui.m_splitDialog.transform, root, false);
             s_grid = panel != null ? Twin<InventoryGrid>(gui.m_container, panel, liveGrid) : null;
             s_split = split != null ? split.GetComponent<SplitDialog>() : null;
+            // The fuel window showed the last chest's items with the player's fuel drawn over them: the
+            // clone copies the element objects vanilla built for the last chest under m_gridRoot, but not the grid's private element
+            // list, so UpdateInventory built new elements on top and the old ones kept showing. The copied ones go first.
+            if (s_grid != null && s_grid.m_gridRoot != null)
+            {
+                int stale = s_grid.m_gridRoot.childCount;
+                for (int i = stale - 1; i >= 0; i--) UnityEngine.Object.Destroy(s_grid.m_gridRoot.GetChild(i).gameObject);
+                if (stale > 0) FiresLogger.LogDebug($"[FiresZones] Chunk Generator fuel window: cleared {stale} element(s) copied from the last chest panel");
+            }
             if (s_grid == null || s_split == null)
             {
                 ZoneModeChunkGeneratorMenu.Close();
@@ -403,6 +415,32 @@ namespace VerdantsAscent.Terrain.Zones
         // everything else another mod or vanilla hung on the panel goes, and so do gamepad hints.
         private static void Strip(GameObject root)
         {
+            // Other mods hang whole
+            // screens on vanilla's panels. A node carrying any component from a mod's assembly is such a screen: it goes with
+            // everything under it, before the script-only strip below (which left their images and texts showing).
+            var injected = new List<GameObject>();
+            foreach (var behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (behaviour == null || behaviour.gameObject == root) continue;
+                string asm = behaviour.GetType().Assembly.GetName().Name;
+                if (asm == "assembly_valheim" || asm == GuiUtilsAssembly || asm.StartsWith("Unity", StringComparison.Ordinal)) continue;
+                if (!injected.Contains(behaviour.gameObject)) injected.Add(behaviour.gameObject);
+            }
+            // VAInventory's tab
+            // buttons are clones of vanilla's own Upgrade tab ("VATab_<id>", only vanilla components) and its views are bare
+            // RectTransforms ("VAView_<id>"), so the component test above never saw them. Any node another mod named that way goes too.
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (t == null || t.gameObject == root || injected.Contains(t.gameObject)) continue;
+                foreach (var p in ForeignNamePrefixes)
+                    if (t.name.StartsWith(p, StringComparison.Ordinal)) { injected.Add(t.gameObject); break; }
+            }
+            foreach (var node in injected)
+            {
+                if (node == null) continue;   // already gone with a parent
+                if (s_reported.Add("injected " + node.name)) FiresLogger.LogDebug($"[FiresZones] Chunk Generator window: dropped another mod's '{node.name}' from the cloned panel");
+                UnityEngine.Object.DestroyImmediate(node);
+            }
             foreach (var behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
                 if (behaviour == null || behaviour is UIBehaviour) continue;
@@ -461,6 +499,39 @@ namespace VerdantsAscent.Terrain.Zones
         private static void Hide(Component part)
         {
             if (part != null) part.gameObject.SetActive(false);
+        }
+
+        // The clone copies whatever page the live crafting panel shows. FATI's tab (FiresAllTheItems FatiTab) hides
+        // vanilla's RecipeList and Decription and draws its own grid (FATI_BaseUI) in that panel, and its tab state outlives the
+        // inventory closing, so after using FATI the recipe window opened on a dead copy of FATI's page with no way back.
+        // The recipe window shows vanilla's own parts: each part it uses is made visible up to the clone's root, and any
+        // other mod's page or tab in the clone (a "FATI" name) is hidden. What was found is logged at Debug.
+        private static void ShowRecipePage(RectTransform panel, RecipeWindow window)
+        {
+            var reopened = new List<string>();
+            var parts = new List<Component> { window.List, window.Name, window.Description, window.Icon, window.Craft };
+            foreach (var slot in window.Requirements) parts.Add(slot);
+            foreach (var part in parts)
+            {
+                if (part == null) continue;
+                for (var node = part.transform; node != null && node != panel.parent; node = node.parent)
+                {
+                    if (node.gameObject.activeSelf) continue;
+                    node.gameObject.SetActive(true);
+                    if (!reopened.Contains(node.name)) reopened.Add(node.name);
+                }
+            }
+            var hidden = new List<string>();
+            foreach (var node in panel.GetComponentsInChildren<Transform>(true))
+            {
+                if (node == panel || !node.name.StartsWith("FATI", StringComparison.OrdinalIgnoreCase)) continue;
+                if (node.gameObject.activeSelf) hidden.Add(node.name);
+                node.gameObject.SetActive(false);
+            }
+            FiresLogger.LogDebug(reopened.Count == 0 && hidden.Count == 0
+                ? "[FiresZones] Chunk Generator recipes: the crafting panel was on its recipe page"
+                : $"[FiresZones] Chunk Generator recipes: the crafting panel was on another page; shown again: " +
+                  $"{(reopened.Count > 0 ? string.Join(", ", reopened) : "none")}; hidden: {(hidden.Count > 0 ? string.Join(", ", hidden) : "none")}");
         }
 
         // The game's GUI canvas scale, so the clones come out exactly as big as vanilla draws them.

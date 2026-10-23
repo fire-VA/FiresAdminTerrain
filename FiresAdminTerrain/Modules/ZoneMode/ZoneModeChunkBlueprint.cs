@@ -15,7 +15,7 @@ namespace VerdantsAscent.Terrain.Zones
     // the world it came from and can be handed to someone else. Saved as FiresWorldGen\chunks\<name>.chunkbp.
     //
     // Placing one drops it as it was: its own heights, nothing blended into the zones around it, and a build that ran
-    // into the next zone cut at the border (Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md). Every placement first saves the zone
+    // into the next zone cut at the border. Every placement first saves the zone
     // it replaces, so an admin can undo and redo.
     internal static class ZoneModeChunkBlueprint
     {
@@ -328,7 +328,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_redo.Clear();
         }
 
-        // A biome paint joins the same history (Fire's popup: Undo/Redo cover paint).
+        // A biome paint joins the same history (Undo/Redo cover paint).
         internal static void RecordPaint(uint id, string what)
         {
             Keep(s_undo, new Step { PaintId = id, What = what });
@@ -549,7 +549,7 @@ namespace VerdantsAscent.Terrain.Zones
                 return false;
             }
             // Clearing a zone resets vanilla's chunk save mapping, and a save in flight would swap the old mapping
-            // back in afterwards (Tools\WORLD_LOSS_20260927_RPGWORLD_CHUNKS.md).
+            // back in afterwards.
             if (net.IsSaving())
             {
                 problem = WorldSavingMessage;

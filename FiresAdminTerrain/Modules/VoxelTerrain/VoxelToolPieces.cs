@@ -7,8 +7,8 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // THE IH DIVORCE — the V-tools are OUR OWN pieces with our own input:
     // no infinity_tools.yaml, no IH ruler, no console-command round-trip.
-    //   * They live on the Chaos Hammer's Voxel tab, admin-gated, with every other admin terrain tool (Fire,
-    //     2026-09-27, Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md); ZoneModeChunkTools puts them in its table. The vanilla
+    //   * They live on the Chaos Hammer's Voxel tab, admin-gated, with every other admin terrain tool;
+    //     ZoneModeChunkTools puts them in its table. The vanilla
     //     Hammer no longer carries them. The admin seam is Core (AdminSyncing), never FAP.
     //   * Selecting one never places anything (TryPlacePiece blocked); the
     //     VoxelBrushDrag pump owns every click.
@@ -26,13 +26,13 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static IReadOnlyList<GameObject> Tools => s_tools;
 
         internal static readonly HashSet<string> Names = new HashSet<string>
-        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vriver", "Vpour", "Vpool" };
+        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vskin", "Vriver", "Vpour", "Vpool", "Vpond", "Vfall", "Vmop" };
 
         // Tools the VoxelBrushDrag pump actually drives. Only these take the
         // scroll wheel off the camera — a registered-but-unwired tool must not
         // swallow input and read as broken.
         internal static readonly HashSet<string> PumpedNames = new HashSet<string>
-        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vriver", "Vpour", "Vpool" };
+        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vskin", "Vriver", "Vpour", "Vpool", "Vpond", "Vfall", "Vmop" };
 
         // Our own tool state (was IH ruler / console args before the divorce).
         public static float ToolRadius = 3f;
@@ -58,27 +58,41 @@ namespace VerdantsAscent.Terrain.Voxel
             s_tools.RemoveAll(tool => tool == null);
             if (s_tools.Count > 0) return;
 
-            AddTool("Vcarve", "Carve TRUE 3D terrain — sphere dig at the cursor: what the ghost "
-                + "shows is exactly what gets removed. Hold LMB and DRAG to paint trenches/tunnels. "
-                + "Scroll = size, PgUp/PgDn = cylinder mode (explicit height).");
-            AddTool("Vfill", "Fill TRUE 3D terrain — sphere fill at the cursor: what the ghost "
-                + "shows is exactly what gets placed. Hold LMB and DRAG to raise runs. "
-                + "Scroll = size, PgUp/PgDn = cylinder mode (explicit height).");
-            AddTool("Vdelete", "Restore voxel terrain to its generated state in the brush. "
-                + "Scroll = radius.");
-            AddTool("Vcube", "3D CUBE voxel brush — click to stamp, hold LMB + drag to paint runs "
-                + "of blocks. Scroll = size. Hold LeftAlt = CARVE (lines-only ghost).");
-            AddTool("Vsphere", "3D SPHERE voxel brush — click to stamp, drag for smooth tubes. "
-                + "Scroll = size. Hold LeftAlt = CARVE (lines-only ghost).");
+            // The texts say what the stroke tools do (click and drag at the draw speed, PgUp/PgDn offset).
+            AddTool("Vcarve", "Carve voxel terrain — click and DRAG to sculpt a trench at a constant depth under the ground "
+                + "(it rides the terrain as it was before the stroke). Scroll = width, Shift+scroll or PgUp/PgDn = depth (Shift+PgUp = fine, hold = faster).");
+            AddTool("Vfill", "Fill voxel terrain — click and DRAG to raise the ground by a constant height along the stroke. "
+                + "Scroll = width, Shift+scroll or PgUp/PgDn = height (Shift+PgUp = fine, hold = faster).");
+            AddTool("Vdelete", "Restore voxel terrain to its generated state — click and DRAG over the edits to undo them. "
+                + "Scroll = width, Shift+scroll or PgUp/PgDn = how far above and below the surface it restores.");
+            AddTool("Vcube", "3D CUBE voxel brush — click and DRAG to lay runs of blocks. Scroll = size, Shift+scroll or PgUp/PgDn = lift "
+                + "off the ground. Hold LeftAlt = CARVE (lines-only ghost).");
+            AddTool("Vsphere", "3D SPHERE voxel brush — click and DRAG for smooth tubes and mounds. Scroll = size, "
+                + "Shift+scroll or PgUp/PgDn = lift off the ground. Hold LeftAlt = CARVE (lines-only ghost).");
+            AddTool("Vlevel", "Level voxel ground — click and DRAG: everything under the disc is cut or filled to the height "
+                + "you started at plus the Shift+scroll or PgUp/PgDn offset (no limit; the disc shows it). LeftAlt + drag = smooth instead. Scroll = size.");
+            AddTool("Vskin", "Skin over holes — click and DRAG across a cave opening or a broken lattice: a thin smooth shell is "
+                + "laid exactly at the surrounding ground's height (roads stay flat), only where there is a hole; the cave below "
+                + "stays hollow and intact ground is never raised. Scroll = size, Shift+scroll or PgUp/PgDn = shell thickness.");
 
             AddTool("Vriver", "Carve a river bed — hold LMB and DRAG the spine you want. Sweeps a "
                 + "channel between samples and clears vegetation across the wet width, so vanilla's shore "
-                + "sand and water ecology take over. Scroll = width, PgUp/PgDn = depth below the cursor.");
+                + "sand and water ecology take over. Scroll = width, Shift+scroll or PgUp/PgDn = depth below the cursor.");
             AddTool("Vpour", "Pour a water ribbon — hold LMB and DRAG to lay a smoothed water "
-                + "surface along the path. Scroll = width, PgUp/PgDn = surface offset from the terrain hit.");
-            AddTool("Vpool", "Pool shaper (all-in-one) — click to level, carve, fill and seed a pool. "
-                + "Click again downstream to auto-connect the two with a graded channel. "
-                + "Scroll = size, PgUp/PgDn = water level.");
+                + "surface along the path. Scroll = width, Shift+scroll or PgUp/PgDn = surface offset from the terrain hit.");
+            AddTool("Vpool", "Pool shaper (all-in-one) — click to level, carve, fill and seed a pool, or click existing water "
+                + "to use it. Click again (a new spot or another water) to auto-carve and fill a river between the two, routed "
+                + "along the low ground; click the higher one first. LeftAlt + click = fill the dip under the cursor to its rim "
+                + "(nothing carved). Scroll = size, Shift+scroll or PgUp/PgDn = water level.");
+            AddTool("Vpond", "Pond — a flat circle of water at the height you set: Shift+scroll or PgUp/PgDn nudge it over the ground under the "
+                + "crosshair (Shift = fine), scroll = radius. Click fills the dip under the circle with water flat at that height. "
+                + "Red with posts = it would spill there (lower it or shrink it); nothing is laid until it holds all round.");
+            AddTool("Vfall", "Waterfall — click the ground just before an edge (a cliff, a sky island's rim): a "
+                + "spillway at the lip, a curtain with mist down to the ground or water below, and a pool where it "
+                + "lands. Scroll = width. LeftAlt + click = remove the falls in the ring.");
+            AddTool("Vmop", "Water mop — hold LMB and DRAG to remove water in the ring for good: generated rivers, "
+                + "lakes and ponds (sky islands too) AND water you drew. Water outside the ring stays. Redraw with "
+                + "Vpour/Vpool/Vriver. Scroll = size. LeftAlt = restore what was mopped there.");
 
             FiresLogger.LogInfo($"[FiresVoxel] {s_tools.Count} V-tools built for the Chaos Hammer's Voxel tab (IH-free, admin-gated).");
         }
@@ -221,13 +235,13 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // Camera zoom stands down while a V-tool is selected — the wheel is
-        // the tool radius. Our own reads use raw Input.GetAxis, unaffected.
+        // the tool radius. Our own reads (FatInput.WheelNotches) pass ReadingRaw and see the wheel.
         [HarmonyPatch(typeof(ZInput), nameof(ZInput.GetMouseScrollWheel))]
         private static class Patch_ZInput_Scroll_VoxelTools
         {
             private static void Postfix(ref float __result)
             {
-                if (__result == 0f) return;
+                if (__result == 0f || FatInput.ReadingRaw) return;
                 var player = Player.m_localPlayer;
                 if (OurToolSelected(player) || Zones.ZoneModeAreaTool.WantsWheel(player)) __result = 0f;
             }

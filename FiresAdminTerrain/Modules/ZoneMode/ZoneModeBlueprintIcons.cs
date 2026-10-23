@@ -7,7 +7,7 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // A picture for every saved blueprint in the Chaos Hammer's menu (Fire, 2026-09-27, Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md).
+    // A picture for every saved blueprint in the Chaos Hammer's menu.
     //   * MAP: a top-down map drawn on the server from the blueprint's own data - surface height, biome, paint, water
     //     and every built piece - so every blueprint has one, console saves and older files included, and a headless
     //     dedicated server can draw it: no camera, no GPU. Kept beside the blueprint as <name>.map.

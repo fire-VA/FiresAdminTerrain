@@ -376,8 +376,8 @@ namespace VerdantsAscent.Water.Core
         private void CreateGameObjects()
         {
             // --- Water volume (inner liquid, visible through holes) ---
-            // Snow has no underwater layer (user 2026-05-25: "no water
-            // effects, just the normal mountain snow effects") — skip
+            // Snow has no underwater layer (no water
+            // effects, just the normal mountain snow effects), so skip
             // creating it entirely so nothing renders below the snow surface.
             if (_waterGO != null) Destroy(_waterGO);
             if (!IsSnowMode)
@@ -405,11 +405,10 @@ namespace VerdantsAscent.Water.Core
             _iceGO.transform.localPosition = Vector3.zero;
             _iceGO.transform.localRotation = Quaternion.identity;
             _iceGO.transform.localScale = Vector3.one;
-            // Both Ice and Snow live on "Default" layer. Earlier round-5
+            // Both Ice and Snow live on "Default" layer. "piece" was
             // tried "piece" for ice on the theory that built-structure layer
             // gave better walk-on detection, but it actually broke collision
-            // entirely (user 2026-05-25: "the ice is drawing the ice on top
-            // now but not adding the collision to that mesh"). Default
+            // entirely (the ice drew on top but the mesh had no collision). Default
             // collides cleanly with the character controller and works fine
             // with the slippery PhysicsMaterial.
             _iceGO.layer = LayerMask.NameToLayer("Default");
@@ -421,7 +420,7 @@ namespace VerdantsAscent.Water.Core
             if (_iceMaterial != null)
                 _iceRenderer.material = _iceMaterial;
 
-            // 2026-05-25 round-6: snow has NO collider. User wants "just snow
+            // Snow has NO collider: just snow
             // with no collision and no water effects (just the normal
             // mountain snow effects)" — a visual decal, not a walkable
             // surface. Skip the MeshCollider entirely so the player walks
@@ -431,8 +430,8 @@ namespace VerdantsAscent.Water.Core
                 _iceCollider = _iceGO.AddComponent<MeshCollider>();
                 _iceCollider.convex = false;
                 // Slippery physics material so the player slides on ice
-                // instead of sticking. User explicitly wanted "we can run
-                // along it and slide" 2026-05-25.
+                // instead of sticking, so the player can run along it
+                // and slide.
                 _iceCollider.sharedMaterial = GetOrCreateIcePhysicsMaterial();
             }
         }

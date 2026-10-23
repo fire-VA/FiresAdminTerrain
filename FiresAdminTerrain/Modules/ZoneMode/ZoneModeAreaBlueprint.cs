@@ -9,7 +9,7 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // An AREA in a file (Fire, 2026-09-22 and 2026-09-27, Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md "Save area"): everything
+    // An AREA in a file: everything
     // inside an upright cylinder - a radius round a centre, between a bottom and a top height - so a sky island cluster
     // or a patch of land can be picked up whole. It holds the land as whole-metre voxel samples (the rest of the box
     // marked "keep"), the ground's paint in every column inside, and every object inside, builds included. Saved as
@@ -17,7 +17,7 @@ namespace VerdantsAscent.Terrain.Zones
     //
     // Placing lays it down with its centre at the spot the admin looks at, at the heights it was saved at, and touches
     // nothing outside its cylinder. What stood inside is kept first, so the chunk tools' Undo and Redo step it back and
-    // forth. Objects are removed only through vanilla's own DestroyZDO (Tools\WORLD_LOSS_20260927_RPGWORLD_CHUNKS.md).
+    // forth. Objects are removed only through vanilla's own DestroyZDO.
     internal static class ZoneModeAreaBlueprint
     {
         internal const string Extension = ".areabp";

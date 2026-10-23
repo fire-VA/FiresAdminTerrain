@@ -6,7 +6,7 @@ namespace VerdantsAscent.Terrain.BcImport
 {
     // Vanilla WorldGenerator.MergePoints, which FindLakes runs over every low grid point, is quadratic: it takes each point off
     // the FRONT of a List (shifting the rest) and then rescans every remaining point for the closest one after each merge.
-    // A world with a lot of sea has thousands of such points: 247 ms of every join and server start on CratersAshlands (R6,
+    // A world with a lot of sea has thousands of such points: 247 ms of every join and server start on one test world (see
     // PregenerationTiming). This is the same algorithm over the same list order, with a grid of range-sized cells so a search
     // only looks at the 3x3 cells a point can reach. The distances, the equality skip, the "strictly closer, so the lowest
     // index wins a tie" rule, the midpoint merge and the swap-removal are vanilla's own, so the lakes come out identical.

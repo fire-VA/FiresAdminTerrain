@@ -6,8 +6,8 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.BcImport
 {
     /// <summary>
-    /// BetterContinents' DataKey ordinals. Keys serialize as their ORDINAL, so this order is the format and
-    /// must only ever grow at the end. Taken from BC 0.7.30 (BetterContinentsREF/BetterContinents.cs:4093).
+    /// The setting keys of a BetterContinents save, in the order its format numbers them. A key is stored as its
+    /// NUMBER, so this order is part of the file format (data, as a save carries it) and may only ever grow at the end.
     /// </summary>
     internal enum BcDataKey
     {

@@ -42,8 +42,8 @@ namespace VerdantsAscent.Terrain.Persistence
         // for its family to pick the right glyph and colour.
         public static readonly string[] NativeToolNames =
         {
-            "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere",
-            "Vriver", "Vpour", "Vpool",
+            "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel",
+            "Vriver", "Vpour", "Vpool", "Vfall", "Vmop",
         };
 
         // "Paint Cultivated" -> "fires_paint_cultivated". Non-alnum runs → '_'.
@@ -207,6 +207,8 @@ namespace VerdantsAscent.Terrain.Persistence
                 case "vriver":  return S(0x6E8FA8, Glyph.Wave, Overlay.ChipLand);
                 case "vpour":   return S(0x2E77C0, Glyph.Drop, Overlay.WaveUnder);
                 case "vpool":   return S(0x2E77C0, Glyph.Wave, Overlay.BarUnder);
+                case "vfall":   return S(0x2E77C0, Glyph.Falls);
+                case "vmop":    return S(0x2E77C0, Glyph.Drop, Overlay.Slash);
             }
 
             // ── util / mode tools ──

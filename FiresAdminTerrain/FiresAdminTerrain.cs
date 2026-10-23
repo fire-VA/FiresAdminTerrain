@@ -15,12 +15,12 @@ using VerdantsAscent.Terrain.Utilities;
 namespace VerdantsAscent
 {
     // Standalone Fires-* mod hosting CustomTerrain + CustomWater. Clutter is
-    // delegated to FAP (source-linked) — see csproj for the linked files.
+    // delegated to FAP (source-linked) Ã¢â‚¬â€ see csproj for the linked files.
     //
     // Companion / NPC / Quest / Guild / Discord / Wayshrine / Territory init
     // intentionally absent: this mod is admin terrain + water tools only.
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
-    // Soft dependencies — these mods are not required for FAT to load, but
+    // Soft dependencies Ã¢â‚¬â€ these mods are not required for FAT to load, but
     // we integrate with them when present. Declaring them gives r2modman /
     // Thunderstore proper "depends on" metadata AND lets BepInEx order our
     // Awake AFTER theirs, so reflective lookups (AdminCheck, IH ruler
@@ -39,13 +39,16 @@ namespace VerdantsAscent
     [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, "0.2.138")]
     // ValheimPerformanceOptimizations replaces vanilla's zone spawn and heightmap render / collision builds outright, which
     // undoes FAT's own terrain pipeline (voxel ground, zone mode, the dedi's off-map refusal). FAT does its own optimizing;
-    // Fire 2026-09-30: listed as incompatible, so BepInEx refuses to load FAT beside it.
+    // It is listed as incompatible, so BepInEx refuses to load FAT beside it.
     [BepInIncompatibility("dev.ontrigger.vpo")]
     public class FiresAdminTerrain : BaseUnityPlugin
     {
         public const string PluginGUID = "com.Fire.FiresAdminTerrain";
         public const string PluginName = "FiresAdminTerrain";
-        public const string PluginVersion = "0.2.702";
+        public const string PluginVersion = "0.2.1006";
+        // The oldest FAT whose server-synced config keys match this one's (ConfigSync's MinimumRequiredVersion). Raise it ONLY when a
+        // synced key's name, type or meaning changes, never with every build: it forces every player and server to update together.
+        internal const string SyncedConfigSince = "0.2.974";   // The synced "VoxelTerrain World" keys moved to "Voxel Terrain - World"
 
         public static readonly Harmony harmony = new Harmony(PluginGUID);
         public static FiresAdminTerrain Instance { get; private set; }
@@ -57,19 +60,35 @@ namespace VerdantsAscent
         public ConfigSync configSync;
         private static ILogHandler _originalLogHandler;
 
-        // BepInEx log source — banner emitters route through this (not Debug.Log)
+        // BepInEx log source Ã¢â‚¬â€ banner emitters route through this (not Debug.Log)
         // so banner lines don't stdout-echo a raw white console duplicate.
         public static BepInEx.Logging.ManualLogSource Log;
 
         private static bool s_applicationQuitting;
 
-        /// <summary>0.2.701: the game is quitting (Application.quitting has fired): teardown must not touch the scene's managers.</summary>
+        /// <summary>the game is quitting (Application.quitting has fired): teardown must not touch the scene's managers.</summary>
         internal static bool ApplicationQuitting => s_applicationQuitting;
 
         private void Awake()
         {
             Log = Logger;
-            // BIG floating-island banner — fires FIRST so it sits at
+            VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.s_wetMainThread = System.Threading.Thread.CurrentThread.ManagedThreadId;   // PaintWet01 memo is main-thread only
+            // No caches under BepInEx config: move FAT's old config-folder caches to BepInEx/cache/
+            // FiresAdminTerrain once, before anything reads them (the water cache restore needs its .bin). Copy + verify, then the old
+            // folder moves to BepInEx/cache/FiresAdminTerrain/_migrated_from_config_<date> as the backup; nothing is deleted.
+            try
+            {
+                string cfg = BepInEx.Paths.ConfigPath;
+                System.Action<string> info = m => Logger.LogInfo(m), warn = m => Logger.LogWarning(m);
+                FiresCachePaths.Migrate(System.IO.Path.Combine(cfg, "FiresAdminTerrain"), FiresCachePaths.For("FiresAdminTerrain"), info, warn);
+                FiresCachePaths.Migrate(System.IO.Path.Combine(cfg, "VerdantsAscent", "WaterCache"), FiresCachePaths.For("FiresAdminTerrain", "WaterCache"), info, warn);
+                FiresCachePaths.Migrate(System.IO.Path.Combine(cfg, "FiresDistantPaint"), FiresCachePaths.For("FiresAdminTerrain", "DistantPaint"), info, warn);
+                FiresCachePaths.Migrate(System.IO.Path.Combine(cfg, "BiomeData"), FiresCachePaths.For("FiresAdminTerrain", "BiomeData"), info, warn);
+                Logger.LogInfo($"[FiresCache] FAT caches at {FiresCachePaths.For("FiresAdminTerrain")}");
+                if (!Application.isBatchMode) VerdantsAscent.Terrain.Voxel.FatStatsSection.TryRegister();   // Hub Stats card (clients)
+            }
+            catch (Exception ex) { Logger.LogWarning($"[FiresCache] migration skipped: {ex.Message}"); }
+            // BIG floating-island banner Ã¢â‚¬â€ fires FIRST so it sits at
             // the top of the FAT console output as the load
             // announcement. The compact tree-island-waterfall banner
             // fires at the end of FinishInit to bookend the load with
@@ -81,22 +100,23 @@ namespace VerdantsAscent
                 FiresLogger.LogWarning($"VAFatBanner.PrintBig failed: {ex.Message}");
             }
 
-            FiresLogger.LogInfo($"Awake() entered — version {PluginVersion}");
+            FiresLogger.LogInfo($"Awake() entered - version {PluginVersion}");
             Instance = this;
             Application.quitting += () => s_applicationQuitting = true;
+            VerdantsAscent.Terrain.Voxel.VoxelLayerPaint.NoteMainThread();   // Layered biome lookups answer on the main thread only
 
             // Declared before any world loads, so the offer is ready the moment a peer connects. (A studio bake goes through
-            // FAT's own join sync, before PeerInfo: BcJoinSync, D14.)
+            // FAT's own join sync, before PeerInfo: BcJoinSync.)
             try { VerdantsAscent.Terrain.Voxel.FiresSkyIslands.RegisterSync(); }
             catch (Exception ex)
             {
-                FiresLogger.LogWarning($"Sky island set sync registration failed: {ex.Message} — clients will hold "
+                FiresLogger.LogWarning($"Sky island set sync registration failed: {ex.Message} Ã¢â‚¬â€ clients will hold "
                                        + "islands off until their wait times out.");
             }
             try { VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.RegisterWearGround(); }
             catch (Exception ex)
             {
-                FiresLogger.LogWarning($"Wear gate registration failed: {ex.Message} — pieces on voxel ground keep vanilla's wear timing.");
+                FiresLogger.LogWarning($"Wear gate registration failed: {ex.Message} Ã¢â‚¬â€ pieces on voxel ground keep vanilla's wear timing.");
             }
             try { VerdantsAscent.Terrain.Voxel.FatSeasons.Register(); }
             catch (Exception ex)
@@ -125,21 +145,33 @@ namespace VerdantsAscent
             PrefabContainer.SetActive(false);
 
             ConfigManager.Instance.Initialize(Config);
-            VerdantsAscent.Water.Core.FiresLiquidConfig.Bind(Config);   // round-84 FiresLiquid look sliders
+            VerdantsAscent.Water.Core.FiresLiquidConfig.Bind(Config);   // FiresLiquid look sliders
             VerdantsAscent.Water.Core.FiresInlandWaterConfig.Bind(Config);   // per-layer ripple controls for the inland sheet
+            VerdantsAscent.Water.Core.InlandLakeProbe.Bind(Config);   // Lake reflection (Probe on by default)
+            VerdantsAscent.Water.Core.InlandLookConfig.Bind(Config);   // Per class / per biome looks
+            VerdantsAscent.Water.Core.InlandSteam.Bind(Config);        // Steam over warm still water (Plains, Ashlands)
             VerdantsAscent.Water.Core.FiresWaterAuthority.Bind(Config); // FAT owns the wave clock + CalcWave (client+dedi)
             VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.Bind(Config); // voxel P0 prototype toggles
+            VerdantsAscent.Terrain.Voxel.FatSuperFlatGrid.Bind(Config);   // The super flat build grid
+            StartCoroutine(VerdantsAscent.Terrain.Voxel.DediTextureTrim.Run());   // Headless dedi only, opt-in
             VerdantsAscent.Terrain.Zones.ZoneModeConfig.Bind(Config);
+            VerdantsAscent.Terrain.Zones.FatLocationAccelerator.Bind(Config);
+            VerdantsAscent.Terrain.Voxel.FiresCaveBiome.Bind(Config);   // Cave biome variety + cave environments
+            VerdantsAscent.Terrain.Voxel.FatUndergroundLocations.Bind(Config);   // Underground locations
+            VerdantsAscent.Terrain.Voxel.FatGrottos.Bind(Config);   // Grottos
+            VerdantsAscent.Terrain.Voxel.FatCaveRivers.Bind(Config);   // Underground rivers
+            VerdantsAscent.Terrain.Voxel.FatSinkFalls.Bind(Config);   // River waterfall sinkholes
             VerdantsAscent.Terrain.Zones.ZoneModeCoreBridge.Register();
             VerdantsAscent.Terrain.Paint.DistantPaintCache.Bind(Config); // paint on distant-LOD terrain
             VerdantsAscent.Terrain.Persistence.TileAnchorHeal.Bind(Config); // duplicate tile anchors: DryRun (default) | Apply
             VerdantsAscent.Terrain.Zones.OffMapZones.Bind(Config); // saved objects beyond the world edge: Off (default) | List | Remove
+            FatConfigRetire.MoveSections(Config);                   // "VoxelTerrain X" sections -> "Voxel Terrain - X", values carried
+            FatConfigRetire.Retire(Config);                        // The named dead keys leave the .cfg
 
             ConfigManager.Instance.configPresetToLoad.SettingChanged += (_, __) => ApplySelectedPreset();
             ConfigManager.Instance.configPresetSaveNow.SettingChanged += (_, __) => SaveNamedPreset();
             ConfigManager.Instance.configServerPreset.SettingChanged += (_, __) => ApplyServerPreset();
 
-            FiresCore.Config.FiresConfigVisibility.MarkAdvanced(Config, ConfigManager.IsAdvancedTuning);
             FiresCore.Config.FiresAdminConfigGate.Register(Config,
                 () => ConfigManager.Instance.configAdminOnlyTuning.Value, ConfigManager.IsAdvancedTuning);
 
@@ -147,7 +179,9 @@ namespace VerdantsAscent
             {
                 DisplayName = PluginName,
                 CurrentVersion = PluginVersion,
-                MinimumRequiredVersion = PluginVersion
+                // A FIXED floor, raised only when a synced key's name, type or meaning changes. An earlier version
+                // renamed the synced [Voxel Terrain] section (was "VoxelTerrain (P0 prototype)"), so peers below it disagree on it.
+                MinimumRequiredVersion = SyncedConfigSince
             };
             configSync.lockedConfigChanged += ConfigManager.Instance.OnConfigLockChanged;
             configSync.AddLockingConfigEntry(ConfigManager.Instance.configServerAuthority);
@@ -158,6 +192,11 @@ namespace VerdantsAscent
             configSync.AddConfigEntry(ConfigManager.Instance.configHeightCacheSamplesPerFrame);
             configSync.AddConfigEntry(ConfigManager.Instance.configUseNewTilePersistence);
             VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.RegisterServerAuthority(configSync);
+            VerdantsAscent.Ocean.OceanKit.Bind(Config, configSync);   // The Ocean keys, synced through this sync
+            // Player-facing config rules, applied after the last Bind (Ocean included). Basics only without
+            // Show Advanced, one-line descriptions, built-in lists hidden. The admin gate above keeps IsAdvancedTuning.
+            FiresCore.Config.FiresConfigVisibility.MarkAdvanced(Config, d => VerdantsAscent.Managers.FatPlayerFacingConfig.IsPlayerAdvanced(Config, d));
+            VerdantsAscent.Managers.FatPlayerFacingConfig.Apply(Config);
 
             LoadAssets();
 
@@ -169,8 +208,8 @@ namespace VerdantsAscent
 
             FiresCore.Materials.TerrainMaterialCache.MaterialCaptured += OnTerrainMaterialCaptured;
 
-            // Tile-restore batch tracker — starts an infinite polling
-            // coroutine that emits the 🪨 TILES banner whenever a wave
+            // Tile-restore batch tracker Ã¢â‚¬â€ starts an infinite polling
+            // coroutine that emits the Ã°Å¸ÂªÂ¨ TILES banner whenever a wave
             // of tile restores (TileAnchor.Load calls) has settled.
             // Per-tile success logs are verbose-only; the batch banner
             // is the default-visible summary. See VATileRestoreBatch
@@ -189,7 +228,7 @@ namespace VerdantsAscent
         {
             // FiresUnifiedCore installs the one shared rate-limit/suppression log handler now
             // (FiresCore.Logging.RateLimitedLogHandler). This per-mod copy was collapsed into Core so the handler
-            // chain stays a single wrapper instead of one-per-mod — intentionally a no-op.
+            // chain stays a single wrapper instead of one-per-mod Ã¢â‚¬â€ intentionally a no-op.
         }
 
         private IEnumerator DelayedDedicatedServerInit()
@@ -226,7 +265,7 @@ namespace VerdantsAscent
         {
             // The dedicated server executable, not "no graphics device": the headless test bot is a client, so it gets the
             // menus and the ice, snow and biome-painter pipelines a player has, and reads what a player would
-            // ([visual] 2026-09-28, admintools_test).
+            // (admintools_test).
             bool isDedicatedServer = FiresCore.Lifecycle.FiresMod.IsDedicatedServer;
             FiresCore.Logging.StatusBanner.Register("FAT", VerdantsAscent.Terrain.FatStatus.Line);
             if (!isDedicatedServer) VerdantsAscent.Terrain.Voxel.FiresWorldMenu.Register();
@@ -286,11 +325,11 @@ namespace VerdantsAscent
             // Phase F: legacy TerrainPaintRPC removed. RPC sync now flows
             // through TileBrushRPC (tile ops) + RegionScrubberRPC (clear).
 
-            // Track which sub-system inits succeeded so the 🔧 COMMANDS
+            // Track which sub-system inits succeeded so the Ã°Å¸â€Â§ COMMANDS
             // mini-banner at the end can summarize. Each int is 1 if
             // the corresponding Initialize/RegisterCommands call
             // returned without throwing, 0 otherwise. Per-success
-            // detail logs are verbose-only — the banner conveys the
+            // detail logs are verbose-only Ã¢â‚¬â€ the banner conveys the
             // aggregate count for normal loads.
             int biomePersistOK = 0, biomePainterOK = 0, iceToolOK = 0, landSnowOK = 0;
 
@@ -320,9 +359,8 @@ namespace VerdantsAscent
                     FiresLogger.LogError($"BiomeOverlayPainter.RegisterCommands threw: {ex.Message}");
                 }
 
-                // 2026-05-25 round-19: WIRE UP the LandIce / FloatingIce
-                // pipeline that's been sitting dead in the assembly since
-                // the original port. IcePlacementTool.Initialize() registers
+                // Wire up the LandIce / FloatingIce
+                // pipeline. IcePlacementTool.Initialize() registers
                 // place_ice / place_ice_land / place_ice_water / delete_ice /
                 // break_standalone_ice, and chains to LandIceCommands +
                 // FloatingIceCommands which register the height-mod
@@ -354,7 +392,7 @@ namespace VerdantsAscent
                 }
             }
 
-            // 🔧 COMMANDS mini-banner — single visual summary of which
+            // Ã°Å¸â€Â§ COMMANDS mini-banner Ã¢â‚¬â€ single visual summary of which
             // FAT sub-systems came up successfully. Replaces the 5-line
             // "X console commands registered" cluster above with one
             // box. Per-line details remain available via the verbose
@@ -368,7 +406,7 @@ namespace VerdantsAscent
             try { VerdantsAscent.Utilities.FatHelpContent.Register(); }
             catch (Exception ex) { FiresLogger.LogWarning($"Help registration failed: {ex.Message}"); }
 
-            // Compact "ready" banner — small floating island with
+            // Compact "ready" banner Ã¢â‚¬â€ small floating island with
             // brand panel. Deferred to WORLD LOAD time (when
             // ZNetScene is up) so it fires in lockstep with FAP's
             // and FGN's compact banners. The BIG "loading" banner
@@ -377,7 +415,7 @@ namespace VerdantsAscent
             StartCoroutine(EmitCompactBannerWhenZNetReady());
         }
 
-        // 📡 RPCs mini-banner — one visual summary of the session's RPC
+        // Ã°Å¸â€œÂ¡ RPCs mini-banner Ã¢â‚¬â€ one visual summary of the session's RPC
         // handler registrations (ConfigSync + RegionScrubberRPC +
         // TileBrushRPC), from the Priority.Last part of FAT's one ZNet.Awake
         // hook (FatVanillaHooks), after every registration, so the counts are
@@ -399,7 +437,7 @@ namespace VerdantsAscent
 
         // Waits for ZNetScene + prefab table to be live, then emits
         // the compact floating-island brand banner. Failure is
-        // non-fatal — falls back to the plain "mod loaded" log so
+        // non-fatal Ã¢â‚¬â€ falls back to the plain "mod loaded" log so
         // the load event is still recorded.
         private System.Collections.IEnumerator EmitCompactBannerWhenZNetReady()
         {
@@ -465,7 +503,7 @@ namespace VerdantsAscent
             if (!ConfigManager.Instance.configPresetSaveNow.Value) return;
 
             FiresCore.Config.FiresConfigPresets.SaveCurrentValuesAsPreset(
-                ConfigManager.PresetModName, Config, ConfigManager.Instance.configPresetSaveName.Value);
+                ConfigManager.PresetModName, Config, string.IsNullOrWhiteSpace(ConfigManager.Instance.configPresetSaveName.Value) ? "MyLook" : ConfigManager.Instance.configPresetSaveName.Value);
             ConfigManager.Instance.configPresetSaveNow.Value = false;
         }
 
@@ -488,7 +526,7 @@ namespace VerdantsAscent
             }
 
             // On an application quit Unity destroys the plugins before ZNet; unpatching here would drop FAT's ZNet.OnDestroy
-            // and other teardown hooks (R44-R46). Application.quitting fires first, and the process is ending anyway.
+            // and other teardown hooks. Application.quitting fires first, and the process is ending anyway.
             if (!s_applicationQuitting)
                 try { harmony?.UnpatchSelf(); } catch { }
 
@@ -519,13 +557,13 @@ namespace VerdantsAscent
                 assetBundle = GetAssetBundleFromResources("adminterrain");
                 if (assetBundle == null)
                 {
-                    FiresLogger.LogWarning($"Embedded asset bundle 'adminterrain' not found — terrain/water bundle-dependent features will be unavailable.");
+                    FiresLogger.LogWarning($"Embedded asset bundle 'adminterrain' not found Ã¢â‚¬â€ terrain/water bundle-dependent features will be unavailable.");
                     return;
                 }
                 FiresLogger.LogInfo($"Loaded asset bundle: {assetBundle.name}");
 
                 // The voxel-mesh terrain shader (Custom/FiresVoxelHeightmap):
-                // vanilla layer logic with voxel-proper projection — ceilings
+                // vanilla layer logic with voxel-proper projection Ã¢â‚¬â€ ceilings
                 // wear cliff rock instead of top-down grass, steep faces
                 // triplanar-blend the ground/paint/snow/ash layers instead of
                 // smearing them. Handed to the material cache; it swaps the
@@ -535,7 +573,7 @@ namespace VerdantsAscent
                 if (voxelShader != null)
                     FiresCore.Materials.TerrainMaterialCache.SetShaderOverride(voxelShader);
                 else
-                    FiresLogger.LogWarning($"Custom/FiresVoxelHeightmap missing from adminterrain bundle — voxel skin stays on the vanilla heightmap shader (top-down projection).");
+                    FiresLogger.LogWarning($"Custom/FiresVoxelHeightmap missing from adminterrain bundle Ã¢â‚¬â€ voxel skin stays on the vanilla heightmap shader (top-down projection).");
             }
             catch (Exception ex)
             {

@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // ── `va_homestead_scan [radius=800] [top=5] [x z]`: where to build Fire's homestead test base (10-01: smelter, kiln,
+    // ── `va_homestead_scan [radius=800] [top=5] [x z]`: where to build a homestead test base (smelter, kiln,
     // forge, workbench, crops, archery target, a fishing pond, copper and iron nearby, pickables) ─────────────────────────
     // Read-only and admin-only, like va_site_scan, which it extends. Candidates on a 10 m grid round the centre (default: where
     // the admin stands), each needing:
@@ -64,7 +64,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── `homestead_scan_test [radius] [top]`: the same scan as an on-demand F5 contract test, for the unattended chain
-        // ([lead] 10-01: the runner only takes "[F5 test]" commands). Without arguments both steps SKIP, so a full
+        // (the test runner only takes "[F5 test]" commands). Without arguments both steps SKIP, so a full
         // fires_test_all is harmless. Step 1 waits for the generated water to be queryable (the hydrology solve finishes
         // after the join); step 2 is the scan, its [FiresHomesteadScan] lines printed as the body.
         private const string TestCommand = "homestead_scan_test";
@@ -205,7 +205,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     s.X = x; s.Z = z; s.Lo = lo; s.Hi = hi; s.Dist = dist; s.Forest = forest;
                     s.Copper = RulePoints(gen, copper, x, z, water);
                     s.Pickables = RulePoints(gen, pickables, x, z, water);
-                    // 0.2.683 (Fire 10-01, lilies "Stay vanilla"): the share of a PondProbe-radius pool at the pond that passes
+                    // Lilies stay vanilla: the share of a PondProbe-radius pool at the pond that passes
                     // vanilla's lily / vass position gates (FatWaterLife); -1 = no ClutterSystem here (a dedicated server).
                     s.Lily = global::VerdantsAscent.Water.Core.FatWaterLife.LilyFractalPass(s.PondX, s.PondZ, PondProbe);
                     s.Vass = global::VerdantsAscent.Water.Core.FatWaterLife.VassFractalPass(s.PondX, s.PondZ, PondProbe);

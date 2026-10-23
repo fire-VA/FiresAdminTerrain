@@ -7,8 +7,8 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // A SKYLAND in a file (Fire, 2026-09-27, by popup: "Do the living refactor"; Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md "Save
-    // skyland"). It holds the island's registry record, its voxel edits as brush bounds, and every object in its space,
+    // A SKYLAND in a file.
+    // It holds the island's registry record, its voxel edits as brush bounds, and every object in its space,
     // builds and felled trees included. Saved as FiresWorldGen\skylands\<name>.skybp.
     //
     // Placing adds the record again as a new skyland standing somewhere else (FiresSkyIslands.Placed.cs), so the copy is a
@@ -325,8 +325,8 @@ namespace VerdantsAscent.Terrain.Zones
             };
         }
 
-        // The whole file. A skyland saved in a world with another seed is raised too (Fire, 2026-09-27: "Make them work
-        // anywhere"): its record carries its home world's seeds and biome (FiresSkyIslands.TryPlaceRecord).
+        // The whole file. A skyland saved in a world with another seed is raised too:
+        // its record carries its home world's seeds and biome (FiresSkyIslands.TryPlaceRecord).
         private static bool TryRead(string path, List<ZDO> objects, out Skyland saved, out string report, string what)
         {
             saved = default;

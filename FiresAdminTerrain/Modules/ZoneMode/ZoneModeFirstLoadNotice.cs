@@ -5,8 +5,8 @@ namespace VerdantsAscent.Terrain.Zones
 {
     // A converted world's first load blocks the game for minutes: vanilla upgrades an older save, then the park sets every
     // explored zone aside, and nothing can draw while either runs, so it looks like a hang. Starting such a world from the
-    // menu first says so (Fire, 2026-09-27: "a loading message ... to let people know its going to take a bit and they
-    // are not frozen"). Start goes on as vanilla would; the popup shows only for a world whose next load does that work.
+    // menu first says so, so players know it will take a while and the game is not frozen. Start goes on as vanilla
+    // would; the notice shows only for a world whose next load does that work.
     internal static class ZoneModeFirstLoadNotice
     {
         private const string Header = "First load takes a while";

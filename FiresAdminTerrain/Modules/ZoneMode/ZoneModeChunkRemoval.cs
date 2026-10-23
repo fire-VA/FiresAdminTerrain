@@ -7,7 +7,7 @@ using VerdantsAscent.Terrain.Voxel;
 namespace VerdantsAscent.Terrain.Zones
 {
     // The Chaos Hammer's remover: an open chunk taken back out of the world so a different one can be placed there. It
-    // reuses the re-close pair the wrong-seed undo already had (Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md): the zone's objects
+    // reuses the re-close pair the wrong-seed undo already had: the zone's objects
     // are set aside as <x>_<y>.override, which fires_zones_undo parks again, and ZoneModeOpening.Close makes it closed
     // sea. Then every peer forgets the zone's voxel chunks, because a destroyed anchor leaves its edited land standing.
     internal static class ZoneModeChunkRemoval
@@ -111,12 +111,22 @@ namespace VerdantsAscent.Terrain.Zones
             host.StartCoroutine(DropAfterAnchors(zone));
         }
 
-        private static IEnumerator DropAfterAnchors(Vector2s zone)
+        private static IEnumerator DropAfterAnchors(Vector2s zone, string what = "was taken back")
         {
             yield return new WaitForSeconds(DropDelaySeconds);
             int dropped = VoxelWorld.DropZoneChunks(zone);
-            FiresLogger.LogInfo($"[FiresZones] ({zone.x},{zone.y}) was taken back: {dropped} voxel chunk(s) forgotten, so it "
+            FiresLogger.LogInfo($"[FiresZones] ({zone.x},{zone.y}) {what}: {dropped} voxel chunk(s) forgotten, so it "
                 + "streams in again as closed sea.");
+        }
+
+        // A CLOSE drops the zone's
+        // voxel chunks on this peer too, as taking a chunk back always did. Closing dropped only its objects, so the old terrain
+        // stayed on screen with the sea drawn over part of it until the peer next streamed the zone out, so the zone looked
+        // open after it was closed.
+        internal static void DropZoneVoxelsSoon(Vector2s zone)
+        {
+            var host = FiresAdminTerrain.Instance;
+            if (host != null) host.StartCoroutine(DropAfterAnchors(zone, "was closed"));
         }
     }
 }

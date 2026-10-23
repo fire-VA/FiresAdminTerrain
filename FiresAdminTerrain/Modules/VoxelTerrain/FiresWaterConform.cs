@@ -4,7 +4,7 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // ═══════════════════════════════════════════════════════════════════════════
-    // CONFORMANCE — the terrain fills in to work with the water (user contract).
+    // CONFORMANCE — the terrain fills in to work with the water (design contract).
     // Runs once at generation, immediately after the plan is decided. Consumes the
     // plan, mutates the height grid to serve it, and emits the runtime water
     // fields (level + mask) FROM the plan — the fields are a projection of the
@@ -26,7 +26,7 @@ namespace VerdantsAscent.Terrain.Voxel
     internal static class FiresWaterConform
     {
         private const float SEA = 30f;
-        // SHALLOW-RIBBON river profile (user 2026-08-07): a river is a flat ribbon sitting a little below its
+        // SHALLOW-RIBBON river profile: a river is a flat ribbon sitting a little below its
         // banks in a shallow groove — NOT a gorge. The ribbon rides the LOCAL surface (never deeper than one bank
         // relief below the ground the corridor crosses), so where the drainage routes a river over a small ridge
         // the fill smoothed away, it tracks the terrain up-and-over as a shallow run instead of digging a 50 m slot.
@@ -79,7 +79,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
                         if (b.Kind == WaterBodyKind.Marsh || b.Kind == WaterBodyKind.SeaMarsh)
                         {
-                            // SMOOTH BULBOUS MOUNDS (user reference: soft rounded pillows, not
+                            // SMOOTH BULBOUS MOUNDS (soft rounded pillows, not
                             // noise). A PRODUCT of two VERY broad octaves (83m·36m wavelengths)
                             // gives sparse blobs; a SMOOTHSTEP domes their tops so they read as
                             // rounded pillows, not peaks; a faint roll breaks up the flats. The
@@ -193,7 +193,7 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresLogger.LogInfo($"[FiresWaterPlan] conformance: terrain shaped to {plan.Bodies.Count} bodies + {plan.Connections.Count} connections in {sw.Elapsed.TotalSeconds:0.0}s.");
         }
 
-        // ═══ BURY ALL MESH EDGES (user contract 2026-08-04) ═══════════════════
+        // ═══ BURY ALL MESH EDGES (design contract) ═══════════════════
         // The water mesh is computed ONCE from the plan and NEVER adjusted — the
         // TERRAIN is what moves. At every coverage boundary (wet cell with a dry
         // 8-neighbour) the terrain must stand ABOVE the sheet so the mesh edge is
@@ -227,11 +227,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // must clear L, so RIM ≥ 3·SHELF + margin. 1.0m: worst corner = L+0.06,
         // straight edge = L+0.38. The berm reads as a real bank; feather softens it.
         private const float RIM = 1.0f;       // dry rim stands this far above the sheet
-        // ═══ RIVERS GET THE SAME BANK RULE AS PONDS AND LAKES (2026-08-18, GEN_VERSION 146) ═══════════════
-        // (user, with a screenshot of river water standing as raised slabs above sand benches at
-        // (5935,−1473) seed 1095533379: "WHAT IS SO HARD ABOUT GIVING RIVERS THE SAME BANK LOGIC AS PONDS
-        // AND LAKES SO THEY EXTEND THEIR MESH OUT TO THE TERRAIN INSTEAD OF SITTING IN MOUNDED PUDDLES".)
-        // He was right, and the reason is an ORDERING, not a rule: BuryMeshEdges runs inside Apply(), which
+        // ═══ RIVERS GET THE SAME BANK RULE AS PONDS AND LAKES (GEN_VERSION 146) ═══════════════
+        // (River water stood as raised slabs above sand benches at
+        // (5935,−1473) seed 1095533379; rivers get the same bank logic as ponds
+        // and lakes, so they extend their mesh out to the terrain instead of sitting in mounded puddles.)
+        // The reason is an ORDERING, not a rule: BuryMeshEdges runs inside Apply(), which
         // both gen paths call BEFORE InciseRivers — so when the pond/lake bank rule ran, no river water was
         // in `w` yet, and the rivers incised afterwards never received it. They had only InciseRivers' own
         // thinner berm (wl+0.6, skipped over any seeded footprint — i.e. exactly on flat valley floors), and
@@ -242,7 +242,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // exist. Raise-only and idempotent: bodies buried by the first call are already at level+RIM and are
         // untouched; only cells the first call could not see move. `seaGuard` is the one difference, and it
         // is InciseRivers' own berm guard: a mouth reach (w ≤ SEA+0.3) is not bermed and seabed (g ≤ SEA) is
-        // never raised — without it this pass would rebuild the 2026-08-15 causeway-into-the-sea (134,301
+        // never raised — without it this pass would rebuild the causeway-into-the-sea (134,301
         // ocean cells turned to land by a bank raise). Sky-island water is not in this grid.
         public static void BuryAllEdges(float[] g, float[] w, int n, byte[] mask = null) => BuryMeshEdges(g, w, n, seaGuard: true, mask: mask);
 
@@ -252,7 +252,7 @@ namespace VerdantsAscent.Terrain.Voxel
             long shelf = 0, rim = 0, feather = 0, holes = 0;
             var stamp = new byte[n * n];      // 1 = burial rim cell (feather source)
             // ═══ PASS 0 — AN ENCLOSED DRY CELL IS A HOLE IN THE SHEET, NOT A SHORE ════════════════════════
-            // (2026-08-19, measured with the `riverfield` probe on seed 126369233 at n=10501.) Pass 1 below
+            // (Measured with the `riverfield` probe on seed 126369233 at n=10501.) Pass 1 below
             // raises EVERY dry cell touching water to `demand + RIM`, and RIM is 1.0 m. It has no idea whether
             // that cell is on the OUTSIDE of the sheet — a real bank, which is the case it was written for —
             // or INSIDE it, a cell some footprint failed to claim. For the inside case the rule is actively
@@ -350,11 +350,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (wet)
                     {
                         // ═══ THE SHELF IS A BEACH RULE. A RIVER HAS NO BEACH. ════════════════════════════
-                        // (2026-08-19, user: "if the river's ribbon logic read the terrain height correctly,
-                        // carved the river bed deep enough, and actually set its mesh down into that carve like
-                        // I wanted from the start then most of these issues would have been solved already —
-                        // but we had to do a bunch of workarounds because we do not carve our river correctly
-                        // and then lay the mesh down into the carve correctly." He is right, and this line is
+                        // (If the river's ribbon logic reads the terrain height correctly,
+                        // carves the river bed deep enough, and sets its mesh down into that carve,
+                        // most of these issues are solved; the workarounds exist because the river was not carved
+                        // correctly
+                        // and the mesh then laid into the carve. This line is
                         // the workaround. It is not that the carve fails; the carve is UNDONE afterwards.)
                         // This raises the BED of every wet cell that has a dry neighbour to `level − 0.25`.
                         // On a lake that is a shallow shore and it looks like one — the boundary is a thin

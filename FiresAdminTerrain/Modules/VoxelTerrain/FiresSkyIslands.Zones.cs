@@ -62,7 +62,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool TryBottomAt(float wx, float wz, out float bottom)
         {
             bottom = float.MaxValue;
-            if (!Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
+            if (!Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) { bottom = float.NaN; return false; }
             bool any = false;
             foreach (int k in list)
             {
@@ -73,8 +73,38 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (b < bottom) bottom = b;
                 any = true;
             }
+            // A miss leaves NaN, never float.MaxValue (a test read "underside 3.4e38" as a height).
+            if (!any) bottom = float.NaN;
             return any;
         }
+
+        // The underside the VOXELS are built with. SkylandColumn takes it from the CARVED top (ponds, rills and island
+        // water dug in), so under a carved bed the body reaches lower than SkylandBottomAt (the uncarved top) says: test
+        // ops stood on a bed at 204.33 under a recorded underside of 207.67. Dearer than TryBottomAt (it carves the column),
+        // so only the terrain-edit path uses it; per-frame probes keep TryBottomAt.
+        internal static bool TryExactBottomAt(float wx, float wz, out float bottom)
+        {
+            bottom = float.NaN;
+            if (!Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
+            float low = float.MaxValue;
+            foreach (int k in list)
+            {
+                var isl = s_islands[k];
+                float sx = wx - isl.OffX, sz = wz - isl.OffZ;
+                if (!Covers(in isl, sx, sz)) continue;
+                float b;
+                if (!IsSkyland(isl.Kind)) b = isl.Bot;
+                else if (SkylandColumn(in isl, sx, sz, out _, out float column, out _)) b = Mathf.Min(column, SkylandBottomAt(in isl, sx, sz));
+                else b = SkylandBottomAt(in isl, sx, sz);
+                low = Mathf.Min(low, b + isl.OffY);
+            }
+            if (low == float.MaxValue) return false;
+            bottom = low;
+            return true;
+        }
+
+        internal static bool IsOnIslandExact(Vector3 point)
+            => TryExactBottomAt(point.x, point.z, out float bottom) && point.y > bottom - IslandContactMargin;
 
         // Is this point on (or in) an island rather than down on the ground below it?
         internal static bool IsOnIsland(Vector3 point)
@@ -94,7 +124,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float sx = point.x - isl.OffX, sz = point.z - isl.OffZ;
                 if (!IsSkyland(isl.Kind) || !Covers(in isl, sx, sz)) continue;
                 if (point.y - isl.OffY <= SkylandBottomAt(in isl, sx, sz) - IslandContactMargin) continue;
-                top = TopAt(in isl, sx, sz) + isl.OffY;
+                top = FarTopAt(in isl, sx, sz) + isl.OffY;   // The density surface the voxels draw (carved, rim-rounded)
                 return true;
             }
             return false;
@@ -249,7 +279,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool TrySkylandCentre(int cx, int cz, int seed, out float x, out float z, out float r)
         {
             SkylandCandidate(cx, cz, seed, out x, out z, out r);
-            return Hash(cx, cz, seed, SkylandSalt) < SkylandChance && x * x + z * z <= 9300f * 9300f
+            float rim = FatWorldSize.Radius - 700f;   // 9300 at vanilla size
+            return Hash(cx, cz, seed, SkylandSalt) < SkylandChance && x * x + z * z <= rim * rim
                    && !InArchipelago(x, z, r + SkylandGap, seed) && !Outranked(cx, cz, seed, x, z, r);
         }
 
@@ -269,6 +300,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool Outranked(int cx, int cz, int seed, float x, float z, float r)
         {
             int reach = Mathf.CeilToInt((GreatMaxRadius + r + SkylandGap) / SkylandCell) + 1;
+            float rim = FatWorldSize.Radius - 700f;   // 9300 at vanilla size
             for (int nz = cz - reach; nz <= cz + reach; nz++)
                 for (int nx = cx - reach; nx <= cx + reach; nx++)
                 {
@@ -276,7 +308,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     SkylandCandidate(nx, nz, seed, out float ox, out float oz, out float otherR);
                     if (otherR < r || (otherR == r && (nx > cx || (nx == cx && nz > cz)))) continue;
                     float dx = ox - x, dz = oz - z, gap = r + otherR + SkylandGap;
-                    if (dx * dx + dz * dz >= gap * gap || ox * ox + oz * oz > 9300f * 9300f) continue;
+                    if (dx * dx + dz * dz >= gap * gap || ox * ox + oz * oz > rim * rim) continue;
                     if (!InArchipelago(ox, oz, otherR + SkylandGap, seed)) return true;
                 }
             return false;
@@ -316,6 +348,64 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         internal static uint IslandId(int index) => IslandHash(s_islands[index]);
+
+        // For skyland_check: the far view's top at a world column of a skyland (what its far mesh is built from), false
+        // when the column is past its coast; and its location pad (centre, flat radius) when it holds one.
+        internal static bool TryFarTop(int index, float wx, float wz, out float y)
+        {
+            var isl = s_islands[index];
+            float sx = wx - isl.OffX, sz = wz - isl.OffZ;
+            y = float.NaN;
+            if (!SkylandColumn(in isl, sx, sz, out _, out _, out _)) return false;
+            y = FarTopAt(in isl, sx, sz) + isl.OffY;
+            return true;
+        }
+
+        internal static bool TryGetSitePad(int index, out Vector3 centre, out float flat)
+        {
+            var isl = s_islands[index];
+            centre = new Vector3(isl.SiteX + isl.OffX, isl.SiteY + isl.OffY, isl.SiteZ + isl.OffZ);
+            flat = isl.SiteFlat;
+            return isl.Site > 0 && isl.SiteFlat > 0f;
+        }
+
+        internal static float SkylandRadius(int index) => s_islands[index].R;
+
+        // For FiresTerrainLayers: the island whose body a point is in or on, with that column's solid span (the voxels'
+        // own: carved top, rounded rim) and the island's id. A point counts from Margin under the underside to Margin over the
+        // top. False when no island holds the column there.
+        internal static bool TryIslandAt(Vector3 p, float margin, out uint id, out float bottom, out float top)
+        {
+            id = 0;
+            bottom = top = float.NaN;
+            if (!Enabled || !s_index.TryGetValue(CellKey(p.x, p.z), out var list)) return false;
+            foreach (int k in list)
+            {
+                var isl = s_islands[k];
+                float sx = p.x - isl.OffX, sz = p.z - isl.OffZ;
+                if (!Covers(in isl, sx, sz)) continue;
+                float low, high;
+                if (IsSkyland(isl.Kind))
+                {
+                    if (!SkylandColumn(in isl, sx, sz, out float t, out float b, out float side) || !SolidSpan(t, b, side, out low, out high)) continue;
+                }
+                else
+                {
+                    low = isl.Bot;
+                    high = TopAt(in isl, sx, sz);
+                }
+                low += isl.OffY;
+                high += isl.OffY;
+                if (p.y < low - margin || p.y > high + margin) continue;
+                id = IslandHash(in isl);
+                bottom = low;
+                top = high;
+                return true;
+            }
+            return false;
+        }
+
+        internal static Vector2 SkylandCentre(int index) { var isl = s_islands[index]; return new Vector2(WorldX(in isl), WorldZ(in isl)); }
 
         // A skyland's disc in the world, widened by the skin its rim colour and dressing can reach past the coast.
         internal static void SkylandDisc(int index, out float x, out float z, out float radius)
@@ -362,6 +452,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal const int DressRolledRims = 64;
         internal const int DressGround = 128;
         internal const int DressNames = 256;
+        internal const int DressSurface = 512;   // Every item on the density surface the voxels draw (belly, rim, vines too)
         private const float VineSlotSpacing = 3.2f;
         private const float VineTopAbovePivot = 1.26f;
         private const float FallClearance = 5f;
@@ -380,6 +471,130 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float DressingHeadroom = 6f;
         private const float DressingBelowBottom = 5f;
 
+        // Fixes floating vegetation: the dressing was placed on TopAt, the island's top BEFORE its ponds and
+        // rivers are dug in (SkylandColumn → CarveWaters runs only when the chunks generate), so a river bank cut away under a
+        // plant left it floating and a pond rim raised over one buried it. Dressing now stands on the CARVED top, the same
+        // column the voxel shape is built from: a spot the water carve dug more than DressCarveTolerance into is skipped, a
+        // raised bank lifts the item onto it. Counted per island for the dressing line.
+        private const float DressCarveTolerance = 0.3f;
+        private static int s_dressSkipped, s_dressLifted;
+        private static float s_dressWorstCut;
+
+        // Where the PREVIOUS rule (the uncarved top, nothing skipped) put this skyland's dressing, every
+        // layer: the re-dress command recognises untagged dressing from that rule by these exact spots.
+        private static bool s_legacyTops;
+
+        internal static void CollectLegacySkylandDressing(int index, List<Vector3> pos, List<Quaternion> rot, List<string> name, List<Vector3> scale)
+        {
+            s_legacyTops = true;
+            try { CollectSkylandDressing(index, DressAll, pos, rot, name, scale); }
+            finally { s_legacyTops = false; }
+        }
+
+        // The ground a dressing item stands on: the carved column top. false = the water carve dug this spot out (skip it).
+        private static bool DressingTop(in Island isl, float px, float pz, out float top)
+        {
+            float natural = TopAt(in isl, px, pz);
+            top = natural;
+            if (s_legacyTops) return true;
+            // Rocks and trees hung off the edge, a cluster falling toward the sea: a spot past the
+            // coast has no island under it, so a top item there is skipped, never set on the shape's top in mid-air.
+            if (!SkylandColumn(in isl, px, pz, out float carved, out float bottom, out float side)) { s_dressSkipped++; return false; }
+            float cut = natural - carved;
+            if (cut > DressCarveTolerance)
+            {
+                s_dressSkipped++;
+                if (cut > s_dressWorstCut) s_dressWorstCut = cut;
+                return false;
+            }
+            if (-cut > DressCarveTolerance) s_dressLifted++;
+            // 17 of 133 re-dressed items floated in a test, worst 2.95 m: the voxel surface is where the column's
+            // density crosses zero, and its soft rounding (EdgeSoftness) lowers it below the carved top near the coast and
+            // where the island is thin. Stand on that crossing; a column the rounding leaves no ground in is skipped.
+            float surface = DensitySurface(carved, bottom, side);
+            if (float.IsNaN(surface)) { s_dressSkipped++; return false; }
+            if (carved - surface > s_dressWorstSink) s_dressWorstSink = carved - surface;
+            top = surface;
+            return true;
+        }
+
+        private static float s_dressWorstSink;
+
+        // The highest y in a column where BodyDensity (the voxels' own body, without cave carving, which is sealed near the
+        // surface) turns solid, between the carved top and the underside: bisection to 2 cm. NaN when the column holds none.
+        private static float DensitySurface(float top, float bottom, float side)
+        {
+            if (top <= bottom) return float.NaN;
+            float solidY = float.NaN;
+            for (float y = top; y >= bottom; y -= 0.5f)
+                if (BodyDensity(y, top, bottom, side) > 0f) { solidY = y; break; }
+            if (float.IsNaN(solidY)) return float.NaN;
+            float lo = solidY, hi = Mathf.Min(top, solidY + 0.5f);
+            if (BodyDensity(hi, top, bottom, side) > 0f) return hi;
+            for (int i = 0; i < 6; i++)
+            {
+                float mid = (lo + hi) * 0.5f;
+                if (BodyDensity(mid, top, bottom, side) > 0f) lo = mid; else hi = mid;
+            }
+            return lo;
+        }
+
+        // The lowest y in a column where the body turns solid (its underside as the voxels build it). NaN when none.
+        private static float DensityUnderside(float top, float bottom, float side)
+        {
+            if (top <= bottom) return float.NaN;
+            float solidY = float.NaN;
+            for (float y = bottom; y <= top; y += 0.5f)
+                if (BodyDensity(y, top, bottom, side) > 0f) { solidY = y; break; }
+            if (float.IsNaN(solidY)) return float.NaN;
+            float hi = solidY, lo = Mathf.Max(bottom, solidY - 0.5f);
+            if (BodyDensity(lo, top, bottom, side) > 0f) return lo;
+            for (int i = 0; i < 6; i++)
+            {
+                float mid = (lo + hi) * 0.5f;
+                if (BodyDensity(mid, top, bottom, side) > 0f) hi = mid; else lo = mid;
+            }
+            return hi;
+        }
+
+        // Dressing matches the actual shown terrain: every dressing item goes on the surface the
+        // voxels build, the density's crossing, never the analytic shape. A belly item hangs from (or stands on) the column's lowest
+        // solid crossing; false where the column holds no body (the item is skipped, not hung in the air).
+        private static bool DressingUnderside(in Island isl, float px, float pz, out float y)
+        {
+            y = SkylandBottomAt(in isl, px, pz);
+            if (s_legacyTops) return true;
+            if (!SkylandColumn(in isl, px, pz, out float top, out float bottom, out float side)) return false;
+            float underside = DensityUnderside(top, bottom, side);
+            if (float.IsNaN(underside)) return false;
+            y = underside;
+            return true;
+        }
+
+        // A vine's or rim item's anchor: the density surface at the rim, found stepping inward (inX, inZ: unit, toward the
+        // island) up to RimSearch when the rim's rounding leaves the outermost column without ground. false = no ground near.
+        private const float RimSearch = 2f, RimSearchStep = 0.25f;
+
+        private static bool RimTop(in Island isl, float px, float pz, float inX, float inZ, out float top)
+        {
+            top = AnchorTop(in isl, px, pz);
+            if (s_legacyTops) return true;
+            for (float d = 0f; d <= RimSearch; d += RimSearchStep)
+            {
+                float x = px + inX * d, z = pz + inZ * d;
+                if (!SkylandColumn(in isl, x, z, out float carved, out float bottom, out float side)) continue;
+                float surface = DensitySurface(carved, bottom, side);
+                if (float.IsNaN(surface)) continue;
+                top = surface;
+                return true;
+            }
+            return false;
+        }
+
+        // The carved top for a vine or rim anchor (never skipped; it hangs off whatever ground is there).
+        private static float AnchorTop(in Island isl, float px, float pz)
+            => !s_legacyTops && SkylandColumn(in isl, px, pz, out float carved, out _, out _) ? carved : TopAt(in isl, px, pz);
+
         internal static void CollectSkylandDressing(int index, int layers, List<Vector3> pos, List<Quaternion> rot,
             List<string> name, List<Vector3> scale)
         {
@@ -387,6 +602,8 @@ namespace VerdantsAscent.Terrain.Voxel
             var isl = s_islands[index];
             if (!IsSkyland(isl.Kind)) return;
             var palette = PaletteOf(isl.Biome);
+            s_dressSkipped = s_dressLifted = 0;
+            s_dressWorstCut = s_dressWorstSink = 0f;
             if (isl.Shape != null) CollectShapedDressing(in isl, palette, layers, pos, rot, name, scale);
             else
             {
@@ -396,6 +613,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 if ((layers & DressCliff) != 0) CollectCliffDressing(in isl, palette, pos, rot, name, scale);
             }
             ShiftOut(in isl, pos, 0);
+            if (!s_legacyTops) FiresLogger.LogDebug($"[FiresSkyIslands] dressing skyland {index} ({isl.Biome}): {pos.Count} item(s) on the carved top; "
+                + $"{s_dressSkipped} skipped where the water carve dug in (worst {s_dressWorstCut:0.0} m below the uncarved top), "
+                + $"{s_dressLifted} lifted onto a raised bank or rim; set on the voxel surface (up to {s_dressWorstSink:0.00} m under the carved top)");
         }
 
         // Anywhere this skyland's dressing can stand: on the dome, around the rim, hanging off it, or under it.
@@ -425,7 +645,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float size = 1.2f + Hash(k, 97, hseed, 197) * 0.9f;
                 float stretch = 1.1f + Hash(k, 101, hseed, 199) * 0.9f;
                 float cx = Mathf.Cos(a), cz = Mathf.Sin(a);
-                float rimTop = TopAt(in isl, isl.X + cx * isl.R * 0.995f, isl.Z + cz * isl.R * 0.995f);
+                if (!RimTop(in isl, isl.X + cx * isl.R * 0.995f, isl.Z + cz * isl.R * 0.995f, -cx, -cz, out float rimTop)) continue;
                 pos.Add(new Vector3(isl.X + cx * (isl.R + 0.15f), rimTop - 0.15f - VineTopAbovePivot * size * stretch, isl.Z + cz * (isl.R + 0.15f)));
                 rot.Add(Quaternion.LookRotation(new Vector3(-cx, 0f, -cz)) * Quaternion.Euler(0f, (Hash(k, 103, hseed, 211) - 0.5f) * 16f, 0f));
                 name.Add(palette.Vines);
@@ -446,7 +666,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float rr = Mathf.Sqrt(Hash(k, 5, hseed, 103)) * 0.86f;
                 float px = isl.X + Mathf.Cos(a) * rr * isl.R, pz = isl.Z + Mathf.Sin(a) * rr * isl.R;
                 if (InPondOrRill(in isl, px, pz) || InSiteClearing(in isl, px, pz, SiteDressingGap)) continue;
-                float top = TopAt(in isl, px, pz);
+                if (!DressingTop(in isl, px, pz, out float top)) continue;
                 if (CaveHollow(in isl, px, top - FootingDepth, pz)) continue;
                 var pick = Choose(palette.Top, Hash(k, 7, hseed, 107));
                 if (pick.Prefab == null) continue;
@@ -467,7 +687,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float px = isl.X + Mathf.Cos(a) * rr * isl.R, pz = isl.Z + Mathf.Sin(a) * rr * isl.R;
                 if (InPondOrRill(in isl, px, pz)) continue;
                 if (Hash(k, 19, hseed, 119) < RimBareShare) continue;
-                float top = TopAt(in isl, px, pz);
+                if (!DressingTop(in isl, px, pz, out float top)) continue;
                 if (CaveHollow(in isl, px, top - FootingDepth, pz)) continue;
                 var pick = Choose(palette.Rim, Hash(k, 23, hseed, 121));
                 pos.Add(new Vector3(px, top + pick.Lift, pz));
@@ -476,8 +696,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 scale.Add(Vector3.one * pick.ScaleAt(Hash(k, 223, hseed, 229)));
             }
 
-            if (palette.Centerpiece == null) return;
-            pos.Add(new Vector3(isl.X, TopAt(in isl, isl.X, isl.Z), isl.Z));
+            if (palette.Centerpiece == null || !DressingTop(in isl, isl.X, isl.Z, out float centreTop)) return;
+            pos.Add(new Vector3(isl.X, centreTop, isl.Z));
             rot.Add(Quaternion.identity);
             name.Add(palette.Centerpiece);
             scale.Add(Vector3.one);
@@ -496,7 +716,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 float cx = Mathf.Cos(a), cz = Mathf.Sin(a);
                 float px = isl.X + cx * rr * isl.R, pz = isl.Z + cz * rr * isl.R;
                 var pick = Choose(palette.Belly, Hash(k, 47, hseed, 149));
-                var surface = new Vector3(px, SkylandBottomAt(in isl, px, pz), pz);
+                if (!DressingUnderside(in isl, px, pz, out float underY)) continue;
+                var surface = new Vector3(px, underY, pz);
                 if (CaveHollow(in isl, px, surface.y + FootingDepth, pz)) continue;
                 name.Add(pick.Prefab);
                 if (!pick.Hangs)
@@ -560,7 +781,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 else outer = mid;
             }
             float px = isl.X + cx * rr * isl.R, pz = isl.Z + cz * rr * isl.R;
-            face = new Vector3(px, SkylandBottomAt(in isl, px, pz), pz);
+            DressingUnderside(in isl, px, pz, out float faceY);   // The voxels' underside where it has one
+            face = new Vector3(px, faceY, pz);
             return true;
         }
 
@@ -610,7 +832,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (rr >= 0.86f) continue;
                     found++;
                     if (InPondOrRill(in isl, px, pz) || InSiteClearing(in isl, px, pz, SiteDressingGap)) continue;
-                    float top = TopAt(in isl, px, pz);
+                    if (!DressingTop(in isl, px, pz, out float top)) continue;
                     if (CaveHollow(in isl, px, top - FootingDepth, pz)) continue;
                     var pick = Choose(palette.Top, Hash(k, 7, hseed, 107));
                     if (pick.Prefab == null) continue;
@@ -631,7 +853,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     float px = coast.x - outward.x * inset, pz = coast.y - outward.y * inset;
                     if (InPondOrRill(in isl, px, pz)) continue;
                     if (Hash(k, 19, hseed, 119) < RimBareShare) continue;
-                    float top = TopAt(in isl, px, pz);
+                    if (!DressingTop(in isl, px, pz, out float top)) continue;
                     if (CaveHollow(in isl, px, top - FootingDepth, pz)) continue;
                     var pick = Choose(palette.Rim, Hash(k, 23, hseed, 121));
                     pos.Add(new Vector3(px, top + pick.Lift, pz));
@@ -640,9 +862,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     scale.Add(Vector3.one * pick.ScaleAt(Hash(k, 223, hseed, 229)));
                 }
 
-                if (palette.Centerpiece != null)
+                if (palette.Centerpiece != null && DressingTop(in isl, shape.Heart.x, shape.Heart.y, out float heartTop))
                 {
-                    pos.Add(new Vector3(shape.Heart.x, TopAt(in isl, shape.Heart.x, shape.Heart.y), shape.Heart.y));
+                    pos.Add(new Vector3(shape.Heart.x, heartTop, shape.Heart.y));
                     rot.Add(Quaternion.identity);
                     name.Add(palette.Centerpiece);
                     scale.Add(Vector3.one);
@@ -659,7 +881,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (NearAnyFall(in isl, coast)) continue;
                     float size = 1.2f + Hash(k, 97, hseed, 197) * 0.9f;
                     float stretch = 1.1f + Hash(k, 101, hseed, 199) * 0.9f;
-                    float rimTop = TopAt(in isl, coast.x - outward.x * 0.1f, coast.y - outward.y * 0.1f);
+                    if (!RimTop(in isl, coast.x - outward.x * 0.1f, coast.y - outward.y * 0.1f, -outward.x, -outward.y, out float rimTop)) continue;
                     pos.Add(new Vector3(coast.x + outward.x * 0.15f, rimTop - 0.15f - VineTopAbovePivot * size * stretch, coast.y + outward.y * 0.15f));
                     rot.Add(Quaternion.LookRotation(new Vector3(-outward.x, 0f, -outward.y)) * Quaternion.Euler(0f, (Hash(k, 103, hseed, 211) - 0.5f) * 16f, 0f));
                     name.Add(palette.Vines);
@@ -679,7 +901,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (rr < 0.35f || rr > 0.92f) continue;
                     found++;
                     var pick = Choose(palette.Belly, Hash(k, 47, hseed, 149));
-                    var surface = new Vector3(px, SkylandBottomAt(in isl, px, pz), pz);
+                    if (!DressingUnderside(in isl, px, pz, out float underY)) continue;
+                    var surface = new Vector3(px, underY, pz);
                     if (CaveHollow(in isl, px, surface.y + FootingDepth, pz)) continue;
                     name.Add(pick.Prefab);
                     if (!pick.Hangs)
@@ -736,7 +959,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 else thin = mid;
             }
             var p = coast - outward * thick;
-            face = new Vector3(p.x, SkylandBottomAt(in isl, p.x, p.y), p.y);
+            DressingUnderside(in isl, p.x, p.y, out float faceY);   // The voxels' underside where it has one
+            face = new Vector3(p.x, faceY, p.y);
             return true;
         }
 
@@ -812,8 +1036,23 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // The far view's top is the column's own, with ponds, rill and rivers dug in as the voxels dig them; at the coast,
         // where columns end, it is the plain top.
+        // Skylands showed one shape from far away and then reshaped/recarved themselves on approach:
+        // the far view is the voxels' OWN surface, the density crossings of the same column the near chunks are built from
+        // (rounded at the coast and where the island is thin), not the carved top and the uncarved underside. A column the
+        // rounding leaves no solid in closes to the middle of its top and underside, as the near rim does.
         private static float FarTopAt(in Island isl, float x, float z)
-            => SkylandColumn(in isl, x, z, out float top, out _, out _) ? top : TopAt(in isl, x, z);
+        {
+            if (!SkylandColumn(in isl, x, z, out float top, out float bottom, out float side)) return TopAt(in isl, x, z);
+            float surface = DensitySurface(top, bottom, side);
+            return float.IsNaN(surface) ? (top + bottom) * 0.5f : surface;
+        }
+
+        private static float FarBottomAt(in Island isl, float x, float z)
+        {
+            if (!SkylandColumn(in isl, x, z, out float top, out float bottom, out float side)) return SkylandBottomAt(in isl, x, z);
+            float underside = DensityUnderside(top, bottom, side);
+            return float.IsNaN(underside) ? (top + bottom) * 0.5f : underside;
+        }
 
         // The far view's cell size, and the local bounds it covers: the coast's, or the disc's for a round skyland.
         private static float FarGrid(in Island isl, out float x0, out float z0, out float x1, out float z1)
@@ -906,7 +1145,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
             int bottomCenter = verts.Count;
-            verts.Add(new Vector3(isl.X, SkylandBottomAt(in isl, isl.X, isl.Z), isl.Z));
+            verts.Add(new Vector3(isl.X, FarBottomAt(in isl, isl.X, isl.Z), isl.Z));
             for (int ring = 1; ring < FarRings; ring++)
             {
                 float rr = FarRingRadius(ring);
@@ -914,7 +1153,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     float a = s * Mathf.PI * 2f / FarSegments;
                     float px = isl.X + Mathf.Cos(a) * rr * isl.R, pz = isl.Z + Mathf.Sin(a) * rr * isl.R;
-                    verts.Add(new Vector3(px, SkylandBottomAt(in isl, px, pz), pz));
+                    verts.Add(new Vector3(px, FarBottomAt(in isl, px, pz), pz));
                 }
             }
 
@@ -966,7 +1205,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (cache.TryGetValue(key, out int index)) return index;
                 var p = Point(key);
-                verts.Add(new Vector3(p.x, high ? FarTopAt(in local, p.x, p.y) : SkylandBottomAt(in local, p.x, p.y), p.y));
+                verts.Add(new Vector3(p.x, high ? FarTopAt(in local, p.x, p.y) : FarBottomAt(in local, p.x, p.y), p.y));
                 return cache[key] = verts.Count - 1;
             }
             var polygon = new List<int>(8);
@@ -1000,8 +1239,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         int wall = verts.Count;
                         verts.Add(new Vector3(pa.x, FarTopAt(in isl, pa.x, pa.y), pa.y));
                         verts.Add(new Vector3(pb.x, FarTopAt(in isl, pb.x, pb.y), pb.y));
-                        verts.Add(new Vector3(pb.x, SkylandBottomAt(in isl, pb.x, pb.y), pb.y));
-                        verts.Add(new Vector3(pa.x, SkylandBottomAt(in isl, pa.x, pa.y), pa.y));
+                        verts.Add(new Vector3(pb.x, FarBottomAt(in isl, pb.x, pb.y), pb.y));
+                        verts.Add(new Vector3(pa.x, FarBottomAt(in isl, pa.x, pa.y), pa.y));
                         tris.Add(wall); tris.Add(wall + 1); tris.Add(wall + 2);
                         tris.Add(wall); tris.Add(wall + 2); tris.Add(wall + 3);
                     }

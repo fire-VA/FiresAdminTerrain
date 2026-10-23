@@ -7,8 +7,6 @@ namespace VerdantsAscent.Water.Core
     /// ZDO-backed anchor for land-snow persistence. Mirrors LandIceAnchor
     /// exactly; only the keyspace (`va_landsnow_*`) and the linked
     /// controller type differ.
-    ///
-    /// Round-26 plan §2.2.
     /// </summary>
     public class LandSnowAnchor : MonoBehaviour
     {

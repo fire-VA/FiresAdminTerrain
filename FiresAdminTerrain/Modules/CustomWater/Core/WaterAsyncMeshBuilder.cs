@@ -134,9 +134,8 @@ namespace VerdantsAscent.Water.Core
         //   Lava:  -0.5m    sits half a meter INTO terrain so it flood-
         //                   fills low spots flush with the surrounding
         //                   tile edges. Player stepping onto a lava-painted
-        //                   area drops in. User-requested behavior 2026-05-25
-        //                   ("lower the terrain where placed and basically
-        //                    flood fill to the level edge").
+        //                   area drops in (it lowers the terrain where
+        //                   placed and flood-fills to the level edge).
         //   Boiling: +0.02m same as water (visual treatment differs in shader)
         //   Freezing: +0.02m same
         //   Ice / Slime: +0.02m (no special drop)
@@ -178,21 +177,21 @@ namespace VerdantsAscent.Water.Core
                 TerrainHeights = (float[])terrainHeights.Clone(),
                 BlendDistance = blendDistance,
                 EdgeFadeDistance = 1.0f,
-                // Bank extension RESTORED (2026-05-25 round-2).
+                // Bank extension.
                 //
-                // Briefly zeroed earlier today for "no climb up banks", but
-                // the resulting square mesh shape + lack of waterfall pull-
-                // down is worse than the climb. Restored to the natural
+                // Zeroing it (for "no climb up banks") gives a
+                // square mesh shape + no waterfall pull-
+                // down, which is worse than the climb. The natural
                 // 2m/0.5m vanilla-style tuning so disks form nice shores
                 // and dragging the ruler up an elevation gives a waterfall.
-                BankExtensionDistance = 2.0f,
+                BankExtensionDistance = 0.01f,   // placed water ends at its circles (not 2 m past them)
                 BankDepthBelowTerrain = 0.5f,
                 // Per-liquid offset. Water sits slightly ABOVE terrain
                 // (small lift = clean read from above, no Z-fighting).
                 // Lava sits BELOW terrain so it flood-fills low spots
                 // flush with the surrounding terrain edge (player walking
                 // toward a lava tile drops into it instead of standing on
-                // a hovering sheet). User-requested behavior 2026-05-25.
+                // a hovering sheet).
                 WaterTerrainOffset = GetLiquidTerrainOffset(combiner != null ? combiner.CustomLiquidType : CustomLiquidType.Water),
                 CenterChannelDepth = 0.05f,
                 CenterChannelRadiusFraction = 0.3f,
@@ -343,13 +342,13 @@ namespace VerdantsAscent.Water.Core
                         if (distToEdge > maxExtendedDist)
                             continue;
 
-                        // 2026-05-26 round-22 (mirrors sync path): ALWAYS
+                        // Mirrors the sync path: ALWAYS
                         // track the nearest disk for any disk within range,
                         // regardless of which weight branch the cell falls
-                        // into. Previously only the `weight > 0.001f` branch
-                        // updated nearestCenterDist, so bank-only overflow-
-                        // ring cells fell through to terrainY+offset in
-                        // paintedSurfaceY and neutered the spike-kill
+                        // into. If only the `weight > 0.001f` branch
+                        // updated nearestCenterDist, bank-only overflow-
+                        // ring cells would fall through to terrainY+offset in
+                        // paintedSurfaceY and neuter the spike-kill
                         // threshold. See WaterMeshCombiner.MeshGen.cs
                         // for the matching diagnosis comment.
                         if (!input.IsPondMode)
@@ -438,18 +437,18 @@ namespace VerdantsAscent.Water.Core
                         // Terrain clip pass will remove cells where terrain rises above surface.
                     }
 
-                    // 2026-05-25 round-17: capture the IDW-blended PAINTED
+                    // Capture the IDW-blended PAINTED
                     // surface BEFORE edge-fade / bank-extension. Used as
                     // a ceiling so bank-extension never pushes the mesh
                     // UP onto cliff terrain.
                     //
-                    // 2026-05-26 round-22 (mirrors sync path): prefer
+                    // Mirrors the sync path: prefer
                     // nearestDiskY over surfaceY. If surfaceY came from
                     // the third fallback (terrainY + WaterTerrainOffset
                     // at line ~425), the spike-kill threshold downstream
                     // becomes `terrainY > terrainY + 0.77f` (impossible)
                     // and the bank-extend then writes cliff-height
-                    // vertices — the upward spike pathology. The round-22
+                    // vertices (the upward spike pathology). The nearest-disk
                     // tracking lift above guarantees nearestDiskY is set
                     // for every in-range cell, so this branch always wins.
                     float paintedSurfaceY = (nearestCenterDist < float.MaxValue - 1f)
@@ -464,11 +463,11 @@ namespace VerdantsAscent.Water.Core
                         surfaceY -= centeredness * input.CenterChannelDepth;
                     }
 
-                    // 2026-05-26 round-26: EDGE FADE TO TERRAIN REMOVED.
+                    // No edge fade to terrain.
                     // Mirrors WaterMeshCombiner.MeshGen.cs sync path. Edge
-                    // fade was producing upward spike fins at boundaries
+                    // fade produces upward spike fins at boundaries
                     // where terrain rose above the disk surface. Bank-
-                    // extension below + the round-22 nearestDiskY clamp
+                    // extension below + the nearestDiskY clamp
                     // handle the gentle-shore + cliff-base cases cleanly
                     // without needing the fade.
 
@@ -477,11 +476,10 @@ namespace VerdantsAscent.Water.Core
 
                     if (surfaceY <= minWaterY)
                     {
-                        // 2026-05-25 round-17: kill the cell entirely when
+                        // Kill the cell entirely when
                         // terrain rises far above the painted water level
                         // (cliff face / rock / tree base). Bank-extending
-                        // there produces the upward mesh slivers users keep
-                        // complaining about.
+                        // there produces upward mesh slivers.
                         const float MAX_BANK_RISE_ABOVE_PAINTED = 0.75f;
                         if (terrainY > paintedSurfaceY + MAX_BANK_RISE_ABOVE_PAINTED)
                         {
@@ -745,7 +743,7 @@ namespace VerdantsAscent.Water.Core
                         }
                     }
 
-                    // 2026-05-30 round-55 — DISABLED edge gravity-settle
+                    // Edge gravity-settle pull-down DISABLED
                     // pull-down (see WaterMeshCombiner.MeshGen.cs for the
                     // full rationale). The visible water surface must
                     // respect the ruler Y. Shell wall handles the visual

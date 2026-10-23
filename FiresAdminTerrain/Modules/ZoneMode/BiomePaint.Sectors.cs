@@ -14,6 +14,11 @@ namespace VerdantsAscent.Terrain.Zones
     internal static partial class BiomePaint
     {
         [ThreadStatic] private static int t_resolving;
+        // Set while BiomePaint.Regrow re-seeds a painted circle. Vanilla PlaceVegetation places an alt-biome's own plants
+        // (AltBiome.m_addVegetation, tagged AltBiomeParent) only where WorldGenerator.GetBiomeSector(point).AltBiomes holds
+        // that blend, so the paint must answer those lookups during the regrow even inside a zone-mode source lookup, or the
+        // circle re-grows as its plain ground biome (otherwise Dark Meadows / Lantern paint as plain Meadows / Swamp).
+        [ThreadStatic] private static int t_regrow;
 
         // One shared sector per (ground, blend), so every circle of a brush reads as one place (its name, its weather).
         private static readonly Dictionary<string, BiomeSector> s_sectors = new Dictionary<string, BiomeSector>();
@@ -39,7 +44,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static void Paint(float wx, float wz, ref BiomeSector result)
         {
             var snapshot = s_snapshot;
-            if (snapshot.Circles.Length == 0 || result == null || t_resolving > 0 || ZoneModeGate.InSourceLookup) return;
+            if (snapshot.Circles.Length == 0 || result == null || t_resolving > 0 || (ZoneModeGate.InSourceLookup && t_regrow == 0)) return;
             Interlocked.Increment(ref s_checked);
             if (!snapshot.Cells.TryGetValue(CellKey(wx, wz), out var candidates)) return;
             Interlocked.Increment(ref s_inCell);
@@ -56,7 +61,7 @@ namespace VerdantsAscent.Terrain.Zones
             }
         }
 
-        // Per minute, for [perf]'s pricing: lookups that met a painted world, those whose 64 m cell holds a circle, and
+        // Per minute, for performance accounting: lookups that met a painted world, those whose 64 m cell holds a circle, and
         // those answered with a painted sector. Logged only while anything is painted.
         private const float CountSeconds = 60f;
         private static long s_checked, s_inCell, s_painted;
@@ -91,8 +96,57 @@ namespace VerdantsAscent.Terrain.Zones
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeSector), typeof(Vector3), typeof(bool))]
         private static class WorldGenerator_GetBiomeSector_Position
         {
-            private static void Postfix(Vector3 worldPos, ref BiomeSector __result) => Paint(worldPos.x, worldPos.z, ref __result);
+            private static void Postfix(Vector3 worldPos, ref BiomeSector __result)
+            {
+                Paint(worldPos.x, worldPos.z, ref __result);
+                OnLayer(worldPos, ref __result);
+            }
         }
+
+        // The minimap overlay did not follow a sky island's biome while weather did:
+        // the HUD's biome name and the player's current biome come from GetBiomeSector(position), which answered by XZ
+        // alone, so a skyland over the sea read "Ocean". A point standing on a skyland, or on a cave floor with a biome painted
+        // on it (VoxelLayerPaint), answers that layer's biome (painted or its own), as Heightmap.GetBiome already does.
+        private static readonly Dictionary<Heightmap.Biome, BiomeSector> s_layerSectors = new Dictionary<Heightmap.Biome, BiomeSector>();
+
+        private static void OnLayer(Vector3 point, ref BiomeSector result)
+        {
+            if (result == null || t_resolving > 0) return;
+            if (!LayerBiome(point, out var biome) || biome == result.Biome) return;
+            lock (s_layerSectors)
+            {
+                if (!s_layerSectors.TryGetValue(biome, out var sector)) s_layerSectors[biome] = sector = new BiomeSector(null, biome);
+                result = sector;
+            }
+        }
+
+        // Vanilla's Player.UpdateBiome compares the sector with WorldGenerator.GetBiome(position) every second and logs a
+        // "GetBiome error" when they differ: the position overload answers the same layer.
+        [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiome), typeof(Vector3))]
+        private static class WorldGenerator_GetBiome_Position
+        {
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix(Vector3 point, ref Heightmap.Biome __result)
+            {
+                if (t_resolving > 0) return;
+                if (LayerBiome(point, out var biome)) __result = biome;
+            }
+        }
+
+        // The layer a point stands on answers its biome. Skylands and painted floors as before (zone-mode worlds); a
+        // point in a cave answers the cave's own biome (FiresCaveBiome: painted, else its region's) on any voxel world.
+        private static bool LayerBiome(Vector3 point, out Heightmap.Biome biome)
+        {
+            biome = Heightmap.Biome.None;
+            if (ZoneModeRegistry.ModeActive && VoxelTerrainLayerBiome(point, out biome)) return true;
+            t_resolving++;
+            try { return VerdantsAscent.Terrain.Voxel.FiresCaveBiome.TryCaveBiome(point, out biome); }
+            finally { t_resolving--; }
+        }
+
+        private static bool VoxelTerrainLayerBiome(Vector3 point, out Heightmap.Biome biome)
+            => VerdantsAscent.Terrain.Voxel.FiresSkyIslands.TrySkylandBiomeAt(point, out biome)
+               || VerdantsAscent.Terrain.Voxel.VoxelLayerPaint.TryPaintedBiomeAt(point, out biome);
 
         // ── Terrain that already read the old map ───────────────────────────
         // A heightmap takes its four corner sectors when it is built, and its creature spawn list and alt-biome spawns come

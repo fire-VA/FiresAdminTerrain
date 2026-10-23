@@ -32,8 +32,8 @@ namespace VerdantsAscent.Water.Core
         private const float SNOW_TERRAIN_OFFSET = 0.10f;
 
         /// <summary>
-        /// 2026-05-26 round-26 — RESTORED to 1.5m (was 0.25m). LandIce
-        /// (which works correctly per user) uses 1.0m. We go slightly
+        /// 1.5m. LandIce
+        /// uses 1.0m. We go slightly
         /// deeper since the snow has visible bumps that can rise above
         /// disk surface, so the skirt needs to be tall enough that
         /// terrain still clips the boundary even at bump peaks. The
@@ -48,7 +48,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private const float SLOPE_DISTANCE = 3.0f;
 
-        // ─── SNOW SURFACE TREATMENT (round-20) ─────────────────────────────
+        // ─── SNOW SURFACE TREATMENT ─────────────────────────────
         // The geometry-level bumps + edge fade. These do NOT touch _heights[]
         // (which is what gets persisted to ZDO) — they're applied at mesh
         // build time only. _noiseSeed is persisted, so the bumps reproduce
@@ -85,7 +85,7 @@ namespace VerdantsAscent.Water.Core
 
         #region ZDO Keys (LEGACY — kept for ZdoHasLandSnowData migration check)
 
-        // Round-26 plan §2.2: persistence moved to LandSnowAnchor with
+        // Persistence moved to LandSnowAnchor with
         // new `va_landsnow_*` keys. This legacy hash remains only so
         // orphan-cleanup passes can identify stale ice1-host ZDOs.
         private static readonly int s_isLandSnowHash = "va_land_snow".GetStableHashCode();
@@ -99,7 +99,7 @@ namespace VerdantsAscent.Water.Core
         private static int s_instanceCounter = 0;
         private bool _initialized = false;
 
-        // Round-26 §2.2: persistence anchor (LandSnowAnchor).
+        // Persistence anchor (LandSnowAnchor).
         private LandSnowAnchor _anchor;
 
         // Height grid
@@ -391,8 +391,8 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// LEGACY check for pre-migration ice1-host ZDOs. Round-26 §2.2
-        /// moved persistence to `va_landsnow_*` keys on a dedicated
+        /// LEGACY check for pre-migration ice1-host ZDOs. Persistence
+        /// now lives in `va_landsnow_*` keys on a dedicated
         /// VALandSnow prefab.
         /// </summary>
         public static bool ZdoHasLandSnowData(ZDO zdo)
@@ -404,7 +404,7 @@ namespace VerdantsAscent.Water.Core
 
         #region Lifecycle
 
-        // Round-26 §2.2: no auto-restore here. LandSnowAnchor.Start drives
+        // No auto-restore here. LandSnowAnchor.Start drives
         // the restore via RestoreFromAnchor (below).
         private void Start() { /* anchor-driven */ }
 
@@ -641,12 +641,12 @@ namespace VerdantsAscent.Water.Core
                         float desiredH;
                         if (fpRaised[d])
                         {
-                            // 2026-05-26 round-28: DOME SHAPING.
+                            // DOME SHAPING.
                             //
-                            // Previously raised disks stored a CONSTANT
+                            // Storing a CONSTANT
                             // fp.Center.y (plus noise) at every vertex,
-                            // giving a flat-top mesa with vertical sides
-                            // dropping to terrain. The user wanted a
+                            // would give a flat-top mesa with vertical sides
+                            // dropping to terrain. The goal is a
                             // natural snow-pile look — smooth slope from
                             // center disk Y down to terrain at the radius.
                             //
@@ -658,9 +658,8 @@ namespace VerdantsAscent.Water.Core
                             // down) and disk surface when terrain is ABOVE
                             // disk (cliff case, mesh stays at disk Y so
                             // the skirt drops past the cliff and terrain
-                            // visually clips it — preserves the "stretches
-                            // to meet custom terrain" cliff-wall look the
-                            // user wanted to keep).
+                            // visually clips it, which keeps the "stretches
+                            // to meet custom terrain" cliff-wall look).
                             //
                             // For multi-disk drag arrangements, the
                             // highest-wins logic downstream lets the
@@ -974,23 +973,22 @@ namespace VerdantsAscent.Water.Core
         #region Mesh Generation
 
         /// <summary>
-        /// 2026-05-26 round-26 — EDGE FADE REMOVED. Only bumps remain.
+        /// No edge fade; only bumps.
         ///
-        /// The earlier edge fade pulled boundary corner heights toward
-        /// local terrain, intending to make the mesh top "wrap down" to
-        /// ground. But the marching-squares boundary crossing's height
-        /// was linearly interpolated between an inside corner (faded to
+        /// An edge fade that pulls boundary corner heights toward
+        /// local terrain (to make the mesh top "wrap down" to
+        /// ground) fails: the marching-squares boundary crossing's height
+        /// is linearly interpolated between an inside corner (faded to
         /// terrain) and an outside corner (default h=0), giving a
         /// crossing height with NO relationship to terrain at the crossing
-        /// XZ. The skirt then dropped from that wrong height down to
-        /// terrain-penetration, producing the upward spike fins the
-        /// user kept reporting.
+        /// XZ. The skirt then drops from that wrong height down to
+        /// terrain-penetration, producing upward spike fins.
         ///
-        /// LandIce solves this by NOT trying to fade — the top stays
+        /// LandIce avoids this by NOT trying to fade: the top stays
         /// flat at disk height, the skirt drops straight down past
         /// terrain, and terrain (opaque) visually clips the boundary.
-        /// We use the same approach now. Only the bump displacement
-        /// remains since the user wanted "bumpy not cardboard".
+        /// We use the same approach. Only the bump displacement
+        /// remains, so the snow looks bumpy, not like cardboard.
         ///
         /// Bumps are deterministic from `_noiseSeed` (ZDO-persisted) so
         /// the pattern reproduces on reload. `edgeDist` is no longer
@@ -1060,18 +1058,17 @@ namespace VerdantsAscent.Water.Core
                     float wx2 = wx0, wz2 = wz0 + CELL_SIZE;
                     float wx3 = wx0 + CELL_SIZE, wz3 = wz0 + CELL_SIZE;
 
-                    // 2026-05-26 round-27 SPIKE ROOT CAUSE: invalid corners
-                    // (whose `_heights[idx] < -50f`) previously got `h = 0f`
+                    // SPIKE ROOT CAUSE: invalid corners
+                    // (whose `_heights[idx] < -50f`) would get `h = 0f`
                     // as their LOCAL Y default. Local Y 0 = world Y of
                     // myPos.y = disk surface Y. The marching-squares
                     // interpolation between a valid inside corner (h ≈ 0
                     // local + bumps) and an invalid outside corner (h = 0)
-                    // then produced boundary crossings AT disk surface Y.
+                    // would then produce boundary crossings AT disk surface Y.
                     // With bumps making the surrounding inside-mesh dip
                     // below surface in spots, those flat-surface crossings
-                    // stuck UP above the bumpy mesh as thin upward fins —
-                    // exactly the "spikes raise to the center height" the
-                    // user described.
+                    // would stick UP above the bumpy mesh as thin upward fins
+                    // (spikes rising to the center height).
                     //
                     // Fix: substitute invalid corners' h with the AVERAGE
                     // of valid corners on this cell. The boundary crossings
@@ -1176,7 +1173,7 @@ namespace VerdantsAscent.Water.Core
                     float wx2 = wx0, wz2 = wz0 + CELL_SIZE;
                     float wx3 = wx0 + CELL_SIZE, wz3 = wz0 + CELL_SIZE;
 
-                    // 2026-05-26 round-27: same valid-corner-avg substitution
+                    // Same valid-corner-avg substitution
                     // as the top-face loop above. Skirt's top edge MUST use
                     // the same corner heights as the top face so they meet
                     // cleanly without gaps or doubled geometry. Renamed
@@ -1383,21 +1380,21 @@ namespace VerdantsAscent.Water.Core
             float botA = terrainA - SKIRT_TERRAIN_PENETRATION - myPos.y;
             float botB = terrainB - SKIRT_TERRAIN_PENETRATION - myPos.y;
 
-            // 2026-05-26 round-29 PLACEHOLDER (replaced by §3.3 drag-aware
-            // skirt later in the migration plan):
+            // PLACEHOLDER (to be replaced by a drag-aware
+            // skirt):
             //
             // Skip the skirt entirely when the top-face boundary crossing
             // is at-or-below local terrain. That's the SINGLE-PILE case —
             // the dome shaping in SampleHeightsFromFootprints has already
             // tapered the top down to terrain, so a vertical skirt below
             // it would just be invisible terrain-clipped geometry AND
-            // would cause the "sharp edge below the soft slope" look
-            // the user reported. Cliff-meets-disk cases still get the
+            // would cause a "sharp edge below the soft slope" look.
+            // Cliff-meets-disk cases still get the
             // skirt because their boundary crossing stays at disk Y
             // (terrain is HIGHER than disk Y at the cliff edge, so the
             // dome's `min(terrain, disk)` keeps disk Y as the target).
             //
-            // §3.3 will replace this with explicit drag-mode gating from
+            // A planned replacement is explicit drag-mode gating from
             // the DiskDragRouter: skirt fires only when the drag tick
             // detects a cliff-drop (1.5×radius Y delta) onto a previous
             // disk's footprint. Until then this auto-check covers both
@@ -1488,7 +1485,7 @@ namespace VerdantsAscent.Water.Core
             return footprints;
         }
 
-        // Round-26 §2.2: anchor-routed save. Packs current state and
+        // Anchor-routed save. Packs current state and
         // hands it to LandSnowAnchor.WriteData (new `va_landsnow_*` keys).
         private void SaveToZDO()
         {

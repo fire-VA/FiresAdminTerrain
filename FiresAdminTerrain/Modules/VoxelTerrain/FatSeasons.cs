@@ -246,7 +246,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         /// <summary>
-        /// Painted ground in winter (Fire, 2026-09-27: snow follows the painted biome, blended). Deep in a circle the painted
+        /// Painted ground in winter (snow follows the painted biome, blended). Deep in a circle the painted
         /// biome decides; across a band inside the rim the snow fades to what the world's own ground has there, so the rim
         /// meets the unpainted winter ground without a seam. Heightmaps (BiomePaint.TintHeightmap), voxel ground and the far
         /// tiles all draw painted ground through here.

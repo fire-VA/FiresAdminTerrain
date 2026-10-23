@@ -9,7 +9,7 @@ using UnityEngine.Rendering;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // Vanilla loads the cached world minimap in Minimap.Update's first frame with a world: it reads four files, inflates three
-    // of them into full-size pixel arrays and uploads those, 316 ms on the main thread right after a client's PeerInfo (R40).
+    // of them into full-size pixel arrays and uploads those, 316 ms on the main thread right after a client's PeerInfo.
     // The reading and inflating are plain managed work, so they start on a worker as soon as the world is known (FAT's
     // WorldGenerator.Initialize hook, ahead of FAT's own world init), and the load only uploads. When anything differs (other
     // paths, a file changed or dropped as stale since, another seed or cache version) vanilla's own load runs as before.
@@ -66,7 +66,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             s_decode = null;
             if (world == null || SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null) return;
-            string dir = world.GetSaveDirectory(FileHelpers.FileSource.Local);
+            string dir = FiresMinimapCache.CacheDirectory(world);   // The same per-server-world folder the load uses
             string mask = FiresMinimapCache.CompletePath(dir, MaskName);
             string biome = FiresMinimapCache.CompletePath(dir, BiomeName);
             string height = FiresMinimapCache.CompletePath(dir, HeightName);

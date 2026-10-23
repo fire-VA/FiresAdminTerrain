@@ -3,17 +3,17 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // ── Where vanilla lets water clutter grow (0.2.683; Fire 10-01 on lilies: "Stay vanilla") ─────────────────────────────
+    // ── Where vanilla lets water clutter grow (lilies stay vanilla) ─────────────────────────────
     // Lilies and vass follow vanilla's position-only gates in ClutterSystem.GenerateVegPatch (ClutterSystem.cs:285-297):
-    // the forest factor (m_inForest rules) and the fractal patchiness mask (Utils.Fbm of the world position). H11: a 6 m
+    // the forest factor (m_inForest rules) and the fractal patchiness mask (Utils.Fbm of the world position). E.g. a 6 m
     // pool where 129/129 points failed the lily fractal grows no lily however it is shaped. These answer, for a spot, the
     // share of a 1 m grid within radius that passes them, so a pond can be put where vanilla allows lilies (and vass).
     // Depth, altitude, tilt, ocean depth, vegetation mask and cleared paint are the pond's own and are NOT judged here.
-    // Public and stable for [visual]'s homestead site search (soft lookup by name):
+    // Public and stable for the homestead site search (soft lookup by name):
     //   float FatWaterLife.LilyFractalPass(float x, float z, float radius)   0..1, or -1 without a ClutterSystem / rule
     //   float FatWaterLife.VassFractalPass(float x, float z, float radius)   same for instanced_vass
     //   float FatWaterLife.ClutterFractalPass(string prefab, float x, float z, float radius)
-    //   float FatWaterLife.UnclearedShare(float x, float z, float radius)   0.2.684: share not "cleared" by paint now, -1 unknown
+    //   float FatWaterLife.UnclearedShare(float x, float z, float radius)   share not "cleared" by paint now, -1 unknown
     public static class FatWaterLife
     {
         public const string LilyPrefab = "instanced_waterlilies", VassPrefab = "instanced_vass";
@@ -43,9 +43,9 @@ namespace VerdantsAscent.Water.Core
             return points > 0 ? (float)pass / points : -1f;
         }
 
-        // 0.2.684 ([visual] 10-01): the share of a 1 m grid within radius whose ground is NOT "cleared" right now, by vanilla's
+        // The share of a 1 m grid within radius whose ground is NOT "cleared" right now, by vanilla's
         // Heightmap.IsCleared (paint mask r/g/b > 0.5: dirt, cultivate, paved, and FAT's [FiresWetMask] shore sand along
-        // generated water). Vass is onUncleared-only (H11: 15/129 pond points refused on cleared paint), so a pond spot is
+        // generated water). Vass is onUncleared-only (most pond points can be refused on cleared paint), so a pond spot is
         // worth lily share × this. Reads the live paint, so call it on the client with the ground loaded. -1 = unknown:
         // no loaded near heightmap at (x, z) (none, or only a distant LOD, which carries no player paint), or no point
         // within radius had one. Points without a loaded near heightmap are left out of the share.
@@ -95,8 +95,8 @@ namespace VerdantsAscent.Water.Core
     }
 
     // Vanilla judges "is there water here" in places that only know vanilla water (its sea and lakes sit at 30 m, its
-    // WaterVolumes, its water layer). FAT's lakes, rivers and pours stand higher, so those checks missed them (Fire
-    // 2026-09-30 23:0x: a raven landed under a FAT lake and the bot swam ~4 min trying to read it). Every check here asks
+    // WaterVolumes, its water layer). FAT's lakes, rivers and pours stand higher, so those checks missed them (a raven
+    // could land under a FAT lake and a swimmer could not read it). Every check here asks
     // FatWaterChecks.SurfaceAt, the same water a swimming character feels.
     internal static class FatWaterChecks
     {
@@ -114,7 +114,7 @@ namespace VerdantsAscent.Water.Core
             return generated > NoWater ? Mathf.Max(level, generated) : level;
         }
 
-        // ── ONE inland-water query (0.2.673, Fire 10-01: "our carved ponds and the water fill properly spawn fish and
+        // ── ONE inland-water query (carved ponds and filled water must spawn fish and
         // vegetation") ─────────────────────────────────────────────────────────────────────────────────────────────
         // The generated field (GenWaterField: hydrology or the Fires generator) first. Otherwise every other water FAT
         // knows, i.e. tool pours, WaterDisk ponds (the Vpool tool), the voxel sheet and vanilla's own, through SurfaceAt,
@@ -211,7 +211,7 @@ namespace VerdantsAscent.Water.Core
         }
     }
 
-    // Fire 2026-09-30: inland water must "spawn fish to begin with so that they CAN fish in it". SpawnSystem judges a fish
+    // Inland water must spawn fish so that players CAN fish in it. SpawnSystem judges a fish
     // entry's altitude and ocean depth against the 30 m sea, so a lake or river above it never qualified. A fish entry
     // vanilla refused gets a second look at FAT inland water: the same gates, with altitude measured from the water's own
     // surface and the ocean depth being that water's depth. Fish only (a Fish component on the prefab): serpents and other
@@ -234,8 +234,8 @@ namespace VerdantsAscent.Water.Core
             return fish;
         }
 
-        // 0.2.663 diagnostics, one line each per session: every fish entry's bands when first seen, and the first time
-        // each (entry, reason) refuses FAT inland water, so a round with no inland fish says why.
+        // Diagnostics, one line each per session: every fish entry's bands when first seen, and the first time
+        // each (entry, reason) refuses FAT inland water, so a run with no inland fish says why.
         private static readonly System.Collections.Generic.HashSet<string> s_said = new System.Collections.Generic.HashSet<string>();
 
         private static void SayOnce(string key, string line)
@@ -352,12 +352,21 @@ namespace VerdantsAscent.Water.Core
             int id = c.GetInstanceID();
             if ((Time.frameCount + id) % EveryFrames != 0) return;
             bool ours = s_fed.ContainsKey(id);
+            // Sleeping floaters skip the water feed (nearly all floaters can be asleep Pickable_Tar outside FAT water, costing many ms/s of lookups).
+            // Only objects FAT has NOT put in its water:
+            // those it did are still fed, so the "left the water" reset below still runs for them.
+            if (!ours)   // always on (a perf fix)
+            {
+                var rb = c.GetComponent<Rigidbody>();
+                if (rb != null && rb.IsSleeping()) { s_skipped++; ReportSkips(); return; }
+                s_fedCalls++; ReportSkips();
+            }
             Vector3 p = c.transform.position;
-            // 0.2.685 (H12, 10-01: a Fish2 on a tool pond's floor still read "given level never set" with the swim trigger
-            // reaching the bed): the generated sheet AND tool water (WaterMeshCombiner disks), through the same reader the
-            // player's swim patches use, instead of relying on a physics trigger contact a resting fish never makes.
+            // A fish resting on a tool pond's floor never makes a physics trigger contact, so read
+            // the generated sheet AND tool water (WaterMeshCombiner disks), through the same reader the
+            // player's swim patches use.
             float surface = global::VerdantsAscent.Water.Core.CustomWaterManager.GetWaterLevelAt(p);
-            // 0.2.687 (H13, 10-01: "Fish2 … given level 29.51 … OUT of water; FAT surface here 37.37"): an object vanilla
+            // An object vanilla
             // already gave a level (the zone-wide ocean WaterVolume, sea + tide) was left to vanilla. FAT water standing
             // higher than that level now wins, so a pond above sea level is the water an inland fish or drop is in.
             if (surface > NoWater && p.y < surface + AboveSurface && (ours || surface > current + LevelEpsilon))
@@ -375,7 +384,20 @@ namespace VerdantsAscent.Water.Core
 
         private const float LevelEpsilon = 0.01f;
 
-        // 0.2.687: vanilla's WaterVolume rewrites its level every update (WaterVolume.cs:256), so between feeds a fish in
+        // The summary line for "Sleeping floaters skip the water feed", once a minute.
+        private static int s_skipped, s_fedCalls;
+        private static float s_reportAt = -1f;
+
+        private static void ReportSkips()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (s_reportAt < 0f) { s_reportAt = now + 60f; return; }
+            if (now < s_reportAt) return;
+            FiresLogger.LogInfo($"[FatFloaterFeed] last minute: {s_skipped} feed(s) skipped (asleep, not in FAT water), {s_fedCalls} fed (awake), {s_fed.Count} in FAT water (Sleeping floaters skip the water feed = ON)");
+            s_skipped = 0; s_fedCalls = 0; s_reportAt = now + 60f;
+        }
+
+        // Vanilla's WaterVolume rewrites its level every update (WaterVolume.cs:256), so between feeds a fish in
         // a pond above the sea would be handed the sea's 29.5 again. These raise any Water level vanilla (or anything
         // else) writes to the FAT surface at the object when that stands higher and the object is in it.
         internal static float RaiseToFatWater(Component c, float level)
@@ -396,7 +418,7 @@ namespace VerdantsAscent.Water.Core
         }
     }
 
-    // 0.2.687: the level vanilla hands a fish or a floating object is raised to FAT water standing higher there
+    // The level vanilla hands a fish or a floating object is raised to FAT water standing higher there
     // (GeneratedWaterFeeder.RaiseToFatWater), so the ocean WaterVolume's every-update write cannot put a pond fish "out".
     [HarmonyPatch(typeof(Fish), nameof(Fish.SetLiquidLevel))]
     internal static class FishLevelSeesFatWater

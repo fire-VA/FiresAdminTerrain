@@ -44,6 +44,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // How far the WATER SHEET (and swim) sit below the reconciled surface
         // the bed carve is cut for — visible bank relief, tuned on screen.
         private const float WATER_SEAT_DOWN = 0.4f;
+        private const float SpreadBankSlack = 0.5f;   // a spread column's generated surface may sit this far under the level (seat-down 0.4)
 
         // Saturated density a uniform chunk serves at its border ring (>0 solid).
         private const sbyte UniformSolidDensity = 127;
@@ -125,7 +126,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // appears - recomputed at every enqueue, compared by the heal.
         public byte OrphanMask;
 
-        // W1.2 - streamed chunks keep their RENDERER hidden until the zone's
+        // Streamed chunks keep their RENDERER hidden until the zone's
         // swap moment (colliders bake first, then voxel-on/vanilla-off flips in
         // ONE frame). Kills the z-fight window where both terrains rendered
         // coplanar during wrap-in. Copied onto the view at creation.
@@ -161,6 +162,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // same array the streamer folded into LastGenHash; null when none.
         private float[] _genCracks;
         public bool PendingGenerate { get; private set; }
+        // When PrepareGenerate last armed it (realtime), for the spawn gate's stall line and re-queue watchdog.
+        public float PendingSince;
 
         // Change-gate: hash of the last executed generate inputs. A zone
         // rewrap whose gather hashes identically is a NO-OP - skipping it
@@ -180,11 +183,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 _genOverrides = null;
                 GenFailCount = 0;
                 PendingGenerate = true;
+                PendingSince = UnityEngine.Time.realtimeSinceStartup;   // the spawn gate's stall line + watchdog (main thread)
             }
             finally { System.Threading.Monitor.Exit(_lock); }
         }
 
-        // Diagnostic (R8a, 2026-09-28: a 1.8 s dedi stall in BuildZoneChunks, 98% of it blocked). The streamer re-arms chunks
+        // Diagnostic (a 1.8 s dedi stall in BuildZoneChunks, 98% of it blocked). The streamer re-arms chunks
         // on the main thread through here and SetBorderOverrides, while a worker holds the same lock for a whole generate or
         // mesh, so a wait at or over LockWaitReportMs is logged with the chunk: that tells a lock wait from page-ins.
         private const long LockWaitReportMs = 50;
@@ -396,6 +400,10 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Worker-safe (pure math + our noise). Also callable on the main
         // thread (brush guard) - whoever gets there first runs it.
+        // Sky-island chunks this session (nothing regenerates on load): restored from the chunk cache (the island's
+        // shape was generated once and saved) vs generated from its shape here. FiresSkylandHold logs them at Debug.
+        internal static int IslandChunksRestored, IslandChunksGenerated;
+
         public void RunPendingGenerate()
         {
             // CACHE READ - outside the lock's work, but the restore itself
@@ -404,7 +412,10 @@ namespace VerdantsAscent.Terrain.Voxel
             // and generates, so a bad entry can never block terrain.
             if (PendingGenerate && _genCacheable && VoxelChunkCache.TryLoad(Key, LastGenHash, out var cachedKind, out var cachedBlob)
                 && CacheRestore(cachedKind, cachedBlob))
+            {
+                if (FiresSkyIslands.ChunkOverlaps(WorldOrigin)) System.Threading.Interlocked.Increment(ref IslandChunksRestored);
                 return;
+            }
 
             var swGen = System.Diagnostics.Stopwatch.StartNew();
             lock (_lock)
@@ -422,6 +433,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // SKY ISLANDS — one overlap test per chunk; only overlapping
                 // chunks pay the per-voxel SDF union below.
                 bool skyIsle = FiresSkyIslands.ChunkOverlaps(WorldOrigin);
+                if (skyIsle) System.Threading.Interlocked.Increment(ref IslandChunksGenerated);
                 // BED RE-CARVE (Fires worlds). Generated water seats its surface
                 // just under the LOWER bank; where that level drops to meet a low
                 // bank the bed has to follow, or the channel becomes too shallow
@@ -597,7 +609,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                     if (carved < dens) dens = (sbyte)carved;
                                 }
                             }
-                            // W2.1 - UNDERCUT pockets: in the shallow BANK zone
+                            // UNDERCUT pockets: in the shallow BANK zone
                             // of a river (carve 0.15-2.2m), noise bites the
                             // wall just above the bed -> eroded, overhanging
                             // bank pockets at waterline (the voxel-only look).
@@ -686,6 +698,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private bool AnyBrushEditsLocked()
         {
+            if (HasLayerPaint) return true;
             if (_genWaterMop != null)
                 for (int i = 0; i < _genWaterMop.Length; i++)
                     if (_genWaterMop[i] != 0) return true;
@@ -762,6 +775,95 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // Vmop (remove generated or drawn water permanently and redraw it by hand): the mop
+        // mask now marks EVERY column in the disc, dry ones too, because the same persisted mask keeps hand-drawn water
+        // (WaterMeshCombiner grids) out of those columns. Returns columns newly marked; wetGen counts the ones that held
+        // generated water.
+        internal int MopColumns(Vector3 center, float radius, out int wetGen)
+        {
+            wetGen = 0;
+            int changed = 0;
+            lock (_lock)
+            {
+                if (Kind != ChunkKind.Full) return 0;
+                float r2 = radius * radius;
+                for (int z = -1; z <= CELLS; z++)
+                    for (int x = -1; x <= CELLS; x++)
+                    {
+                        float dx = WorldOrigin.x + x - center.x, dz = WorldOrigin.z + z - center.z;
+                        if (dx * dx + dz * dz > r2) continue;
+                        int col = (x + 1) + SAMPLES * (z + 1);
+                        if (_genWaterMop != null && _genWaterMop[col] != 0) continue;
+                        if (_genWaterMop == null) _genWaterMop = new byte[SAMPLES * SAMPLES];
+                        _genWaterMop[col] = 1;
+                        changed++;
+                        if (_genWater != null && _genWater[col] > 0f) wetGen++;
+                    }
+                if (changed > 0)
+                {
+                    Version++;
+                    HasBrushEdits = true;
+                }
+            }
+            if (changed > 0) VoxelWorld.AnyMops = true;
+            return changed;
+        }
+
+        // LeftAlt + Vmop: clear the mask in the disc, so generated water there shows again (its stored level was never
+        // erased) and drawn water regenerates from its disks.
+        internal int UnmopColumns(Vector3 center, float radius)
+        {
+            lock (_lock)
+            {
+                if (_genWaterMop == null) return 0;
+                float r2 = radius * radius;
+                int changed = 0;
+                for (int z = -1; z <= CELLS; z++)
+                    for (int x = -1; x <= CELLS; x++)
+                    {
+                        float dx = WorldOrigin.x + x - center.x, dz = WorldOrigin.z + z - center.z;
+                        if (dx * dx + dz * dz > r2) continue;
+                        int col = (x + 1) + SAMPLES * (z + 1);
+                        if (_genWaterMop[col] == 0) continue;
+                        _genWaterMop[col] = 0;
+                        changed++;
+                    }
+                if (changed > 0)
+                {
+                    Version++;
+                    HasBrushEdits = AnyBrushEditsLocked();
+                }
+                return changed;
+            }
+        }
+
+        internal bool IsColumnMopped(float wx, float wz)
+        {
+            lock (_lock)
+            {
+                if (_genWaterMop == null) return false;
+                int lx = Mathf.FloorToInt(wx - WorldOrigin.x + 0.5f), lz = Mathf.FloorToInt(wz - WorldOrigin.z + 0.5f);
+                if (lx < -1 || lx > CELLS || lz < -1 || lz > CELLS) return false;
+                return _genWaterMop[(lx + 1) + SAMPLES * (lz + 1)] != 0;
+            }
+        }
+
+        // Changes when the mask does (VoxelChunkAnchor.Apply refreshes drawn water only then).
+        internal int MopSignature
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    if (_genWaterMop == null) return 0;
+                    int h = 17;
+                    for (int i = 0; i < _genWaterMop.Length; i++)
+                        if (_genWaterMop[i] != 0) h = h * 31 + i + 1;
+                    return h;
+                }
+            }
+        }
+
         // ── CARVE-AND-FILL SELF-REPAIR ───────────────────────────────────
         // Digging into a bank opens AIR below the neighbouring water level —
         // the sheet must extend to the new edge, or the invariant (stored
@@ -797,6 +899,12 @@ namespace VerdantsAscent.Terrain.Voxel
                         int ly = Mathf.FloorToInt(lvl - 0.25f - WorldOrigin.y);
                         if (ly < -1 || ly > CELLS) continue;        // level outside this band — its owner layer spreads
                         if (_density[Idx(x, ly, z)] >= 0) continue; // still solid — bank intact, no water here
+                        // A bump of water and rapids formed in a river for no reason (one sheet spanning 2.6 m,
+                        // 1.2-2.5 m over its neighbours, 8 rapid emitters):
+                        // the spread took the HIGHEST neighbour level into any dry column with air under it, so on a sloping river
+                        // the upstream level flooded naturally LOWER dry ground and stood metres over it. It is for a dug bank: the
+                        // column's generated surface must have been at or over the level (it was bank), never lower ground.
+                        if (FiresWorldGenBase.Active && FiresWorldGenBase.SampleFinalMeters(WorldOrigin.x + x, WorldOrigin.z + z) < lvl - SpreadBankSlack) continue;
                         _genWater[col] = lvl;
                         grew = true;
                     }
@@ -830,6 +938,10 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (_genWaterBaseTried) return;
             _genWaterBaseTried = true;
+            // Island levels only in chunks inside an island's band, as the generate path does (skyIsle). Ungated,
+            // a brush rebuild of a GROUND chunk under an island stored the island pond's level (~y 600) in the ground's
+            // column, i.e. water hundreds of metres above the ground the chunk holds.
+            bool skyIsle = FiresSkyIslands.ChunkOverlaps(WorldOrigin);
             for (int z = -1; z <= CELLS; z++)
                 for (int x = -1; x <= CELLS; x++)
                 {
@@ -839,7 +951,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // on either world type.
                     if (!Zones.ZoneModeGate.IsClosedForTerrain(bwx, bwz)
                         && GenWaterField.TryWaterSurfaceSmooth(bwx, bwz, out float wlvl, out float wdep)
-                        && (wdep >= 0.15f || _genGround[(x + 1) + SAMPLES * (z + 1)] < wlvl - 0.05f)
+                        && (wdep >= 0.15f || (_genGround != null && _genGround[(x + 1) + SAMPLES * (z + 1)] < wlvl - 0.05f))   // _genGround is dropped once a chunk has generated; a brush near shallow water threw here
                         && wlvl > 30.3f
                         && (!FiresWorldGenBase.Active
                             || FiresWorldGenBase.IsWetRawAt(bwx, bwz)
@@ -854,7 +966,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     // Island ponds/rills restore through the edit path too —
                     // a brush hit near a grotto pool must not drain it.
-                    if (FiresSkyIslands.WaterLevelAt(bwx, bwz, out float isLvl))
+                    if (skyIsle && FiresSkyIslands.WaterLevelAt(bwx, bwz, out float isLvl))
                     {
                         if (_genWater == null) _genWater = new float[SAMPLES * SAMPLES];
                         _genWater[(x + 1) + SAMPLES * (z + 1)] = isLvl;
@@ -1042,7 +1154,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // reads the height array (incl. hoe/TerrainComp mods),
                         // is immune to colliders, and is faster.
                         //
-                        // +eps bias (round-89): a sample exactly ON a zone-edge
+                        // +eps bias: a sample exactly ON a zone-edge
                         // plane is inside TWO heightmaps and FindHeightmap
                         // returns whichever registered FIRST - two chunks could
                         // seed the SAME world sample from DIFFERENT heightmaps
@@ -1301,6 +1413,91 @@ namespace VerdantsAscent.Terrain.Voxel
         private const byte MopTailMarker = 0xF9;
         internal const int SampleCount = SAMPLES * SAMPLES * SAMPLES;
 
+        // ── Layered paint (paint keeps to the layer it is aimed at, like every tool) ─────────────────────────────────────
+        // One byte a sample: the low nibble the ground paint (VoxelLayerPaint.Dirt / Cultivated / Paved, 0 none), the high
+        // nibble the biome it is turned to (VoxelLayerPaint.BiomeCode, 0 its own). Null until painted. A cave floor or a
+        // skyland wears it instead of the ground column's paint mask; it rides the anchor blob as [0xFA] + SampleCount bytes
+        // after the mop tail, so the paint syncs, saves and undoes with the chunk's edits.
+        private const byte PaintTailMarker = 0xFA;
+        private byte[] _paint;
+        internal bool HasLayerPaint { get; private set; }
+
+        // Memory line: bytes this chunk's arrays hold (array payload only, no object headers).
+        internal long HeldBytes()
+        {
+            long b = 0;
+            if (_density != null) b += _density.Length;
+            if (_seed != null) b += _seed.Length;
+            if (_biome != null) b += _biome.Length * 4L;
+            if (_genWater != null) b += _genWater.Length * 4L;
+            if (_editLo != null) b += _editLo.Length;
+            if (_editHi != null) b += _editHi.Length;
+            if (_editBase != null) b += _editBase.Length;
+            if (_genGround != null) b += _genGround.Length * 4L;
+            if (_genBiome != null) b += _genBiome.Length * 4L;
+            if (_genCracks != null) b += _genCracks.Length * 4L;
+            if (_genWaterMop != null) b += _genWaterMop.Length;
+            if (_paint != null) b += _paint.Length;
+            return b;
+        }
+
+        private static bool AnyPaint(byte[] paint)
+        {
+            for (int i = 0; i < paint.Length; i++) if (paint[i] != 0) return true;
+            return false;
+        }
+
+        // The paint of the sample at local (x, y, z) (-1..CELLS each), 0 when none. Main thread (render, biome lookups).
+        internal byte PaintAt(int x, int y, int z)
+        {
+            var paint = _paint;
+            if (paint == null || x < -1 || x > CELLS || y < -1 || y > CELLS || z < -1 || z > CELLS) return 0;
+            return paint[Idx(x, y, z)];
+        }
+
+        // Paints the samples of local column (x, z) from y0 to y1 (local, clipped to the chunk): the ground paint when
+        // setMask (0 clears it), the biome when setBiome (0 clears it). True when a sample changed.
+        internal bool PaintColumn(int x, int z, int y0, int y1, bool setMask, byte mask, bool setBiome, byte biome)
+        {
+            if (x < -1 || x > CELLS || z < -1 || z > CELLS) return false;
+            y0 = Mathf.Max(y0, -1);
+            y1 = Mathf.Min(y1, CELLS);
+            if (y1 < y0) return false;
+            lock (_lock)
+            {
+                if (_density == null || Kind != ChunkKind.Full) return false;
+                bool changed = false;
+                for (int y = y0; y <= y1; y++)
+                {
+                    int i = Idx(x, y, z);
+                    byte was = _paint != null ? _paint[i] : (byte)0;
+                    byte now = was;
+                    if (setMask) now = (byte)((now & 0xF0) | (mask & 0x0F));
+                    if (setBiome) now = (byte)((now & 0x0F) | ((biome & 0x0F) << 4));
+                    if (now == was) continue;
+                    if (_paint == null) _paint = new byte[SampleCount];
+                    _paint[i] = now;
+                    changed = true;
+                }
+                if (!changed) return false;
+                EnsureBrushEditsLocked();
+                HasLayerPaint = AnyPaint(_paint);
+                HasBrushEdits = AnyBrushEditsLocked();
+                if (HasLayerPaint) VoxelLayerPaint.NoteChunkPainted();
+                Version++;
+                return true;
+            }
+        }
+
+        // The density of the sample at local (x, y, z), sbyte.MinValue outside or when the chunk holds no arrays. Main thread.
+        internal sbyte DensityAt(int x, int y, int z)
+        {
+            if (x < -1 || x > CELLS || y < -1 || y > CELLS || z < -1 || z > CELLS) return sbyte.MinValue;
+            if (Kind != ChunkKind.Full) return Kind == ChunkKind.UniformSolid ? UniformSolidDensity : UniformAirDensity;
+            var density = _density;
+            return density != null ? density[Idx(x, y, z)] : sbyte.MinValue;
+        }
+
         public byte[] ExportBrushEdits()
         {
             lock (_lock)
@@ -1308,7 +1505,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 int mops = 0;
                 if (_genWaterMop != null)
                     for (int i = 0; i < _genWaterMop.Length; i++) if (_genWaterMop[i] != 0) mops++;
-                var blob = new byte[SampleCount * 2 + (mops > 0 ? 3 + mops * 2 : 0)];
+                var paint = HasLayerPaint ? _paint : null;
+                int paintAt = SampleCount * 2 + (mops > 0 ? 3 + mops * 2 : 0);
+                var blob = new byte[paintAt + (paint != null ? 1 + SampleCount : 0)];
                 if (_editLo != null)
                 {
                     System.Buffer.BlockCopy(_editLo, 0, blob, 0, SampleCount);
@@ -1330,6 +1529,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     blob[o++] = (byte)((mops >> 8) & 0xFF);
                     for (int i = 0; i < _genWaterMop.Length; i++)
                         if (_genWaterMop[i] != 0) { blob[o++] = (byte)(i & 0xFF); blob[o++] = (byte)((i >> 8) & 0xFF); }
+                }
+                if (paint != null)
+                {
+                    blob[paintAt] = PaintTailMarker;
+                    System.Buffer.BlockCopy(paint, 0, blob, paintAt + 1, SampleCount);
                 }
                 return blob;
             }
@@ -1353,10 +1557,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 // mopped columns stay dry.
                 _genWaterMop = null;
                 int tail = SampleCount * 2;
+                int paintAt = tail;
                 if (raw.Length > tail + 2 && raw[tail] == MopTailMarker)
                 {
                     int cnt = raw[tail + 1] | (raw[tail + 2] << 8);
                     int o = tail + 3;
+                    paintAt = o + cnt * 2;
                     if (raw.Length >= o + cnt * 2)
                         for (int k = 0; k < cnt; k++)
                         {
@@ -1369,6 +1575,17 @@ namespace VerdantsAscent.Terrain.Voxel
                             }
                         }
                 }
+                if (_genWaterMop != null) VoxelWorld.AnyMops = true;   // drawn water consults the mask from now on
+                // The layered paint tail ([0xFA] + one byte a sample) after the mop tail; none = no paint.
+                if (raw.Length >= paintAt + 1 + SampleCount && raw[paintAt] == PaintTailMarker)
+                {
+                    var paint = new byte[SampleCount];
+                    System.Buffer.BlockCopy(raw, paintAt + 1, paint, 0, SampleCount);
+                    _paint = paint;
+                    HasLayerPaint = AnyPaint(paint);
+                }
+                else { _paint = null; HasLayerPaint = false; }
+                if (HasLayerPaint) VoxelLayerPaint.NoteChunkPainted();
                 for (int i = 0; i < SampleCount; i++)
                     _density[i] = ClampToBounds(_editBase[i], _editLo[i], _editHi[i]);
                 HasBrushEdits = AnyBrushEditsLocked();
@@ -1398,15 +1615,21 @@ namespace VerdantsAscent.Terrain.Voxel
             int lz = Mathf.RoundToInt(wz - WorldOrigin.z);
             if (lx < -1 || lx > CELLS || lz < -1 || lz > CELLS) return false;
 
+            // "Solid at the top" is this chunk's answer only when topY lies INSIDE it. A uniform-solid chunk or a
+            // full chunk wholly below topY (the rock under any ground) used to report it too, so TrySampleSurfaceY read a wall
+            // under almost every column (every Vpond hit "no voxel ground", placed water clipped away as "bank above").
+            int rawTop = Mathf.FloorToInt(topY - WorldOrigin.y);
+            bool topInside = rawTop >= 0 && rawTop <= CELLS;
+
             // Uniform chunks carry no crossing: solid = a wall spanning the whole
             // probe range, air = nothing.
             if (Kind != ChunkKind.Full)
             {
-                solidAtTop = Kind == ChunkKind.UniformSolid;
+                solidAtTop = topInside && Kind == ChunkKind.UniformSolid;
                 return false;
             }
 
-            int yTop = Mathf.Min(CELLS, Mathf.FloorToInt(topY - WorldOrigin.y));
+            int yTop = Mathf.Min(CELLS, rawTop);
             int yBot = Mathf.Max(-1, Mathf.CeilToInt(botY - WorldOrigin.y) - 1);
             if (yTop <= yBot) return false;
 
@@ -1416,8 +1639,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // (the liquid bridge), and the Kind fast-path above is not atomic
                 // with the deref - a main-thread MakeUniform could have nulled the
                 // arrays in the gap. Both Kind and _density flip under this lock.
-                if (_density == null) { solidAtTop = Kind == ChunkKind.UniformSolid; return false; }
-                if (_density[Idx(lx, yTop, lz)] > 0) { solidAtTop = true; return false; }
+                if (_density == null) { solidAtTop = topInside && Kind == ChunkKind.UniformSolid; return false; }
+                if (topInside && _density[Idx(lx, yTop, lz)] > 0) { solidAtTop = true; return false; }
                 for (int y = yTop; y > yBot; y--)
                 {
                     float dAbove = _density[Idx(lx, y, lz)];
@@ -1429,6 +1652,79 @@ namespace VerdantsAscent.Terrain.Voxel
                         return true;
                     }
                 }
+            }
+            return false;
+        }
+
+        // The mesh and its collider come from Surface Nets
+        // (VoxelMesherSurfaceNets: each cell's vertex = the mean of its edge crossings), so beside a step, slope or pad rim
+        // the ground you stand on is a blend of the four cells around the point, up to ~0.2 m below the single-column
+        // crossing SampleColumnSurface reads. This reads the SAME vertices: the highest surface cell in each of the four
+        // cells whose vertices surround (wx,wz), bilinearly blended. False = not answerable in this chunk (a neighbour cell
+        // outside the sample ring, or no surface cell in the window): the caller falls back to SampleColumnSurface.
+        public bool SampleColumnSurfaceMesh(float wx, float wz, float topY, float botY,
+            out float surfY, out bool solidAtTop)
+        {
+            surfY = float.MinValue;
+            solidAtTop = false;
+            float fx = wx - WorldOrigin.x - 0.5f, fz = wz - WorldOrigin.z - 0.5f;   // vertices sit near cell centres
+            int cx0 = Mathf.FloorToInt(fx), cz0 = Mathf.FloorToInt(fz);
+            if (cx0 < -1 || cx0 + 1 > CELLS - 1 || cz0 < -1 || cz0 + 1 > CELLS - 1) return false;
+            float u = fx - cx0, v = fz - cz0;
+
+            int rawTop = Mathf.FloorToInt(topY - WorldOrigin.y);
+            bool topInside = rawTop >= 0 && rawTop <= CELLS;
+            if (Kind != ChunkKind.Full)
+            {
+                solidAtTop = topInside && Kind == ChunkKind.UniformSolid;
+                return false;
+            }
+            int yTop = Mathf.Min(CELLS - 1, rawTop);
+            int yBot = Mathf.Max(-1, Mathf.CeilToInt(botY - WorldOrigin.y) - 1);
+            if (yTop < yBot) return false;
+
+            lock (_lock)
+            {
+                if (_density == null) { solidAtTop = topInside && Kind == ChunkKind.UniformSolid; return false; }
+                int lx = Mathf.Clamp(Mathf.RoundToInt(wx - WorldOrigin.x), -1, CELLS);
+                int lz = Mathf.Clamp(Mathf.RoundToInt(wz - WorldOrigin.z), -1, CELLS);
+                if (topInside && rawTop <= CELLS && _density[Idx(lx, rawTop, lz)] > 0) { solidAtTop = true; return false; }
+                if (!CellVertexY(cx0, cz0, yTop, yBot, out float y00)) return false;
+                if (!CellVertexY(cx0 + 1, cz0, yTop, yBot, out float y10)) return false;
+                if (!CellVertexY(cx0, cz0 + 1, yTop, yBot, out float y01)) return false;
+                if (!CellVertexY(cx0 + 1, cz0 + 1, yTop, yBot, out float y11)) return false;
+                surfY = WorldOrigin.y + Mathf.Lerp(Mathf.Lerp(y00, y10, u), Mathf.Lerp(y01, y11, u), v);
+                return true;
+            }
+        }
+
+        // The Surface Nets vertex height (chunk-local y) of the highest surface cell in column (cx,cz) within [yBot, yTop]:
+        // the same mean of edge crossings VoxelMesherSurfaceNets.Realize computes. Call under _lock.
+        private bool CellVertexY(int cx, int cz, int yTop, int yBot, out float y)
+        {
+            y = 0f;
+            for (int cy = yTop; cy >= yBot; cy--)
+            {
+                bool anySolid = false, anyAir = false;
+                for (int c = 0; c < 8; c++)
+                {
+                    float dc = _density[Idx(cx + (c & 1), cy + ((c >> 1) & 1), cz + ((c >> 2) & 1))];
+                    if (dc > 0f) anySolid = true; else anyAir = true;
+                }
+                if (!(anySolid && anyAir)) continue;
+                float py = 0f; int crossings = 0;
+                for (int e = 0; e < 12; e++)
+                {
+                    int a = VoxelMesherSurfaceNets.EDGES[e, 0], b = VoxelMesherSurfaceNets.EDGES[e, 1];
+                    float da = _density[Idx(cx + (a & 1), cy + ((a >> 1) & 1), cz + ((a >> 2) & 1))];
+                    float db = _density[Idx(cx + (b & 1), cy + ((b >> 1) & 1), cz + ((b >> 2) & 1))];
+                    if ((da > 0f) == (db > 0f)) continue;
+                    float t = da / (da - db);
+                    py += ((a >> 1) & 1) + t * (((b >> 1) & 1) - ((a >> 1) & 1));
+                    crossings++;
+                }
+                y = cy + (crossings > 0 ? py / crossings : 0.5f);
+                return true;
             }
             return false;
         }

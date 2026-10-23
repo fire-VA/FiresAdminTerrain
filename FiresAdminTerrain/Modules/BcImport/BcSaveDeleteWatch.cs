@@ -8,7 +8,7 @@ namespace VerdantsAscent.Terrain.BcImport
     //
     // A flat pre-1.0 world lost its .db and .fwl three times while its .BetterContinents sidecar survived - the
     // signature of SaveSystem.Delete on a non-chunked save, which removes file.AllPaths and nothing else. Neither
-    // the game nor FAT logs a line when it happens, so four rounds of reading decompiled code produced four
+    // the game nor FAT logs a line when it happens, so four rounds of guessing at the cause produced four
     // plausible culprits and no proof. This produces proof: every delete of a world file is logged with its path
     // and the managed stack that called it.
     //
@@ -71,7 +71,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         // A 1.0 save writes each changed chunk as a new version, then deletes the version before it (ZDOMan.DeleteOldChunks);
         // a load removes chunk files no save mapping names (ZDOMan.LoadChunks; the park's ResetChunkStore leaves them on
-        // purpose). Both are the game's own housekeeping: one line with the count, no stack (R24 2026-09-28: two stacks at
+        // purpose). Both are the game's own housekeeping: one line with the count, no stack (it used to log two stacks at
         // every dedi save). A failed save's revert (DeleteCurrentChunksAndRevert) still reports every file.
         [HarmonyPatch(typeof(ZDOMan), nameof(ZDOMan.DeleteOldChunks))]
         [HarmonyPrefix]
@@ -130,7 +130,7 @@ namespace VerdantsAscent.Terrain.BcImport
         }
 
         // A world save that succeeded removes the save before it (_main.<previous>.fwl2 / .db2 / .chunks / .ok), then the
-        // old chunk versions (R25 2026-09-28: two stacks at every dedi save); the chunk rotation's line counts both. While a
+        // old chunk versions (it used to log two stacks at every dedi save); the chunk rotation's line counts both. While a
         // save runs, the previous save's names differ from the current one's, so a failed save deleting its OWN files, or
         // any delete outside a save, still reports.
         private static bool IsPreviousSaveFile(string path)

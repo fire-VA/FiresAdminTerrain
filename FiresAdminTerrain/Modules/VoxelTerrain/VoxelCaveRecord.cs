@@ -15,9 +15,9 @@ namespace VerdantsAscent.Terrain.Voxel
     // object is gone. It is written when the world is saved, so a crash rolls it back with the world.
     //
     // An entry's object is found by its prefab and spot, the id being only a shortcut within one session: 1.0 gives every
-    // ZDO a new id at each load (ZDO.Load: m_uid.SetID(++ZDOID.m_loadID), user "unknown former"). Until 0.2.625 the ids
+    // ZDO a new id at each load (ZDO.Load: m_uid.SetID(++ZDOID.m_loadID), user "unknown former"). Older builds trusted the ids
     // were trusted across restarts, found nothing, and the restock rebuilt pickables and chests beside the originals; the
-    // first load binds every entry again and removes those copies where that is safe. Tools\SAVE_SAFETY_AUDIT.md
+    // first load binds every entry again and removes those copies where that is safe.
     internal static class VoxelCaveRecord
     {
         internal sealed class Chest
@@ -366,8 +366,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static string RecordPath()
         {
-            string safe = string.Concat((s_loadedFor ?? "world").Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + "_caves.txt");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(s_loadedFor ?? "world", "_caves.txt");
         }
     }
 

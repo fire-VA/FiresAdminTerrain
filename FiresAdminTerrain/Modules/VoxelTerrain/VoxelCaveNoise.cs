@@ -126,6 +126,74 @@ namespace VerdantsAscent.Terrain.Voxel
 
         public static float Noise01(float x, float y, float z, int seed) => Noise(x, y, z, seed);
 
+        // ── SINKHOLES: not straight cylinders with broken latticed terrain
+        // over the top; fully open, irregular, with the debris that
+        // 'fell in' piled up along the bottom ───────────────────────────────────────────────────────────────────────
+        // The shaft is a true signed distance (metres, > 0 inside): its radius at a depth minus the distance from its
+        // axis. It used to be a cone value shifted down by a minimum bite, only ~1 m positive at the centre of
+        // the mouth: the top cells were left half cleared and the mesher skinned them as a lattice. Now the mouth is as
+        // open as the shaft and the wall's zero crossing is clean. Per site (deterministic from the cell): a lean (the
+        // axis drifts sideways with depth), a funnel (wider mouth) or a bell (an overhanging lip), wall noise in 3D so
+        // no two depths share a cross-section, a floor short of the full depth, and a mound of fallen rock heaped in the
+        // middle of the floor. The cave-content pass dresses that mound with fallen rubble, logs and stones.
+        internal struct SinkholeSite
+        {
+            public float X, Z, Radius, Floor, LeanX, LeanZ, Mound;
+            public bool Bell;
+        }
+
+        private static SinkholeSite SiteOf(int cx, int cz, float x, float z, float radius, float sinkDepth, int seed)
+        {
+            return new SinkholeSite
+            {
+                X = x, Z = z, Radius = radius,
+                Floor = sinkDepth * (0.8f + 0.2f * Hash(cx, 90004, cz, seed)),
+                LeanX = (Hash(cx, 90005, cz, seed) - 0.5f) * 0.3f,
+                LeanZ = (Hash(cx, 90006, cz, seed) - 0.5f) * 0.3f,
+                Mound = 1.5f + 2.5f * Hash(cx, 90007, cz, seed),
+                Bell = Hash(cx, 90008, cz, seed) < 0.35f,
+            };
+        }
+
+        private static float SinkholeSdf(in SinkholeSite site, float wx, float wz, float depth, int seed)
+        {
+            float d = Mathf.Max(0f, depth);
+            float ax = site.X + site.LeanX * d, az = site.Z + site.LeanZ * d;
+            float dx = wx - ax, dz = wz - az;
+            float dist = Mathf.Sqrt(dx * dx + dz * dz);
+            float t = Mathf.Clamp01(d / Mathf.Max(site.Floor, 1f));
+            // Funnel: 1.25x at the mouth narrowing to 0.9x; bell: 0.8x at the lip widening to 1.15x (an overhang).
+            float profile = site.Bell ? Mathf.Lerp(0.8f, 1.15f, Mathf.Sqrt(t)) : Mathf.Lerp(1.25f, 0.9f, t);
+            // Wall noise in 3D: big lobes plus a finer crumble, so the wall is never one circle swept down.
+            float lobes = Noise(wx * 0.11f + 31.7f, d * 0.09f + 613.1f, wz * 0.11f - 17.3f, seed);
+            float crumble = Noise(wx * 0.35f - 5.1f, d * 0.3f + 77.2f, wz * 0.35f + 9.4f, seed);
+            float r = site.Radius * profile * (0.72f + 0.56f * lobes) + (crumble - 0.5f) * 0.9f;
+            float wall = r - dist;
+            // The floor, and the fallen-rock mound heaped in its middle (higher at the centre, lumpy).
+            float heap = site.Mound * Mathf.Pow(1f - Mathf.Clamp01(dist / Mathf.Max(1f, r * 0.85f)), 1.4f)
+                         + (Noise(wx * 0.45f + 3.3f, 911.7f, wz * 0.45f - 8.8f, seed) - 0.5f) * 0.8f;
+            float floor = (site.Floor - heap) - depth;
+            return Mathf.Min(wall, floor);
+        }
+
+        // The sinkhole of the spacing cell a world point lies in, if that cell has one (same rarity and river veto as the
+        // carve). For the cave-content pass: where the shaft's floor and fallen rock are.
+        internal static bool TrySinkholeAt(float wx, float wz, out SinkholeSite site)
+        {
+            site = default;
+            if (FiresVoxelConfig.SinkholeSpacing == null || FiresVoxelConfig.SinkholeRadius == null || FiresVoxelConfig.SinkholeDepth == null) return false;
+            float spacing = Mathf.Max(16f, FiresVoxelConfig.SinkholeSpacing.Value);
+            int cx = Mathf.FloorToInt(wx / spacing), cz = Mathf.FloorToInt(wz / spacing);
+            float radius = Mathf.Max(1f, FiresVoxelConfig.SinkholeRadius.Value);
+            float inset = Mathf.Clamp01((radius * 1.5f) / spacing);
+            float span = Mathf.Max(0f, 1f - inset * 2f);
+            float sxw = (cx + inset + span * Hash(cx, 90002, cz, s_seed)) * spacing;
+            float szw = (cz + inset + span * Hash(cx, 90003, cz, s_seed)) * spacing;
+            if (Hash(cx, 90001, cz, s_seed) < FiresVoxelConfig.SinkholeRarity.Value || SinkholeSiteWet(cx, cz, sxw, szw, radius)) return false;
+            site = SiteOf(cx, cz, sxw, szw, radius, FiresVoxelConfig.SinkholeDepth.Value, s_seed);
+            return true;
+        }
+
         // Carve SDF at a world position (metres, > 0 inside a tunnel): the noise
         // caves, unioned with a chunk world's guaranteed start cave.
         public static float CarveSdf(float wx, float wy, float wz, float depthBelowSurface, bool sinkholes = true)
@@ -193,30 +261,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (Hash(cx, 90001, cz, seed) >= FiresVoxelConfig.SinkholeRarity.Value
                     && (!worldVetoes || !SinkholeSiteWet(cx, cz, sxw, szw, radius)))
                 {
-                    float ddx = wx - sxw, ddz = wz - szw;
-                    float dist = Mathf.Sqrt(ddx * ddx + ddz * ddz);
-                    // Radial falloff: 1 at the site, 0 at the rim. Wobble the rim
-                    // a little so the mouth is not a machined circle.
-                    float wob = 0.82f + 0.36f * Noise(wx * 0.09f, 613.1f, wz * 0.09f, seed);
-                    float t = dist >= radius * wob ? 0f : 1f - dist / (radius * wob);
-                    // FUNNEL, not a column. Narrow at the lip and opening out as
-                    // it descends, so the cave ROOF survives everywhere except
-                    // the entrance itself. The first cut had this inverted —
-                    // widest at the surface — which stripped the roof across the
-                    // whole shaft footprint and left the ceiling in floating
-                    // fragments over a butchered crater.
-                    float depthT = Mathf.Clamp01(depthBelowSurface / Mathf.Max(sinkDepth, 1f));
-                    float profile = Mathf.Lerp(0.28f, 1f, depthT * depthT);
-                    float bite = t * radius * profile;
-                    // CONTINUOUS min-bite: SHIFT the carve down by the minimum
-                    // instead of gating it. The old binary gate (bite or −10)
-                    // made the density field DISCONTINUOUS across the whole
-                    // threshold contour — adjacent voxels jumped solid↔cut and
-                    // the mesher rendered the step as a diamond LATTICE with
-                    // sawtooth rims (user screenshots). Subtracting moves the
-                    // zero crossing to where the bite reaches the minimum,
-                    // smoothly: same no-sliver guarantee, one clean hole.
-                    sinkhole = bite - SINK_MIN_BITE;
+                    sinkhole = SinkholeSdf(SiteOf(cx, cz, sxw, szw, radius, sinkDepth, seed), wx, wz, depthBelowSurface, seed);
                 }
             }
 

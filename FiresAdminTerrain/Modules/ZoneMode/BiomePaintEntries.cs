@@ -3,7 +3,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The Chaos Hammer's Paint entries (Fire's popup, 2026-09-27). For each land biome: a Plain brush (the bare biome),
+    // The Chaos Hammer's Paint entries. For each land biome: a Plain brush (the bare biome),
     // then every enabled vanilla blend that belongs to it. A blend of several biomes gets one entry per biome
     // ("Lantern (Swamp)"), because a paint always names the ground it is for. Then one Restore brush. Each is a copy of
     // the Chaos Hammer's saving tool, like the save-area tool, wearing a disc in its ground's colour: a ring marks a
@@ -50,6 +50,15 @@ namespace VerdantsAscent.Terrain.Zones
         {
             entry = default;
             return piece != null && s_entries.TryGetValue(piece, out entry);
+        }
+
+        // FatApi.QueueBiomePaintAt: the brush entry for a key, if the hammer's table holds one.
+        internal static bool TryFindPiece(string key, out Piece piece)
+        {
+            foreach (var kv in s_entries)
+                if (kv.Key != null && kv.Value.Key == key) { piece = kv.Key; return true; }
+            piece = null;
+            return false;
         }
 
         internal static Heightmap.Biome GroundOf(GameObject go)
@@ -107,6 +116,10 @@ namespace VerdantsAscent.Terrain.Zones
                 Object.Destroy(go);
                 return;
             }
+            // The save tool's crystal model blocked the cursor: the entry is a copy of the save
+            // tool, whose crystal model became the placement ghost at the crosshair. A paint entry shows only the ground ring
+            // (ZoneModeAreaTool draws it with its own LineRenderers), so the copy's renderers go.
+            foreach (var r in go.GetComponentsInChildren<Renderer>(true)) Object.DestroyImmediate(r);
             piece.m_name = name;
             piece.m_description = description + " Wheel: radius. Swing to paint; Undo takes it back.";
             piece.m_icon = Icon(colour, ring);

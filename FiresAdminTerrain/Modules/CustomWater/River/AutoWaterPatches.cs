@@ -27,6 +27,7 @@ namespace VerdantsAscent.Water.Core
         private const string RPC_NOTIFY_GENERATION_COMPLETE = "FiresAdminTerrain_AutoWater_GenerationComplete";
         private const string RPC_STREAM_COMBINER = "FiresAdminTerrain_AutoWater_StreamCombiner";
         private static bool _rpcInitialized = false;
+        private static ZRoutedRpc s_rpcOn;   // also re-register on a new ZRoutedRpc, not only after Game.Logout
 
         /// <summary>
         /// How many combiners have been streamed to clients during the current generation.
@@ -95,8 +96,9 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void InitializeRPC()
         {
-            if (_rpcInitialized) return;
             if (ZRoutedRpc.instance == null) return;
+            if (ReferenceEquals(s_rpcOn, ZRoutedRpc.instance)) return;   // instance identity only
+            s_rpcOn = ZRoutedRpc.instance;
 
             try
             {

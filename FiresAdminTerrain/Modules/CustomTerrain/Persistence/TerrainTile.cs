@@ -49,7 +49,7 @@ namespace VerdantsAscent.Terrain.Persistence
         public ushort[] Biome { get; private set; }
         public bool[] BiomeModified { get; private set; }
 
-        // 2026-05-26 round-30: per-tile FloatingIslandMode flag (codec v4).
+        // Per-tile FloatingIslandMode flag (codec v4).
         // false (default) → existing "stretch underside down to terrain"
         //   behavior. The underside mirrors the top mesh and reaches all
         //   the way down to vanilla terrain, no matter how high the top
@@ -150,7 +150,7 @@ namespace VerdantsAscent.Terrain.Persistence
             FiresLogger.LogVerbose($"[TerrainTile] tile=({TileXZ.x},{TileXZ.y}) NotifyMutated → rebuilding mesh");
             _meshRenderer.RebuildMesh();
 
-            // 2026-05-26 round-30: re-clamp clutter onto the new mesh.
+            // Re-clamp clutter onto the new mesh.
             // Vanilla ClutterSystem.ResetGrass re-rolls grass placement at
             // the CURRENT terrain height; calling it after we sculpt
             // ensures grass blades / flowers / clutter don't end up
@@ -175,7 +175,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         private void EnsureMeshRenderer()
         {
-            if (TileAnchor.Retired) return;   // no mesh, no collider: nothing floats over the ground (Fire, 2026-09-29)
+            if (TileAnchor.Retired) return;   // no mesh, no collider: nothing floats over the ground
             if (_meshRenderer != null) return;
             _meshRenderer = GetComponent<TileMeshRenderer>();
             if (_meshRenderer == null)

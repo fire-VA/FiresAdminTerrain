@@ -23,7 +23,7 @@ namespace VerdantsAscent.Water.Core
     //     slope INWARD as they go down → smooth meniscus, not a sharp
     //     vertical cliff. Detected via boundary-edge counting.
     //
-    // User spec (2026-05-27):
+    // Design goal:
     //   "we basically want the mesh to look like a drop of water would
     //    or a pool of water on a hard surface where it rolls under
     //    itself and is a full mesh"
@@ -34,7 +34,9 @@ namespace VerdantsAscent.Water.Core
     {
         // Master toggle. Console command `va_water_balloon_shell 0/1`
         // flips this — see WaterDebugCommands.
-        public static bool Enabled = true;
+        // OFF by default (placed water stood up as vertical sheets and square slabs - the shell's side
+        // walls and bottom). `va_water_balloon_shell 1` still turns it on for a look.
+        public static bool Enabled = false;
 
         // Floor on the per-vertex depth used for the shell. Even when
         // the surface job reports depth=0 at a vertex, we use this much
@@ -57,11 +59,10 @@ namespace VerdantsAscent.Water.Core
         // BOTTOM_INSET_RATIO controls how much the bottom mesh is pulled
         // toward the surface centroid relative to a vert's radial
         // distance. 0 = bottom is a pure vertical-drop mirror of the
-        // top (slab/box look — what W-4 originally shipped). 0.3 = the
+        // top (slab/box look). 0.3 = the
         // bottom is 30% smaller than the top → the perimeter wall slopes
         // inward at a noticeable angle as it goes down, giving the
-        // meniscus / droplet "rolled-under" appearance the user asked
-        // for. Higher = more dramatic roll; too high (>0.5) starts to
+        // meniscus / droplet "rolled-under" appearance. Higher = more dramatic roll; too high (>0.5) starts to
         // look like a teardrop hanging beneath the surface, which is
         // wrong for a pool sitting on a flat hard surface.
         private const float BOTTOM_INSET_RATIO = 0.3f;
@@ -102,13 +103,13 @@ namespace VerdantsAscent.Water.Core
         {
             int topVertCount = topVerts.Length;
 
-            // 2026-05-27 round-49 — REWRITE per user correction.
+            // Minimal shell.
             //
             // The water shader DOES handle closed 3D meshes — vanilla
             // water volumes spawned in the air render as proper
-            // wrapped 3D shapes when frozen. Round-47/48's "back face
-            // breaks the depth blend" theory was wrong; the bug was
-            // that my topology wasn't actually a closed proper shape.
+            // wrapped 3D shapes when frozen. A "back face
+            // breaks the depth blend" theory was wrong; what matters is
+            // that the topology is actually a closed proper shape.
             //
             // What this builds now:
             //   TOP face — the original surface mesh, unchanged in
@@ -129,10 +130,10 @@ namespace VerdantsAscent.Water.Core
             // top still renders as transparent blue via the standard
             // water shader. For waterfalls, the wall IS the back
             // face (terrain is the cliff), giving the tube look.
-            // Diagnostic log demoted to verbose — round-50's `Debug.Log`
+            // Diagnostic log is verbose only: a `Debug.Log`
             // here fired every mesh regen which is multiple times per
-            // second during a drag-paint stroke. Together with the
-            // SWIM_DEBUG per-frame spam in WaterBoatSupport, it
+            // second during a drag-paint stroke, and together with
+            // per-frame log spam in WaterBoatSupport it
             // collectively stalled the main thread.
             FiresLogger.LogVerbose($"[WaterBalloonShell] Shell invoked: topVerts={topVertCount} topTris={topTris.Length / 3} hasDepths={(waterDepths != null && waterDepths.Length > 0)}");
 
@@ -204,13 +205,13 @@ namespace VerdantsAscent.Water.Core
             }
             System.Array.Copy(topTris, 0, allTris, 0, topTris.Length);
 
-            // 2026-05-28 round-52b — REVERT to round-49 minimal shell.
+            // Minimal shell.
             //
-            // Round-51 added a meniscus curl that pushed boundary verts
+            // No meniscus curl: pushing boundary verts
             // UP into the air whenever terrain was higher than the
             // water (because `Mathf.Max(groundY, ...)`), which gave
-            // the broken floating-ring ribbon mesh the user saw.
-            // Wiping that. This is now strictly: top unchanged, +
+            // a broken floating-ring ribbon mesh.
+            // So this is strictly: top unchanged, +
             // perimeter wall straight down to terrain Y. No
             // meniscus, no UV mutation on the top mesh.
             //
@@ -218,8 +219,8 @@ namespace VerdantsAscent.Water.Core
             // follows worldY (so the water shader's wave/foam texture
             // tiles vertically down the wall instead of smearing one
             // pixel). ONLY written to the new wall verts — top mesh
-            // UVs are NEVER touched, so the "torn texture" ring of
-            // round-50 stays gone.
+            // UVs are NEVER touched, so no "torn texture" ring
+            // appears.
             //
             // Wall depth is sampled from actual terrain (ZoneSystem
             // raycast) but CAPPED at MAX_WALL_DEPTH so floating-air
@@ -261,12 +262,12 @@ namespace VerdantsAscent.Water.Core
                 allVerts[wallAIdx] = new Vector3(topA.x, groundA, topA.z);
                 allVerts[wallBIdx] = new Vector3(topB.x, groundB, topB.z);
 
-                // 2026-05-30 round-54 — wall UV scheme. The water shader
+                // Wall UV scheme. The water shader
                 // samples its diffuse / wave / foam texture INTERNALLY
                 // by world XZ, NOT by UV0; the UV is used for foam mask
                 // and surface-detail patterns. Feeding it axis-projected
-                // world-Y UVs (round-49/50/51) produced the pixelated
-                // patchy texture the user keeps seeing — the shader's
+                // world-Y UVs produced a pixelated
+                // patchy texture: the shader's
                 // foam mask landed in unexpected places.
                 //
                 // Inheriting the top boundary vert's UV verbatim gives
@@ -308,8 +309,8 @@ namespace VerdantsAscent.Water.Core
             };
         }
 
-        // Round-47 LEGACY — closed-shell expansion (top + bottom +
-        // walls). Disabled in favour of the round-48 edge-curl above
+        // LEGACY closed-shell expansion (top + bottom +
+        // walls). Disabled in favour of the edge wall above
         // because the water shader couldn't render a closed volume.
         // Kept here behind ExpandLegacyClosedShell for reference and
         // to provide a path if we ever swap to a custom shader that
@@ -491,7 +492,7 @@ namespace VerdantsAscent.Water.Core
                 // so adjacent walls in the same direction stay
                 // continuous; V follows worldY so the texture tiles
                 // vertically as the eye travels down. Same convention
-                // as the floating-island wall fix in round-43.
+                // as the floating-island wall fix.
                 float ux = topB.x - topA.x;
                 float uz = topB.z - topA.z;
                 float topAU, topBU, botAU, botBU;

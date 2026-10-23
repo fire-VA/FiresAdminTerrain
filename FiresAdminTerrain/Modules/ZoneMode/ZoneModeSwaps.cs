@@ -151,7 +151,7 @@ namespace VerdantsAscent.Terrain.Zones
         // Otherwise the source is a zone holding a planned instance of it (through its own source when that zone was
         // itself swapped), the one nearest the seed-hashed aim point, and `instance` is that location moved into
         // `zone`. A zone kept for a boss altar, a progression location or a one-per-world place refuses the seed.
-        // The location stands at the zone's centre (Fire, 2026-09-27: "A location seed centres its location in the chunk"):
+        // The location stands at the zone's centre:
         // the source square is the 64 m square round the location's real spot, which is `source` (the zone holding that
         // spot) slid by `centring`, so the location and everything it levels stay whole inside the zone.
         internal static bool TryChooseLocationSource(Vector2s zone, string location, out Vector2s source, out ZoneShift centring,

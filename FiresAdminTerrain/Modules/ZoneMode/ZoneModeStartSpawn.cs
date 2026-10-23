@@ -3,7 +3,7 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Where the start really is for FAT's start objects (Fire, 2026-09-27, Tools\FAT_START_ITEMS.md): the spot a player
+    // Where the start really is for FAT's start objects: the spot a player
     // actually stands on at the StartTemple, height included. On a converted map the start is the player's own town and
     // a player spawns on top of its builds, well above the temple's ground; measured from the temple, the starter and the
     // hammer chest landed tens of metres below the player. A fresh world spawns the player on the temple's own ground.

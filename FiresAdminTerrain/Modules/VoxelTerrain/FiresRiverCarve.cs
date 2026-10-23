@@ -5,9 +5,8 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // ═══ RIVER CARVE — WHERE THE CHANNEL IS CUT INTO THE GROUND ══════════════════════════════════════
-    // (user, 2026-09-02: "part of the problem is it shouldnt BE a 14k line file … it should be broken up
-    // into manageable sections", and again the same day: "SPLIT UP THESE FUCKING MASSIVE GODDAMN CLASSES
-    // YOU HAVE SO MUCH TROUBLE FOLLOWING". He is describing a real cost, not a style preference — the
+    // (This file was split out of a 14k-line generator so that each part stays a manageable section.
+    // That is a real cost, not a style preference: the
     // junction bank shipped three times because the rule that built it and the carve that feathers the
     // channel to meet it sat 9,000 lines apart in one file and were never read together.)
     //
@@ -30,7 +29,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             var rsw = System.Diagnostics.Stopwatch.StartNew();
             float cellM = (2f * _half) / (n - 1);
-            float RS = 2047f / (n - 1);
+            float RS = 2047f / (n - 1) * SpanScale;   // X (edge / 10500), exactly 1 on a vanilla-size world
             int ms = seed * 7 + 977;
 
             // RIVER REWORK — the global stream-power incision is REMOVED. It cut
@@ -51,7 +50,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // ⚠ The classification MUST run ahead of the cascade for that to work. It used to sit after both
             // the splitter and the level solve, where a canyon-induced drop would arrive too late to be cut.
             // ═══ THE CARVE READS THE PLAN'S CANYONS. IT DOES NOT LOOK FOR THEM. ══════════════════════════
-            // (user: "canyons are meant to be placed with purpose, carved with purpose".) The floor term
+            // (Canyons are placed with purpose and carved with purpose.) The floor term
             // below used to fire on a per-cell terrain test — "is the thalweg 12 m below its own ground here"
             // — which is a detector wearing a carve's clothes: it could disagree with what the game labels a
             // canyon, it could not be listed, and "no canyons" and "canyons we cannot see" were the same
@@ -90,12 +89,12 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_canyonExcavate) ExcavateCanyons(h, incisionCls, n, cellM, seed, seeded, riverPolys);   // polylines = the spline each canyon descends along
 
             var hOrig = (float[])h.Clone();
-            // (v133) Diagnostic only, and null in every normal run — see FlatRegionAudit/LastWriteSrc. This
+            //  Diagnostic only, and null in every normal run — see FlatRegionAudit/LastWriteSrc. This
             // function writes the grid from seven places; without a per-cell record of WHICH one wrote last,
             // attributing a terrain artifact to a pass is guesswork, and the first guess here was wrong.
             var wsrc = Environment.GetEnvironmentVariable("FIRES_FLAT_AUDIT") == "1" ? new byte[n * n] : null;
             // ═══ WHO WROTE THIS WATER LEVEL? ════════════════════════════════════════════════════════════
-            // (2026-08-22.) Three independent attempts at the level SOURCE — the local bank guess, the plan's
+            // Three independent attempts at the level SOURCE — the local bank guess, the plan's
             // levels raw, and the plan's law re-solved on final terrain — all landed within noise of each
             // other (3,307 / 3,378 / 3,264 uphill rises). And the spine-descent experiment made every run's
             // spine monotone BEFORE the carve, corrected 9,871 cells and 5,624 m of climb, and the finished
@@ -113,7 +112,7 @@ namespace VerdantsAscent.Terrain.Voxel
             LastWriteSrc = wsrc;
 
             // MARSH GUARD — SWAMP-biome cells under a seeded sheet ONLY (lakes/rivers/
-            // ocean behaviour untouched, per the user's scope). Incising channels +
+            // ocean behaviour untouched, by scope). Incising channels +
             // valley shaves THROUGH a marsh floor fractured it into mesa mazes with the
             // sheet pouring off every cut (in-game: waterfalls everywhere, water at many
             // levels). Inside a marsh the body IS the water: the river STOPS at the rim
@@ -141,7 +140,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
 
-            // ═══ THE MARSH FOOTPRINT COMES FROM THE PLAN, NOT THE BIOME (2026-08-13) ══════════════════════
+            // ═══ THE MARSH FOOTPRINT COMES FROM THE PLAN, NOT THE BIOME ══════════════════════
             // `underMarsh` above is BIOME-gated (bm[i2] == 2), and that is correct for what it is used for —
             // keeping the river carve out of swampy ground. It is WRONG as a test for "is this marsh water",
             // because FiresWaterPlanner deliberately floods a marsh PAST the biome line ("water ignores the
@@ -203,7 +202,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // the sea. The tuned Dijkstra valley + cross-section carve below
             // then draw the terrain around this smooth spine exactly as before.
             var riverCells = new List<int>(16384);
-            // (TRACE 2026-08-19) WHICH RUN owns each spine cell. The multi-level sheet is measured
+            // (TRACE) WHICH RUN owns each spine cell. The multi-level sheet is measured
             // (riverfield N. LEVEL SPREAD: 52.7 % of river cells have another river surface >1 m off within
             // 10 m) but the MECHANISM decides the fix, and there are only two candidates: two DIFFERENT runs
             // crossing at their own levels, or ONE run whose own profile is inconsistent along its length.
@@ -218,12 +217,12 @@ namespace VerdantsAscent.Terrain.Voxel
             // the headwater-pool pass reads THIS, not a level heuristic. The
             // old "no higher neighbour" test misfired on the monotone-clamped
             // flat runs and carved a pool bowl at EVERY clamped cell — the
-            // beaded pit trenches (user screenshots).
+            // beaded pit trenches.
             var polySources = new HashSet<int>();
             float AREA_ONSET = WaterRules.RiverProc.AreaOnset;    // m² — below = ephemeral, no channel
             float WK = WaterRules.RiverProc.WidthK, WP = WaterRules.RiverProc.WidthP;
             float rhalf = (n - 1) * cellM * 0.5f;
-            // (v94) BODY OUTLET GUARANTEE — the closed water GRAPH (user's law: rivers exist to CONNECT.
+            //  BODY OUTLET GUARANTEE — the closed water GRAPH (the rule: rivers exist to CONNECT.
             // A body that receives drainage OVERFLOWS at its rim, and the overflow continues to the next
             // body or the sea — no lakes that mysteriously swallow their inflow, no random rivers).
             // Traced rivers are sea-anchored by construction (TraceRivers walks upstream FROM sea mouths;
@@ -273,7 +272,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 ReportDepressions(w, hOrig, n, cellM);   // (v128 diag) why this world ponds — measured, before any theory about it
                 int outletsDerived = 0, alreadyDrained = 0, seaOwned = 0;
-                int flatCrossings = 0, flatNodes = 0;   // (v128) how much of the routing is flat resolution — see EscapeFlat
+                int flatCrossings = 0, flatNodes = 0;   //  how much of the routing is flat resolution — see EscapeFlat
                 // (v128 diag) Straightness telemetry. Three theories about WHY these runs draw as straight lines
                 // were each disproved by measurement, so stop guessing and measure the walk itself: how many
                 // steps come from the carried-gradient path vs the D8 fallback, and how long the longest
@@ -288,7 +287,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (bodyLevels[b2] <= SEA + 0.6f) { seaOwned++; continue; }     // sea-owned sheet — the ocean drains it
                     if (drained[b2]) { alreadyDrained++; continue; }
                     if (bodyCellLists[b2].Count < 150) continue;                    // speck: no channel-worthy overflow
-                    // (v104) HIGH tarns must EARN an outlet — the real massif terrain (v102) holds thousands
+                    //  HIGH tarns must EARN an outlet — the real massif terrain holds thousands
                     // of small cirque pockets; deriving a channel from every one carpeted the mountains with
                     // carved wet corridors (seed 49185460). Small high tarns are endorheic (seep/evaporate —
                     // real cirque tarns usually are); only substantial high lakes overflow as streams.
@@ -305,7 +304,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     if (saddle < 0) continue;                                       // enclosed by other water — already continuous
                     walkNodes.Clear();
-                    // (v104) OUTLETS ARE BORN STREAM-SCALE — keying width to the lake's SURFACE AREA made a
+                    //  OUTLETS ARE BORN STREAM-SCALE — keying width to the lake's SURFACE AREA made a
                     // big cirque tarn's outlet hit WidthMax/DepthMax+mountain-incision: a 70m-wide, 23m-deep
                     // channel carved ACROSS THE SUMMIT and filled bank-to-bank at ridge level (the "mountain
                     // top turned into water", seed 49185460). A real outlet starts as a stream at the rim
@@ -319,7 +318,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     AddNode(inBody); AddNode(saddle);                               // in-body first node → the base-level anchor pins the start at the body surface
                     int cur = saddle; bool reached = false; int step = 0;
-                    float accX = 0f, accZ = 0f;   // (v128) sub-cell heading carry — see the walk below
+                    float accX = 0f, accZ = 0f;   //  sub-cell heading carry — see the walk below
                     int prevSx = 99, prevSz = 99, runLen = 0, runStart = cur;   // (v128 diag) same-heading run
                     // One place that accounts for a step, so the descent path and the flat crossings cannot
                     // diverge again — measuring only the descent once reported "longest run 21" while the
@@ -347,7 +346,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // draws as a long axis-aligned run with a 45° jog, and a field of them looks like
                         // circuit traces. It is the same defect this file already fixed for TRACED rivers with
                         // D-infinity ("rivers drew as straight axis/diagonal segments with 45°/90° jogs —
-                        // user-caught at native res") — that fix went into TraceRivers and never reached here,
+                        // visible at native res") — that fix went into TraceRivers and never reached here,
                         // and here is where 497 of a world's 530 rivers come from.
                         //
                         // Note it is NOT enough to divide the drop by step length (tried first, measured: the
@@ -488,14 +487,14 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
             }
             ReportRunLengths(riverPolys, "as planned (before truncation and cascade)");
-            TruncateRunsAtSea(riverPolys, hOrig, n, cellM, rhalf);   // (v128) a river that reaches the coast is FINISHED — nothing below sea is written
+            TruncateRunsAtSea(riverPolys, hOrig, n, cellM, rhalf);   //  a river that reaches the coast is FINISHED — nothing below sea is written
             ReportRunLengths(riverPolys, "after TruncateRunsAtSea");
-            CascadeSplitPolys(riverPolys, hOrig, n, cellM);   // (v99) no sheet on steep drops — lip, gap, plunge resume (covers plan runs AND derived outlets)
+            CascadeSplitPolys(riverPolys, hOrig, n, cellM);   //  no sheet on steep drops — lip, gap, plunge resume (covers plan runs AND derived outlets)
             ReportRunLengths(riverPolys, "after CascadeSplitPolys");
             // #2 + #3 — overwrite each polyline's fill-table level with the BANK-DERIVED, flow-monotone, smoothed
             // ribbon level BEFORE the rasterize reads it (poly[·*4+3]). This is the single source of truth for the
             // water surface now; the fill table stays only for WHERE water pools (bodies), not the river level.
-            SetBankDerivedLevels(riverPolys, hOrig, n, cellM, seeded, w, incisionCls);   // `w` IS _fillTable (aliased at the call) — the drainage solution the reference uses as THE level   // (v92) seeded bodies anchor outlet levels (base-level law)
+            SetBankDerivedLevels(riverPolys, hOrig, n, cellM, seeded, w, incisionCls);   // `w` IS _fillTable (aliased at the call) — the drainage solution the reference uses as THE level   // seeded bodies anchor outlet levels (base-level law)
             FiresLogger.LogInfo($"[FiresWaterDiag] CANYON LEVEL RULE: {s_canyonNodes:N0} canyon/gorge node(s) reached the level solve; the FLOOR rule moved {s_canyonMoved:N0} of them by more than 0.05 m (if this is 0 the incision class is not arriving, or the bank min already equals the floor).");
             FiresLogger.LogInfo($"[FiresWaterDiag] BASE-LEVEL ANCHOR: {s_anchorRuns:N0} run(s) through SetBankDerivedLevels, {s_anchorNodes:N0} node(s) anchored to a body surface, {s_anchorRunsNone:N0} run(s) ({(s_anchorRuns > 0 ? 100.0 * s_anchorRunsNone / s_anchorRuns : 0):F1} %) anchored NOWHERE. A plan run is a hop between two bodies whose coherence comes ENTIRELY from being pinned to their levels; a run anchored nowhere invents its own surface from two ground samples.");
             if (riverPolys != null)
@@ -507,7 +506,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int nn = poly.Length / 4;
                     bool sourceMarked = false;
                     float arcM = 0f;   // (TRACE) metres travelled ALONG this run so far — see spineArc
-                    // REVERTED to the original level rule (user mandate): the
+                    // REVERTED to the original level rule: the
                     // monotone running-min collapsed the level downstream of
                     // any deep dip and the uncapped carve then trenched whole
                     // mountainsides (locations dragged, mountain water dug to
@@ -533,7 +532,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             float area = aar + (bar - aar) * t;
                             float width = Math.Min(WaterRules.RiverProc.WidthMax, Math.Max(WaterRules.RiverProc.WidthMin, WK * (float)Math.Pow(Math.Max(area, AREA_ONSET), WP)));
                             float lvl = alv + (blv - alv) * t;   // level is already the bank-derived ribbon (relief baked in by SetBankDerivedLevels); no extra freeboard
-                            // (v91) NO per-cell floor clamp on the LEVEL — docs/HYDROLOGY.md Law 2: the surface
+                            //  NO per-cell floor clamp on the LEVEL — docs/HYDROLOGY.md Law 2: the surface
                             // glides smooth + flow-monotone; DEPTH absorbs terrain bumps, never the surface.
                             // The old `lvl ≤ hOrig[i]−0.5` re-noised the smoothed level with every floor bump
                             // (the along-flow waviness) and un-did the monotone clamp. Obstructions are the
@@ -542,10 +541,10 @@ namespace VerdantsAscent.Terrain.Voxel
                             // under the lowest tide) instead of clamping flat at SEA: the river then
                             // runs down its carved bed THROUGH the tidal ocean plane and the sheets
                             // clip. The old hard clamp left the ribbon at exactly 30 while the tide
-                            // sat lower — the river edge floating in mid-air over the sea (user).
-                            // THE SURFACE ONLY GOES UNDER THE SEA WHERE THE BED DOES (2026-08-12, user: "this
-                            // end bit needs to dive into the ground, not leave a floating mesh, and the middle
-                            // bits should have carved and filled with mesh and connected"). The mouth profile
+                            // sat lower — the river edge floating in mid-air over the sea.
+                            // THE SURFACE ONLY GOES UNDER THE SEA WHERE THE BED DOES (the river's end dives into the ground
+                            // instead of leaving a floating mesh, and the middle
+                            // stretches are carved, filled with mesh and connected). The mouth profile
                             // was floored at SEA−1.8 EVERYWHERE, so the last reach ran below sea level while
                             // still crossing dry land — and since the sheet builder (correctly) refuses to draw
                             // inland water at/below SEA, that stretch was chopped into flickering 0.2-0.4m
@@ -556,7 +555,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // right to the shoreline), and only where the bed itself is below SEA may the
                             // ribbon dive — there the ocean plane covers it and the two clip.
                             float bedHere = hOrig[i];
-                            // ═══ THE PER-CELL CEILING — RESTORED FROM THE REFERENCE (2026-08-19) ═════════
+                            // ═══ THE PER-CELL CEILING — RESTORED FROM THE REFERENCE ═════════
                             // docs/WATER_REFERENCE_DIVERGENCE.md §1. The FiresAdminTerrain generator this
                             // file descends from carries, at exactly this point in its own rasterizer:
                             //     if (lvl > hOrig[i] - 0.5f) lvl = hOrig[i] - 0.5f;
@@ -575,7 +574,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // it (wl+0.6 berm, ContainRiversBelowBanks +0.65, BuryMeshEdges RIM +1.0, the
                             // feather, SHELF 0.25, the drape ring, the skirt, the 9-cell dilation, the mesh
                             // clip test) is reactive compensation for a level that is now free to float.
-                            // ⚠ RIVER-ONLY BY CONSTRUCTION, and that is required: the user keeps the current
+                            // ⚠ RIVER-ONLY BY CONSTRUCTION, and that is required: the current
                             // still-water logic ("our ponds and lakes work great"). This is inside the river
                             // polyline rasterization — no body cell is ever written here — and the body anchor
                             // in SetBankDerivedLevels is untouched, so a river still meets a pond at the
@@ -586,10 +585,10 @@ namespace VerdantsAscent.Terrain.Voxel
                             // same order the reference uses (ceiling, then `if (lvl < SEA) lvl = SEA`).
                             if (s_riverLevelCeiling && lvl > bedHere - 0.5f) lvl = bedHere - 0.5f;
                             // ═══ A RIVER MOUTH DIVES UNDER THE SEA, IT DOES NOT PERCH ON IT ═════════════════════
-                            // (user, 2026-08-22: "every river body that ends at the ocean needs to just dive
-                            // its mesh into and under the terrain at ocean level so that the ocean can take
-                            // care of the logic, currently the meshes float about 1/2m above the lowest tide
-                            // point".) The floor was SEA-1.8 = 28.2 while the tide pulls the sea down to
+                            // (Every river body that ends at the ocean dives
+                            // its mesh into and under the terrain at ocean level so that the ocean takes
+                            // care of the logic; the meshes used to float about 1/2 m above the lowest tide
+                            // point.) The floor was SEA-1.8 = 28.2 while the tide pulls the sea down to
                             // SEA-5 = 25 at spring low (SPRING_LOW_TIDE_M), so at low water
                             // the ribbon was left standing up to 3 m proud of the ocean it drains into, and
                             // its edge showed. Sinking it to EstuaryDiveY (24.5, half a metre under the
@@ -604,16 +603,16 @@ namespace VerdantsAscent.Terrain.Voxel
                             // across the seabed and it stays reverted; this is a per-cell clamp applied only
                             // where the bed is already at or under sea level, i.e. the mouth itself.
                             // ═══ THE MOUTH DESCENDS INTO THE SEA. IT DOES NOT STEP INTO IT. ══════════════
-                            // (user, 2026-08-23, from a screenshot at X-2143 Z-1962 with the overlay reading
-                            // `surf Y 30.1`: "at some points were culling the mesh because the ocean owning
-                            // the spot, and others we draw both meshes with ours floating".)
+                            // (Seen at X-2143 Z-1962 with the overlay reading
+                            // `surf Y 30.1`: at some points the mesh was culled because the ocean owned
+                            // the spot, and at others both meshes drew with ours floating.)
                             // Both symptoms were ONE line — the previous form of this was a STEP:
                             //     bed > SEA  -> floor the ribbon at SEA + 0.10  (30.1)
                             //     bed <= SEA -> slam it to EstuaryDiveY         (24.5)
                             // 5.6 m apart with nothing in between, switching on a single cell of bed height.
                             // One cell inland the sheet stands 0.1 m proud of the ocean and BOTH draw; one
                             // cell seaward it is 5.6 m under and the ocean culls it. That is exactly the
-                            // alternation in the screenshot, and it is a discontinuity, not a tuning error.
+                            // alternation that was seen, and it is a discontinuity, not a tuning error.
                             // Now the seaward side RAMPS: the cap descends smoothly from the shoreline value
                             // to EstuaryDiveY over DIVE_BAND of bed depth, so at bed == SEA the two branches
                             // AGREE (t = 0 gives exactly the land value) and there is no step anywhere.
@@ -625,7 +624,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // expression of the contradiction, not a miss. Shrinking it only trades a visible
                             // lip for z-fighting between two near-coplanar sheets. The real remedy is to stop
                             // DRAWING the last stretch — fade the inland sheet out against sea level in the
-                            // shader — which is specified for [shaders] in COORDINATION.md (2026-08-23).
+                            // shader.
                             const float MOUTH_LIP = 0.10f;   // minimum height above SEA that is still drawn
                             const float DIVE_BAND = 4.0f;    // bed depth below SEA over which the mouth reaches EstuaryDiveY
                             if (bedHere > SEA)
@@ -641,7 +640,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             bool fresh = widthOf[i] <= 0f;
                             if (fresh) riverCells.Add(i);
                             // ═══ WHO WINS A REPAINT — THE NOTCH, FIXED AT ITS SOURCE ═════════════════════
-                            // (user, 2026-09: "we have sections of rivers that dip down BELOW their ends".)
+                            // (Some sections of rivers dipped down BELOW their ends.)
                             // The old rule was an unconditional MIN across every writer. A meander folding
                             // back inside its own tube width therefore stamped its far-DOWNSTREAM (lower)
                             // level onto an UPSTREAM cell, and the profile climbed back out of the notch —
@@ -714,7 +713,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (underMarsh != null && underMarsh[j]) continue;   // the valley region halts at the marsh rim
                     float nd = dcur + cellM * RIV_DL[e];
                     if (nd >= rDist[j]) continue;
-                    // Per-reach falloff (2026-08-13): the expansion gate now uses THIS reach's valley grade, so
+                    // Per-reach falloff: the expansion gate now uses THIS reach's valley grade, so
                     // a wide river's region keeps growing where a brook's has already terminated — the valley
                     // extent, not just its steepness, scales with the channel.
                     if (swl + nd * InclineFor(sw) > hOrig[j] + 4f && nd > sw) continue;
@@ -727,8 +726,8 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresLogger.LogInfo($"[FiresWorldGen]  │  rivers: valley regions solved ({rsw.Elapsed.TotalSeconds:0}s); carving channels...");
             // Solve → carve, one pass over every reached cell.
             // ═══ THE CHANNEL FEATHERS INTO A STILL BODY — IT DOES NOT ARRIVE AT FULL DEPTH ═══════════════
-            // (2026-08-19, user: "so that we can feather the river mesh into the still water mesh and keep it
-            // contained".) The LEVEL already tapers to a body over DROP_TAPER nodes (the backwater drawdown).
+            // (So the river mesh feathers into the still water mesh and stays
+            // contained.) The LEVEL already tapers to a body over DROP_TAPER nodes (the backwater drawdown).
             // The DEPTH never did, so the channel drove its full cross-section straight into the shore — and
             // the moment the depth budget was raised (DepthMin/Max 0.6/2.9 → 1.5/6.0 so the ribbon would have
             // headroom to sit lower on a descent) that started excavating the BODY'S OWN SHORE on its way in.
@@ -806,8 +805,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 int sd = seedIdx[i2];
                 if (sd < 0) continue;
                 if (underMarsh != null && underMarsh[i2]) continue;   // never carve/berm inside a marsh
-                // NEVER CARVE INSIDE A BODY (2026-08-11, user: "why would we be carving a river at a lowland
-                // body anyway — the river carves up to the inlet, and leaves the outlet"). A marsh already had
+                // NEVER CARVE INSIDE A BODY (there is no reason to carve a river through a lowland
+                // body: the river carves up to the inlet, and leaves from the outlet). A marsh already had
                 // this guard; lakes and ponds did not, so the ribbon cut its own trench and berm THROUGH a
                 // lake's shore and floor. That is what the float overlay shows: the magenta is not lakes
                 // floating, it is a ring at every river↔body junction where the carve undercut the body's own
@@ -855,7 +854,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     float slope = (hi - lo) / cellM;
                     float mtnDepth = Mathf.Clamp01(alt / WaterRules.RiverProc.IncisionAltRef) * WaterRules.RiverProc.IncisionAltGain
                                    + Mathf.Clamp01(slope / WaterRules.RiverProc.IncisionSlopeRef) * WaterRules.RiverProc.IncisionSlopeGain;
-                    // (v104) mountain incision is a TROUGH-SEATING nudge, not a canyon license — on the real
+                    //  mountain incision is a TROUGH-SEATING nudge, not a canyon license — on the real
                     // massif terrain (v102: legitimately tall EVERYWHERE) the uncapped addend dug every
                     // mountain channel 15-25m deep and the fill painted the whole massif wet (audit, seed
                     // 49185460: 56k wet cells >200m, mean 16m deep, dominant bucket 16-32m). +4m at most;
@@ -867,7 +866,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // FiresWaterConform (`0.8 + d·0.12`) — so the two beds MEET instead of the river driving a
                 // full-depth trench through the lake's shore. Smoothstep, so there is no step where the taper
                 // starts. The berm is deliberately still armed at these junctions (a cell touching still water
-                // keeps the full rim — see `stillDemand`), which is the user's own scope for it: "rivers
+                // keeps the full rim — see `stillDemand`), which is its intended scope: "rivers
                 // meeting still water is specifically where the berm logic could be useful".
                 if (bodyDist != null)
                 {
@@ -887,7 +886,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // channel: BiasedRational — −depth at the thalweg, asymptotic
                 // linear banks at slope `steep`; UNCAPPED so the river always
                 // gets through (bumps on the line become incised gorges).
-                // (Phase 2, 2026-08-15) BANK SLOPE IS A PROPERTY OF THE REACH, KEYED TO DISCHARGE.
+                // BANK SLOPE IS A PROPERTY OF THE REACH, KEYED TO DISCHARGE.
                 // Was `RemapClamp(hOrig[i2], 3f, 20f, 2.9f, 4.4f)`, which had two defects: it saturates at
                 // 20 m elevation while SEA is 30, so every land cell took the 4.4 endpoint and the altitude
                 // ramp was dead code; and it read hOrig[i2] PER-CELL, so the two banks of one cross-section
@@ -896,13 +895,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 // is already the discharge proxy (WidthK·area^WidthP): a brook cuts a tight slot, a trunk a
                 // broader canyon. This governs how much material the wall cut removes; it does NOT touch the
                 // thalweg, so it cannot dry a reach.
-                // ⚠ REVERTED 2026-08-15 with the two changes below. The finding stands — this ramp saturates
+                // ⚠ REVERTED with the two changes below. The finding stands — this ramp saturates
                 // at 20 m elevation while SEA is 30, so it is a de-facto constant 4.4 on land, and it reads
                 // per-CELL across one cross-section — but changing the bank angle also changes containment,
                 // and it went out in the same batch as the floating-river regression. Restore the original
                 // and re-land it on its own, gated on AuditWater's float count.
                 float steep = RemapClamp(hOrig[i2], 3f, 20f, 2.9f, 4.4f);
-                // (v91) CARVE FROM THE LEVEL — docs/HYDROLOGY.md Part II (self-formation): the channel is MADE
+                //  CARVE FROM THE LEVEL — docs/HYDROLOGY.md Part II (self-formation): the channel is MADE
                 // BY its water. bed = L − depth·shape(dN), rising to meet L EXACTLY at the wetted edge, so the
                 // T-section fills bank-to-bank BY CONSTRUCTION (v89's hOrig[sd] base decoupled bed from surface —
                 // only the deep line wetted, and the unpainted uphill half kept fill-table water: the tilted bar).
@@ -911,17 +910,17 @@ namespace VerdantsAscent.Terrain.Voxel
                 // under the cell's own natural ground: where a mis-routed spine crosses high terrain the bed
                 // stays high and DRY (a visible break, not a gorge — the pool|gorge|tunnel trichotomy owns
                 // those reaches later, HYDROLOGY.md Part IV).
-                // (2026-08-13) Now expressed through the SHARED cross-section (ChannelShape) rather than
+                //  Now expressed through the SHARED cross-section (ChannelShape) rather than
                 // inlining the BiasedRational here — algebraically identical (verified to 1e-9 across the
                 // half/depth/steep range: wl + depth·(term − 1) ≡ wl − depth·(1 − term)), so this is a pure
                 // refactor. It is the same curve StampChannelCell now uses, which is the whole point: there is
                 // one channel section in this generator, and its rim behaviour is defined in exactly one place.
                 float profile = wl - depth * ChannelShape(dN / half, half / depth, steep);
-                // (user 2026-08-11: "then let it fucking dig deeper than 4m — give it 12m") The local-incision
+                // (Let it dig deeper than 4 m: 12 m.) The local-incision
                 // bound was +4m: where a reach had to cross ground higher than that above its ribbon level the
                 // bed stayed UP, the cell fell out of the fill gate and the reach went DRY — the visible river
                 // break / "stops short of the lake". 12m lets the channel dig through those approaches.
-                // ═══ THE BOUND IS A PROPERTY OF THE REACH, NOT OF THE CELL (2026-08-13) ═══════════════════
+                // ═══ THE BOUND IS A PROPERTY OF THE REACH, NOT OF THE CELL ═══════════════════
                 // This read hOrig[i2] — each cell's OWN natural ground — so the incision limit varied ACROSS
                 // the cross-section. On any real slope hOrig swings metres between one bank and the other, so
                 // the bound bit on some cells of a transect and not on others: the bed landed below wl on the
@@ -932,16 +931,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 // A cross-section is ONE hydraulic object: its floor belongs to the reach. Read the limit at
                 // the seed (thalweg) and the whole T-section shares it. Where a spine genuinely crosses ground
                 // too high to cut, the entire reach is limited together — one clean break, never speckle.
-                // (Phase 2, 2026-08-15) THE INCISION BUDGET IS PER-REACH, FROM DISCHARGE — was a flat +12 for
+                // THE INCISION BUDGET IS PER-REACH, FROM DISCHARGE — was a flat +12 for
                 // everything, so a 2 m brook was licensed to cut as deep as a 20 m trunk. Keyed to `width`
                 // (already WidthK·area^WidthP) and read at the seed, like the bound itself. The trunk endpoint
                 // stays 12 so the big rivers the 12 was chosen for are unchanged; only small channels tighten.
-                // ⚠ REVERTED 2026-08-15 with the valley shave above — same reason, same missing float gate.
+                // ⚠ REVERTED with the valley shave above — same reason, same missing float gate.
                 // Tightening the bound for small channels holds their bed UP, which is one of the ways a
                 // sheet ends up above its ground. Restore the flat +12 until the float audit is the gate.
                 // ═══ THE BED DESCENDS FROM HEADWATER TO END — THE BOUND IS A PATH STATEMENT ══════════════
-                // (2026-08-22, user: "we should know its origin point and its end point and we should know
-                // the y levels of the bed at each point to make sure they are descending".)
+                // (We know each river's origin point and end point, and the
+                // y levels of the bed at each point, to make sure they are descending.)
                 // This bound is what actually shapes the visible canyons — NOT ExcavateCanyons, which its own
                 // log shows touching 490 canyon + 862 gorge spine cells in the whole world while the terrain
                 // test finds 13,572 canyon-like water cells. The slots you stand in are cut by THIS.
@@ -969,7 +968,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         else System.Threading.Interlocked.Increment(ref s_deepTrunk);
                     }
                 }
-                // ═══ ONE EVALUATION FEEDS BOTH THE BED AND THE FILL (2026-08-13) ══════════════════════════
+                // ═══ ONE EVALUATION FEEDS BOTH THE BED AND THE FILL ══════════════════════════
                 // bedDemand is what the CHANNEL demands of the ground at this cell — the layer, in UE's terms
                 // (their water body writes a dedicated landscape edit layer instead of mutating the sculpt, so
                 // `bed = surface − Depth·Curve(t)` with Curve ≥ 0 holds BY CONSTRUCTION and floating water is
@@ -983,13 +982,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 // below its surface (docs/HYDROLOGY.md Part II — the bed meets L only AT the edges; a bar above
                 // the surface mid-channel is a deposition feature, not leftover terrain). Kills the estuary
                 // MEDIAL SPIKES (parallel corridors carving to ~wl at their shared midline) and the mid-chute
-                // mounds the sheet had to ride over. UNCONDITIONAL (user 2026-08-11): it used to switch off on
+                // mounds the sheet had to ride over. UNCONDITIONAL: it used to switch off on
                 // "obstructed" reaches, deferring them to a trichotomy that was never built, so those reaches
                 // came out DRY and the river visibly stopped and restarted. Applied to bedDemand rather than
                 // clamping h afterwards, so SmoothMinCubic eases the core edge instead of leaving a hard step.
-                // ⭐ AND THE CORE IS CUT BELOW THE BANK RELIEF, NOT 0.35 m ABOVE IT (user, 2026-09-02:
-                // "the river bed should sit low enough that it's never dry here", and "make sure the carve
-                // runs into and overlaps the still water slightly").
+                // ⭐ AND THE CORE IS CUT BELOW THE BANK RELIEF, NOT 0.35 m ABOVE IT (the river bed
+                // sits low enough that it is never dry here, and the carve
+                // runs into and overlaps the still water slightly).
                 // 0.35 m was the depth of a puddle, and the renderer takes DefaultRiverRelief (0.84 m) off
                 // every inland surface before drawing it — so a core cut 0.35 m under its own water level is
                 // drawn 0.49 m UNDER ITS OWN BED. Wet in the field, dry on screen, and dry EVERY TIME, which
@@ -1006,14 +1005,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 float chan = SmoothMinCubic(h[i2], bedDemand, 3f);
 
                 // valley: shave approach bumps toward the solved surface, capped so gorge/canyon walls survive.
-                // (Phase 2, 2026-08-15) THE SHAVE CAP IS PER-REACH, FROM DISCHARGE — was a flat 24 m for every
+                // THE SHAVE CAP IS PER-REACH, FROM DISCHARGE — was a flat 24 m for every
                 // river, which is what let a 2 m brook take 24 m off a ridge exactly like a 20 m trunk. This is
                 // the pass that actually digs the canyons: measured per-pass, FiresWaterConform and the tarns
                 // cut nothing past 3.5 m, while InciseRivers produces every >20 m cell and the 53.6 m max, most
                 // of it on DRY valley wall rather than in the channel. The grade was already discharge-keyed
                 // (InclineFor: 0.75 brook → 0.22 trunk); only the depth cap was not. Trunk endpoint stays 24 so
                 // the big rivers are unchanged.
-                // ⚠⚠ REVERTED 2026-08-15 — DO NOT RE-APPLY WITHOUT A FLOAT GATE. Budgeting this by discharge
+                // ⚠⚠ REVERTED — DO NOT RE-APPLY WITHOUT A FLOAT GATE. Budgeting this by discharge
                 // (ValleyShaveMin 8 → Max 24) produced FLOATING RIVERS everywhere: the shave is not just
                 // cosmetic valley shaping, it is CONTAINMENT. Capping it leaves the ground high while `wl` —
                 // the traced water level — is unchanged, so the sheet perches above the terrain beside it.
@@ -1021,7 +1020,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // wetted width ⇒ dry) and is structurally blind to water-above-ground. The right gate already
                 // exists and I did not use it: AuditWater() — "the height-aware float detector the game runs
                 // (inland-overflow audit)", which prints `lvl Xm stands Ym over bank` / `N overflows`.
-                // ⚠⚠ THE THIRD ABSOLUTE-HEIGHT WRITE, AND THE ONE v132 MISSED (v133). `hOrig[sd] + d·Incline`
+                // ⚠⚠ THE THIRD ABSOLUTE-HEIGHT WRITE, AND THE ONE v132 MISSED. `hOrig[sd] + d·Incline`
                 // is a pure geometric CONE rising from the thalweg — no terrain in it at all — so wherever it
                 // bites, the ±1.75 m baked detail is replaced by a smooth ramp. v132 found and fixed exactly
                 // this shape in the berm (`wl + 0.6`) and the feather (`hi − FEATHER`) and stopped there;
@@ -1045,7 +1044,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // there `outH = min(chan, vall) ≤ chan ≤ wl − 0.35` holds whatever `vall` is. So the grain may
                 // run both ways, which is what keeps the shaved valley wall reading like the ground beside it
                 // instead of like a bevel with a rough edge. Verified against AuditWater, which the reverted
-                // 2026-08-15 shave-cap note names as the correct gate for any change to this line.
+                // shave-cap note names as the correct gate for any change to this line.
                 float vdet = 0f;
                 {
                     int vx = i2 % n, vz = i2 / n;
@@ -1097,22 +1096,22 @@ namespace VerdantsAscent.Terrain.Voxel
 
                 float outH = Math.Min(chan, vall);
                 // ═══ A CANYON HAS A FLOOR YOU CAN WALK ON ═══════════════════════════════════════════════
-                // (user, 2026-08-31: "canyons need to carve out wide floors that allow us land on each side
-                // of the central river to walk and explore, we should have a cliff wall, a meter or two of
-                // terrain, and THEN the carved depression of the river in the center, another meter or two
-                // of terrain, then the cliff wall".)
+                // (Canyons carve out wide floors with walkable land on each side
+                // of the central river: a cliff wall, a metre or two of
+                // terrain, and THEN the carved depression of the river in the centre, another metre or two
+                // of terrain, then the cliff wall.)
                 // Today a canyon has no floor at all, and the reason is visible two lines up: the ground
                 // outside the channel is shaped by `vall`, a cone rising at `wallGrade` from hOrig[sd] — the
                 // thalweg's NATURAL height. In a slot that is metres above the water, so the cone starts high
                 // and shaves almost nothing; the only thing cut near the river is the channel bowl itself.
                 // The result is a narrow trench in natural ground with the water wall-to-wall, which is
-                // exactly what the user is describing and why there is nowhere to stand.
+                // exactly why there is nowhere to stand.
                 // So add the missing term: hold the ground FLAT just above the waterline for a shelf either
                 // side, then let the cliff take over. Cross-section becomes
                 //     bowl (0..half) | flat shelf (half..half+SHELF) | cliff at CLIFF_GRADE
                 // which is the section asked for, in that order.
-                // ⚠ THREE THINGS KEEP THIS OFF EVERY RIVER THAT ALREADY WORKS — the user's constraint is
-                // "we need to be SUPER careful here not to screw up any existing river or water logic":
+                // ⚠ THREE THINGS KEEP THIS OFF EVERY RIVER THAT ALREADY WORKS — the constraint is
+                // not to break any existing river or water logic:
                 //   1. GATED ON A REAL SLOT. It fires only where the thalweg's own natural ground stands
                 //      CANYON_SLOT_M above the water. That is the SAME 12 m test IsCanyonWaterAt uses, so
                 //      what the game CALLS a canyon and what the carve SHAPES as one cannot drift apart —
@@ -1155,17 +1154,17 @@ namespace VerdantsAscent.Terrain.Voxel
                 // territory painted a trunk's trench 8m above the trunk's own
                 // water — min-write makes the trunk rule shared trenches; the
                 // trib steps down into it at its mouth, a natural fall).
-                // RIBBON FILL (2026-08-07) — water covers EVERY cell the carve left below the level: the whole
+                // RIBBON FILL — water covers EVERY cell the carve left below the level: the whole
                 // T-section bank-to-bank, not just the narrow core. The channel profile above already rises to wl at
                 // the bank, so `h < wl` fills exactly to the banks and STOPS there (terrain standing above wl IS the
                 // dry bank). This puts "level across the entire T-section" into the DATA, so the sheet — which now
                 // renders from this field — tucks into the banks like a pond instead of drawing a 1-cell thread.
-                // (v91) cap tightened 2.0→1.3·half: the carve-from-L profile crosses wl at dN≈half, so 1.3·half
+                //  cap tightened 2.0→1.3·half: the carve-from-L profile crosses wl at dN≈half, so 1.3·half
                 // is a pure leak guard (the blend tail reaching an unrelated low spot) — and it cuts the wet-cell
                 // count the sheet builder walks every apply (the apply.water main-thread cost).
-                // THE WATER FILLS THE CARVE — NOT THE FLATS (2026-08-11, user: "you cannot just make the rivers
-                // wider at the mesh, you need to carve them wider, and deeper, and lower the mesh into them so
-                // it remains contained"). I had pushed this to 1.8 half-widths to chase a buried edge; that is
+                // THE WATER FILLS THE CARVE — NOT THE FLATS (rivers are not widened at the mesh; they are
+                // carved wider and deeper, and the mesh is lowered into them so
+                // it stays contained). Pushing this to 1.8 half-widths to chase a buried edge is
                 // the exact failure docs/HYDROLOGY.md Law 5 warns about — treating the channel as "a ditch water
                 // was poured into" and then asking which cells happen to lie under L. Past the carve's own
                 // wetted edge the test admits any flat ground that is merely a few cm below the surface, so the
@@ -1173,7 +1172,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // meet L exactly at dN = half (shape(edge)=0), so filling to 1.05·half fills the channel
                 // bank-to-bank BY CONSTRUCTION and stops where the bed does. Width comes from the WIDTH LAW
                 // (which now carves wider), never from the fill radius.
-                // ═══ THE FILL READS THE CHANNEL, NOT THE GROUND (2026-08-13) ═════════════════════════════
+                // ═══ THE FILL READS THE CHANNEL, NOT THE GROUND ═════════════════════════════
                 // Was `h[i2] < wl − 0.05f`: the fill INTERROGATED the terrain the carve had just written, so
                 // "is this cell wet" was answered by whatever survived the bound, the valley shave, the smooth
                 // blend and any earlier pass — a different question from "does the channel put water here".
@@ -1192,8 +1191,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (paintLvl[i2] > wl) paintLvl[i2] = wl;
                 }
                 // ═══ THE SUBMERGED SHORE IS PART OF THE RIVER — RIVERS FOOTPRINT LIKE PONDS DO ═════════════
-                // (2026-08-18, user: "our lake and pond logic already handles this cleanly, why do our rivers
-                // act different?" — the right question, and the answer was in the two footprint rules.)
+                // (Lake and pond logic already handles this cleanly, so rivers should
+                // act the same; the answer was in the two footprint rules.)
                 // A BODY's footprint is `FiresWaterPlanner.ExpandFootprint`, which floods across any neighbour
                 // with `g[j] < level`, and its own header states the invariant this buys: "The true shoreline
                 // is where ground rises past the level — so a body's edge can NEVER stand over lower dry
@@ -1222,14 +1221,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 else if (dN <= half * 0.9f)
                 {
-                    // ═══ NOW UNREACHABLE BY CONSTRUCTION — s_dryCore IS THE PROOF (2026-08-13) ════════════
+                    // ═══ NOW UNREACHABLE BY CONSTRUCTION — s_dryCore IS THE PROOF ════════════
                     // dN ≤ 0.9·half ⇒ dN ≤ 0.95·half ⇒ bedDemand ≤ wl−0.35 < wl−0.05, so the branch above
                     // always takes this cell. A dry core cell is no longer a thing that CAN happen rather
                     // than a thing we hope does not: if this counter is ever non-zero the invariant has been
                     // broken somewhere and the log says so immediately. Kept as a live assertion, not dead code.
                     System.Threading.Interlocked.Increment(ref s_dryCore);   // (TRACE) core channel cell left DRY — the visible river break
                     // narrow core stays channel even where the carve left it shallow — but it gets NO water
-                    // claim: (v91) drop any fill-table level still parked here (`w` IS _fillTable, aliased at
+                    // claim: drop any fill-table level still parked here (`w` IS _fillTable, aliased at
                     // the call), else the final pass preserves it (mask 1) and the cell stands wet at the OLD
                     // terrain height — the uphill half of every contour reach rode up the bank exactly so
                     // (continuity, HYDROLOGY.md CONTRACT #6: no water without a source). With the carve based
@@ -1242,13 +1241,13 @@ namespace VerdantsAscent.Terrain.Voxel
 
                 // WATER-FIRST BANK FLOOR (docs/RIVER_WATERFIRST.md P1) — re-instates the v24
                 // containment crest deleted above on the false "banks are always above water"
-                // assumption (the user hit overflow). The immediate bank margin must stand ABOVE the
+                // assumption (overflow was seen). The immediate bank margin must stand ABOVE the
                 // level ribbon, so the ribbon can NEVER overflow — a construction guarantee, not the
                 // reactive containment clamp. Raise-only + margin-only ⇒ no-op in gorges / valley
                 // walls already above, and only berms the genuine low banks the water would spill.
                 // The berm rings the WATER: the fill now stops at 1.05·half, so a 2.0 ring is a genuine bank
                 // outside the sheet again (at 1.8 fill there was nothing left between water and berm edge).
-                // ⚠ THE SEA OWNS ITS OWN COLUMNS — NEVER BERM ONE (2026-08-15, user screenshots: a river
+                // ⚠ THE SEA OWNS ITS OWN COLUMNS — NEVER BERM ONE (otherwise a river
                 // running out into open water as a long raised causeway, and the map showing it as a stripe
                 // reaching far offshore). This is the ONLY raise in InciseRivers, and with `wl` still above
                 // SEA+0.3 along a mouth reach it was lifting SEABED to wl+0.6 — measured max raise 98.7 m
@@ -1288,8 +1287,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
 
             // ═══ THE RIVER'S SHORE IS FOUND BY FLOODING, NOT BY MEASURING OUT FROM THE SPINE ══════════════
-            // (2026-08-19. The user asked the question that names the defect — "ponds and lakes reach and
-            // intersect their shores perfectly every time, why can you not accomplish this with rivers?" — and
+            // (Ponds and lakes reach and
+            // intersect their shores perfectly every time, rivers did not, and
             // the answer is one line of each footprint rule.)
             //   • A BODY: FiresWaterPlanner.ExpandFootprint, a 4-connected flood over `g[j] < level`. Its
             //     shoreline is wherever the GROUND rises through the level, so it is exact by construction,
@@ -1384,11 +1383,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 int cz2 = i / n, cx2 = i - cz2 * n;
                 if (cx2 < 2 || cz2 < 2 || cx2 >= n - 2 || cz2 >= n - 2) continue;
                 float pr = Math.Max(9f, widthOf[i] * 1.4f);
-                // (2026-08-09, user: "the ponds and lakes get the proper surface level — make the springs into
-                // mini ponds") SPRING LEVEL FROM THE LOCAL GROUND, not the river field. The old `wl2 = w[i]`
+                // (Ponds and lakes get the proper surface level, so springs become
+                // mini ponds.) SPRING LEVEL FROM THE LOCAL GROUND, not the river field. The old `wl2 = w[i]`
                 // took the inherited water-field value at the source, which can sit tens of metres above the
                 // head's actual ground (a high fill-table/junction level) → the pool rendered as a floating
-                // disc/column above the terrain (user screenshots). A spring is a MINI POND: derive its surface
+                // disc/column above the terrain. A spring is a MINI POND: derive its surface
                 // from the CONTAINING RIM exactly like FiresWaterPlanner does for ponds/lakes (level = spill −
                 // relief), so it beds in its own basin and its surface meets the river that descends from it.
                 float rimMin = float.MaxValue, rimMax = float.MinValue;
@@ -1404,7 +1403,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // A pond needs a bowl that HOLDS it: a steep head (rim relief > 2.2m) can't — it becomes a bare
                 // channel head, no pool (same rule the plan cull uses). Gentle heads keep their mini-pond.
                 if (rimMax - rimMin > 2.2f) { poolsSkipped++; continue; }
-                // (user) THE POND'S FLAT LEVEL = THE RIVER'S OWN MESH LEVEL AT THE SOURCE it connects to. The
+                //  THE POND'S FLAT LEVEL = THE RIVER'S OWN MESH LEVEL AT THE SOURCE it connects to. The
                 // river already runs correctly (bank-pinned), so matching its level here makes the pond meet the
                 // river flush and it CANNOT float. Not the rim, not a derived offset — the river's level, period.
                 float wl2 = w[i];
@@ -1428,13 +1427,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (h[j] < wl2)                                       // lay the flat mesh over the carved hole
                         {
                             // ⚠ A SPRING POND IS STILL WATER, SO IT GETS THE STILL MASK — NOT THE CHANNEL ONE.
-                            // (2026-08-16, user, looking at a render: "what exactly is happening in spots like
-                            // here where we have a stillwater surrounded by rivers? that's not correct at all".)
+                            // (A still water surrounded by rivers rendered
+                            // wrongly.)
                             // This wrote `mask[j] = 1` — the CHANNEL mask — across the whole pool disc, so
                             // every one of these (4,163 on seed 530442569) was a flat circular pond that the
                             // class grid then read as WC_RIVER and drew in river colour, with the channel head
                             // threading through it and bank noise fraying its rim. That is the tangle in the
-                            // screenshots. It was not only a colour error: mask 1 also opts a cell into RIVER
+                            // renders. It was not only a colour error: mask 1 also opts a cell into RIVER
                             // treatment downstream — the bank/berm rules and the Part VII rapids disturbance
                             // bake — so a still spring pool was getting flow shading applied to it.
                             // MASK_STILL keeps the water (the final dry pass below honours it exactly as it
@@ -1471,7 +1470,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         const float TALUS = 9f;
                         if (d2 > TALUS)
                         {
-                            // (2026-08-11) NEVER BACKFILL A CHANNEL. Scree sheds onto natural ground, but a
+                            //  NEVER BACKFILL A CHANNEL. Scree sheds onto natural ground, but a
                             // river bed is kept open by its own flow — and dumping the slope's excess INTO the
                             // channel raised the bed back above the ribbon, re-drying reaches the carve had
                             // just cut (the river that "stops and starts again 40m later", especially where a
@@ -1505,10 +1504,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 // REORDER — ANY cell under a seeded body adopts the body's surface,
                 // INCLUDING a river channel crossing it (mask 1/3). Without this the
                 // incised river keeps its own (higher) level and renders as a SEPARATE
-                // mesh FLOATING above the swamp/lake sheet (user's in-game report); here
+                // mesh FLOATING above the swamp/lake sheet; here
                 // the river blends into the body as ONE surface and resumes past the
                 // far edge. Runs before sea-snap/dry so highland bodies survive.
-                // ═══ (v104) COMPARE AGAINST THE PRE-CARVE GROUND, NOT THE CARVED FLOOR. `seeded` is
+                // ═══ COMPARE AGAINST THE PRE-CARVE GROUND, NOT THE CARVED FLOOR. `seeded` is
                 // BuildGrid's DryWaterField = a COPY OF THE PRE-INCISION h ("water = ground everywhere,
                 // dry"), with real bodies raised above it by Conform/tarns. Testing `seeded > h` against
                 // the CARVED h made EVERY cell the carve or valley-shave lowered read as "under a body"
@@ -1527,7 +1526,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // ESTUARY — a wet river-mask cell keeps its DESCENDING mouth ribbon
                     // (floored at SEA−1.8 by the rasterizer) instead of snapping flat to
                     // SEA: the river runs down through the tidal ocean plane and the two
-                    // sheets clip (user: no river edge may float above the tide — swamps
+                    // sheets clip (no river edge may float above the tide — swamps
                     // at y30 AND open-ocean mouths alike). Everything else snaps as before.
                     bool riverRibbon = (mask[i2] == 1 || mask[i2] == 3) && w[i2] > h[i2] + 0.01f && w[i2] > ESTUARY_DIVE_Y - 0.1f;
                     if (!riverRibbon) { w[i2] = SEA; if (lvlSrc != null) lvlSrc[i2] = 7; }
@@ -1536,8 +1535,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     if (w[i2] > h[i2]) { w[i2] = h[i2]; if (lvlSrc != null) lvlSrc[i2] = 8; }
                 }
-                // ═══ THE BED IS ALWAYS BELOW THE MESH (user 2026-08-11: "the channel needs to fucking carve
-                // to be deeper than the mesh wherever we put the mesh, period"). The carve's own wetted-core
+                // ═══ THE BED IS ALWAYS BELOW THE MESH (the channel carves
+                // deeper than the mesh wherever the mesh goes, period). The carve's own wetted-core
                 // rule only guaranteed this within 0.95 half-widths; everything out to the fill edge merely
                 // needed `h < wl − 0.05`, so the sheet's outer band sat on a bed a few centimetres under it —
                 // a paper-thin lip that reads as a visible mesh EDGE and floats the moment a neighbouring stem
@@ -1569,16 +1568,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 FiresLogger.LogInfo(sbT.ToString());
             }
-            // ═══ RIVER BANK BURIAL — NO FLOATING WATER, NO VISIBLE MESH EDGE, PERIOD (user 2026-08-11:
-            // "i don't accept a tradeoff — we either carve the rivers deeper in these spots to conceal the mesh
-            // edges or we raise the banks and smooth them into the surrounding terrain"; "there is no floating
-            // water that is acceptable period"; "i don't ever want to see the edge of a river's mesh").
+            // ═══ RIVER BANK BURIAL — NO FLOATING WATER, NO VISIBLE MESH EDGE, PERIOD (no tradeoff:
+            // either the rivers are carved deeper in these spots to conceal the mesh
+            // edges, or the banks are raised and smoothed into the surrounding terrain; no floating
+            // water is acceptable, and the edge of a river's mesh is never visible).
             // This is the project's own contract — TERRAIN CONFORMS TO WATER — and it is exactly the
             // construction FiresWaterConform.BuryMeshEdges already performs for still bodies (shore shelf +
             // burial rim + feather). It was simply never applied to the river ribbon, which is why a reach on
             // any real slope could stand above its banks: the ribbon is a smooth monotone surface, the ground
             // under it is not, so on a descent the sheet outruns its own banks. Deleting those reaches (the old
-            // 25%-grade cascade rule) traded a float for a dry trench — the user rejects both. Instead the BANK
+            // 25%-grade cascade rule) traded a float for a dry trench, and both are unacceptable. Instead the BANK
             // is made to hold the water, everywhere: every DRY cell touching river water rises above that
             // water, then feathers back to natural ground over a few rings so it reads as a bank, not a wall.
             // Containment becomes a GUARANTEE by construction, so steep reaches keep continuous water AND the
@@ -1587,7 +1586,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 const float RIVER_RIM = 0.65f;    // dry bank stands this far above the ribbon it touches
                 const float MARSH_BANK_RIM = 0.28f; // ...but a marsh shore is a beach, not a levee (see below)
-                // ⚠ THE RAMP IS A GRADE AND A DISTANCE, NOT "0.7 m PER RING FOR 4 RINGS" (v135). A ring is one
+                // ⚠ THE RAMP IS A GRADE AND A DISTANCE, NOT "0.7 m PER RING FOR 4 RINGS". A ring is one
                 // CELL, so the old pair described a completely different bank at each resolution the player can
                 // choose: 4 rings of 0.7 m is an 8 m ramp falling at 35% on the game's 2 m grid, and a 41 m ramp
                 // falling at 6.8% at n=2049. Same seed, same river, different bank. (The v134 leapfrog was
@@ -1609,7 +1608,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     byte mk = mask[i];
                     if (mk == 1 || mk == 3) return w[i] - h[i] >= 0.4f;
-                    // ═══ A MARSH IS SHALLOW BY DESIGN — 1.2m MADE IT INVISIBLE HERE (2026-08-13) ═════════
+                    // ═══ A MARSH IS SHALLOW BY DESIGN — 1.2m MADE IT INVISIBLE HERE ═════════
                     // The 1.2m depth test is a sensible "is this really a lake" bar, but a marsh is
                     // specified as a LARGE SHALLOW lake, and its bed additionally lerps up toward natural
                     // ground through the shore band — so most of a marsh, and essentially all of its rim,
@@ -1623,12 +1622,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     return w[i] - h[i] >= 1.2f;
                 }
                 // ═══ AN ENCLOSED DRY CELL IS A HOLE IN THE SHEET — FILL IT, DO NOT BUILD A CURB IN IT ════════
-                // (2026-08-19, measured by the new `riverfield` probe on seed 126369233 at n=10501: 7,098 dry
+                // (Measured by the `riverfield` probe on seed 126369233 at n=10501: 7,098 dry
                 // cells sat with ≥6 of their 8 neighbours WET, in 4,646 islands — and 6,422 of them, 90.5%,
                 // stood at EXACTLY water+1.00 ±0.15 m, which is the RIM constant of the burial passes. They are
                 // not terrain. They are cells the RIVER FOOTPRINT MISSED, which the burial pass then met as "a
                 // dry cell touching water", did exactly what it is told, and RAISED A METRE ABOVE THE SHEET —
-                // turning a gap into an island. That is the user's "mysterious dry cells in the middle of pooled
+                // turning a gap into an island. Those are the "mysterious dry cells in the middle of pooled
                 // up rivers", and it is why rivers carry 18.2 such holes per 1,000 wet cells against a body's
                 // 0.15: a body's footprint is a FLOOD on `g < level` (FiresWaterPlanner.ExpandFootprint) and
                 // cannot leave an interior cell out; a river's was a stamped tube (`dN ≤ 1.05·half`) and does.
@@ -1706,7 +1705,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // on "carries any water at all" protects every drop from being raised (raising water
                         // is what put 306 gaps back) while letting a dry bed be bermed like any other bank.
                         if (w[i2] > h[i2] + 0.01f) continue;
-                        // ═══ MARSH GROUND IS NO LONGER EXEMPT FROM CONTAINMENT (2026-08-13) ══════════════
+                        // ═══ MARSH GROUND IS NO LONGER EXEMPT FROM CONTAINMENT ══════════════
                         // This blanket skip is why marshes floated and why two earlier attempts at the wetness
                         // test changed the float by EXACTLY ZERO three runs running: the cells that needed a
                         // bank exited here, before `demand` was ever computed. A dry island shore inside a
@@ -1751,9 +1750,9 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                         if (demand <= 0f) continue;
                         // ═══ WHERE TWO WATERS MEET, THEY MERGE. A BANK BETWEEN THEM IS A DEFECT. ═════════
-                        // (user, 2026-08-31, standing on a river mouth at X4779 Z8310: "seems like every
+                        // (Seen on a river mouth at X4779 Z8310: every
                         // water connection where a river meets the stillwater has a slight berm containing it
-                        // rather than the two water bodies merging cleanly".)
+                        // rather than the two water bodies merging cleanly.)
                         // `stillDemand` above changes only the TRIGGER, never the OUTCOME: a junction cell
                         // takes `demand + rim` either way, so the strip between a river and the lake it runs
                         // into is raised to water+0.65 on both sides and reads as a sand bar holding them
@@ -1787,8 +1786,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         // ground across this one pass. The feather exists to ease a RAISED bank back into the
                         // terrain; where nothing was raised there is nothing to ease, and the ground should be
                         // left exactly as the erosion and detail passes made it.
-                        // ═══ (TRACE 2026-08-19) IS THIS BERM EARNED, OR IS IT A CURB? ════════════════════
-                        // The user's cross-section is three lines: the NATURAL ground (green), the bed we cut
+                        // ═══ (TRACE) IS THIS BERM EARNED, OR IS IT A CURB? ════════════════════
+                        // The cross-section is three lines: the NATURAL ground (green), the bed we cut
                         // into it (red), and the water filling that cut (blue). The green line is never
                         // raised — the water is contained because it sits BELOW natural ground, not because a
                         // wall was built beside it. This pass raises the green line, on 58.9 % of every river
@@ -1802,8 +1801,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (hOrig[i2] < demand) System.Threading.Interlocked.Increment(ref s_bermEarned);
                         else System.Threading.Interlocked.Increment(ref s_bermGratuitous);
                         // ═══ THE TRIGGER AND THE ACTION ARE NOT THE SAME NUMBER ══════════════════════════
-                        // (2026-08-19, user: "the berm stays as a safety for when you inevitably cannot
-                        // contain the mesh in spots".) It stays. What changes is that it stops being the
+                        // (The berm stays as a safety for where the mesh cannot be
+                        // contained.) It stays. What changes is that it stops being the
                         // primary containment and goes back to being the safety it is described as.
                         // `h < demand + rim` then `h = demand + rim` is one threshold used twice, and that is
                         // what makes every riverbank in the world an identical terrace: any ground below
@@ -1815,14 +1814,14 @@ namespace VerdantsAscent.Terrain.Voxel
                         // Split them: TRIGGER on whether the ground actually buries the sheet (a small margin
                         // above the waterline), ACT with the full rim so that where it does fire you get a
                         // real bank and not a lip. Ground already standing above the water is left exactly as
-                        // the terrain made it — the green line of the user's cross-section, untouched.
+                        // the terrain made it — the natural-ground line of the cross-section, untouched.
                         const float BURY_MARGIN = 0.50f;   // "does this ground bury the sheet?" — 0.15 was too tight to survive the dry node's 2x2 bilinear over deep channel neighbours: river lips 20 -> 47. 0.50 keeps natural banks and catches the marginal ground.
                         float trigger = (riverDemand && !stillDemand) ? demand + BURY_MARGIN : demand + rim;
                         if (h[i2] < trigger) { h[i2] = demand + rim; rimRaised++; bankStamp[i2] = 1; if (wsrc != null) wsrc[i2] = 6; }
                     }
                 // ═══ THE SEAM BETWEEN TWO SAME-LEVEL WATERS IS WATER ═════════════════════════════════════
-                // (user: "merging cleanly"; and, from the screenshot: "none of them even properly connect,
-                // they constantly have a fucking gap".) The merge branch above correctly builds NO BANK
+                // (Waters must merge cleanly; none of them properly connected,
+                // they always had a gap.) The merge branch above correctly builds NO BANK
                 // between a river and the still water it joins — but leaving the seam cell DRY makes a
                 // notch: bare ground with water either side, which is exactly the photographed gap, and the
                 // sheet edge over it is a visible free face (EXPOSED went 0 → 19 the moment the draw
@@ -1846,7 +1845,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             int i2 = z2 * n + x2;
                             if (bankStamp[i2] != 0) continue;
                             if (w[i2] > h[i2] + 0.01f) continue;                             // never touch water, at any depth
-                            // ⚠ THE SEA OWNS ITS COLUMNS (2026-08-15, user: a river running out into open
+                            // ⚠ THE SEA OWNS ITS COLUMNS (otherwise a river runs out into open
                             // water as a raised causeway, visible as a stripe far offshore on the map).
                             // The RIM pass above already refuses to wall off the sea — "estuary/ocean — the
                             // sea owns that edge, never wall it off" — but this FEATHER had no such guard, so
@@ -1912,15 +1911,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 FiresLogger.LogInfo($"[FiresWaterDiag] MERGE POINTS — {s_bermMergePoint:N0} junction cell(s) between a river and still water at the same level: no bank built (a bank there is a sand bar between two waters that should merge), and seams whose ground lies under the shared level were flooded at it.");
                 FiresLogger.LogInfo($"[FiresWorldGen]  │  rivers: BANKS BURY THE MESH — {rimRaised:N0} bank cell(s) raised above the ribbon they touch, {feathered:N0} feathered back to natural ground: no floating water, no visible sheet edge. HOLES CLOSED: {holesFilled:N0} enclosed dry cell(s) filled with water instead of being raised into an island (see the enclosure note above). BERM EARNED vs CURB: {s_bermEarned:N0} bank cell(s) whose NATURAL (pre-carve) ground lay BELOW the water — those raises hold up a level the solve floated; {s_bermGratuitous:N0} were already above it and are raised only to make a terrace at exactly water+rim. The user's cross-section never raises natural ground: the water is contained by the CUT, not by a wall.");
-            // STUDIO-ONLY: two full-grid scans that the GAME was paying for at every world gen (user: 'the
-            // world generation itself is taking close to 20min now because of all the re passes'). Gated on
+            // STUDIO-ONLY: two full-grid scans that the GAME was paying for at every world gen (world
+            // generation had grown to close to 20 min from all the re-passes). Gated on
             // the same flag as the rest of the instrumentation; riverfield sets FIRES_FLAT_AUDIT=1.
             if (wsrc != null)
             {
             // ═══ THE JOIN AUDIT — DO TWO WATER SURFACES ACTUALLY MEET AT THE SAME HEIGHT? ════════════════
-            // (user, 2026-09: "water bodies, rivers, rivers running into lakes, canyons running into still
-            // water, rivers meeting the ocean NONE of it is fucking accurate, NONE of it meets at the correct
-            // fucking height".)
+            // (Water bodies, rivers, rivers running into lakes, canyons running into still
+            // water and rivers meeting the ocean must all meet at the correct
+            // height.)
             // ⚠ EVERY METRIC THIS FILE PRINTS WALKS ALONG A RUN. UPHILL WATER, total climb, LEVEL SPREAD —
             // all of them measure a single surface against itself, in flow order. NOT ONE of them looks at
             // the place two DIFFERENT surfaces touch. So "3 uphill rises, climb 2 m" could be true while
@@ -1973,8 +1972,8 @@ namespace VerdantsAscent.Terrain.Voxel
                               $"A CORRECT JOIN IS 0.00 m. This is the metric the along-run ones (UPHILL WATER, LEVEL SPREAD) structurally cannot see: they walk ONE surface against itself and say nothing about where it meets another.");
                 }
                 // ═══ AND THE GAP — CELLS WHERE NEITHER SURFACE IS DRAWN ══════════════════════════════════
-                // (user, 2026-09, on a frozen coast at X2896 Z-6865: "none of them even properly connect,
-                // they constantly have a fucking gap".)
+                // (Seen on a frozen coast at X2896 Z-6865: waters that should connect
+                // were left with a gap.)
                 // ⚠ THE JOIN AUDIT ABOVE IS BLIND TO THIS BY CONSTRUCTION. It walks boundaries where two wet
                 // cells already TOUCH, so it can only score joins that exist. A gap is the absence of a join:
                 // a DRY cell sitting between two different water families, which is what you see as a strip
@@ -2015,7 +2014,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }   // end studio-only water audits
             }
 
-            // (TRACE 2026-08-11, user: "the river stops for no goddamn reason and then starts again 40m away")
+            // (TRACE: a river stopped for no reason and started again 40 m away.)
             // GAP SCAN — walk every FINAL river polyline and sample wetness along it. A dry run between two wet
             // runs IS the visible break. Reports how many, how long, and where the worst ones are, so the cause
             // can be attributed instead of guessed (steep-cascade drop vs carve-bound dry vs off-valley meander).
@@ -2056,7 +2055,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 FiresLogger.LogInfo($"[FiresWaterDiag] RIVER GAP SCAN: {gaps:N0} interior dry gaps along the final polylines, {gapM:N0}m total — ≤10m {g10}, ≤30m {g30}, ≤100m {g100}, >100m {gBig}.{gb}");
             }
             // ═══ OVERLAP CENSUS — IS THE MULTI-LEVEL SHEET *BETWEEN* RUNS, OR *WITHIN* ONE? ══════════════
-            // (2026-08-19.) `riverfield`'s N. LEVEL SPREAD proves the defect exists (52.7 % of river cells sit
+            // `riverfield`'s N. LEVEL SPREAD proves the defect exists (52.7 % of river cells sit
             // within 10 m of another river surface more than a metre off in height) but not what causes it,
             // and the two candidates want opposite fixes:
             //   • BETWEEN runs — two traced channels crossing at levels each solved from its own local banks.
@@ -2095,7 +2094,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 // apart in SPACE can be hundreds of metres apart ALONG a meandering channel,
                                 // and an 11 m difference between those is an ordinary river gradient. Only a
                                 // large level difference over a SHORT along-channel distance is a step — the
-                                // thing the user is actually asking to remove ("the rest of the river all
+                                // thing to remove ("the rest of the river all
                                 // lays out at the canyons bottom", not perched at several levels).
                                 // Judge it as a GRADE: metres of fall per metre travelled along the run.
                                 if (itsPoly == myPoly
@@ -2131,9 +2130,9 @@ namespace VerdantsAscent.Terrain.Voxel
                             }
                     }
                 // ═══ THE ONLY DEFECT THAT MATTERS: THE SURFACE GOING BACK UP ════════════════════════════
-                // (2026-08-22, user: "as long as steps are descending along the river's path they're actually
-                // a good thing, rivers do naturally step — the issue is we are dropping and then raising back
-                // up.") That is the correct definition and it retires the >25 %-grade "STEP" count above: a
+                // (Steps that descend along the river's path are fine, rivers
+                // do naturally step; the defect is a level dropping and then rising back
+                // up.) That definition retires the >25 %-grade "STEP" count above: a
                 // step is a waterfall and belongs there. The defect is NON-MONOTONICITY along the path.
                 // `SetBankDerivedLevels` does enforce monotone on the POLYLINE — but the FIELD level is not
                 // the polyline. It goes through the Voronoi assignment (`wl = w[sd]`), the min-write where
@@ -2166,9 +2165,9 @@ namespace VerdantsAscent.Terrain.Voxel
                             float up = w[lst[t2].cell] - w[lst[t2 - 1].cell];
                             if (up <= 0.10f) continue;                   // descending (or flat) — correct, and a step is fine
                             riseCount++; riseSum += up;
-                            // ⚠ WHOSE RISE IS IT — THE WATER'S, OR THE BED'S? (user, 2026-08-22: "it could
+                            // ⚠ WHOSE RISE IS IT — THE WATER'S, OR THE BED'S? (It could
                             // also be places where the carve itself does not run deep enough causing the
-                            // water to have to come back up a bit".) That is a distinct mechanism from a bad
+                            // water to come back up a bit.) That is a distinct mechanism from a bad
                             // level solve and it wants the opposite fix, so measure it rather than argue: if
                             // the BED climbs alongside the surface, the carve failed to dig and the water is
                             // merely sitting on it; if the bed descends while the surface climbs, the level

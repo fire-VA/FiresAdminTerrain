@@ -5,7 +5,7 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Voxel
 {
     /// <summary>
-    /// Vedr's earthquake fissures cut into voxel ground in 3D (Fire's popup: real cracks, not heightmap dents). Vedr leaves
+    /// Vedr's earthquake fissures cut into voxel ground in 3D (real cracks, not heightmap dents). Vedr leaves
     /// fissures out of the heightmap on FAT ground and answers where each open one runs (SeasonBridge.GroundCrackAt). On
     /// the main thread each chunk column gets a grid of (signed distance, half-width, depth) per sample column, cached
     /// until Vedr's scars change; its signature folds into the column hash, so a crack opening, widening or healing
@@ -13,7 +13,7 @@ namespace VerdantsAscent.Terrain.Voxel
     /// density: noise pushes the walls in and out (undercuts, overhangs), the crack leans slowly along its length, and the
     /// floor is rough. The V keeps a wide floor and the wall noise scales with the width at each depth, so the noise
     /// roughens the walls but never closes the slot at FAT's 1 m resolution: a typical crack stays open about 4 m down
-    /// (Fire's popup after R20's pictures: "Build it deeper"). Only density changes, never the seed or brush edits, and a
+    /// (built deep on purpose). Only density changes, never the seed or brush edits, and a
     /// scarred chunk skips the chunk cache (VoxelChunk), so a healed crack regenerates the ground it cut. On a dedicated
     /// server the scar event dirties the zones itself (no heightmap poke reaches it), so server-side physics sees the
     /// cracks too.
@@ -41,6 +41,15 @@ namespace VerdantsAscent.Terrain.Voxel
         private const int DensityLimit = 127;
 
         private static readonly Dictionary<Vector2Int, float[]> Columns = new Dictionary<Vector2Int, float[]>();
+
+        // Memory: crack grids held (not pruned while roaming; Forget clears them at teardown).
+        internal static long HeldBytes(out int columns)
+        {
+            columns = Columns.Count;
+            long b = 0;
+            foreach (var g in Columns.Values) if (g != null) b += g.Length * 4L;
+            return b;
+        }
 
         /// <summary>
         /// The crack grid of one chunk column, or null where no fissure is open (main thread). The array is never changed
@@ -120,6 +129,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         /// <summary>Leaving the world: Vedr drops its scars without an event, so a grid kept now would cut a healed crack next load.</summary>
         internal static void Forget() => Columns.Clear();
+
+        // Drop one column's grid when its zone unwraps (rebuilt on demand; workers keep any array they hold).
+        internal static void ForgetColumn(int kx, int kz) => Columns.Remove(new Vector2Int(kx, kz));
 
         /// <summary>One density sample with the crack cut in (worker thread). ground is the column's ground after river and bowl carving.</summary>
         internal static sbyte Carve(sbyte density, float[] grid, int column, float wx, float wy, float wz, float ground)

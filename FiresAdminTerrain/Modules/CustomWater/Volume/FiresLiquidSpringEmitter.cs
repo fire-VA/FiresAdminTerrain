@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // Round-75 — INFINITE SOURCE for vanilla liquid pours.
+    // INFINITE SOURCE for vanilla liquid pours.
     //
     // Vanilla LiquidVolume pours a fixed m_initialVolume once in Awake and
     // then only ever redistributes/drains it (grid border cells are zeroed
@@ -37,17 +37,17 @@ namespace VerdantsAscent.Water.Core
         // a contained bowl.
         public float m_emitPerSecond = 2f;
 
-        // Round-78 — anti-spill / bank-respect. A wet cell is KEPT only if
+        // Anti-spill / bank-respect. A wet cell is KEPT only if
         // it is either deep enough to be a real body of water, OR contained
         // by a true bank (some neighbour's TERRAIN rises at least
         // BANK_MIN_RELIEF above this cell's water surface). Thin water that
         // has sheeted onto open/flat ground (no containing bank) is culled —
         // this is the "needs a certain cut depth before it overflows" logic
-        // the user asked for, and it kills the z-fighting path spillage.
+        // that is wanted, and it kills the z-fighting path spillage.
         public float m_shallowCull = 0.35f;   // m — thin water on flat ground is culled
         public float m_bankRelief = 0.5f;     // m — local relief needed to count as a cut/channel
 
-        // Round-79 — the ruler fill level. The source pool LEVELS OUT here
+        // The ruler fill level. The source pool LEVELS OUT here
         // (does not keep rising to overflow the cut). NaN = legacy pours
         // spawned before this field existed → fall back to the old
         // maxDepth-fraction guard so they still emit.
@@ -162,7 +162,7 @@ namespace VerdantsAscent.Water.Core
 
                     var emitter = root.AddComponent<FiresLiquidSpringEmitter>();
                     emitter.m_emitPerSecond = rate;
-                    // Round-79 — restore the fill level so the pool still
+                    // Restore the fill level so the pool still
                     // levels out at the ruler height after reload.
                     emitter.m_fillY = zdo.GetFloat(FiresLiquidGridOps.ZDO_SPRING_FILL, float.NaN);
                     Debug.Log($"[FiresLiquidSpring] restored emitter on '{root.name}' at {root.transform.position} rate={rate:F1} m³/s fillY={emitter.m_fillY:F1}.");

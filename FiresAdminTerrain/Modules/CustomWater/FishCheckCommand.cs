@@ -6,8 +6,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // ── `va_fish_check <x> <z>` and `va_fish_spawn <x> <z>`: the inland-fish proof made deterministic ([lead] 10-01, R29a:
-    // vanilla's random 40-80 m spawn points rarely land in a 2-4.5 m river, so a silent round proves nothing) ──────────────
+    // ── `va_fish_check <x> <z>` and `va_fish_spawn <x> <z>`: the inland-fish check made deterministic (vanilla's random
+    // 40-80 m spawn points rarely land in a 2-4.5 m river, so a silent run proves nothing) ──────────────
     // Admin-only test tooling; changes no behaviour. The contract test fishwater_test (Testing\FishWaterTest) runs the same
     // judging through Judge/Spawn below.
     //   va_fish_check  prints every water source at the point (the generated field, the voxel sheet, FAT's surface, the

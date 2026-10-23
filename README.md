@@ -11,10 +11,11 @@ Every edit is saved with the world, so every player sees the same ground.
 
 ## Requirements
 
-- **FiresUnifiedCore** 0.2.39 or newer.
-- **Install on the server and every client, on the same version.** Nothing stops a mismatch, but a player
-  without the mod (or on another version) sees different ground from everyone else. In a one-zone world, a client
-  on an older version logs `the server speaks zone protocol N`, and its closed zones won't match the server's.
+- **FiresUnifiedCore** (the version this release lists as its dependency).
+- **Install on the server and every client, on the same version.** A player without the mod (or on another
+  version) sees different ground from everyone else. Since 0.2.974 a client and server whose synced settings
+  differ (below 0.2.974 on one side) refuse each other's settings with a version message. In a one-zone world, a
+  client on an older version logs `the server speaks zone protocol N`, and its closed zones won't match the server's.
 - Optional:
   - **Infinity Hammer**: its ruler aims the terrain brushes, the mouse wheel sets their size, and holding the
     mouse paints continuously.
@@ -22,9 +23,17 @@ Every edit is saved with the world, so every player sees the same ground.
     also undo terrain brushes.
   - **FiresTossinShade**: the water shaders. Without it, water uses a plainer vanilla look.
 
+## Settings
+
+The config window shows only the basics by default: the preset picker and the super flat grid keys. Everything
+else is under **Show Advanced**, each with a one-line description. The voxel settings sit together as
+`Voxel Terrain`, `Voxel Terrain - World`, `- Performance`, `- Tools`, `- Cave clutter`, `- Cave content` and
+`- Tree seeds`. A config from before 0.2.974 (the old `VoxelTerrain ...` sections) is moved over once on the
+first start, keeping every value.
+
 ## Upgrading from 0.2.382 or earlier
 
-- `[VoxelTerrain World] Terrain Mode` now defaults to `Off`, but an existing config keeps its old value, which
+- `[Voxel Terrain - World] Terrain Mode` now defaults to `Off`, but an existing config keeps its old value, which
   was `FullVoxel`. Check it before you start the server.
 - With any mode other than `Off`, rivers and lakes get carved into vanilla-generated worlds, and trees and
   bushes standing in the new water are removed. Set `Hydrology Enabled` and `Hydrology Place Water` to false if
@@ -36,7 +45,7 @@ Every edit is saved with the world, so every player sees the same ground.
 
 ## Defaults that differ from vanilla
 
-- `Vegetation density scale` 0.7 and `Clutter density scale` 0.55 (`[VoxelTerrain Performance]`): fewer trees
+- `Vegetation density scale` 0.7 and `Clutter density scale` 0.55 (`[Voxel Terrain - Performance]`): fewer trees
   and bushes in newly generated zones, and less grass. Set both to 1 for vanilla density.
 - Creating a new world opens a dialog for its terrain and features (see Creating and cloning worlds) when the voxel
   module (VoxelTerrain Enabled and Custom Generation) or `[Zone Mode] Offer at world creation` is on. With neither,
@@ -47,7 +56,7 @@ Every edit is saved with the world, so every player sees the same ground.
 
 Worlds created or cloned from the main menu keep their own terrain choices, and the server and every client follow
 them whatever their Terrain Mode and feature settings say; a machine with the voxel module switched off still runs
-without it. `[VoxelTerrain World] Terrain Mode` sets the defaults the New World dialog offers,
+without it. `[Voxel Terrain - World] Terrain Mode` sets the defaults the New World dialog offers,
 and decides what the mod does to a world without saved choices. The server's value applies to everyone.
 
 | Mode | What happens |
@@ -74,8 +83,8 @@ and decides what the mod does to a world without saved choices. The server's val
 - **Voxel terrain**: true 3D edits for overhangs, tunnels and caves. In `FullVoxel`, the world grows its own cave
   networks with a dark cave mood. The server dresses them with the biome's pickables, ore, rubble, props and
   hanging roots. Chests and picked stones, bones and crystals restock, and monster spawners re-arm, a few in-game
-  days later while nobody is near (`[VoxelTerrain Cave Content]`). Each client adds loose floor clutter in scattered
-  patches (`[VoxelTerrain Cave Clutter]`).
+  days later while nobody is near (`[Voxel Terrain - Cave content]`). Each client adds loose floor clutter in scattered
+  patches (`[Voxel Terrain - Cave clutter]`).
 - **Water and liquids**: water, lava, tar, boiling and freezing water, waterfalls, springs that flow downhill,
   and pools that settle to their level, at any height and each with its own waterline. You can swim in them and
   sail boats on river currents. Where water steps down (a pond spilling into a lake, a channel dropping to a lower
@@ -179,7 +188,7 @@ one-zone world, but the rest of its data, including its parked zones, is still i
 ## Performance
 
 - `Terrain Mode` `Off` keeps the voxel systems asleep.
-- `[VoxelTerrain Performance]`: `Voxel wrap radius (headless)` is the biggest dedicated-server lever. On clients,
+- `[Voxel Terrain - Performance]`: `Voxel wrap radius (headless)` is the biggest dedicated-server lever. On clients,
   use `Terrain casts shadows`, `Grass render distance`, the two density scales and the impostor settings.
 - `Chunk cache` keeps generated chunks on disk (up to 512 MB by default) so revisits load instantly.
 - FIRES worlds take a few minutes to generate the first time and are cached afterwards. A high
@@ -198,3 +207,7 @@ one-zone world, but the rest of its data, including its parked zones, is still i
 ## Issues / questions
 
 https://discord.gg/zQRgHbqms4
+
+## Screenshots
+
+<!-- ![A voxel cavern](HOSTED_URL/FiresAdminTerrain/01_fat_cave.png) -->

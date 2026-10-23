@@ -2,14 +2,14 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // NOTHING RESHAPES A SKY ISLAND.
+    // A VANILLA TERRAIN OP ON A SKY ISLAND NEVER REACHES THE GROUND BELOW.
     //
-    // A sky island is voxel terrain generated from the world seed: it holds no editable
-    // per-vertex data. A height-changing terrain op on one reaches the GROUND zone's
-    // TerrainComp, which writes a level delta of (op Y - generated ground height) - so
-    // the ground far below rises by the island's altitude. Paint is the one exception:
-    // the voxel paint mask is per XZ column, so an island already wears whatever is
-    // painted at its XZ, and paint-only ops keep working.
+    // A height-changing terrain op on an island would reach the GROUND zone's TerrainComp,
+    // which writes a level delta of (op Y - generated ground height) - so the ground far
+    // below rises by the island's altitude. A voxel island takes the op as
+    // voxel brushes in its own columns (FiresSkyIslandTerrainEdit); it is refused only where
+    // that can't run. Paint on an island or a cave floor goes on that layer alone
+    // (VoxelLayerPaint), never on the ground's TerrainComp.
     // Plan: Docs/PLAN_WecInfinityHammerTerrainBridge.md
     internal static class FiresSkyIslandTerrainGuard
     {
@@ -28,15 +28,83 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Zones.ZoneModeRefusals.WasCancelled(op) || Persistence.TileTerrainOpBlocker.WasRoutedToTile(op)) return false;
 
             var settings = op.m_settings;
-            if (settings == null || !(settings.m_level || settings.m_raise || settings.m_smooth)) return true;
+            if (settings == null) return true;
+            // Paint keeps to the layer it is aimed at: on a cave floor or a skyland the op's paint goes on
+            // that layer (VoxelLayerPaint) and never reaches the ground's TerrainComp; what is left of the op carries on.
+            if (settings.m_paintCleared && Player.m_localPlayer != null && VoxelLayerPaint.TryPaint(op.transform.position, settings.m_paintRadius, true,
+                    VoxelLayerPaint.MaskOf(settings.m_paintType), false, 0, "a terrain paint"))
+            {
+                settings.m_paintCleared = false;   // this instance's copy, not the prefab's
+                if (!(settings.m_level || settings.m_raise || settings.m_smooth))
+                {
+                    UnityEngine.Object.Destroy(op.gameObject);
+                    return false;
+                }
+            }
+            if (!(settings.m_level || settings.m_raise || settings.m_smooth)) return true;
 
             Vector3 position = op.transform.position;
-            if (!FiresSkyIslands.IsOnIsland(position)) return true;
+            // Every tool keeps to the layer it is aimed at: a hoe / cultivator level or raise in a cave, or on
+            // ground over a cave, reshapes that layer's voxels through FiresLayerTerrainEdit (the route WEC / IH ops take, one undo
+            // step, synced by the chunk anchors), never the ground zone's TerrainComp: a cave-floor level no longer cuts the hill
+            // above, and ground over a cave no longer fills into it. Ground over a cave keeps its paint on the TerrainComp.
+            if (Player.m_localPlayer != null && VoxelZoneStreamer.IsVoxelWorldActive)
+            {
+                var layer = FiresTerrainLayers.Resolve(position);
+                if (layer.Kind != TerrainLayerKind.Island && FiresLayerTerrainEdit.Takes(in layer))
+                {
+                    LayerFromTerrainOp(settings, in layer, position);
+                    if (layer.Kind == TerrainLayerKind.Ground && settings.m_paintCleared)
+                    {
+                        settings.m_level = settings.m_raise = settings.m_smooth = false;   // this instance's copy
+                        return true;
+                    }
+                    UnityEngine.Object.Destroy(op.gameObject);
+                    return false;
+                }
+            }
+            // Beside an island at its height counts too (FiresSkyIslandTerrainEdit.Targets), not only over its shape.
+            if (!FiresSkyIslandTerrainEdit.Targets(position) && !FiresSkyIslands.IsOnIsland(position)) return true;
+
+            // On a voxel island the op reshapes the island itself (FiresSkyIslandTerrainEdit). Its paint
+            // was taken onto the island above; nothing of an island's op reaches the ground's TerrainComp.
+            if (FiresSkyIslandTerrainEdit.Targets(position))
+            {
+                FiresSkyIslandTerrainEdit.FromTerrainOp(settings, position);
+                UnityEngine.Object.Destroy(op.gameObject);
+                return false;
+            }
 
             Report(position);
             TellLocalPlayer(position);
             UnityEngine.Object.Destroy(op.gameObject);
             return false;
+        }
+
+        // The op's height parts as layer reshapes: the same targets FiresSkyIslandTerrainEdit.FromTerrainOp gives an island's.
+        private const string LayerRoute = "vanilla TerrainOp";
+
+        private static void LayerFromTerrainOp(TerrainOp.Settings s, in TerrainLayer layer, Vector3 position)
+        {
+            if (s.m_level)
+            {
+                float level = position.y + s.m_levelOffset;
+                FiresLayerTerrainEdit.Reshape("level", LayerRoute, in layer, position, s.m_levelRadius, (dx, dz, surface) => level);
+            }
+            if (s.m_raise)
+            {
+                float r = Mathf.Max(s.m_raiseRadius, 2f), delta = s.m_raiseDelta, power = Mathf.Max(s.m_raisePower, 0.01f);
+                float cap = position.y + delta;
+                FiresLayerTerrainEdit.Reshape(delta >= 0f ? "raise" : "lower", LayerRoute, in layer, position, r, (dx, dz, surface) =>
+                {
+                    float w = Mathf.Pow(1f - Mathf.Clamp01(Mathf.Sqrt(dx * dx + dz * dz) / r), power);
+                    float t = surface + delta * w;
+                    return delta >= 0f ? Mathf.Min(t, Mathf.Max(cap, surface)) : Mathf.Max(t, Mathf.Min(cap, surface));
+                });
+            }
+            if (s.m_smooth)
+                FiresLogger.LogDebug($"[FiresLayers] terrain op on {layer.Describe()} at ({position.x:0.0},{position.y:0.0},{position.z:0.0}) via "
+                    + $"{LayerRoute}: smooth r={s.m_smoothRadius:0.#} skipped (no voxel smooth); the ground zone's TerrainComp untouched");
         }
 
         // Loud once, then quiet: a held brush would otherwise log every stroke.

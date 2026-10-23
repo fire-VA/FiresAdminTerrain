@@ -10,7 +10,7 @@ namespace VerdantsAscent.Terrain.Voxel
     //   * visuals/behaviours DISABLED not destroyed;
     //   * registered in m_namedPrefabs ONLY (never m_prefabs);
     //   * session re-insert on new ZNetScene (statics survive relog);
-    //   * spawns via the template-inactive flip (round-74 destroy-bug lesson:
+    //   * spawns via the template-inactive flip (destroy-bug lesson:
     //     activating at origin registers the ZDO in zone (0,0) → swept).
     public static class VoxelAnchorPrefab
     {

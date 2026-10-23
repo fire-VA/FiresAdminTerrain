@@ -70,7 +70,7 @@ namespace VerdantsAscent.Terrain.Performance
             return exempt;
         }
 
-        // The first zone a server generated used to classify every vegetation prefab here ([perf] R32: 197 ms inside the
+        // The first zone a server generated used to classify every vegetation prefab here (197 ms inside the
         // first explorer's zone). ZoneSystem.Start does it instead, while the world loads; a prefab added to the list later
         // (Expand World Data) is classified when first met. Only a server or host generates zones.
         internal static void WarmExemptions(ZoneSystem zoneSystem)

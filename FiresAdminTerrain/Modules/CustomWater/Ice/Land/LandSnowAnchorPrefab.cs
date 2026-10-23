@@ -8,7 +8,7 @@ namespace VerdantsAscent.Water.Core
     // exactly; only the prefab name and the attached anchor MonoBehaviour
     // type differ.
     //
-    // Round-26 plan §2.1. See LandIceAnchorPrefab for the architectural
+    // See LandIceAnchorPrefab for the architectural
     // rationale (one ZDO per disk-cluster, dedicated namespace, no
     // ice1 host / no per-load strip dance).
     public static class LandSnowAnchorPrefab

@@ -42,8 +42,8 @@ namespace VerdantsAscent.Terrain.BcImport
         /// <summary>
         /// The row that was right-clicked has no BC data. Valheim keeps the ORIGINAL world's own name in every
         /// backup's metadata and renders a row as "name (fileName)", so a backup can say which world it came
-        /// from - and on 2026-09-24 that is exactly what went wrong: the two visible Craters rows were both
-        /// backups, the refusal named the backup's file, and the world that did carry the data was never
+        /// from - and that is exactly what can go wrong: two visible rows can both be
+        /// backups, the refusal names the backup's file, and the world that does carry the data is never
         /// mentioned. Returns "" when there is nothing useful to add, so the message is unchanged in the
         /// ordinary case of a world that simply never had BetterContinents.
         /// </summary>
@@ -263,7 +263,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         // FAT's own record is the ONLY thing a load reads: no load ever converts, so there is no fallback. Copying the
         // BetterContinents file beside the clone used to be one, logged as "takes full ownership the first time it
-        // loads" - nothing did, and the clone generated as vanilla (2026-09-29 04:21, CratersBCWrap on the dedi).
+        // loads" - nothing did, and the clone generated as vanilla.
         private static bool TryGiveCloneTheData(string cloneName, BcWorldSettings settings, out string ownership)
         {
             if (BcWorldData.TryWrite(cloneName, FileHelpers.FileSource.Local, settings, out string writeFailure))

@@ -307,29 +307,15 @@ namespace VerdantsAscent.Terrain.Zones
             return $"[Skylands] Going to the skyland at ({top.x:0},{top.z:0}), top y={top.y:0}.";
         }
 
+        // The zone under the crosshair's HIT (ZoneModeAreaTool.TryGetAim: land, rock or a build, else where the view
+        // meets the sea). It used to intersect the view with the flat sea plane even over land, which lands past a hill you
+        // look at (often in the next zone), and fell back to "the neighbour in the look direction" when the view never
+        // reached sea level, so Close chunk sometimes closed the next zone instead of the one looked at.
         internal static bool TryGetLookedAtZone(out Vector2s zone)
         {
             zone = default;
-            var camera = Utils.GetMainCamera();
-            if (camera == null) return false;
-            Vector3 origin = camera.transform.position, direction = camera.transform.forward;
-            if (direction.y < -0.0001f)
-            {
-                float distance = (WaterLevel - origin.y) / direction.y;
-                if (distance > 0f && distance < LookReach)
-                {
-                    zone = ZoneSystem.GetZone(origin + direction * distance);
-                    return true;
-                }
-            }
-            var player = Player.m_localPlayer;
-            if (player == null) return false;
-            var here = ZoneSystem.GetZone(player.transform.position);
-            Vector3 flat = new Vector3(direction.x, 0f, direction.z);
-            if (flat.sqrMagnitude < 0.0001f) return false;
-            zone = Mathf.Abs(flat.x) >= Mathf.Abs(flat.z)
-                ? new Vector2s(here.x + (flat.x > 0f ? 1 : -1), here.y)
-                : new Vector2s(here.x, here.y + (flat.z > 0f ? 1 : -1));
+            if (!ZoneModeAreaTool.TryGetAim(out var point)) return false;
+            zone = ZoneSystem.GetZone(point);
             return true;
         }
 

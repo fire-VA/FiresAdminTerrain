@@ -163,7 +163,7 @@ namespace VerdantsAscent.Terrain.Zones
             RebindBrokenShaders(source.transform, prefab);
             if (prefab.name == ChaosHammerPrefab) RebindFxFromStaff(scene, prefab);
             // A dedicated server plays no sound. The first call also runs Core's one-time mixer harvest over every ZNetScene
-            // prefab, which landed in this join frame on the dedi (R51: 34 ms of the 44 ms scene wiring).
+            // prefab, which landed in this join frame on the dedi (34 ms of the 44 ms scene wiring).
             if (!FiresCore.Lifecycle.FiresMod.IsDedicatedServer) LiveAudioRouting.RouteWorldSfx(prefab);
         }
 
@@ -174,7 +174,7 @@ namespace VerdantsAscent.Terrain.Zones
         //
         // "Unsupported" alone misses most of them: a ripped shader that names a Fallback reports isSupported and draws
         // through it. The rip's Custom/Vegetation falls back to Legacy Shaders/Diffuse, so FiresSkyVines drew with no
-        // alpha test, as solid cards (RenderDoc, 2026-09-27 frame 13501). So a bundle copy is recognised by identity: a
+        // alpha test, as solid cards (seen in RenderDoc). So a bundle copy is recognised by identity: a
         // shader that is not the twin's live instance yet carries its name, or sits on the baked copy of the twin's
         // material. The bundle's own materials - the rune bands and the chaos core, authored on Standard - match
         // neither and keep exactly what they shipped with, as does every deliberate retint: the material is kept and

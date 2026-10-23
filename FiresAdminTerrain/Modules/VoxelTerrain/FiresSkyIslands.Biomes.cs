@@ -5,8 +5,8 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // Skyland biomes. Three in four skylands take the biome the world plans at their centre; the rest, and every
     // skyland over planned sea or Deep North, roll a random land biome. The roll hashes the island record, so every
-    // peer derives the same biome from the synced registry. Each biome dresses from its own 1.0 world-gen vegetation
-    // (Tools\ZONE_MODE_BIOME_DATA.md, appendix B), its ore, relic and loot nodes a small share of the top. Scales come
+    // peer derives the same biome from the synced registry. Each biome dresses from its own 1.0 world-gen vegetation,
+    // its ore, relic and loot nodes a small share of the top. Scales come
     // from the prefabs' measured sizes in the 1.0 rip.
     //
     // A dry skyland with room for it can also hold one of its biome's vanilla locations, spawned whole with its
@@ -150,6 +150,49 @@ namespace VerdantsAscent.Terrain.Voxel
                 float sx = point.x - isl.OffX, sz = point.z - isl.OffZ;
                 if (!IsSkyland(isl.Kind) || !Covers(in isl, sx, sz)) continue;
                 if (point.y - isl.OffY <= SkylandBottomAt(in isl, sx, sz) - IslandContactMargin) continue;
+                // A biome painted on the skyland (VoxelLayerPaint) is its biome there - the HUD, weather, spawns.
+                biome = VoxelLayerPaint.TryPaintedBiomeAt(point, out var painted) ? painted : isl.Biome;
+                return true;
+            }
+            return false;
+        }
+
+        // For FiresMinimapIslands: every skyland's shape stamped in its biome's map colour onto map pixels (size x size,
+        // pixSize metres each, centred on the world origin as vanilla's map). Returns the pixels stamped.
+        internal static int StampSkylands(Color32[] pixels, int size, float pixSize, System.Func<Heightmap.Biome, Color32> colorOf)
+        {
+            if (!Zones.ZoneModeRegistry.ModeActive || !Enabled) return 0;
+            int half = size / 2, stamped = 0;
+            float hp = pixSize * 0.5f;
+            foreach (var isl in s_islands)
+            {
+                if (!IsSkyland(isl.Kind)) continue;
+                var color = colorOf(isl.Biome);
+                float cx = WorldX(in isl), cz = WorldZ(in isl);
+                int x0 = Mathf.Max(0, Mathf.FloorToInt((cx - isl.R) / pixSize) + half), x1 = Mathf.Min(size - 1, Mathf.CeilToInt((cx + isl.R) / pixSize) + half);
+                int z0 = Mathf.Max(0, Mathf.FloorToInt((cz - isl.R) / pixSize) + half), z1 = Mathf.Min(size - 1, Mathf.CeilToInt((cz + isl.R) / pixSize) + half);
+                for (int z = z0; z <= z1; z++)
+                    for (int x = x0; x <= x1; x++)
+                    {
+                        float wx = (x - half) * pixSize + hp, wz = (z - half) * pixSize + hp;
+                        if (!Covers(in isl, wx - isl.OffX, wz - isl.OffZ)) continue;
+                        pixels[z * size + x] = color;
+                        stamped++;
+                    }
+            }
+            return stamped;
+        }
+
+        // The biome of the skyland whose shape covers a map point, by XZ alone (the large map's hover has no height):
+        // the island's own biome, the one StampSkylands draws there.
+        internal static bool TrySkylandBiomeOver(float wx, float wz, out Heightmap.Biome biome)
+        {
+            biome = Heightmap.Biome.None;
+            if (!Zones.ZoneModeRegistry.ModeActive || !Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
+            foreach (int k in list)
+            {
+                var isl = s_islands[k];
+                if (!IsSkyland(isl.Kind) || !Covers(in isl, wx - isl.OffX, wz - isl.OffZ)) continue;
                 biome = isl.Biome;
                 return true;
             }

@@ -249,9 +249,7 @@ namespace VerdantsAscent.Terrain.Zones
                 if (method != null && method.Invoke(null, null) is string path) return path;
             }
             catch { }
-            string world = ZNet.World?.m_name ?? "world";
-            string safe = string.Concat(world.Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + "_hammer.txt");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_hammer.txt");
         }
 
         private static T Field<T>(string name)

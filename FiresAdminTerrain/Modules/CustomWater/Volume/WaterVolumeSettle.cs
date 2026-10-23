@@ -27,7 +27,7 @@ namespace VerdantsAscent.Water.Core
         // How long the pour/settle animation runs before the gel locks
         // the shape. The viscosity ramp below eases flow to zero across
         // this window, so on a slope SOME water escapes downhill but a
-        // pool always survives (user spec: must not completely run off).
+        // pool always survives (water must never completely run off).
         private const float VOLUME_SETTLE_DURATION = 1.5f;
 
         // Extra grid margin around the ruler circle so settling water can
@@ -116,7 +116,7 @@ namespace VerdantsAscent.Water.Core
             CalculateCombinedBounds();
             _combinedBounds.Expand(new Vector3(VOLUME_SETTLE_MARGIN * 2f, 0f, VOLUME_SETTLE_MARGIN * 2f));
             SetupGrid();
-            // Round-67: fill-anchored PHYSICS probe (sees custom tiles,
+            // Fill-anchored PHYSICS probe (sees custom tiles,
             // rocks, pieces — GetGroundHeight is heightmap-blind).
             _groundProbeFillY = center.y;
             yield return SampleRealGroundAsync();
@@ -128,11 +128,11 @@ namespace VerdantsAscent.Water.Core
 
             // Initial pour: inside the ruler circle, a column from terrain
             // up to the fill level. Terrain above the fill level → dry.
-            // Round-68 — remember the pour cells: the settle loop re-tops
+            // Remember the pour cells: the settle loop re-tops
             // them to the fill level every frame until gel. Without this
             // the sim CONSERVES the poured volume, so as water spreads
-            // outward the level drains below the ruler — the user asked
-            // for "fills to the ring, settles into the depression, gels":
+            // outward the level drains below the ruler. The intent is
+            // "fills to the ring, settles into the depression, gels":
             // the circle is a maintained source until everything sets.
             float r2 = radius * radius;
             var pourCells = new System.Collections.Generic.List<int>(256);
@@ -171,7 +171,7 @@ namespace VerdantsAscent.Water.Core
                 for (int pass = 0; pass < VOLUME_SIM_PASSES_PER_FRAME; pass++)
                     FlowPass(column, next, w, h, viscosity);
 
-                // Round-68 — hold the fill level inside the pour circle
+                // Hold the fill level inside the pour circle
                 // until gel (see pourCells note above). Outflow into the
                 // surrounding depression keeps happening; the circle
                 // itself never drops below the ruler level.
@@ -210,7 +210,7 @@ namespace VerdantsAscent.Water.Core
             LogVolumeDiagnostics("volume GELLED", column, fillY);
         }
 
-        // Round-59 — placement diagnostics. The user reported swimmable-
+        // Placement diagnostics. For swimmable-
         // but-INVISIBLE water: swim triggers read _surfaceHeights (box
         // colliders — working), while the visual comes from _waterMesh +
         // _meshRenderer. This dump tells us in one test run which link
@@ -235,7 +235,7 @@ namespace VerdantsAscent.Water.Core
 
                 int meshVerts = _waterMesh != null ? _waterMesh.vertexCount : -1;
                 int meshTris = _waterMesh != null ? _waterMesh.triangles.Length / 3 : -1;
-                // Round-65 — isVisible is Unity's own frustum/cull verdict
+                // isVisible is Unity's own frustum/cull verdict
                 // (false = the camera never draws this renderer at all);
                 // renderQueue catches a wrapped material stuck at an opaque
                 // queue position (terrain then paints over the ZWrite-Off
@@ -253,7 +253,7 @@ namespace VerdantsAscent.Water.Core
                     $"| mesh verts={meshVerts} tris={meshTris} bounds={_waterMesh?.bounds.size} " +
                     $"| filter={filterState} renderer={rendState} mat={matName} layer={gameObject.layer} pos={transform.position}");
 
-                // Round-72 — the WORLD-Y ledger. Ruler said fillY; these
+                // The WORLD-Y ledger. Ruler said fillY; these
                 // lines say where every stage of the chain actually put
                 // the water at the ring center, and WHICH collider the
                 // ground probe believed. If the mesh is visibly below the
@@ -284,7 +284,7 @@ namespace VerdantsAscent.Water.Core
             }
         }
 
-        // Round-72 — one probe column, spelled out: every collider the
+        // One probe column, spelled out: every collider the
         // ground ray crosses (name/layer/worldY, top-down) and which Y
         // the picker actually chose for the sim. This is the line that
         // says "the probe used the heightmap 2m under your custom tile"
@@ -451,9 +451,9 @@ namespace VerdantsAscent.Water.Core
         // `fillY` = the IH ruler level (ground + PgUp/PgDn offset). The
         // spring POOL (source cells) fills up to this level (at least the
         // layer thickness), then the stream flows onward at `thickness`.
-        // Round-59: added so the set level is meaningful for springs —
+        // Added so the set level is meaningful for springs:
         // raise the ruler to get a deeper source pool that overflows.
-        // Round-80 — bankOffset X: the water surface fills to (local bank
+        // bankOffset X: the water surface fills to (local bank
         // height − X) per cell, so the sheet follows the channel slope
         // instead of levelling to one flat Y (which vanilla LiquidVolume
         // did). fillY = the ruler source-pool level.
@@ -482,7 +482,7 @@ namespace VerdantsAscent.Water.Core
             return combiner;
         }
 
-        // Round-80 — per-cell local BANK height (the containing rim), used
+        // Per-cell local BANK height (the containing rim), used
         // to fill each cell to bank−X. Bank = the highest terrain within a
         // scan neighbourhood. Recomputed per spring after terrain sampling.
         private float[] _springBankHeights;
@@ -529,11 +529,11 @@ namespace VerdantsAscent.Water.Core
             CalculateCombinedBounds();
             _combinedBounds.Expand(new Vector3(SPRING_RANGE * 2f, 0f, SPRING_RANGE * 2f));
             SetupGrid();
-            // Round-67: fill-anchored PHYSICS probe (sees custom tiles,
+            // Fill-anchored PHYSICS probe (sees custom tiles,
             // rocks, pieces — GetGroundHeight is heightmap-blind).
             _groundProbeFillY = fillY;
             yield return SampleRealGroundAsync();
-            // Round-80 — local bank heights drive the sloped fill cap.
+            // Local bank heights drive the sloped fill cap.
             ComputeSpringBankHeights();
 
             int w = _gridWidth, h = _gridHeight;
@@ -636,7 +636,7 @@ namespace VerdantsAscent.Water.Core
             LogVolumeDiagnostics("spring GELLED", column, fillY);
         }
 
-        // ── Real-ground sampling (round-60) ──────────────────────────────
+        // ── Real-ground sampling ──────────────────────────────
         //
         // ROOT CAUSE of "swimmable but invisible" volumes/springs: the
         // combiner's SampleTerrainHeightAt deliberately uses
@@ -647,16 +647,16 @@ namespace VerdantsAscent.Water.Core
         // the water columns get built against ground metres below the
         // real surface → the finished mesh is BURIED under the visible
         // dirt (invisible) while the swim-trigger boxes span upward far
-        // enough to poke above it (swimmable). Diagnosed from the
-        // round-59 log: terrain=[21.3..33.8] under a flat dug area the
+        // enough to poke above it (swimmable). Seen in a log as
+        // terrain=[21.3..33.8] under a flat dug area the
         // player stood on at Y≈30.
         //
-        // Round-67 — PHYSICS-PROBE ground sampling. The round-60 fix used
-        // ZoneSystem.GetGroundHeight and its comment claimed that covers
-        // custom tiles — it does NOT. GetGroundHeight is HEIGHTMAP-ONLY
-        // (proven 2026-07-06, the companion ground-snap bug): it is blind
+        // PHYSICS-PROBE ground sampling. ZoneSystem.GetGroundHeight
+        // is not enough either: it does NOT cover
+        // custom tiles. GetGroundHeight is HEIGHTMAP-ONLY:
+        // it is blind
         // to FAT custom terrain, rocks, and build pieces, and disagrees
-        // with the visible ground by METERS. Result (07-10 test, spring on
+        // with the visible ground by METERS. Result (spring on
         // a built cliff): terrain=[23.3..56.6] = the meadow heightmap
         // under the build → water columns filled from ~21m below the
         // player's feet → water far below the ruler, vertical mesh sheets

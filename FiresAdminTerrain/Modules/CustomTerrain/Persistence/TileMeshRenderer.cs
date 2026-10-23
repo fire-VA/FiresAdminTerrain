@@ -44,7 +44,7 @@ namespace VerdantsAscent.Terrain.Persistence
         private Color32[] _colors;
         private int[] _triangles;
 
-        // 2026-05-25 round-15 — per-tile paint mask + material instance.
+        // Per-tile paint mask + material instance.
         //
         // BEFORE: every tile shared the SAME cached Custom/Heightmap material
         // and we never bound a `_ClearedMaskTex`. Result: Paint[] data was
@@ -81,7 +81,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // _renderMesh / _colliderMesh) so each side's null+reassign cycle
         // doesn't touch the other.
         //
-        //   * RENDER mesh activates within 600m of tile center per user
+        //   * RENDER mesh activates within 600m of tile center as a
         //     requirement. 12m hysteresis (assign at 600m, release at 612m)
         //     so a player wandering near the edge doesn't flicker.
         //   * COLLIDER mesh activates within 60m of tile EDGE — 32m tile
@@ -97,7 +97,7 @@ namespace VerdantsAscent.Terrain.Persistence
         private bool _colliderAssigned;     // collider currently has our mesh
         private bool _renderAssigned = true; // render starts assigned (set in Awake)
         private float _nextLodCheckTime;    // throttle for distance polls
-        // 0.25s = 4 checks/sec. Was 0.5s, halved 2026-05-25 so a player
+        // 0.25s = 4 checks/sec (rather than 0.5s), so a player
         // entering range gets collision within ~0.25s instead of ~0.5s.
         // Per-check cost is one Vector3 distance + bool checks; negligible
         // even with 50+ tile renderers active.
@@ -513,7 +513,7 @@ namespace VerdantsAscent.Terrain.Persistence
                     h - tileWorldYOffset,
                     j * TerrainTile.VERTEX_SPACING - TerrainTile.TILE_SIZE * 0.5f);
 
-                // 2026-05-25 round-15: UV0 = 0..1 across the tile, matching
+                // UV0 = 0..1 across the tile, matching
                 // vanilla Heightmap.RebuildRenderMesh:
                 //   s_tempUVs.Add(new Vector2(i / m_width, j / m_width))
                 // The Custom/Heightmap shader samples `_ClearedMaskTex`
@@ -584,18 +584,18 @@ namespace VerdantsAscent.Terrain.Persistence
             FillMesh(_renderMesh, t);
             FillMesh(_colliderMesh, t);
 
-            // Round-63 — seam-consistent BORDER NORMALS. RecalculateNormals
+            // Seam-consistent BORDER NORMALS. RecalculateNormals
             // (inside FillMesh) only sees THIS tile's triangles, so a
             // shared border vert gets a different normal on each side of
             // the seam → a hard lighting crease along every tile border
             // even when the heights are perfectly stitched (the "weird
-            // hard edges" in the user's screenshots). Overwrite border-
+            // hard edges"). Overwrite border-
             // vert normals with analytic central-difference normals whose
             // neighbor samples cross the tile boundary — both tiles then
             // compute IDENTICAL normals at shared verts by construction.
             ApplySeamNormals(_renderMesh, size);
 
-            // 2026-05-25 round-15 — rebuild and bind the per-tile paint mask
+            // Rebuild and bind the per-tile paint mask
             // so paved/dirt/cultivated colors from `_tile.Paint[]` actually
             // appear on the rendered surface. Before this hook the data was
             // persisted but the shader had no per-tile `_ClearedMaskTex` to
@@ -702,7 +702,7 @@ namespace VerdantsAscent.Terrain.Persistence
             }
         }
 
-        // 2026-05-25 round-15 — rebuild the per-tile paint mask texture from
+        // Rebuild the per-tile paint mask texture from
         // tile.Paint[] and bind it to the renderer's per-tile material
         // instance. Mirrors vanilla Heightmap.RebuildRenderMesh which does:
         //   m_paintMask.SetPixels(...);
@@ -736,7 +736,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 };
             }
 
-            // 2026-05-25 round-16: copy Paint[] into texture pixels with
+            // Copy Paint[] into texture pixels with
             // zero-alpha auto-heal. Vanilla convention is:
             //   (0,0,0,1)  = m_paintMaskNothing — no paint, vegetation present
             //                (this is what the default unmodified tile renders)
@@ -798,7 +798,7 @@ namespace VerdantsAscent.Terrain.Persistence
             _materialInstance.SetTexture(s_clearedMaskTexProp, _paintMask);
         }
 
-        // Round-63 — analytic normals for border verts, sampled ACROSS
+        // Analytic normals for border verts, sampled ACROSS
         // tile boundaries so adjacent tiles agree exactly at shared
         // verts. Central differences over the world height field:
         //   n = normalize(hL−hR, 2·spacing, hD−hU)

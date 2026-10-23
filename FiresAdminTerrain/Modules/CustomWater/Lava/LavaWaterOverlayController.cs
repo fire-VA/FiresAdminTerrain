@@ -18,7 +18,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Height of the water overlay above the lava surface (meters).
         ///
-        /// 2026-05-25 round-4: TIGHTENED from 0.25f → 0.002f per user.
+        /// Kept tiny (0.002f rather than 0.25f).
         /// At 0.25m there was a visible pinkish-orange glow at the lava
         /// edges where the wider water-overlay mesh extended past the
         /// lava and over surrounding terrain. At 0.002m the overlay is

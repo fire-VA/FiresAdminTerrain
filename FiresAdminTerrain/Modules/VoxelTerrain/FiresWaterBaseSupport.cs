@@ -16,13 +16,13 @@ namespace VerdantsAscent.Terrain.Voxel
         // cells sampled _waterS directly (TryGetWaterSurfaceSmooth) instead of the
         // reconcile's bank-governed envelope, NOTHING kept a cell below its local
         // banks, so meanders/confluences/steep reaches floated the sheet up over
-        // the bank (user screenshots: water draped across the surface, leveled
+        // the bank (water draped across the surface, levelled
         // over the banks). Enforced per-cell at full 2m res, PERPENDICULAR to the
         // local flow so a reach never caps itself against its own up/downstream
         // bed. Only LOWERS water; a no-op on well-formed channels.
         // WATERSHED — after the lakes drop to their real level, make the river network CONTINUOUS into
         // them: source → stream → river → lake → river → … → ocean. A river reach touching a LOWER flat
-        // body either SMOOTHS down to meet it (gentle drop) or WATERFALLS in (steep drop), user's call:
+        // body either SMOOTHS down to meet it (gentle drop) or WATERFALLS in (steep drop), by design:
         // a Dijkstra up-river from every body pulls each reach down to (body + gentle slope × distance)
         // — but only where the total drop is smoothable; bigger drops are left as a fall. Where a reach
         // reaches the body level it merges with it. Rivers already below a body are left (it drains in).
@@ -84,7 +84,7 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresLogger.LogInfo($"[FiresWorldGen] watershed: {lowered:N0} river cells sloped down to meet lakes/ocean; {waterfalls:N0} steep confluences left as waterfalls — network flows source→lake→river→ocean.");
         }
 
-        // ═══ WATER-CLASS CONSOLIDATION (2026-08-09, user: "consolidate all generation logic using the correct data") ═══
+        // ═══ WATER-CLASS CONSOLIDATION (all generation logic uses the correct data) ═══
         // The ONE reconcile that classifies still bodies — replacing the DEAD NormalizeBasinWater "basin walk"
         // (its only caller ApplyWaterToImport has no callers, so it never ran → the class grid could NEVER label
         // lake/pond/frozen → lake=0, and every planner lake got tagged RIVER, given RiverRelief, and drawn as
@@ -95,9 +95,9 @@ namespace VerdantsAscent.Terrain.Voxel
         // BuildReconciledSurface so its `owned` test (keeps the body's own level in _surfS) and the class-fill's
         // WC_NONE preserve-guard both see the stamps. _plan persists in the .fgen, so this fires on gen AND load.
         // `g`/`w` = the FINAL 2m ground + water fields the world renders from. Coverage is taken from THEM,
-        // not from the plan's footprint mask (user 2026-08-11: "the map overlay shows this lake extends to
-        // where this river is, but it doesn't in reality … the studio needs to represent what's actually in
-        // game"). The plan decides WHICH KIND of body a cell belongs to; whether there is water there at all
+        // not from the plan's footprint mask (the map overlay showed a lake extending to
+        // where a river was, which was not so in game; the studio must represent what is actually in
+        // game). The plan decides WHICH KIND of body a cell belongs to; whether there is water there at all
         // is the field's call — it is what the sheet, physics and veg all read. Stamping the raw footprint
         // painted 36,521 dry 8m cells as water on a single seed (studio n=10501, seed 220092304), so the map
         // drew lakes over dry ground and every WaterClassAt-based audit inherited the same fiction.
@@ -116,7 +116,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (b.Kind == WaterBodyKind.Marsh) { wc = WC_SWAMP; marsh++; }
                 else
                 {
-                    // STRICTLY-FROZEN all year (user): mountain/frostreach cold bodies. A Tarn IS a cold cirque lake;
+                    // STRICTLY-FROZEN all year: mountain/frostreach cold bodies. A Tarn IS a cold cirque lake;
                     // a Lake/Pond whose ground biome is Mountain(3)/Frostreach(7) freezes too. Distinct from lowland
                     // lakes (seasonal freeze by temperature). Sample the biome at the body centroid.
                     byte bio = bm != null ? bm[Mathf.Clamp(b.Gz0 + b.H / 2, 0, n - 1) * n + Mathf.Clamp(b.Gx0 + b.W / 2, 0, n - 1)] : (byte)0;
@@ -144,9 +144,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
             FiresLogger.LogInfo($"[FiresWorldGen] body classes stamped from plan: {_plan.Bodies.Count} bodies (lake {lakes}, pond {ponds}, frozen {frozen}, marsh {marsh}) → {stamped} 8m class cells; {skippedDry:N0} footprint cell(s) SKIPPED as dry in the field (the map now shows only water the world renders); river mask cleared over bodies.");
-            // ═══ HIGH / FROZEN WATER CENSUS — "am I placing any at all, and WHERE?" (2026-08-14) ════════════
-            // (user: "I need a way to find frozen water bodies because I'm not sure we're placing any frozen
-            // lakes or high elevation water".) A count alone cannot answer that — it says how many exist, not
+            // ═══ HIGH / FROZEN WATER CENSUS — "am I placing any at all, and WHERE?" ════════════
+            // (A way to find frozen water bodies, to check that frozen
+            // lakes and high elevation water are placed at all.) A count alone cannot answer that — it says how many exist, not
             // whether you can ever reach one. This lists the biggest by SIZE with world coordinates and surface
             // level, so they can be flown to directly (the map takes a right-click teleport), and reports the
             // altitude spread so "no high water" is answerable as a fact rather than an impression.
@@ -186,7 +186,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        // (v132) WETLAND RECLASSIFICATION — the water is not too much, it is at the wrong depth.
+        //  WETLAND RECLASSIFICATION — the water is not too much, it is at the wrong depth.
         //
         // `PriorityFloodFill` fills every hollow to its SPILL level and leaves it brim-full forever, because it
         // has no evaporation term. That is only right for a basin with enough inflow to overflow. A genuinely
@@ -202,7 +202,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // also a geometric reason to stop there — draining a steep 22 m bowl to a 1 m sheet would not make a
         // swamp, it would very nearly DELETE it, because 1 m of water covers almost none of a steep basin.
         //
-        // ⚠⚠ THIS PASS CLASSIFIES. IT DOES NOT SET A LEVEL — and that is the whole point (v133).
+        // ⚠⚠ THIS PASS CLASSIFIES. IT DOES NOT SET A LEVEL — and that is the whole point.
         //
         // Until v133 it also lowered `w` to a ~1 m sheet and wrote `w[c] = h[c]` on the cells left standing.
         // That looked like the fix and was measurably the opposite, because `w` IS `_fillTable` and TWO passes
@@ -305,7 +305,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return Math.Max(RUNOFF_MIN, (precip * wet - evap) * RUNOFF_SCALE);
         }
 
-        // (v129) POTHOLE FILL — take the noise depressions out of the TERRAIN before any water logic sees them.
+        //  POTHOLE FILL — take the noise depressions out of the TERRAIN before any water logic sees them.
         //
         // Measured on seed 530442569 (BASIN SIZE HISTOGRAM): the land carries 47,313 closed basins, and basins of
         // 64 cells or fewer are **90.7% of all of them while holding 1.8% of the filled area**. The 423 basins
@@ -354,7 +354,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return filled;
         }
 
-        // (v128) FLAT RESOLUTION — the fix the straight-line bundles actually needed.
+        //  FLAT RESOLUTION — the fix the straight-line bundles actually needed.
         //
         // A priority-flood fill gives every cell in a depression the SAME spill elevation. Inside such a flat
         // there is no local information at all: every neighbour is equal, so steepest descent — by raw drop, by
@@ -411,13 +411,13 @@ namespace VerdantsAscent.Terrain.Voxel
             return null;
         }
 
-        // (v128) THE RIVER ENDS AT THE WATERLINE — measured, not assumed.
+        //  THE RIVER ENDS AT THE WATERLINE — measured, not assumed.
         //
         // On seed 530442569, decoded straight out of the shipped artifact, 220,643 of 549,837 river cells —
         // **40.13%** — sat on ground at or below SEA. Those are river markings inside the ocean: rasterized,
         // carved, banked and saved, then hidden at render time by the v126 cull. Hiding it was never enough,
         // because the CARVE already happened: what the player finds at a river mouth is a dry trench and a
-        // raised rim running out under the water (the user's "messed up terrain along their paths"), and the
+        // raised rim running out under the water ("messed up terrain along their paths"), and the
         // world file carries a third of a million cells of river that nothing will ever draw.
         //
         // v126/v127 established the right ownership test — `hOrig <= SEA` means the sea owns this column — but

@@ -5,7 +5,7 @@ namespace VerdantsAscent.Terrain.Lifecycle
 {
     // Multiplayer sync for RegionScrubber operations.
     //
-    // REQUEST PATTERN (per user choice, MASTER_GAMEPLAN.md §11 Q2):
+    // REQUEST PATTERN:
     //   1. Client invokes RPC_REQUEST_SCRUB via Everybody (reaches server).
     //   2. Server-only handler validates AdminSyncing.IsAdmin(sender).
     //      Non-admin → log + reject. Admin (or local server self-call) →
@@ -29,6 +29,7 @@ namespace VerdantsAscent.Terrain.Lifecycle
         private const string RPC_APPLY_SCRUB   = "FiresAdminTerrain_RegionScrub_Apply";
 
         private static bool _registered;
+        private static ZRoutedRpc s_rpcOn;   // Also re-register on a new ZRoutedRpc (one per connection)
 
         // Real handler count from the last Register() — feeds the 📡 RPCs
         // mini-banner (VAFatLoadSummary.EmitRpcs).
@@ -42,7 +43,8 @@ namespace VerdantsAscent.Terrain.Lifecycle
         {
             var rpc = ZRoutedRpc.instance;
             if (rpc == null) return;
-            if (_registered) return;
+            if (ReferenceEquals(s_rpcOn, rpc)) return;   // instance identity only: a reset flag never re-registers on the same bus
+            s_rpcOn = rpc;
 
             rpc.Register<ZPackage>(RPC_REQUEST_SCRUB, (sender, pkg) => RPC_HandleRequest(sender, pkg));
             rpc.Register<ZPackage>(RPC_APPLY_SCRUB,   (sender, pkg) => RPC_HandleApply(sender, pkg));

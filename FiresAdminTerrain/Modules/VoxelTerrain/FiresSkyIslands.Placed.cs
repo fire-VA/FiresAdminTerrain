@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // Skylands laid down from blueprints (Fire, 2026-09-27, "Do the living refactor"; Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md).
+    // Skylands laid down from blueprints.
     // A saved skyland is its registry record, and placing one adds that record again with an offset, so the copy is a real
     // skyland: its far view, water, falls, caves, biome and dressing rules all work, and it derives the same shape as the
     // island it was saved from because every field it derives from stays in that island's frame. ZoneModeSkylandBlueprint
@@ -82,7 +82,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        // A record saved before the seeds travelled with it (73 bytes, FAT 0.2.573) is read as format 2.
+        // A record saved before the seeds travelled with it (73 bytes) is read as format 2.
         private static bool TryReadRecord(byte[] record, out Island isl)
         {
             isl = default;
@@ -97,7 +97,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // An island at home in this world is grown by this world's own generator, exactly as the one it was saved from
         // (caves included: where a cave mouth may open follows the home world's rivers, which only the home world knows).
-        // From a world with another seed it keeps its home seeds and biome. A 0.2.573 record carries no seeds: the
+        // From a world with another seed it keeps its home seeds and biome. An old 73-byte record carries no seeds: the
         // blueprint's world seed stands in, and its biome is rolled here.
         private static void SettleSeeds(ref Island isl, int homeSeed)
         {

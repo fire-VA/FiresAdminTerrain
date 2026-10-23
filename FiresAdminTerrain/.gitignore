@@ -22,3 +22,16 @@ Thumbs.db
 # Local secrets (none expected in this project but defensive)
 *.env
 *.secret
+
+# Test-only tools: kept out of the public source (the csproj compiles them only when present).
+Modules/Testing/
+Modules/VoxelTerrain/FatWetMemoCheck.cs
+Modules/VoxelTerrain/FatShorePoses.cs
+Modules/ZoneMode/FatContentTests.cs
+
+# Internal working notes (plans, audits, handoffs).
+Docs/
+Modules/**/*_PLAN.md
+Modules/**/*_CHANGES.md
+Modules/**/BIOME_PAINT_IMPLEMENTATION.md
+*.bak*

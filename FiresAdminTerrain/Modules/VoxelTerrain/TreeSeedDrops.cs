@@ -21,7 +21,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // to drop. They are counted and named in one line, and left for the invented-seed stage.
     internal static class TreeSeedDrops
     {
-        private const string Section = "VoxelTerrain Tree Seeds";
+        private const string Section = "Voxel Terrain - Tree seeds";
         private const float DefaultChance = 0.3f;
         private const int DefaultMin = 1;
         private const int DefaultMax = 3;

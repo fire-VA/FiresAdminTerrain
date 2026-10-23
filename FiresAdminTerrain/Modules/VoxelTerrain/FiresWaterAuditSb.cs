@@ -17,9 +17,9 @@ namespace VerdantsAscent.Terrain.Voxel
     // coordinate rather than a pass/fail, because a yes/no instrument silently eats "cannot tell".
     public static partial class FiresWorldGenBase
     {
-        // (2026-08-11, user: "your studio reads are full of shit … the map overlay shows this lake extends to
-        // where this river is, but it doesn't in reality" / "the studio needs to represent what's actually in
-        // game, the actual levels the water sits at") CLASS-vs-FIELD TRUTH — run AFTER the fields are final
+        // (The map overlay showed a lake extending to
+        // where a river was, which was not so in game; the studio must represent what is actually in
+        // game, the actual levels the water sits at.) CLASS-vs-FIELD TRUTH — run AFTER the fields are final
         // (_gridS/_waterS packed, _classS built), because those are what the game renders and queries from.
         // The world map + every WaterClassAt measurement read _classS, which StampBodyClasses fills from the
         // PLAN's body masks; the world itself draws from the 2m field via TryGetWaterSurfaceSmooth. Where the
@@ -61,8 +61,8 @@ namespace VerdantsAscent.Terrain.Voxel
             var sb = new System.Text.StringBuilder();
             foreach (var e in samp) sb.Append($"\n    class {e.c} at ({e.wx:0},{e.wz:0}) — field says DRY");
             string lvlPart = lvlErrN > 0 ? $" Level agreement over {lvlErrN:N0} wet cells: mean |Δ| {lvlErrSum / lvlErrN:0.00}m, worst {lvlErrMax:0.00}m." : "";
-            // MARSH TRUTH (user 2026-08-13: "we cannot use just the studio's data for detecting where actual
-            // water bodies lie … in-game water bodies tend to be SMALLER than what's shown on the map"). The
+            // MARSH TRUTH (the studio's data alone cannot say where actual
+            // water bodies lie; in-game water bodies tend to be SMALLER than what is shown on the map). The
             // planner's "placed marsh N" is a PLAN count and says nothing about what the world draws — a marsh
             // can be planned and render as almost nothing. This is the number marsh work is judged on.
             string marshPart = swampClass > 0
@@ -74,7 +74,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // The reconciled surface level the class/label grid carries at a world position (−9999 when none).
         private static float SampleSurfaceLevel(float wx, float wz)
         {
-            var s = _surfS;
+            var s = SurfF;   // Packed view
             if (s == null || _classN <= 0) return -9999f;
             int x = Mathf.Clamp(Mathf.FloorToInt((wx + _half) / _classCell), 0, _classN - 1);
             int z = Mathf.Clamp(Mathf.FloorToInt((wz + _half) / _classCell), 0, _classN - 1);
@@ -86,8 +86,8 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             FiresLogger.LogInfo($"[FiresWaterDiag] CANYON FLOOR — {s_canyonShelfCells:N0} cell(s) cut to a walkable shelf: bowl | {CANYON_SHELF_M:0.0} m flat at {CANYON_FLOOR_UP:0.0} m above the water | cliff at {CANYON_CLIFF_GRADE:0}:1. Fires only where the thalweg's own ground stands {CANYON_SLOT_M:0} m above the water - the same test IsCanyonWaterAt uses, so the shaping and the in-game label cannot drift - and it only ever LOWERS, so no working river can move. 0 here means no reach in this world is that deeply incised.");
             FiresLogger.LogInfo($"[FiresWaterDiag] CANYON EARNED?: cells cut >20m by reach width — brook(<5m) {s_deepBrook:N0} · stream(5-10m) {s_deepStream:N0} · river(10-15m) {s_deepRiver:N0} · trunk(>15m) {s_deepTrunk:N0}. A canyon cut by a brook is not earned; one cut by a trunk is.");
-            // (TRACE 2026-08-11, user: "the river just stops abruptly even tho the river bank is carved out and
-            // you can clearly see where it's meant to meet the ocean") ESTUARY AUDIT — coastal channel cells
+            // (TRACE: a river stopped abruptly although its bank was carved out and
+            // clearly meant to meet the ocean.) ESTUARY AUDIT — coastal channel cells
             // (carved river mask, ground at/below SEA+2) that carry NO water. A dry carved trench running into
             // the sea is the mouth reach failing, which is a different defect from the inland breaks.
             {
@@ -112,7 +112,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     FiresLogger.LogInfo($"[FiresWaterDiag] ESTUARY AUDIT: {coastal:N0} coastal channel cells (ground ≤ SEA+2), {coastalDry:N0} of them DRY — a carved trench with no water running into the sea.{sb2}");
                 }
             }
-            // (TRACE) SURFACE STEPS — user: "multiple water levels rather than evening out and leveling off".
+            // (TRACE) SURFACE STEPS — multiple water levels rather than evening out and levelling off.
             // Scan every WET river cell against its WET river neighbours: a level jump between two touching wet
             // cells is a hard step in the sheet (the Dijkstra seedIdx gives each cell ONE stem's level, so two
             // stems' territories meet in a Voronoi boundary and the surface folds there).
@@ -378,10 +378,10 @@ namespace VerdantsAscent.Terrain.Voxel
         // How deep the slot is dug and how wide it reaches. A canyon is broad enough to hold a floor and a
         // pool; a gorge is a slot the river could not widen (§1b), so it is deeper relative to its width.
         // ⚠ These are the first numbers in the generator that dig deeper than the river carve, so they are
-        // the ones to re-measure with `gorgeprobe` (trap 3) — and with the CAVE rule the user set: a void
+        // the ones to re-measure with `gorgeprobe` (trap 3) — and with the CAVE rule: a void
         // directly BELOW the floor must be sealed so the floor cannot collapse into a sinkhole, while
         // breaking into the SIDE of one is wanted (lagoons, and terrain worth exploring).
-        // ═══ THE CANYON FLOOR SECTION (user, 2026-08-31) ══════════════════════════════════════════════
+        // ═══ THE CANYON FLOOR SECTION ══════════════════════════════════════════════
         // "a cliff wall, a meter or two of terrain, and THEN the carved depression of the river in the
         // center, another meter or two of terrain, then the cliff wall". CANYON_SLOT_M is deliberately the
         // same 12 m as IsCanyonWaterAt's WALL_M so the shaping and the in-game label share one definition.
@@ -392,8 +392,8 @@ namespace VerdantsAscent.Terrain.Voxel
         const float CANYON_DIG_M = 22f;   // floor this far below the reach it follows
         const float CANYON_DIG_R = 26f;   // ...over this reach, flat to 45% then a wall
         const float GORGE_DIG_M  = 16f;
-        // (2026-08-20, user: "canyons need to carve out a bit wider to allow for an actual river to run
-        // through the bottom of them, right now they tighten up quite a bit at the bottoms".) 11 -> 14 m.
+        // (Canyons carve out a bit wider to allow for an actual river to run
+        // through the bottom of them; they had tightened up at the bottoms.) 11 -> 14 m.
         // The flat floor is FLOOR_FRAC of the reach on each side, so 11 m gave a 15 m floor — and a GORGE is
         // the common case here (9,044 classified nodes against a canyon's 3,515), so most of what reads as
         // canyon in game is this number. A river is up to WidthMax = 20 m, so a 15 m floor cannot hold one:
@@ -425,7 +425,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // measured necessity, not taste: without them the classifier produced 884 reaches averaging 24 m.
         const float INC_WINDOW_M = 400f;      // reach window the relief/rock/grade terms are averaged over
         // ⚠ THE TWO ARE NOT THE SAME LENGTH, AND §1b SAYS SO: a gorge is "narrower and steeper than a
-        // canyon, and usually SHORTER". One shared sustain length was my own conflation, and it measured as
+        // canyon, and usually SHORTER". One shared sustain length was a conflation, and it measured as
         // CANYON 0 GORGE 0 with every one of 283 stamped reaches demoted — including gorges of 100-320 m,
         // which are gorges at exactly the size a gorge comes in. A canyon has to be long because it is a
         // river holding its course across a rising plateau; a gorge is a short crossing of resistant rock.

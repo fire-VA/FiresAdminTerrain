@@ -90,20 +90,50 @@ namespace VerdantsAscent.Water.Core
         /// Checks BOTH new terrain-style water (WaterMeshCombiner) AND legacy box-based water.
         /// Returns float.MinValue if no water at position.
         ///
-        /// 2026-05-25 round-18: SOLID liquid types (Snow, Ice) are excluded
+        /// SOLID liquid types (Snow, Ice) are excluded
         /// from this query. They report a surface Y like everything else for
         /// internal mesh-gen purposes, but the consumers of this method are
         /// Character.InWater / InLiquid / IsSwimming / GetLiquidLevel
         /// patches in CustomWaterPatches — those treat any returned level as
         /// "player is swimming in water". For a snow drift that means
-        /// walking UNDER it = treated as swimming, which is the bug the
-        /// user kept reporting. Ice is similarly solid (you fall through
+        /// walking UNDER it = treated as swimming, which is wrong.
+        /// Ice is similarly solid (you fall through
         /// holes for swim detection, but the ice surface itself isn't
         /// water). Lava/Tar/Water/BoilingWater/FreezingWater all stay in.
         /// </summary>
+        private const float ShaftBedMargin = 0.3f;   // just below the river bed, the shaft is dry
         public static float GetWaterLevelAt(Vector3 worldPos)
+            => Mathf.Max(ScannedLevelAt(worldPos), GeneratedLevelAt(worldPos));   // split for FatWaterLevelGate; same result
+
+        // The combiners + legacy box water (a scan of every one; FatWaterLevelGate can skip it by place).
+        internal static float ScannedLevelAt(Vector3 worldPos)
+            => ScannedLevelAt(worldPos, global::VerdantsAscent.Water.FatWaterLevelGate.IndexOn);
+
+        // useIndex = only the combiners/legacy waters FatWaterLevelGate's 64 m zone index lists for this point
+        // (each listed in every zone its bounds touch, plus a margin), instead of all of them.
+        internal static float ScannedLevelAt(Vector3 worldPos, bool useIndex)
         {
             float highestLevel = float.MinValue;
+            if (useIndex)
+            {
+                var near = global::VerdantsAscent.Water.FatWaterLevelGate.CombinersAt(worldPos);
+                for (int i = 0; i < near.Count; i++)
+                {
+                    var combiner = near[i];
+                    if (combiner == null || combiner.CustomLiquidType.IsSolid()) continue;
+                    float level = combiner.GetWaterSurfaceAt(worldPos);
+                    if (level > highestLevel) highestLevel = level;
+                }
+                var nearLegacy = global::VerdantsAscent.Water.FatWaterLevelGate.LegacyAt(worldPos);
+                for (int i = 0; i < nearLegacy.Count; i++)
+                {
+                    var water = nearLegacy[i];
+                    if (water == null) continue;
+                    float level = water.GetWaterSurfaceAt(worldPos);
+                    if (level > highestLevel) highestLevel = level;
+                }
+                return highestLevel;
+            }
 
             // Check NEW terrain-style water combiners first (priority)
             foreach (var combiner in WaterMeshCombiner.AllCombiners)
@@ -125,7 +155,13 @@ namespace VerdantsAscent.Water.Core
                 if (level > highestLevel)
                     highestLevel = level;
             }
+            return highestLevel;
+        }
 
+        // The generated rivers/lakes (a field lookup, never skipped by place).
+        internal static float GeneratedLevelAt(Vector3 worldPos)
+        {
+            float highestLevel = float.MinValue;
             // GENERATED river/lake water. It reports here like every other custom
             // water source, so vanilla's swim path (the Character.InWater /
             // InLiquid / IsSwimming / GetLiquidLevel patches) treats it EXACTLY
@@ -134,6 +170,9 @@ namespace VerdantsAscent.Water.Core
             // per-frame level writes and bounced the player between swim and
             // walk every few frames.
             float gen = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(worldPos);
+            // Inside a big sinkhole's shaft and below the river bed at
+            // its lip, the river above is not this point's water (no swimming in mid-air); the pond's own sheet (a combiner, above) is.
+            if (VerdantsAscent.Terrain.Voxel.FatSinkFallCuts.BelowShaftBed(worldPos, ShaftBedMargin)) gen = float.MinValue;
             if (gen > highestLevel)
                 highestLevel = gen;
 
@@ -145,7 +184,17 @@ namespace VerdantsAscent.Water.Core
         /// Checks both new and legacy water systems.
         /// </summary>
         public static CustomWaterBase GetWaterAt(Vector3 worldPos)
+            => GetWaterAt(worldPos, global::VerdantsAscent.Water.FatWaterLevelGate.IndexOn);
+
+        internal static CustomWaterBase GetWaterAt(Vector3 worldPos, bool useIndex)   // see ScannedLevelAt
         {
+            if (useIndex)
+            {
+                var near = global::VerdantsAscent.Water.FatWaterLevelGate.LegacyAt(worldPos);
+                for (int i = 0; i < near.Count; i++)
+                    if (near[i] != null && near[i].IsInsideBounds(worldPos)) return near[i];
+                return null;
+            }
             // Check legacy box-based water (returns CustomWaterBase)
             foreach (var water in s_allWater)
             {
@@ -244,7 +293,7 @@ namespace VerdantsAscent.Water.Core
         {
             var disk = new WaterDisk(position, radius, maxDepth, liquidType);
 
-            // Register with combiner system, through the server so it persists (0.2.681, see Place)
+            // Register with combiner system, through the server so it persists (see Place)
             Place(disk);
 
             FiresLogger.LogVerbose($"[CustomWaterManager] Created water disk at {position}, radius={radius}");
@@ -266,7 +315,7 @@ namespace VerdantsAscent.Water.Core
         /// Generic factory that creates a disk of the requested CustomLiquidType
         /// and routes it to a combiner of the matching type.
         ///
-        /// 2026-05-25 round-2: With type-aware combiner separation in
+        /// With type-aware combiner separation in
         /// WaterMeshCombiner.GetOrCreateCombinerFor, a disk of type X is
         /// guaranteed to land in a combiner of type X — either a freshly
         /// created one or an existing one that already matched. No
@@ -282,10 +331,10 @@ namespace VerdantsAscent.Water.Core
             return disk;
         }
 
-        // 0.2.681 ([lead] HR3, 10-01: the H8 va_pool pond was gone after a reload, its bed still carved). Only the server
+        // Only the server
         // persists water (WaterMeshCombiner.PerformDebouncedSave / SaveToAnchor return on a client), and these factories
         // built the combiner locally only, so a disk placed by a client of a dedicated server was never sent to the server:
-        // not saved (the dedi's WaterCache\HomesteadTest_water.bin was an empty 30-byte header) and never seen by other
+        // not saved (the server's water cache stays an empty header) and never seen by other
         // players. They now go through WaterOperationRPC like WaterPlacementTool: applied locally, sent to the server, which
         // saves it to its anchor + cache and broadcasts it. Without a running world the old local-only path stays.
         private static void Place(WaterDisk disk)

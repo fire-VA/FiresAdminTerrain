@@ -15,6 +15,8 @@ namespace VerdantsAscent.Terrain.Zones
         SaveHeal = 5,
         PortalPartner = 6,
         Wayshrine = 7,
+        Quest = 8,       // a quest reward opened it (FiresZonesApi.OpenForQuest / fires_chunk_open)
+        FullWorld = 9,   // open since the world was made closeable (fires_zones_make_closeable): every zone of a full world
     }
 
     // ── THE OPEN-ZONE REGISTRY ──────────────────────────────────────────────
@@ -41,6 +43,10 @@ namespace VerdantsAscent.Terrain.Zones
         // Written only when a swapped zone carries a shift (ZoneShift: its lift and its location centring), so a world
         // without one reads in any build.
         private const byte SectionZoneShifts = 4;
+        // Zones an admin CLOSED: only a Chunk Generator seed, an admin or a quest opens them, never an automatic
+        // opener (location reveal, portal partner, wayshrine, save heal). Written only when one exists, so a world without
+        // one reads in any build.
+        private const byte SectionLockedZones = 5;
         private const int ShiftEntryBytes = 2 + 2 + 4 + 4 + 4;
         private const byte FlagSeeded = 1;
         private const int HeaderBytes = 4 + 1 + 1 + 8 + 4 + 4 + 8 + 1;
@@ -88,6 +94,24 @@ namespace VerdantsAscent.Terrain.Zones
             AccessTools.FieldRefAccess<ZoneSystem, HashSet<Vector2s>>("m_generatedZones");
 
         private static readonly Dictionary<Vector2s, ZoneEntry> s_entries = new Dictionary<Vector2s, ZoneEntry>();
+        private static readonly HashSet<Vector2s> s_locked = new HashSet<Vector2s>();
+
+        internal static bool IsLocked(Vector2s zone) => s_locked.Contains(zone);
+
+        // A reason that may open a locked zone: the ones a player or an admin chooses on purpose.
+        private static bool OpensLocked(ZoneOpenReason reason)
+            => reason == ZoneOpenReason.Bought || reason == ZoneOpenReason.Admin || reason == ZoneOpenReason.Quest;
+
+        // Server: zones an admin closed stay closed until a Chunk Generator seed, an admin or a quest opens them.
+        internal static void Lock(IEnumerable<Vector2s> zones)
+        {
+            if (!s_modeActive || !s_authority) return;
+            bool changed = false;
+            foreach (var zone in zones) changed |= s_locked.Add(zone);
+            if (!changed) return;
+            s_version++;
+            Save();
+        }
         private static World s_world;
         private static bool s_modeActive;
         private static bool s_seeded;
@@ -217,14 +241,14 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // The flag decides only for a world with no profile chosen for it; a chosen profile says it itself.
+        // A super flat world under -fireszones would be played one zone at a time, and every closed zone
+        // would become coast + sea floor at y -20 (a water ring), so a super flat world is never zone-mode, whatever the launch flag says.
         internal static bool LaunchFlagDecides(Voxel.FiresWorldProfile profile)
-            => LaunchFlagPresent() && (profile == null || !profile.Chosen);
+            => LaunchFlagPresent() && (profile == null || !profile.Chosen) && !(profile != null && profile.SuperFlat);
 
         internal static string RegistryPath(string worldName)
         {
-            string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
-            string dir = Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen");
-            return Path.Combine(dir, "firesgen_" + safe + FileSuffix);
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(worldName, FileSuffix);
         }
 
         // ── World lifecycle ─────────────────────────────────────────────────
@@ -249,7 +273,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (net.IsServer()) InitializeAuthoritative(world);
             else BindHandshake(world);
             if (!net.IsServer()) return;
-            // A server's first start after a reboot met a cold file cache here: 10.5 s (R9a, 2026-09-28). Which step, is this line.
+            // A server's first start after a reboot met a cold file cache here (10.5 s). This line shows which step.
             FiresLogger.LogInfo($"[FiresZones] world init: profile {profileMs} ms, water guards {guardsMs - profileMs} ms, park "
                 + $"{parkMs - guardsMs} ms ({ZoneModePark.ParkedCount:N0} parked in {ZoneModePark.StoreDescription}; index "
                 + $"{ZoneModePark.IndexReadMs} ms" + (ZoneModePark.RepackMs > 0 ? $", one-time repack {ZoneModePark.RepackMs:N0} ms" : "")
@@ -266,6 +290,7 @@ namespace VerdantsAscent.Terrain.Zones
         {
             s_handshake = null;
             s_entries.Clear();
+            s_locked.Clear();
             WorldLoaded = false;
             s_world = null;
             s_modeActive = false;
@@ -289,8 +314,19 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModeDiagnostics.Reset();
         }
 
+        // Why zone mode stood down for this world's size, shown once to the local player when they spawn.
+        private static string s_sizeRefusal;
+
+        internal static void OnPlayerSpawned(Player player)
+        {
+            if (s_sizeRefusal == null || player == null || player != Player.m_localPlayer) return;
+            player.Message(MessageHud.MessageType.Center, s_sizeRefusal, 0, null, false);
+            s_sizeRefusal = null;
+        }
+
         private static void InitializeAuthoritative(World world)
         {
+            s_sizeRefusal = null;
             s_world = world;
             s_authority = true;
             s_coastWidth = ZoneModeConfig.CoastWidth?.Value ?? 1f;
@@ -298,6 +334,20 @@ namespace VerdantsAscent.Terrain.Zones
 
             string path = RegistryPath(world.m_name);
             string file = Path.GetFileName(path);
+            // The open-zone grid covers +-ZoneExtent zones, about
+            // 10.9 km, and its length is part of the handshake and the registry. A world whose edge lies beyond it (Expand
+            // World Size) plays as a normal world: nothing is created, loaded or changed on disk, so the registry of a
+            // world that once was zone-mode stays as it was.
+            float gridReach = (ZoneOpenSet.ZoneExtent + 0.5f) * ZoneOpenSet.ZoneSize;
+            if (Voxel.FatWorldSize.EdgeRadius > gridReach)
+            {
+                s_sizeRefusal = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "This world reaches {0:0} m from its centre; one zone at a time supports worlds up to {1:0} m. It plays as a normal world.",
+                    Voxel.FatWorldSize.EdgeRadius, gridReach);
+                FiresLogger.LogWarning($"[FiresZones] '{world.m_name}': {s_sizeRefusal} ({Voxel.FatWorldSize.Describe()}; "
+                    + $"{(File.Exists(path) ? $"{file} left untouched" : "no zone registry")}.)");
+                return;
+            }
             bool profiled = Voxel.FiresWorldProfile.Current != null && Voxel.FiresWorldProfile.Current.ZoneMode;
             if (!File.Exists(path) && (LaunchFlagDecides(Voxel.FiresWorldProfile.Current) || profiled) && IsNeverSaved(world))
             {
@@ -380,6 +430,25 @@ namespace VerdantsAscent.Terrain.Zones
             byte[] bytes = Serialize(world.m_uid, world.m_seed, seeded: false, version: 0,
                 createdUtcTicks: DateTime.UtcNow.Ticks, entries);
             return TryWriteAtomically(path, bytes, out _);
+        }
+
+        // A FULL world made closeable (fires_zones_make_closeable): a registry with every zone of the grid open
+        // (FullWorld), seeded, so from its next load it is a zone-mode world where nothing is closed until an admin closes it.
+        // Nothing else changes: open zones are played as they are, and an older FiresAdminTerrain reads the file the same.
+        internal static bool WriteFullOpenRegistry(World world, out string path, out int zones, out string failure)
+        {
+            path = RegistryPath(world.m_name);
+            zones = 0;
+            failure = null;
+            if (File.Exists(path)) { failure = $"{Path.GetFileName(path)} already exists: the world is a zone-mode world already"; return false; }
+            var entries = new Dictionary<Vector2s, ZoneEntry>();
+            long now = DateTime.UtcNow.Ticks;
+            for (int y = -ZoneOpenSet.ZoneExtent; y <= ZoneOpenSet.ZoneExtent; y++)
+                for (int x = -ZoneOpenSet.ZoneExtent; x <= ZoneOpenSet.ZoneExtent; x++)
+                    entries[new Vector2s(x, y)] = new ZoneEntry { Reason = ZoneOpenReason.FullWorld, OpenedUtcTicks = now };
+            zones = entries.Count;
+            byte[] bytes = Serialize(world.m_uid, world.m_seed, seeded: true, version: 1, createdUtcTicks: now, entries);
+            return TryWriteAtomically(path, bytes, out failure);
         }
 
         // ── Server: save loaded ─────────────────────────────────────────────
@@ -609,6 +678,15 @@ namespace VerdantsAscent.Terrain.Zones
             foreach (var zone in zones)
             {
                 if (!ZoneOpenSet.InRange(zone.x, zone.y) || s_entries.ContainsKey(zone)) continue;
+                if (s_locked.Contains(zone))
+                {
+                    if (!OpensLocked(reason))
+                    {
+                        FiresLogger.LogDebug($"[FiresZones] ({zone.x},{zone.y}) stays closed: an admin closed it, and {reason} does not open a closed chunk.");
+                        continue;
+                    }
+                    s_locked.Remove(zone);
+                }
                 var entry = new ZoneEntry { Reason = reason, OpenedUtcTicks = now, ActorId = actorId };
                 if (sources != null && sources.TryGetValue(zone, out var source) && ZoneOpenSet.InRange(source.x, source.y)
                     && (source.x != zone.x || source.y != zone.y))
@@ -719,8 +797,8 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── Handshake (server → client, before PeerInfo) ────────────────────
-        // Every joining peer gets the same handshake until the zone state changes. On a converted world it is large (R20:
-        // 262,495 bytes for 54,302 parked zones) and building it took 21 ms of the join frame, so it is built once per
+        // Every joining peer gets the same handshake until the zone state changes. On a converted world it is large (one
+        // was 262,495 bytes for 54,302 parked zones) and building it took 21 ms of the join frame, so it is built once per
         // state and the same package goes to every peer (ZRpc.Invoke copies it out and never reads it). The stamp covers
         // everything BuildHandshake reads.
         private static ZPackage s_handshake;
@@ -808,6 +886,27 @@ namespace VerdantsAscent.Terrain.Zones
             return pkg;
         }
 
+        private static readonly System.Reflection.FieldInfo ConnectionStatusField =
+            HarmonyLib.AccessTools.Field(typeof(ZNet), "m_connectionStatus");
+
+        // Leave the server the way vanilla leaves one on a version mismatch: the connection status says so (the main menu
+        // shows it), then the server peer is dropped.
+        private static void RefuseJoin(string why)
+        {
+            FiresLogger.LogError($"[FiresZones] leaving the server: {why}");
+            try
+            {
+                ConnectionStatusField?.SetValue(null, ZNet.ConnectionStatus.ErrorVersion);
+                var net = ZNet.instance;
+                var server = net != null ? net.GetServerPeer() : null;
+                if (server != null) net.Disconnect(server);
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogError($"[FiresZones] could not leave the server cleanly ({ex.Message}); quit to the menu and update FiresAdminTerrain.");
+            }
+        }
+
         internal static void ReceiveHandshake(ZPackage pkg)
         {
             try
@@ -820,7 +919,17 @@ namespace VerdantsAscent.Terrain.Zones
                     return;
                 }
                 var state = new HandshakeState { WorldUid = pkg.ReadLong() };
-                if (pkg.ReadBool()) state.Profile = Voxel.FiresWorldProfile.Read(pkg);
+                if (pkg.ReadBool())
+                {
+                    // A profile this build can't read (a newer FAT's world size, say) must not leave the client to
+                    // build the world from its own config, and the zone block after it depends on the size: refuse the join.
+                    try { state.Profile = Voxel.FiresWorldProfile.Read(pkg); }
+                    catch (System.IO.InvalidDataException ex)
+                    {
+                        RefuseJoin($"the server's world profile can't be read by this FiresAdminTerrain ({ex.Message}). Update FiresAdminTerrain to the server's version.");
+                        return;
+                    }
+                }
                 state.WaterGuards = Voxel.FiresWaterGuards.ReadHandshake(pkg);
                 state.ZoneMode = pkg.ReadBool();
                 if (state.ZoneMode)
@@ -921,6 +1030,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (bytes == null || bytes.Length < HeaderBytes) { failure = $"truncated at {bytes?.Length ?? 0} bytes"; return false; }
 
             var loaded = new Dictionary<Vector2s, ZoneEntry>();
+            var lockedLoaded = new HashSet<Vector2s>();
             bool seeded;
             int version;
             long createdUtcTicks;
@@ -980,6 +1090,22 @@ namespace VerdantsAscent.Terrain.Zones
                                 short zx = reader.ReadInt16(), zy = reader.ReadInt16();
                                 float lift = reader.ReadSingle(), dx = reader.ReadSingle(), dz = reader.ReadSingle();
                                 shifts.Add(new KeyValuePair<Vector2s, ZoneShift>(new Vector2s(zx, zy), new ZoneShift(lift, dx, dz)));
+                            }
+                            continue;
+                        }
+                        if (id == SectionLockedZones)
+                        {
+                            int lockedCount = reader.ReadInt32();
+                            if (lockedCount < 0 || lockedCount > MaxZoneEntries || length != 4 + (long)lockedCount * 4)
+                            {
+                                failure = $"locked-zone section claims {lockedCount} entries in {length} bytes";
+                                return false;
+                            }
+                            for (int i = 0; i < lockedCount; i++)
+                            {
+                                short zx = reader.ReadInt16(), zy = reader.ReadInt16();
+                                if (!ZoneOpenSet.InRange(zx, zy)) { failure = $"locked zone ({zx},{zy}) is outside the world"; return false; }
+                                lockedLoaded.Add(new Vector2s(zx, zy));
                             }
                             continue;
                         }
@@ -1045,12 +1171,16 @@ namespace VerdantsAscent.Terrain.Zones
                         return false;
                     }
                     if (!seeded && loaded.Count != 0) { failure = $"marked unseeded yet holds {loaded.Count} zone(s)"; return false; }
+                    foreach (var zone in lockedLoaded)
+                        if (loaded.ContainsKey(zone)) { failure = $"zone ({zone.x},{zone.y}) is both open and locked closed"; return false; }
                 }
             }
             catch (Exception ex) { failure = $"corrupt ({ex.GetType().Name}: {ex.Message})"; return false; }
 
             s_entries.Clear();
             foreach (var pair in loaded) s_entries[pair.Key] = pair.Value;
+            s_locked.Clear();
+            foreach (var zone in lockedLoaded) s_locked.Add(zone);
             s_seeded = seeded;
             s_version = version;
             s_createdUtcTicks = createdUtcTicks;
@@ -1071,11 +1201,12 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static byte[] CurrentBytes()
             => Serialize(s_world.m_uid, s_world.m_seed, s_seeded, s_version,
-                s_createdUtcTicks != 0 ? s_createdUtcTicks : DateTime.UtcNow.Ticks, s_entries, ZoneModeStartCave.Current);
+                s_createdUtcTicks != 0 ? s_createdUtcTicks : DateTime.UtcNow.Ticks, s_entries, ZoneModeStartCave.Current, s_locked);
 
         private static byte[] Serialize(long uid, int seed, bool seeded, int version, long createdUtcTicks,
-            Dictionary<Vector2s, ZoneEntry> entries, ZoneModeStartCave.Site startCave = null)
+            Dictionary<Vector2s, ZoneEntry> entries, ZoneModeStartCave.Site startCave = null, ICollection<Vector2s> locked = null)
         {
+            int lockedCount = locked?.Count ?? 0;
             using (var ms = new MemoryStream(HeaderBytes + SectionHeaderBytes + 4 + entries.Count * ZoneEntryBytes))
             using (var writer = new BinaryWriter(ms))
             {
@@ -1093,7 +1224,7 @@ namespace VerdantsAscent.Terrain.Zones
                     swapped++;
                     if (!pair.Value.Shift.IsZero) shifted++;
                 }
-                writer.Write((byte)(1 + (swapped > 0 ? 1 : 0) + (shifted > 0 ? 1 : 0) + (startCave != null ? 1 : 0)));
+                writer.Write((byte)(1 + (swapped > 0 ? 1 : 0) + (shifted > 0 ? 1 : 0) + (startCave != null ? 1 : 0) + (lockedCount > 0 ? 1 : 0)));
                 writer.Write(SectionOpenZones);
                 writer.Write(4 + entries.Count * ZoneEntryBytes);
                 writer.Write(entries.Count);
@@ -1139,6 +1270,17 @@ namespace VerdantsAscent.Terrain.Zones
                     writer.Write(SectionStartCave);
                     writer.Write(ZoneModeStartCave.SerializedBytes);
                     ZoneModeStartCave.Write(writer, startCave);
+                }
+                if (lockedCount > 0)
+                {
+                    writer.Write(SectionLockedZones);
+                    writer.Write(4 + lockedCount * 4);
+                    writer.Write(lockedCount);
+                    foreach (var zone in locked)
+                    {
+                        writer.Write(zone.x);
+                        writer.Write(zone.y);
+                    }
                 }
                 writer.Flush();
                 return ms.ToArray();

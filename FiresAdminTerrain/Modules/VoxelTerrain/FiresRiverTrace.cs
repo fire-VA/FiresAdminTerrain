@@ -21,17 +21,17 @@ namespace VerdantsAscent.Terrain.Voxel
 
 
         // ═══ EXCAVATE THE CANYON ══════════════════════════════════════════════════════════════════════════
-        // (user, 2026-08-16: "we dig a canyon and if the bottom of the canyon hits y30 or below we dont even
-        // need to render the river, the ocean level will handle it, if it sits above y30 we draw our water
-        // mesh at the bottom".)
+        // (A canyon whose bottom is at y 30 or below needs no river rendered: the ocean
+        // level handles it. If it sits above y 30 we draw our water
+        // mesh at the bottom.)
         // ⚠ THIS EXISTS BECAUSE THE v140 PROFILE COULD NOT WORK, AND THE REASON IS WORTH KEEPING: that pass
         // steepened the valley wall, and a steeper wall REMOVES LESS MATERIAL. It preserves relief where
         // relief exists and does nothing where it does not — measured at 0.5 m/px, a correctly sited canyon
         // sat on visibly smooth ground with no notch. A canyon is a HOLE. You cannot make one by shaving less.
         // The precedent is SeedMountainTarns, which digs its own parabolic cirque basin rather than hoping the
-        // fill finds one (v104): a deliberate landform EXCAVATES itself.
+        // fill finds one: a deliberate landform EXCAVATES itself.
         //
-        // THE FLOOR IS CLAMPED AT SEA, which is the user's rule and also the ownership rule GEN_VERSION
+        // THE FLOOR IS CLAMPED AT SEA, which is the design rule and also the ownership rule GEN_VERSION
         // 126/127 established: the ocean owns every column at or below the waterline, so a canyon that cuts
         // that deep simply stops there and the ocean plane draws it. Above SEA the floor is dry ground and the
         // ribbon/pool machinery downstream puts water on it.
@@ -41,9 +41,9 @@ namespace VerdantsAscent.Terrain.Voxel
         // pass runs inside InciseRivers, already the memory ceiling of the whole generator (441 MB per n²
         // float at game res; the carve has hit OOM before).
         /// ═══ A CANYON IS A SLOT, NOT A STRING OF PITS ═══════════════════════════════════════════════════
-        /// (2026-08-22, user: "canyons need to carve out a bit wider to allow for an actual river to run
-        /// through the bottom of them"; and, on method, "we have built so many studio tools to allow you to
-        /// visualize the water generation and you just guess and get it wrong over and over".)
+        /// (Canyons carve out a bit wider to allow for an actual river to run
+        /// through the bottom of them, and the result is checked with the studio's visualisation tools
+        /// rather than guessed.)
         ///
         /// WHAT THE OLD PASS DID, SEEN RATHER THAN REASONED. `ClassifyChannelIncision` stamps `cls` as a
         /// CHAIN — cells sampled every half-cell along each polyline, one cell wide — which is correct. The
@@ -60,7 +60,7 @@ namespace VerdantsAscent.Terrain.Voxel
         /// segment, instead of a disc being dug per cell:
         ///   • the FLOOR is flat across `halfFlat`, sized to the CHANNEL that has to run down it (the river's
         ///     own half-width plus FLOOR_MARGIN) rather than to a fixed 80 % of the reach — this is the
-        ///     user's "carve out a bit wider to allow for an actual river to run through the bottom";
+        ///     "carve out a bit wider to allow for an actual river to run through the bottom" rule;
         ///   • the WALLS rise from there to the rim over the remaining reach, so the slot has real sides;
         ///   • the floor is the SAME monotone running minimum from the headwater as before, so the slot only
         ///     ever descends and cannot pond mid-canyon.
@@ -83,7 +83,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // ── THE FLOOR DESCENDS FROM THE HEADWATER (unchanged) ────────────────────────────────────────
             // A running minimum along each spline in flow order, so the slot's floor can only ever go DOWN.
             // Without it the floor tracks local ground and a canyon ponds partway along — the "steps up to a
-            // wide pool, then drops again" the user photographed.
+            // wide pool, then drops again" that was seen in game.
             var floorAt = new Dictionary<int, float>(1 << 14);
             foreach (var poly in polys)
             {
@@ -269,7 +269,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             lock (s_cascadeSpans) { s_cascadeSpans.Clear(); s_cascadeDroppedM = 0f; }   // per-world: this run's falls only
             if (polys == null) return;
-            // (2026-08-11, user: "we are still just drying between river sections for no goddamn reason")
+            // (Rivers were drying out between sections for no reason.)
             // 0.25 → 1.00. The old threshold called a 25% grade (14°) a waterfall and DELETED the reach —
             // but a real river runs continuously down 14°; that is a riffle, not a fall. At full res it was
             // dropping 12,764 spans per world, i.e. 12,764 dry carved trenches between wet sections, and the
@@ -277,15 +277,15 @@ namespace VerdantsAscent.Terrain.Voxel
             // "interior" to any run). 1.00 = 45°: only a genuine cliff loses its sheet, everything gentler
             // keeps continuous water. Dropped spans are still recorded + stamped WC_WATERFALL for FX.
             const float CASCADE_SLOPE = 1.00f;
-            const int MIN_KEEP = 16;             // (v104) a kept bench must be a real reach — 8-node slivers between cascade flickers carved terrace bands down mountainsides (seed 49185460)
-            const int CASC_DILATE = 6;           // (v104) swallow the flicker fringe: a steep face is ONE dry cascade, not alternating benches
+            const int MIN_KEEP = 16;             //  a kept bench must be a real reach — 8-node slivers between cascade flickers carved terrace bands down mountainsides (seed 49185460)
+            const int CASC_DILATE = 6;           //  swallow the flicker fringe: a steep face is ONE dry cascade, not alternating benches
             // A waterfall is a SUSTAINED face. Below this the steep reading is terrain noise on a single node
             // pair, and the dilation above would turn it into a 13-node hole that severs the river. See the
             // open pass below for the measurement that set it.
             const float CASCADE_MIN_M = 12f;
             float rhalf = (n - 1) * cellM * 0.5f;
             int splitN = 0, droppedSeg = 0;
-            // DIAGNOSTIC (2026-08-17): this pass logged NOTHING when it did nothing, so "0 cascade spans" in a
+            // DIAGNOSTIC: this pass logged NOTHING when it did nothing, so "0 cascade spans" in a
             // shipped world was invisible until someone grepped for a MISSING line. Silence is not evidence.
             long pairsTested = 0, over025 = 0, over050 = 0, over100 = 0; double distSum = 0;
             float maxGrade = 0f; int runsShort = 0, runsAnySteep = 0;
@@ -296,7 +296,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (nn < 2) continue;
                 var casc = new bool[nn];
                 bool any = false;
-                const int END_GUARD = 10;   // (v100) JUNCTION/APPROACH GUARD — the descent into a body's basin is
+                const int END_GUARD = 10;   //  JUNCTION/APPROACH GUARD — the descent into a body's basin is
                                             // often the steepest reach of the whole run; cutting it severed the very
                                             // connection the run exists to make (rivers stopping short of the next
                                             // body, seed 724107467). Run ends never cascade-cut: a short steep chute
@@ -359,7 +359,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (!any) continue;
                 runsAnySteep++;
                 }
-                // (v104) DILATE the cascade mask so a steep face is ONE continuous dry cascade — the raw
+                //  DILATE the cascade mask so a steep face is ONE continuous dry cascade — the raw
                 // mask flickers around the threshold and MIN_KEEP kept every flicker bench: carve+fill+berm
                 // bands terraced whole mountainsides (seed 49185460).
                 {
@@ -385,7 +385,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // body) or the LAST (k==nn, the downstream body/sea). END_GUARD stops a cascade being
                         // DETECTED in the last/first 10 nodes, but CASC_DILATE can bleed a cascade detected just
                         // outside the guard INTO the approach, and MIN_KEEP then dropped that short tail → the
-                        // channel ended short of its body ("rivers stop short of merging", user 2026-08-09). Keeping
+                        // channel ended short of its body (rivers stopped short of merging). Keeping
                         // the end sub-reach reconnects the river to the body; it's a flat backwater approach, not a
                         // mid-mountain sliver, so it can't terrace (the case MIN_KEEP exists for).
                         bool touchesEnd = s0 == 0 || k == nn;
@@ -420,7 +420,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── CASCADE (waterfall/rapids) SPANS ────────────────────────────────────────────────────────
-        // (user 2026-08-11) "we want to hide the mesh in these spots but we still have to mark the area as
+        //  "we want to hide the mesh in these spots but we still have to mark the area as
         // waterfall or rapids so we know where to place the fx." A steep reach gets NO flat sheet (a ribbon
         // can't drape a drop) — but deleting it outright threw the information away: the world was left with
         // an unexplained hole in the river and nothing downstream could tell a designed fall from a bug.
@@ -461,11 +461,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // body instead of levee'ing across it). `existingMask` (nullable): a mask to
         // merge river cells INTO (keeps mountain-stream cells) instead of a fresh one.
         // Both null → the old CarveRivers behaviour exactly (imports/cache).
-        // (v94) THE PLAN'S CONNECTIONS ARE THE RIVERS (user: placement from the PLAN, carve from
+        //  THE PLAN'S CONNECTIONS ARE THE RIVERS (placement from the PLAN, carve from
         // InciseRivers). The plan segments every validated trace at body boundaries into runs with
         // PROVENANCE — FromBody {body | SPRING} → ToBody {body | OCEAN} — so every river connects water
         // to water: body→body, body→sea, or spring→…, where a SPRING head is realized as a REAL spring
-        // (user spec): the headwater-pool pass digs a small pond — carved indentation, flat sheet — at
+        // (by design): the headwater-pool pass digs a small pond — carved indentation, flat sheet — at
         // the head, gated by the v93 rim justification (gentle ground → spring pond; steep → a bare
         // seep/channel head). Convert the runs to InciseRivers' poly format: [x, z, AREA, level] — the
         // plan stores WIDTH per node, so back-solve the equivalent catchment area (inverse of the
@@ -480,7 +480,7 @@ namespace VerdantsAscent.Terrain.Voxel
             float WK = WaterRules.RiverProc.WidthK, WP = WaterRules.RiverProc.WidthP;
             float AO = WaterRules.RiverProc.AreaOnset;
             float rhalf = (n - 1) * cellM * 0.5f;
-            // (v97) JUNCTION NODES — EmitConnection cuts runs at the body boundary (first node OUTSIDE),
+            //  JUNCTION NODES — EmitConnection cuts runs at the body boundary (first node OUTSIDE),
             // so converted polys carried NO in-body nodes: the anchor never fired, distA stayed ∞, and the
             // v96 taper NEVER ENGAGED for plan runs — every junction took the full channel drop at the
             // shore (the height step + the widened dry collar, seed 220092304). The plan KNOWS the
@@ -488,10 +488,10 @@ namespace VerdantsAscent.Terrain.Voxel
             // seeded cell and add it as an explicit node — the anchor then pins it to the body surface and
             // the taper eases the drop in/out exactly as designed. Confined to run ENDS: no mid-run
             // anchoring on near-miss shores.
-            // ═══ THE JUNCTION SNAPS TO WATER THAT EXISTS, ACROSS THE PLAN'S DRY RIM (2026-08-13) ═════════
-            // (user: "it's the same reason rivers used to stop short of connecting bodies of water — as far as
+            // ═══ THE JUNCTION SNAPS TO WATER THAT EXISTS, ACROSS THE PLAN'S DRY RIM ═════════
+            // (It is the same reason rivers used to stop short of connecting bodies of water: as far as
             // the map was concerned they DID connect, so the river would end where it thought the still water
-            // started, but it would be many metres away".) This function is already right in kind: it looks for
+            // started, but that was many metres away.) This function is already right in kind: it looks for
             // a cell that is ACTUALLY WET (seeded > g), not merely inside a footprint. The defect was REACH.
             // A plan footprint is the flood's full extent, but conformance/incision leave part of it dry —
             // measured at 43,168 footprint cells "SKIPPED as dry in the field" on this seed. Where that dry rim
@@ -528,8 +528,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (count < 2) continue;
                 if (c.FromBody == WaterConnection.SPRING)
                 {
-                    // (v99) SPRING-SITE CULL (user: "river culling for spots that shouldn't have a river is
-                    // broken") — a SPRING is the run's SOURCE, and a spring is a small pond (user spec). If
+                    //  SPRING-SITE CULL (river culling for spots that shouldn't have a river was
+                    // broken) — a SPRING is the run's SOURCE, and a spring is a small pond. If
                     // the head site cannot HOLD a pond (same rim rule as v93, as ground relief across the
                     // pool ring), there is no spring — and with no source there is NO RIVER: cull the WHOLE
                     // run. The half-generated hillside garbage (no pool bowl, patchy bound-clamped carve,
@@ -559,21 +559,21 @@ namespace VerdantsAscent.Terrain.Voxel
                     int j = FindSeededNear(c.Nodes[0], c.Nodes[1]);
                     if (j >= 0) { buf.Add((j % n) * cellM - rhalf); buf.Add((j / n) * cellM - rhalf); buf.Add(AreaOf(0)); buf.Add(seeded[j]); }
                 }
-                // ═══ A RIVER ENDS AT THE OCEAN — IT DOES NOT RUN ACROSS IT (2026-08-13) ══════════════════
-                // (user: "we're not ending rivers at the oceans, we're just running through/over them"; "our
-                // detection of the ocean is not as sane as our detection of other bodies of water"; "we're
-                // using bad data to find the ocean level".) Exactly right, and it is a DATA-SHAPE problem:
+                // ═══ A RIVER ENDS AT THE OCEAN — IT DOES NOT RUN ACROSS IT ══════════════════
+                // (Rivers were not ending at the oceans but running through/over them; the
+                // detection of the ocean was not as sane as the detection of other bodies of water, and
+                // used bad data to find the ocean level.) It is a DATA-SHAPE problem:
                 // every other destination is a planned WaterBody with a real footprint and a real Level, so a
                 // run terminates on it properly — FindSeededNear plants a junction node on genuinely wet
                 // ground, the anchor pins it, the taper eases into it, the backwater curve holds it level.
                 // The OCEAN is not a body at all. `EmitConnection` just sets lEnd = ESTUARY_FLOOR (the bare
                 // constant SEA−6) and keeps emitting nodes, so the polyline marches on across the seabed with
                 // nothing to stop it — and the carve, the fill and the sheet all follow it out to sea. That is
-                // the fleet of ribbons standing over open water in the user's screenshot.
+                // the fleet of ribbons standing over open water that was seen.
                 // The ocean's shoreline IS well-defined data we already have: the high-tide waterline, where
                 // ground meets SEA (TideHighOffsetM = 0, so the sea never rises past it). Cut the run there
                 // and pin that last node AT the waterline — the same contract a lake-bound run gets, and the
-                // "dive the mesh into the sand line and end" the user asked for. Everything seaward of it is
+                // "dive the mesh into the sand line and end" the design calls for. Everything seaward of it is
                 // the ocean's, at every tide.
                 bool toOcean = c.ToBody == WaterConnection.OCEAN;
                 int added = 0;
@@ -584,10 +584,10 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         int gx = Mathf.Clamp((int)((nx + rhalf) / cellM + 0.5f), 0, n - 1);
                         int gz = Mathf.Clamp((int)((nz + rhalf) / cellM + 0.5f), 0, n - 1);
-                        // ═══ SHORTEST ROUTE TO THE SEA — NOT A RUN ALONG THE BEACH (2026-08-13) ══════════
-                        // (user: "we should be taking the shortest route to the ocean body, not running
-                        // parallel to the shore like this… and our containment logic gets broken there where
-                        // it's running along the edge sideways".) Testing only THIS node's ground misses that
+                        // ═══ SHORTEST ROUTE TO THE SEA — NOT A RUN ALONG THE BEACH ══════════
+                        // (Take the shortest route to the ocean body, not a run
+                        // parallel to the shore; the containment logic broke where
+                        // a run went along the edge sideways.) Testing only THIS node's ground misses that
                         // completely: a trace hugging the coast at, say, 30.5 never dips below SEA, so it was
                         // never cut and simply ran on beside the water for hundreds of metres — carving a
                         // channel along the beach, which is also why containment fell apart there (a ribbon
@@ -635,7 +635,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int j = FindSeededNear(c.Nodes[(count - 1) * 4], c.Nodes[(count - 1) * 4 + 1]);
                     if (j >= 0) { buf.Add((j % n) * cellM - rhalf); buf.Add((j / n) * cellM - rhalf); buf.Add(AreaOf(count - 1)); buf.Add(seeded[j]); }
                 }
-                // (TRACE 2026-08-19) WHY IS 81 % OF THE NETWORK ANCHORED TO NOTHING? A run is pinned to real
+                // (TRACE) WHY IS 81 % OF THE NETWORK ANCHORED TO NOTHING? A run is pinned to real
                 // water only where FindSeededNear plants a junction node, and both calls are gated on
                 // `>= 0` — while SPRING is −1 and OCEAN is −2. The segmentation labels `toBody = OCEAN` for
                 // ANY run whose trace merely ran out in open country, not only for one that reached the sea,
@@ -656,7 +656,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return outPolys;
         }
 
-        // (v99) CASCADE SEGMENTATION — the sheet-on-steep invariant (docs/HYDROLOGY.md Part V + the locked
+        //  CASCADE SEGMENTATION — the sheet-on-steep invariant (docs/HYDROLOGY.md Part V + the locked
         // waterfall rule: NO sheet on a steep drop — the sheet ends at the LIP and resumes at the PLUNGE
         // POOL; the drop itself is VFX). A reach whose ground falls faster than CASCADE_SLOPE cannot hold a
         // ribbon: the carve's local bound + the fill gate fight cell-by-cell there and emit patchy floating

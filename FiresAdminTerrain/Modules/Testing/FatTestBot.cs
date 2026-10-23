@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // FAT's side of the test bot's chat contract (Tools\FDT_TEST_BOT.md): a test shouts `bot <verb>` and waits for the
+    // FAT's side of the test bot's chat contract: a test shouts `bot <verb>` and waits for the
     // bot's shouted `bot: <reply>`. One Chat.OnNewChatMessage postfix (FatVanillaHooks) feeds every FAT test from here.
     internal static class FatTestBot
     {
@@ -100,9 +100,9 @@ namespace VerdantsAscent.Terrain.Testing
             catch (Exception ex) { FiresLogger.LogWarning($"[FatTestBot] 'fdt_bot {verb}' threw: {ex.Message}"); }
         }
 
-        // FDT 1.1.173 `bot verify-follow` ([visual]): the bot keeps 8-20 m from the tester on solid ground, outside the case
-        // grid, facing what the tester faces, and teleports after the tester itself (Fire, R75: a parked verification bot
-        // stood in the sea doing nothing on stream). A re-send replaces the box. Following is true after "verify-follow: on";
+        // FDT 1.1.173 `bot verify-follow`: the bot keeps 8-20 m from the tester on solid ground, outside the case
+        // grid, facing what the tester faces, and teleports after the tester itself (a parked verification bot
+        // stood in the sea doing nothing). A re-send replaces the box. Following is true after "verify-follow: on";
         // an older FDT answers "unknown command" or nothing, and the caller parks the bot instead.
         internal const float FollowMin = 8f, FollowMax = 20f;
         internal static bool Following { get; private set; }

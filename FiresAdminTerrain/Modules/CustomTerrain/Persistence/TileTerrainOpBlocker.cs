@@ -53,7 +53,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 if (VerdantsAscent.Terrain.Zones.ZoneModeRefusals.WasCancelled(__instance)) return false;
                 Vector3 position = __instance.transform.position;
 
-                // 2026-05-30 round-54 — phantom-op guard. Some external
+                // Phantom-op guard. Some external
                 // mods (FAP_ClutterClearTool, etc.) fire transient
                 // TerrainOps at world origin (0,0,0) or similar fixed
                 // positions as a no-op marker / clutter trigger. Our
@@ -111,7 +111,7 @@ namespace VerdantsAscent.Terrain.Persistence
                     return true; // no tile anywhere nearby → vanilla op runs normally
                 }
 
-                // 2026-05-25 round-14: STRICT modified-vertex check removed.
+                // STRICT modified-vertex check removed.
                 // RPG-maker's InfinityHammerCompat just asks "is there custom
                 // terrain at this XZ?" via DirtFloorTerrainManager.IsPositionOverCustomTerrain
                 // — once it gets a yes, EVERY terrain op routes to the
@@ -250,7 +250,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // convention. Matches the EXACT colors vanilla Heightmap uses
         // (m_paintMaskDirt/Cultivated/Paved/Nothing/ClearVegetation).
         //
-        // 2026-05-25 round-16: fixed Reset/Grass mapping. Old Reset
+        // Fixed Reset/Grass mapping. Old Reset
         // returned (255,255,255,0) — transparent white — which the shader
         // displayed as "vegetation cleared" not "default grass restored".
         // Vanilla "no paint" = m_paintMaskNothing = (0,0,0,1) and that's

@@ -223,7 +223,7 @@ namespace VerdantsAscent.Terrain.Persistence
             FiresLogger.LogVerbose($"[TileMeshUnderside] tile=({_tile?.TileXZ.x ?? 0},{_tile?.TileXZ.y ?? 0}) collider → {enabled}");
         }
 
-        // ── 2026-05-26 round-30 — Floating Island Mode ─────────────────
+        // ── Floating Island Mode ─────────────────
         //
         // When TerrainTile.FloatingIslandMode == true AND the tile's top
         // sits ≥20m above the local terrain (no nearby lower tile to
@@ -236,17 +236,17 @@ namespace VerdantsAscent.Terrain.Persistence
         // Result: edges sit ~1m below top (subtle lip); center bulges
         // down to MAX_DOME_DEPTH (~30% of the island's XZ extent) →
         // upside-down teardrop / rock-bottom look.
-        // 2026-05-26 round-33: trigger lowered 50m → 20m per user request.
+        // Trigger at 20m (not 50m).
         // Anything 20m+ above local terrain now auto-rounds into the
         // teardrop underside; below 20m the mesh stretches down to terrain
         // as before. Catches realistic floating-platform heights (10-30m
         // sky islands, mid-level shelves) that the 50m default missed.
         private const float FLOATING_ISLAND_TRIGGER_HEIGHT = 20f;
 
-        // 2026-05-26 round-34 — dome geometry bumped substantially.
-        // Previously the dome was almost invisible (0.5m edge inset, 4m
-        // min dome depth) so floating islands looked like "a bedsheet
-        // hanging over the edge of a bed" (user's words). The new values
+        // Dome geometry bumped substantially.
+        // A smaller dome is almost invisible (0.5m edge inset, 4m
+        // min dome depth): floating islands look like a bedsheet
+        // hanging over the edge of a bed. These values
         // produce visible 3D rock-bottom geometry:
         //
         //   FLOATING_ISLAND_SIDE_WALL_DEPTH = 5m   — vertical-ish side
@@ -268,11 +268,11 @@ namespace VerdantsAscent.Terrain.Persistence
         //     toward centroid by up to 35% of their horizontal distance,
         //     scaled by depth. Gives the teardrop its narrowing bottom.
         //
-        // 2026-05-26 round-38 — reverted rounds 36–37 (material swap +
-        // side-wall removal) per user request: the proven round-34/35
-        // geometry with always-cave-rock material is the keeper. The
-        // image they screenshotted with the dark cliff-side rock + grass
-        // top is exactly this configuration.
+        // No material swap and no
+        // side-wall removal: this
+        // geometry with always-cave-rock material is the approved look
+        // (dark cliff-side rock + grass
+        // top).
         private const float FLOATING_ISLAND_SIDE_WALL_DEPTH = 5f;
         private const float FLOATING_ISLAND_DOME_DEPTH_RATIO = 0.50f;
         private const float FLOATING_ISLAND_MIN_DOME_DEPTH = 10f;
@@ -289,7 +289,7 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             if (_undersideMesh == null || topMesh == null) return;
 
-            // Round-93 (user directive) — the underside "cave layer" exists ONLY
+            // The underside "cave layer" exists ONLY
             // for FLOATING terrain disks now. On grounded tiles it drew a jet-
             // black darkened sheet under/around real voxel caves and confused
             // the env/underwater systems. Real caves are voxel geometry; their
@@ -322,7 +322,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // back to the standard mirror-with-offset (dark cave rock) if
             // either condition fails — caves stay dark.
             //
-            // 2026-05-26 round-39 — per-mode material swap (floating
+            // Per-mode material swap (floating
             // ONLY). The dome reuses the TOP renderer's per-tile
             // material (Custom/Heightmap shader + _ClearedMaskTex
             // paint mask + vertex-color biome blend). The SIDE WALLS
@@ -341,7 +341,7 @@ namespace VerdantsAscent.Terrain.Persistence
             {
                 var topRenderer = GetComponent<MeshRenderer>();
                 var topMat = topRenderer != null ? topRenderer.sharedMaterial : null;
-                // Round-43 — wall material is the UNDARKENED rock so the
+                // Wall material is the UNDARKENED rock so the
                 // cliff face doesn't read as a black hole in overhead
                 // lighting. Cave-ceiling underside (mirror branch below)
                 // still uses the darkened version.
@@ -427,7 +427,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // assignment entirely in that case so we don't spam
             // "must have at least one non-degenerate triangle" errors.
             // The LOD path also checks this so the cook doesn't fire on
-            // re-activation either. Spotted 2026-05-25.
+            // re-activation either.
             if (_undersideCollider != null && triCount > 0 && _colliderCurrentlyEnabled)
             {
                 _undersideCollider.sharedMesh = null;
@@ -448,7 +448,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // it flips from disabled → enabled (we deferred the cook in SyncFrom
         // for inactive colliders). Override to handle this.
 
-        // ── Floating-island domed underside (round-30) ─────────────────
+        // ── Floating-island domed underside ─────────────────
         //
         // Decision: use domed bottom only if the tile is flagged for
         // floating-island mode AND its lowest valid top vertex is at
@@ -496,7 +496,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         private void BuildDomedUnderside(Mesh topMesh, Vector3[] topVerts, int[] topTris, Vector3 worldTransformOffset, int vertCount)
         {
-            // 2026-05-26 round-35: compute centroid + maxRadius across THIS
+            // Compute centroid + maxRadius across THIS
             // tile AND its 8 cardinal+diagonal neighbors that also have
             // FloatingIslandMode set. Without this, a multi-tile floating
             // island had each tile compute its OWN centroid + dome — domes
@@ -615,7 +615,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 }
             }
 
-            // ── Dome math (round-34) ──────────────────────────────────────
+            // ── Dome math ──────────────────────────────────────
             //
             // Two-stage Y drop:
             //   1. SIDE WALL: from top Y down by FLOATING_ISLAND_SIDE_WALL_DEPTH
@@ -633,12 +633,12 @@ namespace VerdantsAscent.Terrain.Persistence
             float domeDepth = maxRadius * FLOATING_ISLAND_DOME_DEPTH_RATIO;
             domeDepth = Mathf.Max(domeDepth, FLOATING_ISLAND_MIN_DOME_DEPTH);
 
-            // Pull UV0 + vertex colors off the top mesh — round-39 hands
+            // Pull UV0 + vertex colors off the top mesh and hand
             // these straight through to the underside so the per-tile
             // _ClearedMaskTex (paint mask) and biome-blend mask sample
             // the SAME data on the underside as on the top. Result:
             // floating-island bottoms render with the same grass/biome
-            // and any paint the user laid on top, visible from below.
+            // and any paint laid on top, visible from below.
             Vector2[] topUVs = topMesh.uv;
             Color32[] topColors = topMesh.colors32;
 
@@ -788,7 +788,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 allVerts[botAIdx] = botA;
                 allVerts[botBIdx] = botB;
 
-                // 2026-05-27 round-43 — proper vertical-wall UV mapping.
+                // Proper vertical-wall UV mapping.
                 // Previously the wall used (worldX, worldZ) UVs which
                 // don't vary with Y → on a vertical surface the entire
                 // wall sampled the SAME texture pixel → solid color
@@ -907,7 +907,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
         // Same prefab fallback list as DirtFloorMeshCombiner.Underside.cs.
         // Ordered by preference: forest rock = dark cave-ish texture.
-        // (Round-35 reorder REVERTED round-36 — user clarified the lighter
+        // (No reorder: the lighter
         // material was ONLY for floating-island domes, not for the cave-
         // ceiling underside that stretches to terrain. Standard underside
         // keeps the dark cave look so caves stay dark inside.)
@@ -940,7 +940,7 @@ namespace VerdantsAscent.Terrain.Persistence
             return s_sharedUndersideMaterial;
         }
 
-        // Round-43 — a separate, NON-DARKENED rock material for the
+        // A separate, NON-DARKENED rock material for the
         // floating-island side walls. The cave-ceiling material above
         // gets darkened to 0.4× because dark cave aesthetics; the wall
         // material is the source color unscaled because a sunlit cliff
@@ -976,7 +976,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 {
                     name = $"TileWall_From_{prefabName}",
                 };
-                // 2026-05-27 round-44 — override the texture scale so
+                // Override the texture scale so
                 // our UV0 mapping is authoritative. The source rock
                 // prefab's material typically bakes _MainTex_ST to ~4×
                 // or 10× (matching the prefab's own mesh proportions);
@@ -996,7 +996,7 @@ namespace VerdantsAscent.Terrain.Persistence
                     s_sharedWallMaterial.SetTextureOffset("_BumpMap", Vector2.zero);
                 }
 
-                // 2026-05-27 round-46 — diffuse-only lightening.
+                // Diffuse-only lightening.
                 //
                 // Round-45 tried adding _EmissionColor at 0.20 to lift
                 // the wall off pitch-black in shadow, but the result

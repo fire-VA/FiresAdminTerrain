@@ -26,6 +26,7 @@ namespace VerdantsAscent.Water.Core
     public static class WaterOperationRPC
     {
         private static bool _initialized = false;
+        private static ZRoutedRpc s_rpcOn;   // re-register on every new ZRoutedRpc (one per connection), not only after Game.Logout
 
         // RPC names - Client -> Server (requests)
         private const string RPC_CREATE_WATER = "FiresAdminTerrain_Water_Create";
@@ -57,8 +58,9 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void Initialize()
         {
-            if (_initialized) return;
             if (ZRoutedRpc.instance == null) return;
+            if (ReferenceEquals(s_rpcOn, ZRoutedRpc.instance)) return;   // instance identity only: a reset flag never re-registers on the same bus
+            s_rpcOn = ZRoutedRpc.instance;
 
             try
             {
@@ -100,7 +102,7 @@ namespace VerdantsAscent.Water.Core
         /// <returns>The stable hash of the created disk</returns>
         public static int RequestCreateWater(Vector3 position, float radius, float maxDepth, LiquidType liquidType)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Create disk with stable hash
             var disk = new WaterDisk(position, radius, maxDepth, liquidType);
@@ -114,7 +116,7 @@ namespace VerdantsAscent.Water.Core
         /// <returns>The stable hash of the created disk</returns>
         public static int RequestCreateWater(Vector3 position, WaterDiskShape shape, float width, float length, float maxDepth, LiquidType liquidType)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Create shaped disk
             var disk = new WaterDisk(position, shape, width, length, maxDepth, liquidType);
@@ -163,7 +165,7 @@ namespace VerdantsAscent.Water.Core
         /// <returns>The stable hash of the created disk</returns>
         public static int RequestCreateWaterWithCustomType(Vector3 position, WaterDisk disk, CustomLiquidType customType)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             int stableHash = disk.StableHash;
 
@@ -204,7 +206,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void RequestRemoveWater(int stableHash)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Apply locally first for instant feedback
             RemoveWaterDiskByHash(stableHash);
@@ -229,7 +231,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void RequestRemoveWaterInRadius(Vector3 center, float radius)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Work on a snapshot of combiners to avoid modification during iteration
             var combinersSnapshot = new List<WaterMeshCombiner>(WaterMeshCombiner.AllCombiners);
@@ -263,7 +265,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void RequestModifyWater(int stableHash, float? newRadius = null, float? newDepth = null, float? newSurfaceY = null)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Apply locally first for instant feedback
             ModifyWaterDiskByHash(stableHash, newRadius, newDepth, newSurfaceY);
@@ -294,7 +296,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void RequestClearZoneWater(Vector3 center, float radius)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Apply locally first for instant feedback
             ClearWaterInRadius(center, radius);
@@ -903,14 +905,14 @@ namespace VerdantsAscent.Water.Core
         /// <param name="targetCombiner">The empty combiner waiting for data</param>
         public static void RequestDiskSyncForPosition(Vector3 position, WaterMeshCombiner targetCombiner)
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
             if (ZRoutedRpc.instance == null) return;
 
             // Store the combiner reference for the response handler
             lock (_pendingSyncLock)
             {
                 // Key by rounded position to match responses
-                var posKey = new Vector2Int(Mathf.RoundToInt(position.x), Mathf.RoundToInt(position.z));
+                var posKey = SyncKey(position);
                 _pendingSyncCombiners[posKey] = targetCombiner;
             }
 
@@ -924,7 +926,12 @@ namespace VerdantsAscent.Water.Core
 
         // Pending sync requests: maps position key to the waiting combiner
         private static readonly object _pendingSyncLock = new object();
-        private static Dictionary<Vector2Int, WaterMeshCombiner> _pendingSyncCombiners = new Dictionary<Vector2Int, WaterMeshCombiner>();
+        private static Dictionary<Vector3Int, WaterMeshCombiner> _pendingSyncCombiners = new Dictionary<Vector3Int, WaterMeshCombiner>();
+
+        // The server echoes the requested position, so a 3D key matches exactly. An XZ key would let a sky-island
+        // water body's request and the ground water's below overwrite each other's waiting combiner.
+        private static Vector3Int SyncKey(Vector3 position)
+            => new Vector3Int(Mathf.RoundToInt(position.x), Mathf.RoundToInt(position.y), Mathf.RoundToInt(position.z));
 
         /// <summary>
         /// SERVER-SIDE: Handles a client requesting disk data for a specific position.
@@ -1030,7 +1037,7 @@ namespace VerdantsAscent.Water.Core
                 if (diskCount == 0) return;
 
                 // Find the pending combiner for this position
-                var posKey = new Vector2Int(Mathf.RoundToInt(position.x), Mathf.RoundToInt(position.z));
+                var posKey = SyncKey(position);
                 WaterMeshCombiner targetCombiner = null;
 
                 lock (_pendingSyncLock)
@@ -1329,7 +1336,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void BroadcastClearAllWater()
         {
-            if (!_initialized) Initialize();
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
             if (ZRoutedRpc.instance == null) return;
 
             var pkg = new ZPackage();

@@ -53,7 +53,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         for (int x = 0; x < num; x++)
                         {
                             float wx = p.x - half + x * scale;
-                            if (!VoxelWorld.TrySampleSurfaceY(wx, wz, topY, botY, out float surfY, out bool wall))
+                            if (!VoxelWorld.TrySampleWaterFloorY(wx, wz, topY, botY, out float surfY, out bool wall))
                             {
                                 if (!wall) continue;
                                 surfY = topY;   // solid all the way up — full-height wall
@@ -80,6 +80,54 @@ namespace VerdantsAscent.Terrain.Voxel
             catch (System.Exception ex)
             {
                 FiresLogger.LogWarning($"[FiresVoxel] UpdateHeights voxel bridge threw: {ex.Message}");
+            }
+        }
+
+        // A location's liquid (tar) in an underground cavern stretched as it dropped into place; it must
+        // sit like a cave pool instead. It got its
+        // ground from rays and voxel samples over +-m_maxDepth (10 m): a column the ray missed read a 10 m pit, and the liquid
+        // poured into it as tall stretched sheets. Underground, the ground is the cavern floor within FloorBand of the volume's
+        // own height, a column with no floor there is the floor (flat), rock reaching above it stays a dam, and nothing is
+        // deeper than PoolDepth: a flat pool on the cavern floor.
+        private const float FloorBand = 3f, PoolDepth = 1.5f;
+        private static int s_flattened;
+
+        internal static void FlattenUnderground(LiquidVolume __instance)
+        {
+            try
+            {
+                if (VoxelWorld.ChunkCount == 0 || __instance == null) return;
+                Vector3 p = __instance.transform.position;
+                // A location's liquid in its dome only (a player's poured water in a natural cave keeps the normal path).
+                if (!FatUndergroundLocations.UnderDome(p) && __instance.GetComponentInParent<Location>() == null) return;
+                if (!FatUndergroundLocations.IsUnderground(p)) return;
+                var heights = FiresLiquidGridOps.Heights(__instance);
+                int num = __instance.m_width + 1;
+                if (heights == null || heights.Count != num * num) return;
+                float scale = __instance.m_scale, half = __instance.m_width * scale * 0.5f, maxD = __instance.m_maxDepth;
+                var mutex = FiresLiquidGridOps.MeshDataLock(__instance);
+                if (mutex != null) System.Threading.Monitor.Enter(mutex);
+                try
+                {
+                    for (int z = 0; z < num; z++)
+                        for (int x = 0; x < num; x++)
+                        {
+                            float wx = p.x - half + x * scale, wz = p.z - half + z * scale, rel;
+                            if (VoxelWorld.TrySampleWaterFloorY(wx, wz, p.y + FloorBand, p.y - FloorBand, out float surfY, out bool wall)) rel = surfY - p.y;
+                            else rel = wall ? maxD : 0f;
+                            heights[z * num + x] = Mathf.Clamp(rel, -PoolDepth, maxD);
+                        }
+                    FiresLiquidGridOps.Dirty(__instance) = true;
+                }
+                finally { if (mutex != null) System.Threading.Monitor.Exit(mutex); }
+                if (s_flattened++ == 0)
+                    FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "[Underground] liquid '{0}' at ({1:0.0},{2:0.0},{3:0.0}) laid flat on the cavern floor (band +-{4:0} m, at most {5:0.0} m deep; first of this session)",
+                        __instance.name, p.x, p.y, p.z, FloorBand, PoolDepth));
+            }
+            catch (System.Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresVoxel] underground liquid flatten threw: {ex.Message}");
             }
         }
     }

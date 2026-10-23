@@ -8,11 +8,11 @@ namespace VerdantsAscent.Terrain.BcImport
 {
     // BetterContinents pins locations from its location map (the boss altars a map maker placed by hand) and can move the
     // start temple. When Valheim places an older world's locations again it first drops every location not yet placed;
-    // BC's own ClearNonPlacedLocations postfix then registered the pinned ones again (BetterContinentsREF
-    // BetterContinents.cs ZoneSystemPatch). A converted map has no BC, so without this its unexplored altars were rolled
-    // anew by vanilla's rules. A pin whose zone already holds a location, or was already explored, is left alone: vanilla
-    // never spawns a location into a zone that is already generated. BC's SkipDefaultLocations is ported with it.
-    // Spec: Docs/BETTERCONTINENTS_IMPORT.md, Tools/BC_CHUNK_CONVERSION.md (D3)
+    // with BetterContinents installed the pinned ones were then registered again. A converted map has no BC, so without
+    // this its unexplored altars were rolled anew by vanilla's rules. A pin whose zone already holds a location, or was
+    // already explored, is left alone: vanilla never spawns a location into a zone that is already generated. The world's
+    // "skip default locations" setting is honoured too: a location the map does not pin counts as already placed.
+    // Spec: Docs/BETTERCONTINENTS_IMPORT.md
     internal static class BcLocationPatches
     {
         private const string StartLocationName = "StartTemple";

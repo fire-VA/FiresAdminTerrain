@@ -4,8 +4,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // Round-63 — per-instance diagnostics for spawned FiresLiquidWater
-    // volumes. The user gets wet (LiquidSurface trigger works → the sim
+    // Per-instance diagnostics for spawned FiresLiquidWater
+    // volumes, for when the player gets wet (LiquidSurface trigger works → the sim
     // runs) but sees NO water. This component logs every link of the
     // visual chain on a schedule (0.5s, 1s, 2s, 4s, 8s, 15s after spawn)
     // so one test run shows exactly where the chain breaks:
@@ -28,7 +28,7 @@ namespace VerdantsAscent.Water.Core
     {
         private static readonly float[] SCHEDULE = { 0.5f, 1f, 2f, 4f, 8f, 15f };
 
-        // Round-86 — all tracing is gated behind the "FiresLiquid Diagnostics"
+        // All tracing is gated behind the "FiresLiquid Diagnostics"
         // config toggle (default off). The origin-destroy bug these hunted is
         // fixed, so on a healthy world they're just noise on every unload.
         internal static bool On =>
@@ -48,7 +48,7 @@ namespace VerdantsAscent.Water.Core
             FiresLogger.LogInfo(Describe(gameObject, $"T+{_age:F1}s"));
         }
 
-        // Round-66 — the 07-10 test showed every pour destroyed in <0.5s
+        // Pours were seen destroyed in <0.5s
         // (zero T+ lines, dump found only the pool template). This logs
         // the moment of death with the pour's final state and age.
         private void OnDestroy()
@@ -57,14 +57,14 @@ namespace VerdantsAscent.Water.Core
             FiresLogger.LogWarning($"[LiquidWaterDebug] '{name}' DESTROYED at T+{_age:F2}s | {Describe(gameObject, "FINAL")}");
         }
 
-        // ── Round-66 destroy TRACERS: REMOVED (Round-87) ─────────────────
-        // These were Harmony prefixes on ZNetScene.OnZDODestroyed / ZNetView.ResetZDO / ZNetScene.Destroy /
-        // ZDOMan.DestroyZDO that dumped a stack trace when a FiresLiquidWater pour died. The origin-destroy
-        // bug they hunted is long fixed, and — being on the hottest object-lifecycle paths — they ran (and
-        // captured Environment.StackTrace) on EVERY object destroy on the server, spamming the log and adding
+        // ── No destroy tracers ─────────────────
+        // Harmony prefixes on ZNetScene.OnZDODestroyed / ZNetView.ResetZDO / ZNetScene.Destroy /
+        // ZDOMan.DestroyZDO that dump a stack trace when a FiresLiquidWater pour dies are not used. The origin-destroy
+        // bug they hunted is fixed, and (being on the hottest object-lifecycle paths) they would run (and
+        // capture Environment.StackTrace) on EVERY object destroy on the server, spamming the log and adding
         // real overhead during bulk removals (Upgrade World zone/location resets remove every ZDO in a zone).
-        // Deleted outright rather than gated: the config gate still executed the prefix per-destroy, and a
-        // process that cached the toggle at launch kept tracing after the file was set to false. The pour
+        // Not gated either: a config gate still executes the prefix per-destroy, and a
+        // process that caches the toggle at launch keeps tracing after the file is set to false. The pour
         // lifecycle can still be inspected via the opt-in dump command + the water GO's own Update/OnDestroy
         // Describe logging below, neither of which touches the global destroy paths.
 
@@ -111,7 +111,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 else sb.Append(" | renderer: MISSING");
 
-                // Round-83 — swim/trigger diagnostics. The LiquidSurface
+                // Swim/trigger diagnostics. The LiquidSurface
                 // trigger (layer-21 box) is what drives swimming; if it's
                 // missing/disabled or the player never registers InWater,
                 // that's the swim bug.
@@ -151,10 +151,10 @@ namespace VerdantsAscent.Water.Core
             return sb.ToString();
         }
 
-        // Round-65 — same render-chain report for a WaterMeshCombiner grid
-        // mesh (drawn disks, springs, settled volumes). The round-63 dump
-        // only covered LiquidVolume, so the user's invisible SPRING never
-        // appeared in it at all — this closes that blind spot.
+        // Same render-chain report for a WaterMeshCombiner grid
+        // mesh (drawn disks, springs, settled volumes). The pour dump
+        // only covers LiquidVolume, so an invisible spring would never
+        // appear in it; this closes that blind spot.
         public static string DescribeCombiner(WaterMeshCombiner c, string tag)
         {
             var sb = new StringBuilder();

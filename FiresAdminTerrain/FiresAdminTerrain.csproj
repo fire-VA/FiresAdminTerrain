@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -152,7 +152,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="FiresAdminTerrain.cs" />
+    <Compile Include="FatApi.cs" />
+    <Compile Include="FiresCachePaths.cs" />
     <Compile Include="Managers\ConfigManager.cs" />
+    <Compile Include="Managers\FatPlayerFacingConfig.cs" />
     <Compile Include="Modules\Async\AsyncShutdownManager.cs" />
     <Compile Include="Modules\Async\BackgroundWorker.cs" />
     <Compile Include="Modules\Async\FrameBudgetScheduler.cs" />
@@ -162,7 +165,9 @@
     <Compile Include="Modules\BcImport\BcSaveSystemPatches.cs" />
     <Compile Include="Modules\BcImport\BcConvert.cs" />
     <Compile Include="Modules\BcImport\BcLocationPatches.cs" />
+    <Compile Include="Modules\BcImport\BcAshlandsPatches.cs" />
     <Compile Include="Modules\BcImport\BcJoinSync.cs" />
+    <Compile Include="Modules\BcImport\BcLocalCaches.cs" />
     <Compile Include="Modules\BcImport\BiomeGridSync.cs" />
     <Compile Include="Modules\BcImport\RiverSync.cs" />
     <Compile Include="Modules\BcImport\JoinSyncScreen.cs" />
@@ -242,6 +247,7 @@
     <Compile Include="Modules\CustomWater\Core\WaterCombinerCache.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterDisk.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombiner.MeshGen.cs" />
+    <Compile Include="Modules\CustomWater\Core\PlacedWaterSheets.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombiner.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidWaterDebug.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidWaterPrefab.cs" />
@@ -256,6 +262,9 @@
     <Compile Include="Modules\CustomWater\FishCheckCommand.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidConfig.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresInlandWaterConfig.cs" />
+    <Compile Include="Modules\CustomWater\Volume\InlandLakeProbe.cs" />
+    <Compile Include="Modules\CustomWater\Volume\InlandLookConfig.cs" />
+    <Compile Include="Modules\CustomWater\Volume\InlandSteam.cs" />
     <Compile Include="Modules\CustomWater\Volume\WaterVolumeSettle.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombinerAnchor.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterOperationRPC.cs" />
@@ -263,6 +272,7 @@
     <Compile Include="Modules\CustomWater\Core\WaterPersistence.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterSegmentAnchor.cs" />
     <Compile Include="Modules\CustomWater\CustomWaterPatches.cs" />
+    <Compile Include="Modules\CustomWater\FatWaterLevelGate.cs" />
     <Compile Include="Modules\CustomWater\ShipWaterImpactFxGuard.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresVoxelConfig.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelChunk.cs" />
@@ -277,6 +287,7 @@
     <Compile Include="Modules\VoxelTerrain\LegacyMesh\VoxelGenWaterMesh.cs" />
     <Compile Include="Modules\VoxelTerrain\WaterCensus.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCavePopGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatNoClip.cs" />
     <Compile Include="Modules\VoxelTerrain\FarVegImpostors.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelLiquidBridge.cs" />
     <Compile Include="Modules\VoxelTerrain\DeepNorthSnowMask.cs" />
@@ -289,6 +300,11 @@
     <Compile Include="Modules\VoxelTerrain\FarQuilt.cs" />
     <Compile Include="Modules\VoxelTerrain\FatSeasons.cs" />
     <Compile Include="Modules\VoxelTerrain\FatCracks.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSurfaceCache.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatNativeTrace.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatSpike.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatLogGate.cs" />
+    <Compile Include="Modules\VoxelTerrain\DediTextureTrim.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveNoise.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveContent.cs" />
     <Compile Include="Modules\VoxelTerrain\HeightmapBuildCache.cs" />
@@ -301,12 +317,17 @@
     <Compile Include="Modules\VoxelTerrain\VoxelCaveSpawners.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelSurfaceSnap.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveClutter.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelUnderwaterClutter.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatSeamSuspects.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatStatsSection.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresFieldPack.cs" />
     <Compile Include="Modules\VoxelTerrain\LegacyMesh\VoxelWaterSurvey.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelGenLiquid.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelChunkCache.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCacheSync.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelWaterSurface.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresMinimapRivers.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresMinimapIslands.cs" />
     <Compile Include="Modules\VoxelTerrain\AltBiomePointGuard.cs" />
     <Compile Include="Modules\VoxelTerrain\AltBiomePointsParallel.cs" />
     <Compile Include="Modules\VoxelTerrain\BiomeIndexGuard.cs" />
@@ -316,9 +337,9 @@
     <Compile Include="Modules\VoxelTerrain\FatUnderWaterPlacement.cs" />
     <Compile Include="Modules\VoxelTerrain\FatGroundProbe.cs" />
     <Compile Include="Modules\VoxelTerrain\FatClutterRegrow.cs" />
-    <Compile Include="Modules\Testing\ClutterFloatTest.cs" />
-    <Compile Include="Modules\Testing\WaveMatchTest.cs" />
     <Compile Include="Modules\Utilities\LocationRepair.cs" />
+    <Compile Include="Modules\Utilities\LocationLoadDrain.cs" />
+    <Compile Include="Modules\Utilities\WhatRendersProbe.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWaterPlan.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWaterPlanner.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresRiverCarve.cs" />
@@ -367,6 +388,10 @@
     <Compile Include="Modules\ZoneMode\OffMapZones.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeHandshake.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeRefusals.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeOverClosed.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeCloseable.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModePark.Close.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModePark.Purge.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeTerrainRefresh.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeOpening.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeIslands.cs" />
@@ -420,26 +445,45 @@
     <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Biomes.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Shape.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresSkyIslands.Ground.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkyIslandTerrainEdit.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresSkyIslandTerrainGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresSkylandHold.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresVoxelLocationLevelGuard.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeFinders.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWaterfalls.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWaterfallMist.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresRainbow.cs" />
     <Compile Include="Modules\Performance\VegetationDensity.cs" />
     <Compile Include="Modules\Performance\VegetationWarmUp.cs" />
-    <Compile Include="Modules\Testing\FatTestBot.cs" />
-    <Compile Include="Modules\Testing\AdminToolsProbe.cs" />
-    <Compile Include="Modules\Testing\AdminToolsCases.cs" />
-    <Compile Include="Modules\Testing\AdminToolsWaterCases.cs" />
-    <Compile Include="Modules\Testing\VanillaOps.cs" />
-    <Compile Include="Modules\Testing\AdminToolsPlaces.cs" />
-    <Compile Include="Modules\Testing\AdminToolsTest.cs" />
-    <Compile Include="Modules\Testing\FishWaterTest.cs" />
-    <Compile Include="Modules\Testing\RiverCarveTest.cs" />
-    <Compile Include="Modules\Testing\WaterLifeTest.cs" />
+    <Compile Include="Modules\Ocean\OceanKit.cs" />
     <Compile Include="Modules\Performance\FiresFrameAudit.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelZoneStreamer.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelBrushDrag.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelBrushDrag.Strokes.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresTerrainLayers.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelLayerPaint.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatZdoNear.cs" />
+    <Compile Include="Modules\ZoneMode\FatLocationTrace.cs" />
+    <Compile Include="Modules\ZoneMode\FatLocationDedupe.cs" />
+    <Compile Include="Modules\ZoneMode\FatLocationAccelerator.cs" />
+    <Compile Include="Modules\FatInput.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresCaveBiome.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatUndergroundLocations.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatGrottos.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatCaveRivers.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatSinkFalls.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatSinkFallCuts.cs" />
+    <Compile Include="Modules\VoxelTerrain\WetLineSeed.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatShaftUnderwater.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatCaveSignals.cs" />
+    <Compile Include="Modules\VoxelTerrain\CaveLight.cs" />
+    <Compile Include="Modules\VoxelTerrain\CaveFactor.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatWaterLine.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresStrandedBodies.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelPaintCommand.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatTerrainSnapshot.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelWaterSheetMesh.cs" />
+    <Compile Include="Modules\VoxelTerrain\FiresLayerTerrainEdit.cs" />
     <Compile Include="Modules\VoxelTerrain\SiteScanCommand.cs" />
     <Compile Include="Modules\VoxelTerrain\HomesteadScanCommand.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelAnchorPrefab.cs" />
@@ -452,6 +496,9 @@
     <Compile Include="Modules\ZoneMode\ZoneModeBuilds.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkBlueprint.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkKeys.cs" />
+    <Compile Include="Modules\FatUndo.cs" />
+    <Compile Include="Modules\FatUndoIce.cs" />
+    <Compile Include="Modules\FatUndoPour.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChaosHammer.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkTools.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkRemoval.cs" />
@@ -463,13 +510,22 @@
     <Compile Include="Modules\ZoneMode\BiomePaint.Sectors.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Spawns.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Regrow.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.ZoneRegrow.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.ZoneLocations.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.ZoneReplace.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.ZoneJobs.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.Density.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.Stroke.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Ground.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Locations.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeLift.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeLiftShore.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaintEntries.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeStartGround.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatWorldSize.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldProfile.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatSuperFlat.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatSuperFlatGrid.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldRecords.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldClone.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldCloudArchive.cs" />
@@ -483,6 +539,7 @@
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceCommands.cs" />
     <Compile Include="Modules\CustomWater\Ice\Floating\FloatingIceController.cs" />
     <Compile Include="Modules\CustomWater\Ice\FrozenWaterController.cs" />
+    <Compile Include="Modules\CustomWater\Ice\SeasonalWaterFreeze.cs" />
     <Compile Include="Modules\CustomWater\Ice\IceSlidingPatches.cs" />
     <Compile Include="Modules\CustomWater\Ice\Land\LandIceAnchor.cs" />
     <Compile Include="Modules\CustomWater\Ice\Land\LandIceAnchorPrefab.cs" />
@@ -513,6 +570,11 @@
     <Compile Include="Modules\CustomWater\Core\WaterBalloonShell.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterBrushCommands.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterShapingTools.cs" />
+    <Compile Include="Modules\CustomWater\Tools\PondTool.cs" />
+    <Compile Include="Modules\CustomWater\Tools\WaterToolDriver.cs" />
+    <Compile Include="Modules\CustomWater\Tools\WaterCleanupCommand.cs" />
+    <Compile Include="Modules\CustomWater\Tools\WaterAtCommand.cs" />
+    <Compile Include="Modules\CustomWater\Tools\WaterSheets.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterBrushDrag.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterDebugCommands.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterDumpCommand.cs" />
@@ -528,6 +590,7 @@
     <Compile Include="Modules\Utilities\PlayerSpawnGate.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Utilities\FiresLogger.cs" />
+    <Compile Include="Utilities\FatConfigRetire.cs" />
     <Compile Include="Utilities\VAFatBanner.cs" />
     <Compile Include="Utilities\FatHelpContent.cs" />
     <Compile Include="Utilities\VAFatLoadSummary.cs" />
@@ -572,10 +635,37 @@
   -->
   <ItemGroup>
     <EmbeddedResource Include="adminterrain" />
+    <EmbeddedResource Include="Assets\Underwater\deep_meadows.png" LogicalName="FAT.Underwater.deep_meadows.png" />
+    <EmbeddedResource Include="Assets\Underwater\deep_mountain.png" LogicalName="FAT.Underwater.deep_mountain.png" />
+    <EmbeddedResource Include="Assets\Underwater\deep_plains.png" LogicalName="FAT.Underwater.deep_plains.png" />
+    <EmbeddedResource Include="Assets\Underwater\deep_swamp.png" LogicalName="FAT.Underwater.deep_swamp.png" />
+    <EmbeddedResource Include="Assets\Underwater\reed_meadows.png" LogicalName="FAT.Underwater.reed_meadows.png" />
+    <EmbeddedResource Include="Assets\Underwater\reed_mountain.png" LogicalName="FAT.Underwater.reed_mountain.png" />
+    <EmbeddedResource Include="Assets\Underwater\reed_plains.png" LogicalName="FAT.Underwater.reed_plains.png" />
+    <EmbeddedResource Include="Assets\Underwater\reed_swamp.png" LogicalName="FAT.Underwater.reed_swamp.png" />
+    <EmbeddedResource Include="Assets\Underwater\silt_meadows.png" LogicalName="FAT.Underwater.silt_meadows.png" />
+    <EmbeddedResource Include="Assets\Underwater\silt_mountain.png" LogicalName="FAT.Underwater.silt_mountain.png" />
+    <EmbeddedResource Include="Assets\Underwater\silt_plains.png" LogicalName="FAT.Underwater.silt_plains.png" />
+    <EmbeddedResource Include="Assets\Underwater\silt_swamp.png" LogicalName="FAT.Underwater.silt_swamp.png" />
+    <EmbeddedResource Include="Assets\Underwater\weed_meadows.png" LogicalName="FAT.Underwater.weed_meadows.png" />
+    <EmbeddedResource Include="Assets\Underwater\weed_mountain.png" LogicalName="FAT.Underwater.weed_mountain.png" />
+    <EmbeddedResource Include="Assets\Underwater\weed_plains.png" LogicalName="FAT.Underwater.weed_plains.png" />
+    <EmbeddedResource Include="Assets\Underwater\weed_swamp.png" LogicalName="FAT.Underwater.weed_swamp.png" />
     <EmbeddedResource Include="fireswaterfall" />
     <EmbeddedResource Include="fireszones" />
     <None Include="packages.config" />
     <None Include="Docs\TERRAIN_WATER_PERSISTENCE_BUGFIX_TRACKER.md" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-</Project>
+
+  <!-- Test-only tools (in-game F5 tests and the overnight-round helpers). They are not part of the public source: a fresh
+       clone builds without them, and a build that has them defines FIRES_TESTS and compiles them in. -->
+  <PropertyGroup Condition="Exists('Modules\Testing\AdminToolsTest.cs')">
+    <DefineConstants>$(DefineConstants);FIRES_TESTS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('Modules\Testing\AdminToolsTest.cs')">
+    <Compile Include="Modules\Testing\*.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatWetMemoCheck.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatShorePoses.cs" />
+    <Compile Include="Modules\ZoneMode\FatContentTests.cs" />
+  </ItemGroup></Project>

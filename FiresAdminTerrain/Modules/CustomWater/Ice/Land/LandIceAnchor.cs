@@ -6,7 +6,7 @@ namespace VerdantsAscent.Water.Core
     /// <summary>
     /// ZDO-backed anchor for land-ice persistence.
     ///
-    /// ARCHITECTURE (round-26 plan §1.2):
+    /// ARCHITECTURE:
     /// - ONE invisible VALandIce anchor per land-ice disk-cluster
     /// - Anchor stores footprints, noise seed, height grid, bounds in ZDO
     /// - On world load, anchor.Start lazily attaches a LandIceController
@@ -16,8 +16,8 @@ namespace VerdantsAscent.Water.Core
     ///   Save() each time heights/footprints change
     ///
     /// HASH KEYS are deliberately re-namespaced from the legacy `va_land_ice_*`
-    /// scheme so any orphan keys on old ice1 ZDOs are ignored — user
-    /// confirmed existing snow/ice is deleted before migration so no
+    /// scheme so any orphan keys on old ice1 ZDOs are ignored; existing
+    /// snow/ice is deleted before migration, so no
     /// backward-compat shim is needed.
     /// </summary>
     public class LandIceAnchor : MonoBehaviour

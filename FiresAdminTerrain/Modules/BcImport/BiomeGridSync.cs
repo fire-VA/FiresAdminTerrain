@@ -8,7 +8,7 @@ using HarmonyLib;
 
 namespace VerdantsAscent.Terrain.BcImport
 {
-    // The server's biome grid for a joining client (D12, Tools\BC_CHUNK_CONVERSION.md). Valheim 1.0's VerifyBiomeData rebuilds
+    // The server's biome grid for a joining client. Valheim 1.0's VerifyBiomeData rebuilds
     // a 2048² grid of GetBiome + GetBiomeHeight on EVERY join, because a joined client's World carries no world version:
     // 1.6 s even in parallel, plus a 20 MB cache write. The client needs the result (terrain colour, environments, the
     // minimap's biome name, spawn levels), so it cannot be skipped. The server already holds the same grid, so it hands its

@@ -3,7 +3,7 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Persistence
 {
     /// <summary>
-    /// 2026-05-26 round-32 — global brush placement modes.
+    /// Global brush placement modes.
     ///
     /// Two toggles that change how all `va_brush_flat / _raise / _lower`
     /// (and their drag re-dispatches) write tiles. The toggles are GLOBAL,
@@ -83,12 +83,11 @@ namespace VerdantsAscent.Terrain.Persistence
         private static bool _loaded;
 
         /// <summary>
-        /// Round-63 — global draw-speed multiplier for the brush drag
+        /// Global draw-speed multiplier for the brush drag
         /// pumps (terrain AND water). 1.0 = full speed (default); lower
         /// values emit proportionally fewer dabs per frame so a drag
-        /// stroke deposits slower — the user asked for a way to "slow
-        /// down how fast it draws the mesh to allow us to be more
-        /// precise". Clamped 0.05–1. Set via `va_brush_drawspeed`.
+        /// stroke deposits slower, so the mesh draws slowly enough to be
+        /// precise. Clamped 0.05–1. Set via `va_brush_drawspeed`.
         /// </summary>
         public static float DrawSpeed
         {

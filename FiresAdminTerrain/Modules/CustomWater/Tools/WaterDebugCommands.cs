@@ -1428,7 +1428,7 @@ namespace VerdantsAscent.Water.Core
                 PrintConsole($"Source {size}x{size} exceeds GPU max {MaxTextureSize}. Exporting at {outputSize}x{outputSize}.");
             }
 
-            string debugDir = Path.Combine(BepInEx.Paths.ConfigPath, "FiresAdminTerrain", "Debug");
+            string debugDir = global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "Debug");   // cache folder, not config
             Directory.CreateDirectory(debugDir);
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
@@ -1776,7 +1776,7 @@ namespace VerdantsAscent.Water.Core
                 args.Context.AddString($"Source {snapshot.Size}x{snapshot.Size} exceeds GPU max {MaxTextureSize}. Exporting at {outputSize}x{outputSize}.");
             }
 
-            string debugDir = Path.Combine(BepInEx.Paths.ConfigPath, "FiresAdminTerrain", "Debug");
+            string debugDir = global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "Debug");   // cache folder, not config
             Directory.CreateDirectory(debugDir);
 
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
@@ -2435,7 +2435,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     // Vanilla's own world save root (honours -savedir; on a plain client it is the same LocalLow\IronGate\
                     // Valheim\worlds_local this used to build by hand from the user profile, so saved data stays put). A public
-                    // mod's files stay inside the game's and Valheim's own folders (Fire, 2026-09-29).
+                    // mod's files stay inside the game's and Valheim's own folders.
                     string basePath = SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local);
                     return System.IO.Path.Combine(basePath, worldName);
                 }

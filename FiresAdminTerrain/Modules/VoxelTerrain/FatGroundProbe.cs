@@ -6,13 +6,13 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // ── What does the SERVER stand on here? (0.2.689, [lead] + [fgn] 10-01, RIDEg) ──────────────────────────────────────
+    // ── What does the SERVER stand on here? ──────────────────────────────────────
     // ride_test's Lox was spawned in a carved pit and walked out while the server owned it. The VoxelWrap dedi builds
     // headless voxel colliders ("Server builds voxel collision" = true), so the question is which of three it was: the
     // runtime carve not yet in the server's collider, a climbable smoothed wall, or vanilla's heightmap collider still on.
     // This asks the server, from any client, and prints its answer:
     //   console  va_ground_probe <x> <z> [y]        (admin)   → one line, "[FiresGroundProbe] server ground at …"
-    //   code     FatGroundProbe.Request(x, z, y, Action<string> reply)   (public, stable; [fgn] calls it from ride_test)
+    //   code     FatGroundProbe.Request(x, z, y, Action<string> reply)   (public, stable; FGN calls it from ride_test)
     //   RPC      "FiresAdminTerrain_GroundProbe" (client → server): ZPackage { int id, float x, float z, float y }
     //            "FiresAdminTerrain_GroundProbeReply" (server → asker): ZPackage { int id, string line }
     // The line, fields separated by " | ":
@@ -147,23 +147,79 @@ namespace VerdantsAscent.Terrain.Voxel
                 Tag, where, x, z, top, ray, voxel, heightmap, edits);
         }
 
-        // ── HasEdits: public, stable ([fgn] option 2, a hand-off near carved ground) ───────────────────────────────────
+        // ── HasEdits: public, stable (for a hand-off near carved ground) ───────────────────────────────────
         // True when a loaded VAVoxel edit anchor's chunk (32 m cube) comes within radius of pos (XZ and Y). Registry
         // lookup only: no physics, no zone build.
         public static bool HasEdits(Vector3 pos, float radius) => VoxelChunkAnchor.AnyNear(pos, Mathf.Max(0f, radius));
 
-        // 0.2.694 ([lead]: "count untouched as columns whose voxel surface equals the generated height"): ground at (x, z)
+        // Untouched columns are those whose voxel surface equals the generated height: ground at (x, z)
         // standing more than EditedTolerance off WorldGenerator's height there is edited (a carve, a fill, a level, a pool).
-        // The tolerance is the fill threshold judged on 09-29 (VoxelWrap ground sits a little off the generator anywhere).
+        // The tolerance is the fill threshold (VoxelWrap ground sits a little off the generator anywhere).
         public const float EditedTolerance = 0.3f;
 
         public static bool IsGroundEdited(float x, float z, float groundY)
             => WorldGenerator.instance != null && Mathf.Abs(groundY - WorldGenerator.instance.GetHeight(x, z)) > EditedTolerance;
 
-        // 0.2.693: the same in plan view: an edit anchor's 32 m column within radius of (x, z), whatever its height.
+        // The same in plan view: an edit anchor's 32 m column within radius of (x, z), whatever its height.
         public static bool HasEditsXZ(float x, float z, float radius) => VoxelChunkAnchor.AnyInColumn(x, z, Mathf.Max(0f, radius));
 
-        // ── CollidersReady: public, stable (0.2.690, [fgn]: hold a server spawn / tame on edited ground until it is) ────
+        // ── VoxelSurfaceY: public, stable (for any test that measures ground) ──────────────
+        // The TOPMOST walkable voxel surface (a solid→air crossing: solid below, air above) in the column at (x, z) within
+        // [nearY - reach, nearY + reach], read from the live voxel density on THIS peer: no physics, so building pieces,
+        // creatures and stale colliders are never read. Highest crossing wins, so a cave pocket, an overhang's underside or
+        // a lip below the top never does (VoxelWorld.TryFindSurfaceY picks the crossing NEAREST its hint in either
+        // direction, which can be one of those). Keep the window round the layer you mean: a skyland or a cave roof outside
+        // it is ignored. False when the column is not loaded here or holds no surface in the window.
+        public static bool VoxelSurfaceY(float x, float z, float nearY, float reach, out float y)
+            => VoxelWorld.TrySampleSurfaceY(x, z, nearY + Mathf.Abs(reach), nearY - Mathf.Abs(reach), out y, out _);
+
+        // The same with the window round the generated ground (±GroundWindow m), for a caller with no height to start from.
+        public static bool VoxelSurfaceY(float x, float z, out float y)
+        {
+            float ground = WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(x, z) : 30f;
+            return VoxelSurfaceY(x, z, ground, GroundWindow, out y);
+        }
+
+        private const float GroundWindow = 40f;
+
+        // fat_surface_probe <x> <z> [nearY] [reach=30]: every surface crossing in the column on this peer, and what
+        // TryFindSurfaceY (nearest to nearY) and VoxelSurfaceY (topmost) answer there. Read-only.
+        internal static void RegisterSurfaceProbe()
+        {
+            new Terminal.ConsoleCommand("fat_surface_probe",
+                "<x> <z> [nearY] [reach=30] - every voxel surface crossing in the column here, and what TryFindSurfaceY / VoxelSurfaceY read (read-only)",
+                args =>
+                {
+                    var inv = CultureInfo.InvariantCulture;
+                    if (args.Length < 3 || !float.TryParse(args[1], NumberStyles.Float, inv, out float x) || !float.TryParse(args[2], NumberStyles.Float, inv, out float z))
+                    { args.Context?.AddString("fat_surface_probe <x> <z> [nearY] [reach=30]"); return; }
+                    float near = args.Length > 3 && float.TryParse(args[3], NumberStyles.Float, inv, out float n) ? n
+                        : (WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(x, z) : 30f);
+                    float reach = args.Length > 4 && float.TryParse(args[4], NumberStyles.Float, inv, out float r) ? r : 30f;
+                    string crossings = VoxelWorld.DescribeColumn(x, z, near - reach, near + reach);
+                    bool nearOk = VoxelWorld.TryFindSurfaceY(x, z, near, reach, out float nearest);
+                    bool topOk = VoxelSurfaceY(x, z, near, reach, out float top);
+                    string line = string.Format(inv, "[FatSurfaceProbe] ({0:0.0},{1:0.0}) window {2:0.0}..{3:0.0}: crossings {4}; TryFindSurfaceY(near {5:0.0}) {6}; VoxelSurfaceY (topmost) {7}",
+                        x, z, near - reach, near + reach, crossings, near, nearOk ? nearest.ToString("0.00", inv) : "none", topOk ? top.ToString("0.00", inv) : "none");
+                    // The proof for "Ground probe matches the mesh": the old single-column read, the water read, and the
+                    // collider you would stand on (a ray down from 2 m above the probe), with the probe-minus-collider Δ.
+                    if (topOk)
+                    {
+                        bool water = VoxelWorld.TrySampleWaterFloorY(x, z, near + reach, near - reach, out float wy, out _);
+                        string ray = "no hit";
+                        if (Physics.Raycast(new Vector3(x, top + 2f, z), Vector3.down, out RaycastHit hit, 6f,
+                                LayerMask.GetMask("Default", "static_solid", "terrain", "piece"), QueryTriggerInteraction.Ignore))
+                            ray = string.Format(inv, "{0:0.000} on {1} (probe Δ {2:+0.000;-0.000;0.000} m)", hit.point.y, hit.collider.name, top - hit.point.y);
+                        line += string.Format(inv, "; topmost {0:0.000}, water floor read {1}; collider {2}",
+                            top, water ? wy.ToString("0.000", inv) : "none", ray);
+                    }
+                    FiresLogger.LogInfo(line);
+                    args.Context?.AddString(line);
+                },
+                isCheat: true);
+        }
+
+        // ── CollidersReady: public, stable (hold a server spawn / tame on edited ground until it is) ────
         // False while any voxel chunk within radius of pos (a 32 m cube grid) still has its edit anchor's latest revision
         // unapplied here, or has a surface whose collider bake is in flight or not yet assigned. True otherwise, including
         // where no voxel chunk is loaded (nothing of ours to wait for). Registry and view lookups only, no physics.

@@ -155,7 +155,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // vanilla. Without the gate, GetGroundHeight overrides apply to
         // vegetation placement, character grounding, AI navigation, etc., and
         // we get the "all vegetation in the world raises when ruler is active"
-        // bug (which the user spotted 2026-05-24).
+        // bug.
         //
         // Counter (not bool) so recursive Snap calls don't drop the gate
         // mid-flight. ThreadStatic so callers from other threads (unlikely
@@ -303,7 +303,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // vegetation/AI/character grounding queries fall through to vanilla
             // — so vanilla trees stay planted on vanilla ground even when our
             // skyland is above them. This is the fix for the "all vegetation
-            // raises with ruler height" bug spotted 2026-05-24.
+            // raises with ruler height" bug.
             if (!TileLiftOpen) return true;
 
             if (TileAnchorRegistry.TrySampleHeightAtWorld(p, out float h))

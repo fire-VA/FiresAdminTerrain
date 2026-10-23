@@ -8,8 +8,8 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // ── `waterlife_test <x> <z> [radius=25]`: what actually lives in and around a pond (Fire 10-01, watching the stream: "it's
-    // hard to tell … whether there are actually any fish, grass or lily pads spawning around this water") ────────────────
+    // ── `waterlife_test <x> <z> [radius=25]`: what actually lives in and around a pond (it is
+    // hard to tell by eye whether any fish, grass or lily pads spawn around a water) ────────────────
     // Read-only, on-demand F5 contract test (without arguments every step SKIPs); it changes nothing. Within radius of the
     // point, on this client:
     //   1 water       the water there (FatWaterChecks: generated field, tool ponds, every FAT and vanilla water)
@@ -89,7 +89,7 @@ namespace VerdantsAscent.Terrain.Testing
                 string fishList = string.Join(", ", fish.GroupBy(f => Utils.GetPrefabName(f.gameObject))
                     .Select(g => $"{g.Key} x{g.Count()} ({g.Count(f => !f.IsOutOfWater())} in water)"));
                 Step("fish", fish.Count > 0 ? Pass : Fail, $"{fish.Count} live fish within {radius:0} m" + (fish.Count > 0 ? ": " + fishList : ""));
-                // 0.2.680 (H8 "Fish2 x1 (0 in water)"): each fish, where it is, the liquid level it was last given (Fish.m_inWater,
+                // Each fish, where it is, the liquid level it was last given (Fish.m_inWater,
                 // -10000 = never set) against vanilla's IsOutOfWater test (Fish.cs:222-225: level < y - m_height), and FAT's surface there.
                 foreach (var f in fish.Take(ListTop))
                 {
@@ -147,7 +147,7 @@ namespace VerdantsAscent.Terrain.Testing
                 Step("clutter", clutterWater > 0 ? Pass : Fail,
                     $"{clutter.Values.Sum()} clutter instance(s) within {radius:0} m ({clutterWater} water-edge){Listing(clutter)}; {ecology}"
                     + (cs == null ? " No ClutterSystem on this client." : fromTester > (cs?.m_distance ?? 0f) ? $" The tester is {fromTester:0} m away, beyond clutter range {cs.m_distance:0} m: walk closer and run again." : ""));
-                // Which water clutter vanilla HAS, and where it may grow (0.2.675: R46 showed none; is there any for this biome?).
+                // Which water clutter vanilla HAS, and where it may grow (is there any for this biome?).
                 if (cs != null)
                 {
                     const float gap = VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.VanillaClutterGap;
@@ -155,7 +155,7 @@ namespace VerdantsAscent.Terrain.Testing
                         + $"is built against surface - {gap:0.00} (vanilla's 30 vs 27 gap, no tide), so a bed d m under the surface has alt {gap:0.00} - d.");
                     var rules = cs.m_clutter.Where(c => c != null && c.m_prefab != null
                         && (c.m_snapToWater || c.m_minOceanDepth != c.m_maxOceanDepth || IsWaterEdge(c.m_prefab.name))).ToList();
-                    // 0.2.680 (H8: vass x1, lilies 0): vanilla's own gates for each snapping rule, in GenerateVegPatch's order
+                    // Vanilla's own gates for each snapping rule, in GenerateVegPatch's order
                     // (ClutterSystem.cs:283-324), on a GateStep grid across the water within radius, against the level the FAT
                     // ecology moves the patch to (surface - gap). Each point counts under the FIRST gate that refuses it.
                     if (anyWater)
@@ -181,7 +181,7 @@ namespace VerdantsAscent.Terrain.Testing
                     string name = Utils.GetPrefabName(nv.gameObject);
                     placed.TryGetValue(name, out int had);
                     placed[name] = had + 1;
-                    // 0.2.686 (Fire 10-01: only stumps, logs and rocks under the water): any base under the surface by more
+                    // Only stumps, logs and rocks may stand under the water: any base under the surface by more
                     // than the drowned sweep's tolerance, read at the base as the sweep reads it, sorted by the same rule
                     // (FatUnderWaterPlacement): refused kinds FAIL the step, allowed kinds and other objects are listed.
                     if (IsWaterAnchor(name) || FatWaterChecks.SurfaceAt(bp + Vector3.up * 0.1f) <= bp.y + global::VerdantsAscent.Terrain.Voxel.FatUnderWaterPlacement.SurfaceTolerance) continue;
@@ -191,8 +191,8 @@ namespace VerdantsAscent.Terrain.Testing
                     bucket[name] = d + 1;
                 }
                 int placedWater = placed.Where(kv => IsWaterEdge(kv.Key)).Sum(kv => kv.Value);
-                // 0.2.680 ([lead] H8): water-edge life counts from clutter OR placed objects (vass is clutter, never placed).
-                // 0.2.686: the step PASSes unless a tree, Tree-type destructible, plant, pickable, bush or sapling stands in the
+                // Water-edge life counts from clutter OR placed objects (vass is clutter, never placed).
+                // The step PASSes unless a tree, Tree-type destructible, plant, pickable, bush or sapling stands in the
                 // water; water-edge life is reported, steps 2 and 3 judge it.
                 int edge = placedWater + clutterWater, inWater = drowned.Values.Sum();
                 Step("vegetation", inWater == 0 ? Pass : Fail,

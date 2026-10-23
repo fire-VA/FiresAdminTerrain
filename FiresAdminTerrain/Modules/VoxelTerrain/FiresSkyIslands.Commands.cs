@@ -32,6 +32,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private const string CmdAdd = "fires_islands_add";
         private const string CmdRemove = "fires_islands_remove";
         private const string CmdReset = "fires_islands_reset";
+        private const string CmdRedress = "fires_islands_redress";
+        private const float DefaultRedressRadius = 300f;
 
         private const string RpcEdit = "FiresAdminTerrain_IslandEdit";
         private const string RpcEditResult = "FiresAdminTerrain_IslandEditResult";
@@ -107,9 +109,22 @@ namespace VerdantsAscent.Terrain.Voxel
                 "Re-roll every island in a zone nobody has generated yet, from the CURRENT generator and rarity. "
                 + "Islands in generated zones are kept exactly as they are, so nothing anyone has visited moves.",
                 args => SendEdit(args.Context, EditOp.Reset, PlayerPos(), 0f, 0), isCheat: true);
+
+            // Old worlds keep the dressing laid on the uncarved top (floating over river banks). This takes off ONLY
+            // the dressing the skyland code placed (tagged objects, or, from before the tag, an object of the same prefab at
+            // exactly the spot the old rule put it) and lays it again on the carved top. Builds and anything players placed stay.
+            new Terminal.ConsoleCommand(CmdRedress,
+                "Re-dress the zone skylands within a radius of you on their carved top. Usage: " + CmdRedress + " [radius] (default "
+                + DefaultRedressRadius + "; 'all' for every skyland). Removes only dressing the skyland code placed, never builds.",
+                args =>
+                {
+                    bool all = args.Length > 1 && string.Equals(args[1], "all", StringComparison.OrdinalIgnoreCase);
+                    float radius = all ? MaxListRadius * 10f : ParseFloat(args, 1, DefaultRedressRadius, MaxListRadius);
+                    SendEdit(args.Context, EditOp.Redress, PlayerPos(), radius, 0);
+                }, isCheat: true);
         }
 
-        private enum EditOp : byte { Add, Remove, Reset }
+        private enum EditOp : byte { Add, Remove, Reset, Redress }
 
         // ── Reads ───────────────────────────────────────────────────────────
         private static List<string> Status()
@@ -268,6 +283,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var lines = new List<string>();
             var world = ZNet.World;
             if (world == null) { lines.Add("[Islands] No world loaded."); return lines; }
+            if (op == EditOp.Redress) return Zones.ZoneModeSkylands.Redress(center, radius);
 
             var before = new List<Island>(s_islands);
             var next = new List<Island>(s_islands);

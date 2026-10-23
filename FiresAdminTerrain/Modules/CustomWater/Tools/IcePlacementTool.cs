@@ -152,7 +152,7 @@ namespace VerdantsAscent.Water.Tools
 
             // Create the ice disk by cloning the vanilla ice1 prefab.
             // This gives us ZNetView (ZDO persistence), Floating, Rigidbody,
-            // 2026-05-26 round-26 §1.2 — split the placement path:
+            // Split the placement path:
             //   * Floating ice keeps cloning ice1 (it relies on
             //     vanilla Floating/Rigidbody for buoyancy).
             //   * Land ice spawns a dedicated VALandIce anchor via
@@ -270,7 +270,7 @@ namespace VerdantsAscent.Water.Tools
             // Final height = from.Y (ruler position) + offset (PageUp/PageDown)
             position.y += heightOffset;
 
-            // 2026-05-26 round-26 §1.2 — same split as PlaceIce:
+            // Same split as PlaceIce:
             // floating uses ice1 clone, land uses VALandIce anchor.
             if (forceFloating)
             {

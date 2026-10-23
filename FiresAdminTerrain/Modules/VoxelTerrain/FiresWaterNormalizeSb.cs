@@ -20,11 +20,11 @@ namespace VerdantsAscent.Terrain.Voxel
     {
         // FINAL still-water containment — run LAST, over ALL still water (swamps, lakes, ponds, highland
         // lakes). Floods each connected still body, finds its lowest DRY/channel bank, levels the body at
-        // (bank − FB); a cell whose bed then sits above the level dries (body shrinks, per user "smaller is
-        // fine"). Rivers (channels) FLOW and are skipped. Drives the audit's inland still-water overflow to
-        // ZERO by construction (user: "nail down the generation to never have a single overflow"). Swamps
+        // (bank − FB); a cell whose bed then sits above the level dries (body shrinks; smaller is
+        // fine). Rivers (channels) FLOW and are skipped. Drives the audit's inland still-water overflow to
+        // ZERO by construction (the generation never has a single overflow). Swamps
         // were seeded at a 15th-pct rim (deliberately spilling); this re-contains them to the true rim.
-        // GUARANTEED NO-FLOAT — the hard invariant (user, 2026-07-29): a NON-ocean water cell may NEVER
+        // GUARANTEED NO-FLOAT — the hard invariant: a NON-ocean water cell may NEVER
         // stand above the terrain of a DRY neighbour. Runs on the RAW 2m field the water MESH actually
         // samples (TryGetWaterSurfaceSmooth reads _waterS for wet cells), so containment is EXACT — full
         // resolution, no decimation, the real per-cell rim. Drain-to-contain: a floating wet cell is
@@ -63,7 +63,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (WetAny(j)) break;                            // connected water on this side — not a dry bank
                         float b = g[j];
                         if (L - b > cliff) break;                        // river lip — allowed to pour; still water: cliff=∞, always contained
-                        // (v91) PROUD BANK — dry ground standing at/above the level CONTAINS this side: STOP
+                        //  PROUD BANK — dry ground standing at/above the level CONTAINS this side: STOP
                         // (hydrostatics, docs/HYDROLOGY.md Law 1 — a connected section is level; only ground
                         // the water actually touches can spill it). The min-over-ray used to walk PAST the
                         // 0.84m bank and the wl+0.6 berm to open falling ground beyond, then shave individual
@@ -370,7 +370,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 else rimOther++;
                 if (cap > capHi) capHi = cap;
 
-                // DELIBERATE DEPRESSIONS ONLY (user doctrine, final form):
+                // DELIBERATE DEPRESSIONS ONLY (final form):
                 // water is NEVER poured into terrain-made dips. Every still
                 // body is a bowl WE dug (seeders — swamp basins, quota
                 // lakes, tarns) or a pool riding a carved river. With the
@@ -515,7 +515,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // ground on EVERY side. The high side was dug above;
                         // the low side is now buried. 0.55 m/m read as an
                         // obvious artificial dike from outside the water
-                        // (user screenshots), and its thin body let the
+                        // (seen in game), and its thin body let the
                         // sheet's 3-cell skirt punch out the outer face.
                         s_ringSeen.Clear();
                         s_ringA.Clear(); s_ringB.Clear();
@@ -626,9 +626,9 @@ namespace VerdantsAscent.Terrain.Voxel
             // fill-table pool (a mask-0 wet cluster BETWEEN channel cells).
             // The walk left them as RAW CONTOUR SHEETS: unflattened
             // shorelines spilling jagged tongues across the snow, no bowl,
-            // no banks — the giant aprons beside sloped channels (user:
-            // "flatter rivers we handle perfectly, but you are not handling
-            // the slopes"). Every pool touching a channel now gets the pond
+            // no banks — the giant aprons beside sloped channels (flat
+            // rivers were handled well, but
+            // the slopes were not). Every pool touching a channel now gets the pond
             // treatment at ITS OWN level: flatten to the pool's fill level,
             // dig a modest bowl, berm the rim locally (bounded lift — the
             // downhill cascade lip stays open). Runs AFTER the outlet brooks
@@ -679,7 +679,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // Seeded sheets (swamp floods, lakes, tarns) are OWNED by
                     // their seeders — this pass flattening one of their
                     // clusters to the cluster max built glassy water MOUNDS
-                    // standing above the swamp's banks (user screenshot).
+                    // standing above the swamp's banks.
                     if (TryGetSeedLevel((int)(pcx / pcells.Count), (int)(pcz / pcells.Count), out _))
                         continue;
                     // MEDIAN, not max: one contaminated high cell (a junction
@@ -886,7 +886,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // brooks), so outlet-poured pools get the pond treatment too.
             ShapeRiverPools();
 
-            // WATER-FIRST DROP-TO-BANK (user spec, 2026-07-28): a still-water body is placed TOO HIGH.
+            // WATER-FIRST DROP-TO-BANK: a still-water body is placed TOO HIGH.
             // Take its LOWEST BANK and level the whole FLAT body at (lowest bank − freeboard). We DROP
             // the water and OWN the terrain — a wall is NEVER built. It's fine if the lake gets smaller:
             // cells whose bed rose above the new level are CARVED down (modest gaps, to keep the
@@ -926,7 +926,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         if (g[i] < level - 0.01f) { w[i] = level; wfLevelled++; }                                  // already below → flat level
                         else if (g[i] - level <= CARVE_CAP) { g[i] = level - LAKE_MIN_DEPTH; w[i] = level; wfCarved++; }  // carve to keep footprint
-                        else { w[i] = g[i]; wfDried++; }                                                            // too high → dry (smaller lake, per user)
+                        else { w[i] = g[i]; wfDried++; }                                                            // too high → dry (smaller lake is fine)
                     }
                 }
                 FiresLogger.LogInfo($"[FiresWorldGen] water DROP-to-bank: {wfBodies:N0} still-water bodies levelled at lowest-bank−{FREEBOARD:0.0}m ({wfLevelled:N0} flat, {wfCarved:N0} bed-carved, {wfDried:N0} dried) — water now sits BELOW terrain; no walls built.");
@@ -964,16 +964,16 @@ namespace VerdantsAscent.Terrain.Voxel
         // below the water level − 0.35 (a water wall in-game). MUST be 0;
         // the first few violations log world coordinates so a screenshot
         // can be matched to the data cell-for-cell.
-        // Overflow audit with FULL diagnostics (user: "nail down WHAT water is incorrect, what banks are
-        // over and where, so we can nail down the generation to never have a single overflow"). An overflow
+        // Overflow audit with FULL diagnostics (exactly WHAT water is incorrect, what banks are
+        // over and where, so the generation never has a single overflow). An overflow
         // is a wet cell standing >0.35m above its lowest DRY neighbour (that neighbour is the bank the water
         // spills over). Reports the count broken down by water CLASS, by overflow MAGNITUDE, the WORST
         // offenders with full context, and spatial HOTSPOT regions — everything needed to hunt each one down.
-        // (TRACE 2026-08-11, user: "if a river is obviously running towards a lake and stops short it's going
-        // to piss me off") FINAL-FIELD CONNECTION AUDIT. For every planned body, how close does the nearest
+        // (TRACE) FINAL-FIELD CONNECTION AUDIT: a river obviously running towards a lake must not stop short.
+        // For every planned body, how close does the nearest
         // CARVED river cell (mask 1 channel / 3 spine) actually get to its footprint? Touching = connected.
         // A river cell 1–30 cells away with NO touch is exactly the "runs at the lake and stops short" defect.
-        // Bodies with no river anywhere near are fine (not every body needs an inflow — user).
+        // Bodies with no river anywhere near are fine (not every body needs an inflow).
         private static int s_bermMergePoint;   // (TRACE) junction cells left unbanked so a river and a body merge
         private static int s_canyonShelfCells;
         private static int s_shelfDeepCell = -1; private static float s_shelfDeepSlot, s_shelfDeepWl;   // the deepest slot the floor pass cut, so its SECTION can be printed   // (TRACE) cells where the canyon floor section cut a walkable shelf

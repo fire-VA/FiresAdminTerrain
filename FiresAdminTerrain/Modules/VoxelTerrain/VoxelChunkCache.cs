@@ -22,7 +22,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // deterministic generator output so a stale entry can never resurrect a
     // deleted carve.
     //
-    // Patterns taken from BetterContinents' WorldCache (BetterContinentsREF):
+    // Three common cache patterns (the same ideas BetterContinents' world cache uses):
     //   * content-addressed key — the directory name IS the hash of every
     //     input, so changing a cave/river config silently re-derives instead
     //     of serving stale terrain. No version field to forget to bump.
@@ -257,7 +257,7 @@ namespace VerdantsAscent.Terrain.Voxel
         //      rivers), vanilla river corridors are outlets we do not re-carve,
         //      bounded surface descent, and the coarse-grid bank relief.
         // 75 = one-zone-at-a-time: closed columns store no water and carve no
-        //      cave or river bed (0.2.442 cached water boxes over closed sea).
+        //      cave or river bed (cached water boxes over closed sea).
         // 76 = skyland bellies: superellipse profile (steep at the rim, round to
         //      pointed per island), the island hash doesn't cover the shape function.
         // 77 = skyland roundness and ribs come from the island hash (the float seed gave every
@@ -274,7 +274,9 @@ namespace VerdantsAscent.Terrain.Voxel
         //      stands in the hydrology's own ground sample.
         // 84 = water guards: channels, bowls, still water and springs keep off a world's frozen builds and placed
         //      locations (FiresWaterGuards), and a channel's carve closes into the ground where it meets them.
-        private const int GEN_VERSION = 84;
+        // 85 = sinkholes are a true distance field: open mouth, irregular leaning walls, a floor with a mound.
+        // 86 = stranded still bodies lowered to the river run they lie in at bake load: the water columns change.
+        private const int GEN_VERSION = 86;
         private const uint MAGIC = 0x56435A31;   // 'VCZ1'
         private const byte FMT = 2;
         private const int HeaderBytes = 10;      // magic(4) fmt(1) kind(1) genHash(4)
@@ -458,7 +460,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_root = Path.Combine(Path.Combine(baseDir, worldName), s_key);
                     Directory.CreateDirectory(s_root);
                     // Measuring the store walks every cached file and the prune deletes whole directories: on the
-                    // dedi that was 565 ms of a 624 ms main-thread stall as a client joined (R29a, [lead] 10-01). Both
+                    // dedi that was 565 ms of a 624 ms main-thread stall as a client joined. Both
                     // run on the thread pool; the cache is usable at once, and the LRU sweep waits for the measure.
                     s_bytes = 0;
                     s_measured = false;

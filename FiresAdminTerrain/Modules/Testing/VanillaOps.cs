@@ -15,7 +15,7 @@ namespace VerdantsAscent.Terrain.Testing
         private const string PickaxeItem = "PickaxeAntler";
 
         // 1.0's Hoe pieces by their tokens first: Level Ground (mud_road_v2) no longer levels at all - it is m_level 0 /
-        // m_smooth 1 - so the old settings-only match found nothing ([visual], R67 2026-09-29). The settings stay as the
+        // m_smooth 1 - so a settings-only match finds nothing. The settings stay as the
         // fallback for a renamed or modded piece.
         internal static GameObject HoeRaise() => Piece(HoeItem, "$piece_raise", s => s.m_raise && s.m_raiseDelta > 0f);
 

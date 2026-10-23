@@ -5,8 +5,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Utilities
 {
-    // Where the undead come from (Fire 2026-09-30 20:0x, the long-form co-op run: "Keep it, deaths are data"; a Skeleton ★2
-    // one-shot the bot 19 m from the CoopStream hall, and neither log said which spawner made it). Log-only: one line per
+    // Where the undead come from (a Skeleton ★2 once
+    // one-shot a player 19 m from a hall, and no log said which spawner made it). Log-only: one line per
     // Skeleton / Ghost / Greyling spawn within WatchMetres of a player, from each vanilla spawn path, on whichever peer
     // runs it (the dedi under server-side simulation, else the zone's owner). Nothing about spawning changes.
     //   [SpawnOrigin] Skeleton ★2 at (x, z) from CreatureSpawner at (x, z) in Dolmen02 | from SpawnSystem, biome Meadows ...
@@ -14,7 +14,9 @@ namespace VerdantsAscent.Terrain.Utilities
     internal static class SpawnOriginLog
     {
         private const float WatchMetres = 200f;
-        private static readonly string[] Watched = { "Skeleton", "Ghost", "Greyling" };
+        private static readonly string[] Watched = { "Skeleton", "Ghost", "Greyling", "Seeker" };
+        // Seekers (they can multiply round the Infested Mine) are watched too, their lines at Debug.
+        private const string DebugOnly = "Seeker";
 
         [HarmonyPatch(typeof(CreatureSpawner), "Spawn")]
         [HarmonyPostfix]
@@ -63,12 +65,12 @@ namespace VerdantsAscent.Terrain.Utilities
                 if (!__result || __instance == null) return;
                 Vector3 from = __instance.transform.position;
                 if (!NearPlayer(from)) return;
-                bool watched = false;
+                bool watched = false, seekers = false;
                 foreach (var data in __instance.m_prefabs)
-                    if (data?.m_prefab != null && IsWatched(data.m_prefab.name)) { watched = true; break; }
+                    if (data?.m_prefab != null && IsWatched(data.m_prefab.name)) { watched = true; seekers |= IsDebugOnly(data.m_prefab.name); }
                 if (!watched) return;
-                Log("(one of its prefabs)", -1, from, string.Format(CultureInfo.InvariantCulture, "SpawnArea '{0}' at ({1:0}, {2:0})",
-                    Utils.GetPrefabName(__instance.gameObject), from.x, from.z));
+                Log(seekers ? "Seeker (one of its prefabs)" : "(one of its prefabs)", -1, from, string.Format(CultureInfo.InvariantCulture, "SpawnArea '{0}' at ({1:0}, {2:0}, y {3:0})",
+                    Utils.GetPrefabName(__instance.gameObject), from.x, from.z, from.y));
             }
             catch (Exception ex) { FiresLogger.LogVerbose($"[SpawnOrigin] spawn area line skipped: {ex.Message}"); }
         }
@@ -90,13 +92,17 @@ namespace VerdantsAscent.Terrain.Utilities
             return false;
         }
 
+        private static bool IsDebugOnly(string name) => name.IndexOf(DebugOnly, StringComparison.OrdinalIgnoreCase) >= 0;
+
         private static float Flat(Vector3 a, Vector3 b) => new Vector2(a.x - b.x, a.z - b.z).magnitude;
 
         // level -1 = not known at this point (SpawnSystem rolls it inside Spawn): the line gives the entry's range instead.
         private static void Log(string prefab, int level, Vector3 at, string from)
         {
             string stars = level > 1 ? " ★" + (level - 1).ToString(CultureInfo.InvariantCulture) : level == 1 ? " ★0" : "";
-            FiresLogger.LogInfo(string.Format(CultureInfo.InvariantCulture, "[SpawnOrigin] {0}{1} at ({2:0}, {3:0}) from {4}", prefab, stars, at.x, at.z, from));
+            string line = string.Format(CultureInfo.InvariantCulture, "[SpawnOrigin] {0}{1} at ({2:0}, {3:0}, y {4:0}) from {5}", prefab, stars, at.x, at.z, at.y, from);
+            if (IsDebugOnly(prefab)) FiresLogger.LogDebug(line);
+            else FiresLogger.LogInfo(line);
         }
     }
 }

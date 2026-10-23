@@ -11,7 +11,7 @@ namespace VerdantsAscent.Water.Core
     // its visuals + colliders, rename to "VALandIce", attach a
     // LandIceAnchor MonoBehaviour, register in ZNetScene.m_namedPrefabs.
     //
-    // Why this exists: round-26 plan §1 — land ice today rides on a cloned
+    // Why this exists: land ice used to ride on a cloned
     // ice1 (vanilla Floating + Rigidbody + LOD group + colliders we have
     // to strip every load), AND its ZDO shares the namespace with anything
     // else that lives on ice1 clones. Splitting it into a dedicated

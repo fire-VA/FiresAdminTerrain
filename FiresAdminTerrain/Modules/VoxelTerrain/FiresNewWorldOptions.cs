@@ -18,7 +18,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // Opened from Select World's "From Gaea..." button (FiresGaeaWorldButton) the same panel is in GAEA MODE: one more row
     // on top takes the Gaea export folder, the generator is Fires (a bake is a Fires world), and Done first has World Gen
     // Studio import and bake the folder (FiresGaeaStudio, behind a cancelable progress popup), then creates the world
-    // exactly as Done always does. Tools\GAEA_WORLD_BUTTON.md.
+    // exactly as Done always does.
     [HarmonyPatch]
     internal static class FiresNewWorldOptions
     {
@@ -66,8 +66,11 @@ namespace VerdantsAscent.Terrain.Voxel
         private static TMP_Dropdown s_terrain;
         private static Toggle s_oneZoneAtATime;
         private static Toggle s_skyIslands;
+        private static Toggle s_islandWater;
+        private static GameObject s_islandWaterLabel;
         private static Toggle s_rivers;
         private static Toggle s_caves;
+        private static Toggle s_superFlat;   // The admin build world
         private static TextMeshProUGUI s_status;
         private static string s_conflict;
         private static string s_newName;
@@ -221,7 +224,7 @@ namespace VerdantsAscent.Terrain.Voxel
             s_panel = panel;
             var template = panel.Find(SeedLabelName)?.GetComponent<TMP_Text>();
             bool offerZones = ZoneModeConfig.OfferAtWorldCreation == null || ZoneModeConfig.OfferAtWorldCreation.Value;
-            int rows = offerZones ? 6 : 5;
+            int rows = offerZones ? 8 : 7;   // + Super flat
             float height = Padding * 2f + rows * RowHeight + (rows - 1) * RowGap + StatusHeight;
             float seedBottom = seed.localPosition.y - seed.rect.height * seed.pivot.y;
             float doneTop = done.localPosition.y + done.rect.height * (1f - done.pivot.y);
@@ -256,10 +259,19 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             s_skyIslands = Check("SkyIslands", fieldLeft, fieldRight, RowCenter(top, row));
             Label(template, "Sky islands", labelLeft, labelRight, RowCenter(top, row++));
+            // Only under Sky islands. Off = islands are born dry (no ponds, rivers or
+            // falls carved, no water placed), to shape water on them by hand with the chaos hammer.
+            s_islandWater = Check("SkyIslandWater", fieldLeft, fieldRight, RowCenter(top, row));
+            Label(template, "Auto-place water on sky islands", labelLeft, labelRight, RowCenter(top, row++));
+            s_islandWaterLabel = s_laidOut[s_laidOut.Count - 1].Key.gameObject;
             s_rivers = Check("Rivers", fieldLeft, fieldRight, RowCenter(top, row));
             Label(template, "Rivers and lakes", labelLeft, labelRight, RowCenter(top, row++));
             s_caves = Check("Caves", fieldLeft, fieldRight, RowCenter(top, row));
             Label(template, "Caves", labelLeft, labelRight, RowCenter(top, row++));
+            // An admin build / test / blueprint world, linked through Dimensions so build yards and big ZDO counts
+            // stay off the main server. It overrides every row above (stock heightmap, nothing extra) and the world's size.
+            s_superFlat = Check("SuperFlat", fieldLeft, fieldRight, RowCenter(top, row));
+            Label(template, "Super flat (admin build world)", labelLeft, labelRight, RowCenter(top, row++));
 
             float statusCenter = RowCenter(top, row) + (RowHeight - StatusHeight) * 0.5f;
             s_status = UIBuilderHelper.CreateLabel(Cell("Status", labelLeft, fieldRight, statusCenter, StatusHeight), "Text", "",
@@ -404,8 +416,10 @@ namespace VerdantsAscent.Terrain.Voxel
             s_terrain.SetValueWithoutNotify(!fires && terrain == FullVoxelChoice ? VoxelWrapChoice : terrain);
             s_oneZoneAtATime?.SetIsOnWithoutNotify(false);
             s_skyIslands.SetIsOnWithoutNotify(FiresVoxelConfig.SkyIslands == null || FiresVoxelConfig.SkyIslands.Value);
+            s_islandWater.SetIsOnWithoutNotify(true);
             s_rivers.SetIsOnWithoutNotify(FiresVoxelConfig.HydrologyEnabled != null && FiresVoxelConfig.HydrologyEnabled.Value);
             s_caves.SetIsOnWithoutNotify(FiresVoxelConfig.GenerateCaves != null && FiresVoxelConfig.GenerateCaves.Value);
+            s_superFlat?.SetIsOnWithoutNotify(false);   // opt-in per world, always off when the screen opens
             Refresh();
         }
 
@@ -415,18 +429,41 @@ namespace VerdantsAscent.Terrain.Voxel
             return (FiresVoxelConfig.WorldMode?.Value ?? VoxelWorldMode.VoxelWrap) == VoxelWorldMode.VoxelOnly ? FullVoxelChoice : VoxelWrapChoice;
         }
 
-        private static FiresWorldProfile ChosenProfile() => new FiresWorldProfile
+        private static FiresWorldProfile ChosenProfile()
+        {
+            if (s_superFlat != null && s_superFlat.isOn)
+            {
+                // Stock heightmap ground (the flat height comes from FatSuperFlat), none of the extras, 25% of the vanilla size.
+                // Built by FiresWorldProfile.NewSuperFlat, the same profile the unattended -fat-new-superflat path makes.
+                // The Terrain row + the Sky islands / Caves rows are kept (voxel choices only)
+                return FiresWorldProfile.NewSuperFlat("created", TerrainByChoice[Mathf.Clamp(s_terrain.value, 0, TerrainByChoice.Length - 1)], s_skyIslands.isOn, s_caves.isOn);
+            }
+            return ChosenFromRows();
+        }
+
+        private static FiresWorldProfile ChosenFromRows() => new FiresWorldProfile
         {
             Generator = s_generator.value == FiresGenerator ? ProfileGenerator.Fires : ProfileGenerator.Vanilla,
             Terrain = TerrainByChoice[Mathf.Clamp(s_terrain.value, 0, TerrainByChoice.Length - 1)],
             ZoneMode = s_oneZoneAtATime != null && s_oneZoneAtATime.isOn,
             SkyIslands = s_skyIslands.isOn,
+            SkyIslandWater = s_skyIslands.isOn && !s_islandWater.isOn ? false : (bool?)null,
             Hydrology = s_rivers.isOn,
             Caves = s_caves.isOn,
         };
 
         private static void Refresh()
         {
+            bool islands = s_skyIslands.isOn;
+            s_islandWater.gameObject.SetActive(islands);
+            s_islandWater.interactable = islands;
+            if (s_islandWaterLabel != null) s_islandWaterLabel.SetActive(islands);
+            // Super flat decides every other row, so they stop taking input while it is on
+            bool flat = s_superFlat != null && s_superFlat.isOn;
+            s_generator.interactable = !flat;   // Super flat keeps the Terrain row (heightmap / voxel wrap / full voxel)
+            if (s_oneZoneAtATime != null) s_oneZoneAtATime.interactable = !flat;
+            s_rivers.interactable = !flat;   // Sky islands + Caves stay choosable on super flat (voxel terrain only); rivers never
+            s_islandWater.interactable = islands && !flat;
             var profile = ChosenProfile();
             s_conflict = profile.Conflict() ?? (s_gaea && s_gaeaFolder != null ? GaeaProblem() : null);
             s_status.color = s_conflict != null ? ConflictInk : NoteInk;
@@ -436,6 +473,10 @@ namespace VerdantsAscent.Terrain.Voxel
         // What this installation's own config switches off for the chosen world; the world keeps its choices elsewhere.
         private static string LocalNote(FiresWorldProfile profile)
         {
+            if (profile.SuperFlat)
+                return profile.Terrain == ProfileTerrain.Heightmap
+                    ? "Super flat: flat Meadows at y 50, 2.5 km radius, the start temple + the Mausoleum only, no plants or spawns. Sky islands and caves need voxel terrain."
+                    : $"Super flat ({(profile.Terrain == ProfileTerrain.VoxelOnly ? "full voxel" : "voxel wrap")}): flat Meadows at y 50, 2.5 km radius, the start temple + the Mausoleum only; sky islands {(profile.SkyIslands == true ? "on" : "off")}, caves {(profile.Caves == true ? "on" : "off")}.";
             bool voxel = profile.Terrain != ProfileTerrain.Heightmap;
             bool voxelModule = FiresVoxelConfig.Enabled != null && FiresVoxelConfig.Enabled.Value
                                && (FiresVoxelConfig.CustomGeneration == null || FiresVoxelConfig.CustomGeneration.Value);

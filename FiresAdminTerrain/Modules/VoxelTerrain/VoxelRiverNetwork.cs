@@ -7,7 +7,7 @@ namespace VerdantsAscent.Terrain.Voxel
     //
     // VoxelHydrology solves WHERE water flows, on a 20m grid. A 20m grid cannot
     // express an 8m channel with banks: sampling its bed per column gave broad
-    // soft swales that read as terrain, which is why the 09-17 test produced
+    // soft swales that read as terrain, which is why an early test produced
     // "no actual rivers". So the network is re-expressed as thalweg polylines
     // carrying width, bed and surface per node, and chunk generation carves a
     // cross-section against the nearest segment. Channel shape is then

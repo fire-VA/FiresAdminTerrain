@@ -10,9 +10,9 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.BcImport
 {
-    // D13 (Tools\BC_CHUNK_CONVERSION.md): the server's lakes, rivers and streams for a joining client. Valheim builds them in
+    // The server's lakes, rivers and streams for a joining client. Valheim builds them in
     // WorldGenerator.Pregenerate on every peer, inside the WorldGenerator constructor, so inside a client's RPC_PeerInfo:
-    // FindLakes, PlaceRivers and PlaceStreams (twice) search the world through GetBaseHeight (R6: rivers 31 ms, streams 289,
+    // FindLakes, PlaceRivers and PlaceStreams (twice) search the world through GetBaseHeight (measured: rivers 31 ms, streams 289,
     // Deep North streams 163), and each Place ends in RenderRivers, which turns its list into the river grid every height
     // read on that peer uses. Pregeneration reads the real world (FAT's planning scope), so every peer finds the same lists.
     // The lists are small: the server sends them with the Random state each RenderRivers started from (it draws the widths),

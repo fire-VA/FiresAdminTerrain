@@ -77,7 +77,7 @@ namespace VerdantsAscent.Async
         // key: (peerUid, namespace)  -> manifest dict (relativePath -> sha256 hex, lowercase)
         private static readonly Dictionary<ManifestKey, Dictionary<string, string>> _peerManifests =
             new Dictionary<ManifestKey, Dictionary<string, string>>();
-        private static bool _rpcsRegistered;
+        private static ZRoutedRpc _rpcsRegisteredOn;   // Per ZRoutedRpc instance (a new one per connection), not a once-flag
 
         private readonly struct ManifestKey : IEquatable<ManifestKey>
         {
@@ -111,12 +111,12 @@ namespace VerdantsAscent.Async
         /// </summary>
         public static void EnsureRegistered()
         {
-            if (_rpcsRegistered) return;
-            if (ZRoutedRpc.instance == null) return;
+            var rpcNow = ZRoutedRpc.instance;
+            if (rpcNow == null || ReferenceEquals(rpcNow, _rpcsRegisteredOn)) return;
 
             TryRegisterRpc(RpcRequest, RPC_OnRequest);
             TryRegisterRpc(RpcReply, RPC_OnReply);
-            _rpcsRegistered = true;
+            _rpcsRegisteredOn = rpcNow;
         }
 
         private static void TryRegisterRpc(string rpcName, Action<long, ZPackage> handler)
@@ -197,7 +197,7 @@ namespace VerdantsAscent.Async
         // ManifestDiffSync safe to use in unit tests that can't create config dirs.
 
         private static string BlobCacheRoot =>
-            Path.Combine(BepInEx.Paths.ConfigPath, "FiresAdminTerrain", "cache", "manifests");
+            global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "cache", "manifests");   // Out of config
 
         private static string BlobCachePath(string namespaceKey) =>
             Path.Combine(BlobCacheRoot, SanitizeKey(namespaceKey) + ".hash");

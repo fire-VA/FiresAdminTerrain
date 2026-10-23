@@ -99,7 +99,7 @@ namespace VerdantsAscent.Terrain.Lifecycle
             return true;
         }
 
-        // Round-57 — raw projector accessor for the ruler ring colorizer.
+        // Raw projector accessor for the ruler ring colorizer.
         // Unlike TryGetRulerPosition this does NOT require the ruler to be
         // active — the colorizer wants to tint the segments even while the
         // projector is momentarily hidden so the color is right the frame

@@ -46,7 +46,7 @@ namespace VerdantsAscent.Water.Core
             public float CellSize;
             public float SettledWaterLevel;
             public bool IsPondMode;
-            // Round-56 (cache v2): gelled water-volume flag. When true the
+            // Cache v2: gelled water-volume flag. When true the
             // SurfaceHeights grid is authoritative and the combiner must
             // never recompute it from WaterDiskData.
             public bool IsGelled;
@@ -512,10 +512,36 @@ namespace VerdantsAscent.Water.Core
         /// Restores a WaterMeshCombiner from cached data.
         /// Returns the restored combiner, or null if cache data is invalid.
         /// </summary>
+        // Skipped-empty count for the per-load summary line (TakeSkippedEmpty, read by the two bulk restores).
+        private static int s_skippedEmpty;
+
+        internal static int TakeSkippedEmpty() { int n = s_skippedEmpty; s_skippedEmpty = 0; return n; }
+
+        // A cell holds water when its cached surface stands MinWaterDepth or more above its cached terrain (as the combiner's
+        // own depth grid is built from them).
+        internal static bool HasWetCell(WaterCombinerGroupData g)
+        {
+            var s = g.SurfaceHeights; var t = g.TerrainHeights;
+            if (s == null || t == null) return true;   // unknown: restore as before
+            int n = Mathf.Min(s.Length, t.Length);
+            for (int i = 0; i < n; i++)
+                if (s[i] - t[i] >= WaterMeshCombiner.MinWaterDepth) return true;
+            return false;
+        }
+
         public static WaterMeshCombiner RestoreFromCache(WaterCombinerGroupData groupData, WaterMeshCombinerAnchor anchor)
         {
             if (groupData == null || !groupData.HasValidData)
                 return null;
+
+            // Skip empty cached groups on load (most restored combiners can hold 0/1024 wet cells). Only the bulk world-load restore (no anchor); a placed-water anchor always
+            // gets its combiner. Nothing is removed from the cache file or the save.
+            if (false)   // disabled: skipping hid the dry-pond symptom; the reseat fix replaced it
+            {
+                s_skippedEmpty++;
+                FiresLogger.LogDebug($"[FiresWaterCache] skipped empty cached group {groupData.GroupId} at ({groupData.CenterPosition.x:F0},{groupData.CenterPosition.y:F1},{groupData.CenterPosition.z:F0}) (no cell >= {WaterMeshCombiner.MinWaterDepth} m)");
+                return null;
+            }
 
             // Check if already instantiated
             var existing = GetInstantiatedCombinerForGroup(groupData.GroupId);
@@ -544,7 +570,7 @@ namespace VerdantsAscent.Water.Core
             combiner.LiquidType = (LiquidType)groupData.LiquidType;
             combiner.CustomLiquidType = (CustomLiquidType)groupData.CustomLiquidType;
             combiner.WaveIntensity = groupData.WaveIntensity;
-            // Round-56: BEFORE any restore/regen so gelled volumes route to
+            // BEFORE any restore/regen so gelled volumes route to
             // the grid-authoritative rebuild, never disk recomputation.
             combiner.IsGelled = groupData.IsGelled;
 
@@ -601,6 +627,10 @@ namespace VerdantsAscent.Water.Core
             if (hasGridData)
             {
                 combiner.RestoreFromAnchorData();
+                // The combiner's field default
+                // _needsRegeneration = true would make Update() re-sample terrain 0.1 s after this restore, and far from the player
+                // unloaded ground reads dry. Under "Reseat waits for the ground" the restored grid stands; the reseat decides.
+                combiner.KeepRestoredGrid();   // always
             }
             else if (combiner.WaterDisks.Count > 0)
             {
@@ -620,8 +650,8 @@ namespace VerdantsAscent.Water.Core
 
         private static string GetCachePath(string worldName)
         {
-            string configPath = BepInEx.Paths.ConfigPath;
-            return Path.Combine(configPath, "VerdantsAscent", "WaterCache", $"{worldName}_water.bin");
+            // Caches never live under BepInEx config: BepInEx/cache/FiresAdminTerrain/WaterCache (moved once in Awake)
+            return Path.Combine(global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "WaterCache"), $"{worldName}_water.bin");
         }
 
         private static WorldWaterCacheData SnapshotCacheData(WorldWaterCacheData source)

@@ -50,7 +50,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (s_confirming || !TryAimedSeed(player, out var seed)) return;
             if (!ZoneModeRegistry.ModeActive) { Tell(player, "Chunk seeds only grow in a one-zone-at-a-time world."); return; }
             if (s_pending && Time.time - s_pendingSince < ReplyTimeoutSeconds) { Tell(player, "The land is still answering your last seed..."); return; }
-            if (!ZoneModeCommands.TryGetLookedAtZone(out var zone)) { Tell(player, "Look out over the closed land you want to raise."); return; }
+            if (!TryGetTargetZone(player, out var zone)) { Tell(player, "Look out over the closed land you want to raise."); return; }
             string refusal = Check(zone, player.transform.position, true);
             if (refusal != null) { Tell(player, refusal); return; }
             bool choosingLand = ZoneModeEyeOfTheBeholder.IsWorn(player);
@@ -65,7 +65,7 @@ namespace VerdantsAscent.Terrain.Zones
                 () => Answer(true, seed, zone, choosingLand), () => Answer(false, seed, zone, choosingLand), false));
         }
 
-        // ONE ANSWER TO "IS THIS THE RIGHT SEED", asked by the popup and by the Eye's label. Two
+        // ONE ANSWER TO "IS THIS THE RIGHT SEED", asked by the confirmation dialog and by the Eye's label. Two
         // copies of this rule would eventually disagree, and the one place that must never be wrong
         // is the one telling you whether you are about to destroy a chunk you built.
         //
@@ -94,7 +94,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static string Promise(ChunkSeed seed, Vector2s zone, bool choosingLand)
         {
             string cost = $" This uses one {seed.Name}.";
-            // Fire (10-03, popup b): say plainly why a seed restores instead of raising new land.
+            // Say plainly why a seed restores instead of raising new land.
             string restoresOnly = seed.RestoresOnly
                 ? $" The {seed.Name} restores only: to raise other land, plant a biome seed (and on parked land, wear the Eye of the Beholder)."
                 : string.Empty;
@@ -120,7 +120,7 @@ namespace VerdantsAscent.Terrain.Zones
             var player = Player.m_localPlayer;
             if (!plant || player == null) return;
 
-            // SECOND ASK, ONLY WHEN SOMETHING IS ACTUALLY DESTROYED. The first popup describes the
+            // SECOND ASK, ONLY WHEN SOMETHING IS ACTUALLY DESTROYED. The first dialog describes the
             // trade; this one makes the destructive answer cost a separate, deliberate click, because
             // the two dialogs are otherwise identical in shape and a habitual Yes reaches both. It is
             // NOT shown for an ordinary planting - a confirmation that appears every time is one
@@ -169,7 +169,7 @@ namespace VerdantsAscent.Terrain.Zones
             Tell(player, $"The {seed.Name} takes root... ({zone.x},{zone.y})");
         }
 
-        // A popup closed by anything but its own buttons must not leave the controls blocked.
+        // A dialog closed by anything but its own buttons must not leave the controls blocked.
         internal static void ClientTick()
         {
             if (Time.time >= s_nextHintCheck)
@@ -187,6 +187,67 @@ namespace VerdantsAscent.Terrain.Zones
         private static float s_nextHintCheck;
 
         // Shared by the client (before asking) and the server (before opening): null means allowed.
+        // The zone the hammer
+        // means is the CLOSEST restorable closed zone under the view, not the zone where the crosshair ray lands. Closed
+        // zones lie on the sea floor (y -20) and the aim ignores water, so a ray over the near closed zone landed on the floor
+        // of a farther one, often one that cannot rise. This walks the view's ground track from the camera to the aimed
+        // point and takes the first zone a strike would accept; when none would, it keeps the aimed zone so the ghost shows
+        // why (red, with the reason). Aiming by the ray alone meant standing at an odd angle to target the zone in front.
+        private const float TrackStep = 2f;
+
+        internal static bool TryGetTargetZone(Player player, out Vector2s zone)
+        {
+            zone = default;
+            if (!ZoneModeAreaTool.TryGetAim(out var aim)) return false;
+            zone = ZoneSystem.GetZone(aim);
+            var camera = Utils.GetMainCamera();
+            if (player == null || camera == null) return true;
+            Vector3 from = camera.transform.position;
+            var track = new Vector3(aim.x - from.x, 0f, aim.z - from.z);
+            float length = track.magnitude;
+            if (length < TrackStep) return true;
+            track /= length;
+            bool any = false;
+            Vector2s last = default;
+            for (float d = 0f; d <= length; d += TrackStep)
+            {
+                var at = ZoneSystem.GetZone(from + track * d);
+                if (any && at.x == last.x && at.y == last.y) continue;
+                any = true;
+                last = at;
+                if (Check(at, player.transform.position, true) == null)
+                {
+                    zone = at;
+                    return true;
+                }
+            }
+            return true;
+        }
+
+        // `fat_hammer_aim` (read-only): the zone under the crosshair hit, the zone the Chunk Hammer will target,
+        // and each one's verdict (stand at the edge, look over the near closed zone, run it).
+        internal static void RegisterAimProbe()
+        {
+            new Terminal.ConsoleCommand("fat_hammer_aim",
+                "- the Chunk Hammer's target: the aimed zone vs the closest restorable closed zone on the view (read-only)",
+                args =>
+                {
+                    var player = Player.m_localPlayer;
+                    string line;
+                    if (player == null || !ZoneModeAreaTool.TryGetAim(out var aim)) line = "[ChunkHammer] aim: nothing under the crosshair.";
+                    else
+                    {
+                        var hit = ZoneSystem.GetZone(aim);
+                        TryGetTargetZone(player, out var target);
+                        string hitWhy = Check(hit, player.transform.position, true), targetWhy = Check(target, player.transform.position, true);
+                        line = $"[ChunkHammer] aim: hit zone ({hit.x},{hit.y}) {hitWhy ?? "OK"}; target zone ({target.x},{target.y}) "
+                            + $"{targetWhy ?? "OK"}{(hit.x == target.x && hit.y == target.y ? "" : " (closer than the hit)")}.";
+                    }
+                    FiresLogger.LogDebug(line);
+                    global::Console.instance?.Print(line);
+                });
+        }
+
         internal static string Check(Vector2s zone, Vector3 user, bool checkReach)
         {
             if (!ZoneOpenSet.InRange(zone.x, zone.y)) return "That is beyond the edge of the world.";
@@ -218,7 +279,7 @@ namespace VerdantsAscent.Terrain.Zones
             ChunkGeneratorApi.RaiseSeedResult(zone, opened, message);
         }
 
-        // ChunkGeneratorApi.PlantSeed: the hammer's "Yes" without the popup, for a bot. Never an overwrite choice (choosingLand
+        // ChunkGeneratorApi.PlantSeed: the hammer's "Yes" without the dialog, for a bot. Never an overwrite choice (choosingLand
         // false: a parked zone comes back as it was). Null when the request went out, else why not.
         internal static string PlantForBot(Player player, string seedPrefab, Vector2s zone)
         {

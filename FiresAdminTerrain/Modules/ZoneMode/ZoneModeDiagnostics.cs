@@ -19,8 +19,11 @@ namespace VerdantsAscent.Terrain.Zones
             // Chunk blueprints are placed on any voxel world, so their keys answer before the zone-mode gate.
             ZoneModeChunkKeys.ClientTick();
             BiomePaint.Tick();
+            ZoneModeCloseable.Tick();   // make-closeable runs on a world that is not zone mode yet
             if (!ZoneModeRegistry.ModeActive) return;
             ZoneModeOpening.Tick();
+            ZoneModeOverClosed.Tick();
+            ZoneModePark.CloseTick();
             ZoneModeLandmarks.Tick();
             ZoneModeIslands.Tick();
             ZoneModeBorderWalls.Tick();
@@ -126,6 +129,7 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModeSwaps.Reset();
             ZoneModeEyeOfTheBeholder.Reset();
             BiomePaint.Reset();
+            ZoneModeCloseable.Reset();
         }
     }
 }

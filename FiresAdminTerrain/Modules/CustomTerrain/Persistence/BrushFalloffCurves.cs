@@ -3,7 +3,7 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Persistence
 {
     /// <summary>
-    /// 2026-05-26 round-31 PHASE B-4 — Blender brush falloff curve library.
+    /// Blender brush falloff curve library.
     ///
     /// Direct port of Blender's `BKE_brush_curve_strength` presets
     /// (`source/blender/blenkernel/intern/brush.cc:2463-2528`). Input is

@@ -40,8 +40,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         if (!ok || w[j] > g[j] + 0.01f) return;         // wet neighbour → continuous
                         if (g[j] >= lvl + FREEBOARD - 0.01f) return;    // already a proud bank
-                        // ⚠ DO NOT BANK THE CELL WHERE THIS RIVER MEETS ANOTHER SHEET. (user, 2026-09-02:
-                        // "bodies of water drag a bank where they should be connecting".) This raise asks only
+                        // ⚠ DO NOT BANK THE CELL WHERE THIS RIVER MEETS ANOTHER SHEET. (Bodies of water
+                        // dragged a bank where they should be connecting.) This raise asks only
                         // whether the neighbour is dry, so at a river↔pond mouth — dry ridge, river on one
                         // side, pond on the other — it dutifully builds a levee across the junction and the two
                         // waters never meet. The matching rule and the measurement are in FiresWaterConform's

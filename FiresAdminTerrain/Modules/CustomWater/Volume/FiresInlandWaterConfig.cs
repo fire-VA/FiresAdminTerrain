@@ -35,6 +35,11 @@ namespace VerdantsAscent.Water.Core
         public static ConfigEntry<Color> ShallowColor, DeepColor, FoamColor, ReflTint, SpecColor, UwTint;
 
         public static ConfigEntry<float> ClearDepth, MinOpacity, MaxOpacity, EdgeSoftness, SeaFade;
+        // Shallows must never be fully clear (it must always be possible to tell there's water there):
+        // floors no preset or slider can go under - a minimum shallow opacity and a minimum ripple, so even 0 m reads as water.
+        public static ConfigEntry<float> MinShallowVisibility, MinRipple;
+        public static ConfigEntry<float> Turbidity, ShoreChurn, ShoreChurnDepth, ShoreBlend;   // Core 0.2.314+ shader dials
+        public static ConfigEntry<float> UwAirAlphaMax, UwAirTint;   // Core 0.2.319 underside-from-air dials
 
         public static ConfigEntry<float> BumpTiling, DetailTiling, GlobalScale, DetailRotate, TileBreak,
             NormalStrength, NormalOpacityMin, NormalOpacityMax, DetailNormalOpacityMin, DetailNormalOpacityMax,
@@ -48,7 +53,9 @@ namespace VerdantsAscent.Water.Core
         public static ConfigEntry<float> FlowStrength, FlowResponse, FlowCycle, FlowSpeedFloor,
             FlowSpeedFull, RiverSwell, RiverWhitewater, FlowDebug;
 
-        public static ConfigEntry<float> SwellAmp, SwellLength, SwellSpeed, SwellShoreCalm, SwellShoreFloor;
+        public static ConfigEntry<float> SwellAmp, SwellLength, SwellSpeed, SwellShoreCalm, SwellShoreFloor, BigWaveDepth, BigWaveAmp, BigWaveLength, BigWaveDrift;
+        public static ConfigEntry<bool> BigWaves;
+        private static bool? s_bigLogged;   // null = not logged yet, so the FIRST apply logs too (OFF included)
 
         public static ConfigEntry<float> EdgeFoamDepth, EdgeFoamOpacity, EdgeFoamTiling, EdgeFoamScroll,
             EdgeFoamBase, EdgeFoamContrast, EdgeFoamGain, RapidsFoam, RapidsStart, RapidsRamp,
@@ -83,14 +90,33 @@ namespace VerdantsAscent.Water.Core
             UwTint = cfg.Bind(S1, "Underwater Tint", new Color(0.10f, 0.30f, 0.38f, 1f),
                 "What the world turns when the camera is under the surface.");
 
-            ClearDepth = F(cfg, S2, "See-through depth (m)", 1.8f, 0.1f, 40f,
+            ClearDepth = F(cfg, S2, "See-through depth (m)", 3.0f, 0.1f, 40f,
                 "Metres of water it takes to reach the deep tint and full opacity. LOW = murky, HIGH = clear.");
-            MinOpacity = F(cfg, S2, "Shallow opacity", 0.10f, 0f, 1f,
-                "Opacity where the column is nearly nothing. Keep it low or the shallows read as a painted slab.");
+            MinOpacity = F(cfg, S2, "Shallow opacity", 0.35f, 0f, 1f,
+                "Opacity where the column is nearly nothing. Lower values make the shallows look clear and then jump to the deep colour over a short depth.");
+            MinShallowVisibility = F(cfg, S2, "Minimum shallow visibility", 0.15f, 0.05f, 1f,
+                "The floor under Shallow opacity: shallows are never fully clear, so you can always tell there is water. Raise it if a tuning makes the edge vanish.");
             MaxOpacity = F(cfg, S2, "Deep opacity", 0.90f, 0f, 1f,
                 "Opacity at full clarity depth.");
             EdgeSoftness = F(cfg, S2, "Waterline fade (m)", 0.18f, 0.001f, 4f,
                 "Dissolves the last centimetres at the bank so the sheet's own mesh edge is never a hard line.");
+            // The depth blend should blend and churn a bit, not be completely clear at the
+            // shoreline: Core 0.2.314's per-pixel shore dials; on an older Core the shader lacks them and they
+            // are skipped (HasProperty).
+            Turbidity = F(cfg, S2, "Turbidity", 0.3f, 0f, 1f,
+                "Sediment murk: at 1 the clear depth is a quarter, the shallow opacity floor rises to 0.6 and the tint leans 35% toward the deep tint. 0 = the old clear look.");
+            ShoreChurn = F(cfg, S2, "Shore churn", 0.35f, 0f, 1f,
+                "How much the shallow band's depth wobbles with the flow (moving noise along the shore). 0 = a still band.");
+            ShoreChurnDepth = F(cfg, S2, "Shore churn depth (m)", 0.35f, 0f, 2f,
+                "How big that wobble is, in metres of apparent depth.");
+            ShoreBlend = F(cfg, S2, "Shore blend", 1f, 0f, 1f,
+                "1 = soft exponential shallow fade (1 - exp(-depth / clear depth)); 0 = the old linear opacity ramp.");
+            // Core 0.2.319: the underside of a sheet seen
+            // from AIR (a grotto, a camera in a sinkhole shaft below the river bed). A diver in the water is unchanged.
+            UwAirAlphaMax = F(cfg, S2, "Underside from air: max opacity", 0.28f, 0f, 1f,
+                "Most opacity a water surface has when seen from below out of the water (from a grotto or a sinkhole shaft). Lower = clearer sky through it.");
+            UwAirTint = F(cfg, S2, "Underside from air: tint", 0.4f, 0f, 1f,
+                "How much of the underwater tint that underside keeps (1 = full, 0 = none).");
             SeaFade = F(cfg, S2, "Sea handover fade (m)", 1f, 0f, 12f,
                 "Width of the ribbon at a river mouth where this sheet hands over to the ocean.");
 
@@ -110,6 +136,8 @@ namespace VerdantsAscent.Water.Core
                 "Breaks up the texture repeat. Raise this FIRST when you can see the tile grid; 0 disables it and the lattice returns.");
             NormalStrength = F(cfg, S3, "Normal strength", 0.6f, 0f, 2f,
                 "Overall ripple depth. Lower it if creases in the map read as hard edges.");
+            MinRipple = F(cfg, S3, "Minimum ripple", 0.12f, 0.05f, 2f,
+                "The floor under Normal strength: a faint ripple always stays, so even glassy water still reads as water.");
             NormalOpacityMin = F(cfg, S3, "Coarse opacity min", 0.5f, 0f, 1f, "Coarse layer's weakest contribution over its cycle.");
             NormalOpacityMax = F(cfg, S3, "Coarse opacity max", 1f, 0f, 1f, "Coarse layer's strongest contribution over its cycle.");
             DetailNormalOpacityMin = F(cfg, S3, "Detail opacity min", 0.5f, 0f, 1f, "Detail layer's weakest contribution.");
@@ -168,6 +196,14 @@ namespace VerdantsAscent.Water.Core
                 "Depth over which the swell calms down toward the bank.");
             SwellShoreFloor = F(cfg, S6, "Shore swell floor", 0.3f, 0f, 1f,
                 "How much swell survives at the very waterline. 0 stops it dead at the lip; higher keeps the edge waxing and waning.");
+            // Larger, deeper bodies get bigger waves: a SCALE on top of the calm values
+            // above. Per point: body size (the sheet's wet share, set by FAT per sheet) x depth / "Big-water full depth". 0 = the calm swell.
+            BigWaves = cfg.Bind(S6, "Big-water waves", false,
+                "OFF (default): every lake and pond uses the swell above. ON: the bigger and deeper the water, the closer its swell, wavelength and surface drift get to the big-water values below (crater lakes move like the sea; shallow and small water stays calm, no eddy foam).");
+            BigWaveDepth = F(cfg, S6, "Big-water full depth (m)", 6f, 0.5f, 40f, "Water this deep (in a big body) gets the full big-water swell.");
+            BigWaveAmp = F(cfg, S6, "Big-water swell amplitude (m)", 0.35f, 0f, 3f, "Swell height on big deep water.");
+            BigWaveLength = F(cfg, S6, "Big-water swell wavelength (m)", 24f, 1f, 80f, "Distance between crests on big deep water.");
+            BigWaveDrift = F(cfg, S6, "Big-water surface drift (m per s)", 0.25f, 0f, 2f, "Ripple drift on big deep water.");
 
             EdgeFoamDepth = F(cfg, S7, "Bank foam width (m)", 0.45f, 0f, 6f, "Column depth the bank collar reaches out to.");
             EdgeFoamOpacity = F(cfg, S7, "Bank foam opacity", 0.55f, 0f, 4f, "Master strength of the bank collar. 0 removes it.");
@@ -227,10 +263,16 @@ namespace VerdantsAscent.Water.Core
             SetC(m, "_UwTint", UwTint);
 
             SetF(m, "_ClearDepth", ClearDepth);
-            SetF(m, "_MinOpacity", MinOpacity);
+            if (m.HasProperty("_MinOpacity")) m.SetFloat("_MinOpacity", Mathf.Max(MinOpacity.Value, MinShallowVisibility != null ? MinShallowVisibility.Value : 0.15f));   // floor
             SetF(m, "_MaxOpacity", MaxOpacity);
             SetF(m, "_EdgeSoftness", EdgeSoftness);
+            SetF(m, "_Turbidity", Turbidity);
+            SetF(m, "_ShoreChurn", ShoreChurn);
+            SetF(m, "_ShoreChurnDepth", ShoreChurnDepth);
+            SetF(m, "_ShoreBlend", ShoreBlend);
             SetF(m, "_SeaFade", SeaFade);
+            SetF(m, "_UwAirAlphaMax", UwAirAlphaMax);
+            SetF(m, "_UwAirTint", UwAirTint);
 
             SetF(m, "_BumpTiling", BumpTiling);
             SetF(m, "_DetailTiling", DetailTiling);
@@ -239,7 +281,7 @@ namespace VerdantsAscent.Water.Core
             SetV(m, "_DetailScroll", DetailScroll);
             SetF(m, "_DetailRotate", DetailRotate);
             SetF(m, "_TileBreak", TileBreak);
-            SetF(m, "_NormalStrength", NormalStrength);
+            if (m.HasProperty("_NormalStrength")) m.SetFloat("_NormalStrength", Mathf.Max(NormalStrength.Value, MinRipple != null ? MinRipple.Value : 0.12f));   // floor
             SetF(m, "_NormalOpacityMin", NormalOpacityMin);
             SetF(m, "_NormalOpacityMax", NormalOpacityMax);
             SetF(m, "_DetailNormalOpacityMin", DetailNormalOpacityMin);
@@ -273,6 +315,9 @@ namespace VerdantsAscent.Water.Core
             SetF(m, "_FlowDebug", FlowDebug);
 
             SetF(m, "_SwellAmp", SwellAmp);
+            if (m.HasProperty("_BigWaveOn")) m.SetFloat("_BigWaveOn", BigWaves != null && BigWaves.Value ? 1f : 0f);
+            { bool bw = BigWaves != null && BigWaves.Value; if (s_bigLogged != bw) { s_bigLogged = bw; FiresLogger.LogInfo($"[FiresInlandWater] big-water waves {(bw ? "ON" : "OFF")} on {m.name}: shader {(m.HasProperty("_BigWaveOn") ? "has" : "LACKS (old bundle)")} _BigWaveOn; full depth {BigWaveDepth?.Value}, amp {BigWaveAmp?.Value} m, length {BigWaveLength?.Value} m, drift {BigWaveDrift?.Value} m/s"); } }
+            SetF(m, "_BigWaveDepth", BigWaveDepth); SetF(m, "_BigWaveAmp", BigWaveAmp); SetF(m, "_BigWaveLength", BigWaveLength); SetF(m, "_BigWaveDrift", BigWaveDrift);
             SetF(m, "_SwellLength", SwellLength);
             SetF(m, "_SwellSpeed", SwellSpeed);
             SetF(m, "_SwellShoreCalm", SwellShoreCalm);

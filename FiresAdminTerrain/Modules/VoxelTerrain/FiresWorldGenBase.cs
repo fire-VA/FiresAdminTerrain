@@ -51,7 +51,14 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool FaithfulBakeWaterOn => FiresVoxelConfig.FaithfulBakeWater != null && FiresVoxelConfig.FaithfulBakeWater.Value;
         private static bool s_saveFaithful;
         private const uint MAGIC = 0x4E454746; // "FGEN"
-        private const float HALF = 10500f;     // generated grids span ±HALF metres
+        // Generated grids span ±HALF metres: the world's edge (FatWorldSize; 10500 on a vanilla-size world, so a 10 km
+        // world's grid, cache and terrain are what they were). A VAHC base keeps its own span in _half.
+        private static float HALF => FatWorldSize.EdgeRadius;
+
+        // The hydrology's RS was "cells of this grid per cell of the 2048 reference grid over 21 km"; on a bigger world the
+        // reference cell must keep its metres, so RS gains (edge / 10500). Exactly 1f on a vanilla-size world (and on VAHC /
+        // image bases, which are vanilla-size worlds), so their rivers, valleys and erosion are what they were.
+        private static float SpanScale => FatWorldSize.EdgeRadius / FatWorldSize.VanillaEdge;
         private const float SEA = 30f;
         // Tide constants the ported river carve keys its mouths to (sandbox
         // WorldConstants): a river mouth sinks half a metre under the lowest
@@ -88,7 +95,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // 2m-grid access for consumers that must integrate over the REAL
         // water cells (shore paint) — the whole point of the 2m grid.
-        internal static short[] WaterShorts => _waterS;
+        internal static I16Field WaterShorts => WaterF;   // Packed view (was the dense short[])
         internal static short[] GridShorts => _gridS;
         internal static int GridN => _res;
         internal static float GridHalf => _half;
@@ -96,7 +103,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // terrain the generator is serving (e.g. the minimap cache stamp).
         internal static short[] PackedGridForIdentity => _gridS;
         // Every value packs on its own, so fixed ranges pack in parallel to the bytes the one-thread loop wrote (checked
-        // against it on the ATomTest bake, 2026-09-28). On one thread the two 110M-value fields took 0.43 s of every load
+        // against it on a test bake). On one thread the two 110M-value fields took 0.43 s of every load
         // and join.
         private const int PackRangeValues = 1 << 20;
 
@@ -149,7 +156,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static Heightmap.Biome SampleBiomeReal(float wx, float wy)
         {
-            var b = _biomeMap;
+            var b = BiomeF;   // Packed view (FiresFieldPack)
             int n = _res;
             float half = _half;
             if (b == null) return Heightmap.Biome.Ocean;
@@ -193,7 +200,70 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (t_fmGen == s_sampleGen && wx == t_fmX && wy == t_fmY) return t_fmV;
             float v = SampleFinalMetersUncached(wx, wy);
+            var mods = s_heightMods;   // FatApi height modifiers, in add order (memoised with the sample)
+            if (mods.Length != 0 && t_inHeightMod == 0) v = ApplyHeightMods(mods, wx, wy, v);
             t_fmX = wx; t_fmY = wy; t_fmV = v; t_fmGen = s_sampleGen;
+            return v;
+        }
+
+        // FatApi.AddHeightModifier (used by RPGM ForceBiome). Applied to the FINAL generator height
+        // inside SampleFinalMetersReal, so the water bake, shore field, wet paint and water queries see the same ground as the terrain.
+        // Copy-on-write array: the bake threads read it without a lock. Adding/removing bumps s_sampleGen (every thread's memo dies);
+        // grids already baked keep the old heights until the world reloads. A modifier that calls back into the height path sees the
+        // unmodified chain (t_inHeightMod); one that throws or returns NaN is skipped for that sample (logged once).
+        private static System.Func<float, float, float, float>[] s_heightMods = new System.Func<float, float, float, float>[0];
+        private static readonly object s_heightModLock = new object();
+        [ThreadStatic] private static int t_inHeightMod;
+        private static int s_heightModFaults;
+
+        internal static void AddHeightMod(System.Func<float, float, float, float> mod)
+        {
+            lock (s_heightModLock)
+            {
+                var a = new System.Func<float, float, float, float>[s_heightMods.Length + 1];
+                System.Array.Copy(s_heightMods, a, s_heightMods.Length);
+                a[a.Length - 1] = mod;
+                s_heightMods = a;
+                System.Threading.Interlocked.Increment(ref s_sampleGen);
+            }
+        }
+
+        internal static bool RemoveHeightMod(System.Func<float, float, float, float> mod)
+        {
+            lock (s_heightModLock)
+            {
+                int i = System.Array.IndexOf(s_heightMods, mod);
+                if (i < 0) return false;
+                var a = new System.Func<float, float, float, float>[s_heightMods.Length - 1];
+                System.Array.Copy(s_heightMods, 0, a, 0, i);
+                System.Array.Copy(s_heightMods, i + 1, a, i, a.Length - i);
+                s_heightMods = a;
+                System.Threading.Interlocked.Increment(ref s_sampleGen);
+                return true;
+            }
+        }
+
+        internal static int HeightModCount => s_heightMods.Length;
+
+        private static float ApplyHeightMods(System.Func<float, float, float, float>[] mods, float wx, float wy, float v)
+        {
+            t_inHeightMod++;
+            try
+            {
+                foreach (var mod in mods)
+                {
+                    float r;
+                    try { r = mod(wx, wy, v); }
+                    catch (System.Exception ex)
+                    {
+                        if (System.Threading.Interlocked.Increment(ref s_heightModFaults) == 1)
+                            FiresLogger.LogWarning($"[FiresWorldGen] (FatApi) a height modifier threw, skipped (logged once): {ex.Message}");
+                        continue;
+                    }
+                    if (!float.IsNaN(r) && !float.IsInfinity(r)) v = r;
+                }
+            }
+            finally { t_inHeightMod--; }
             return v;
         }
 
@@ -210,7 +280,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // switch stepped the ground ±1.7m in one meter along every mask
             // edge: knife-edge ridges that poked through channel water as
             // 1-cell dry slits with deep bed beside them (live-cache-proven).
-            var m = _riverMask;
+            var m = RiverF;   // Packed view
             var em = FiresWorldEdits.EditMask;
             int n = _res;
             float half = _half;
@@ -253,7 +323,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetGenWater(float wx, float wz, out float level, out bool wet)
         {
             level = 0f; wet = false;
-            var m = _riverMask; var w = _waterS; var g = _gridS;
+            var m = RiverF; var w = WaterF; var g = _gridS;   // Packed views
             if (m == null || w == null || g == null) return false;
             int n = _res; float half = _half;
             int gx = Mathf.RoundToInt((wx + half) / (2f * half) * (n - 1));
@@ -296,10 +366,10 @@ namespace VerdantsAscent.Terrain.Voxel
         // line that the generator's final snap marks dry. The sheet must run
         // flat over it into the bank wall (and clip through), same as the
         // flowing core — gating the store on raw wetness alone made the
-        // sheet edge curl down just before the bank (user screenshots).
+        // sheet edge curl down just before the bank.
         internal static bool IsChannelAtReal(float wx, float wz)
         {
-            var m = _riverMask;
+            var m = RiverF;   // Packed view
             if (m == null) return false;
             int n = _res; float half = _half;
             int gx = Mathf.RoundToInt((wx + half) / (2f * half) * (n - 1));
@@ -320,7 +390,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // shoreline ring and stop the sheet short of the banks.
         internal static bool IsWetRawAtReal(float wx, float wz)
         {
-            var w = _waterS; var g = _gridS;
+            var w = WaterF; var g = _gridS;   // Packed view
             if (w == null || g == null) return false;
             int n = _res; float half = _half;
             int gx = Mathf.RoundToInt((wx + half) / (2f * half) * (n - 1));
@@ -351,7 +421,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool TryGetGenWaterSmoothReal(float wx, float wz, out float level, out float depth)
         {
             level = 0f; depth = 0f;
-            var w = _waterS; var g = _gridS;
+            var w = WaterF; var g = _gridS;   // Packed view
             if (w == null || g == null) return false;
             int n = _res; float half = _half;
             float cell = (2f * half) / (n - 1);
@@ -392,7 +462,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // collide with it.
         private const short SURF_CUT = short.MinValue;
 
-        public static bool WaterSurfaceReady => _surfS != null;
+        public static bool WaterSurfaceReady => SurfF != null;   // Packed after init
 
         // ── Water-body CLASSIFICATION (P6) ───────────────────────────────
         // One class per decimated cell, rebuilt every load: basins classify
@@ -591,7 +661,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // LAVA rides the vegetation-mask ALPHA (vanilla GetAshlandsHeight:
         // mask = (0,0,0,lava)). Our GetBiomeHeight override returned
         // Color.black — which has ALPHA 1 — so the entire Ashlands crescent
-        // and every volcano cone rendered as solid lava (user report). Lava
+        // and every volcano cone rendered as solid lava. Lava
         // is now deliberate: the molten CORE of each volcano caldera (ramped
         // to a crusted rim) and sparse cellular fields on the ash flats.
         // LAVA FIELD — baked once per load at 8m from the FINAL terrain:
@@ -610,7 +680,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static Color SampleLavaMaskReal(float wx, float wz)
         {
             var lf = _lavaS;
-            if (lf == null || _biomeMap == null || BiomeCodeAtReal(wx, wz) != 6) return Color.clear;
+            if (lf == null || BiomeF == null || BiomeCodeAtReal(wx, wz) != 6) return Color.clear;
             int nc = _lavaN;
             float gx = (wx + _half) / _lavaCell, gz = (wz + _half) / _lavaCell;
             if (gx < 0f) gx = 0f; else if (gx > nc - 1.001f) gx = nc - 1.001f;
@@ -756,7 +826,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // Consumers: wet paint (mountain shores get a tight faint band).
         internal static byte BiomeCodeAtReal(float wx, float wz)
         {
-            var b = _biomeMap;
+            var b = BiomeF;   // Packed view
             if (b == null) return 0;
             int n = _res;
             float cell = (2f * _half) / (n - 1);
@@ -766,7 +836,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── BAKED ZONE WATER FLAGS ───────────────────────────────────────
-        // Known AT GENERATION, never discovered at runtime (user doctrine:
+        // Known AT GENERATION, never discovered at runtime (design rule:
         // we own ALL the worldgen logic — which zones the rivers carved
         // through and which need shore blending is never a mystery). One
         // byte per 64m zone, built from the FINAL class grid.
@@ -825,7 +895,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // hard-line factory: chamfer-DT source territories meet along
         // STRAIGHT Voronoi edges, and any binary decision keyed on the
         // nearest source's level/class (sea gate, class weights) printed a
-        // ruler-straight paint edge along them (user screenshot at a river
+        // ruler-straight paint edge along them (seen at a river
         // mouth). Callers now evaluate per corner and blend the RESULTS, so
         // source switches feather over 8m instead of cutting.
         public static bool TryGetShoreCorners(float wx, float wz, out float distM,
@@ -848,6 +918,8 @@ namespace VerdantsAscent.Terrain.Voxel
             int i = zi * n2 + xi;
             distM = (d[i] * (1f - fx) * (1f - fz) + d[i + 1] * fx * (1f - fz)
                    + d[i + n2] * (1f - fx) * fz + d[i + n2 + 1] * fx * fz) * 0.25f;
+            var sL = _shoreL; var sC = _shoreC;   // No longer built (unread); the distance alone answers
+            if (sL == null || sC == null) return true;
             l00 = _shoreL[i] * UNPACK; l10 = _shoreL[i + 1] * UNPACK;
             l01 = _shoreL[i + n2] * UNPACK; l11 = _shoreL[i + n2 + 1] * UNPACK;
             c00 = _shoreC[i]; c10 = _shoreC[i + 1];
@@ -903,7 +975,7 @@ namespace VerdantsAscent.Terrain.Voxel
             System.Collections.Generic.List<int> outCells, int minCells, int max)
         {
             outPos.Clear(); outCells.Clear();
-            var bm = _biomeMap; if (bm == null) return 0;
+            var bm = BiomeF; if (bm == null) return 0;   // Packed view
             int n = _res; float half = _half;
             float cellM = (2f * half) / (n - 1);
             int stride = Mathf.Max(1, Mathf.RoundToInt(8f / cellM));
@@ -979,22 +1051,27 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             _active = false;
             LoadedBakePath = null;
+            LoadedCutsPath = null;
+            LoadedSurfacePath = null;
             s_sampleGen++;   // invalidate every thread's sampler memo
             _grid = null; _gridS = null;
             _biomeMap = null;
             _riverMask = null;
             _waterLevel = null; _waterS = null; _surfS = null; _classS = null;
+            ClearPackedFields();
             _plan = null; _riverPolys = null; FiresImportedFlow.Clear();
             FiresWorldEdits.Clear();
             s_seedLevels.Clear();
             _volcanoDraws = null;
             _lavaS = null;
+            _shoreD = null; _shoreL = null; _shoreC = null;   // RAM: a second world in one session kept the first one's ~420 MB
             FiresClimate.Clear();
             FiresSkyIslands.Clear();
             // The chunk cache latches its key on first use; a new world must mint
             // its own, and only after its island set is known (below).
             VoxelChunkCache.Reset();
             FiresMinimapRivers.Reset();
+            FiresMinimapIslands.Reset();
             VoxelHydrology.Reset();   // per-world solve + channel geometry
             if (world == null || world.m_menu) return;
 
@@ -1003,6 +1080,16 @@ namespace VerdantsAscent.Terrain.Voxel
             if (FiresVoxelConfig.CustomGeneration != null && !FiresVoxelConfig.CustomGeneration.Value)
             {
                 FiresLogger.LogInfo("[FiresWorldGen] 'Fires Custom Generation' (master switch) = false — FAT adds NO terrain generation to this world; vanilla generation. 'Terrain Mode' and 'World Terrain Mode' are ignored while this is off.");
+                return;
+            }
+            // A super flat world gets a FLAT FIELD, never the
+            // generator, whatever its Generator / Terrain choice, so every FAT sampler (voxels, quilt, impostors, water, minimap) answers
+            // flat Meadows by construction.
+            // Only the voxel choices (Generator = Fires): a HEIGHTMAP super flat keeps the stock generator, patched flat by FatSuperFlat,
+            // exactly as the heightmap super flat path has proved it, with FAT's generator inactive.
+            if (FiresWorldProfile.Current?.SuperFlat == true && FiresWorldProfile.Current.Generator == ProfileGenerator.Fires)
+            {
+                BuildSuperFlatField(world);
                 return;
             }
             // TERRAIN MODE gate: the Fires GENERATOR (custom height/biomes/
@@ -1091,27 +1178,31 @@ namespace VerdantsAscent.Terrain.Voxel
             // normal seed-keyed cache when no bake exists.
             // A client takes the server's own bake and flow field from the join sync (D14) when the server sent them.
             string bakedPath = BakedCachePath(world.m_name);
-            string syncedFlow = null;
+            string syncedFlow = null, syncedCuts = null;
             bool synced = false;
-            if (ZNet.instance != null && !ZNet.instance.IsServer()
-                && BcImport.BcJoinSync.BakeAnswer(out string syncedBake) == BcImport.BcJoinSync.ServerAnswer.Data)
+            if (ZNet.instance != null && !ZNet.instance.IsServer())
             {
-                bakedPath = syncedBake;
-                BcImport.BcJoinSync.BakeFlowAnswer(out syncedFlow);
-                synced = true;
+                var bakeAnswer = BcImport.BcJoinSync.BakeAnswer(out string syncedBake);
+                if (bakeAnswer == BcImport.BcJoinSync.ServerAnswer.Data)
+                {
+                    bakedPath = syncedBake;
+                    BcImport.BcJoinSync.BakeFlowAnswer(out syncedFlow);
+                    BcImport.BcJoinSync.BakeCutsAnswer(out syncedCuts);   // The server's big waterfall sinkholes
+                    synced = true;
+                }
+                else if (bakeAnswer == BcImport.BcJoinSync.ServerAnswer.Failed)
+                    FiresLogger.LogError($"[FiresWorldGen] the SERVER'S WORLD CACHE for '{world.m_name}' did not arrive through the join sync: "
+                        + "this game builds the world itself if it has no copy (a first join takes several minutes and many GB of memory).");
             }
             string path = File.Exists(bakedPath) ? bakedPath : CachePath(world.m_name, world.m_seed, res, useVahc);
             if (path == bakedPath)
             {
-                FiresLogger.LogInfo($"[FiresWorldGen] loading STUDIO-BAKED world '{world.m_name}' (seed-agnostic"
-                    + (synced ? ", the server's copy from the join sync" : "") + $"): {bakedPath}");
-                if (ZNet.instance == null || ZNet.instance.IsServer())
-                {
-                    LoadedBakePath = bakedPath;
-                    BcImport.BcJoinSync.Prehash(bakedPath);
-                }
+                FiresLogger.LogInfo(synced
+                    ? $"[FiresWorldGen] loading the SERVER'S world cache for '{world.m_name}' from the join sync (no local generation): {bakedPath}"
+                    : $"[FiresWorldGen] loading STUDIO-BAKED world '{world.m_name}' (seed-agnostic): {bakedPath}");
+                if (ZNet.instance == null || ZNet.instance.IsServer()) ShareCacheWithClients(bakedPath, world.m_name);
             }
-            var steps = new StepTimes();
+            var steps = new StepTimes { TrackHeap = true };   // Heap per init step (where the load-time peak comes from)
             if (synced) FiresImportedFlow.TryLoad(syncedFlow);   // the server's flow field, when it has one
             else FiresImportedFlow.TryLoadFor(path);   // authored flow rides beside a baked world; absent for generated ones
             steps.Lap("flow field");
@@ -1119,6 +1210,16 @@ namespace VerdantsAscent.Terrain.Voxel
             var sw = Stopwatch.StartNew();
             // A client's bake may already be read: the join sync started it on a worker (BakePreload).
             var loaded = BakePreload.TakeFor(path) ?? ReadCacheFile(path);
+            // A cache FAT generated for another world size spans the wrong disc; it was reused anyway (the header's
+            // half was never compared). Only the GENERATED cache is judged: a bake (FiresWorldBake writes half = the playable
+            // radius, faithful or not, at BakedCachePath), a synced bake and a VAHC base keep their own spans.
+            if (loaded != null && !useVahc && !loaded.Faithful && path == CachePath(world.m_name, world.m_seed, res, false)
+                && Mathf.Abs(loaded.Half - HALF) > 0.5f)
+            {
+                FiresLogger.LogWarning($"[FiresWorldGen] the cache for '{world.m_name}' spans +-{loaded.Half:0} m but this world's edge is "
+                    + $"{HALF:0} m ({FatWorldSize.Describe()}): generating it again.");
+                loaded = null;
+            }
             steps.Lap(BakePreload.AdoptedReadMs >= 0 ? "cache adopted from the worker" : "cache read");
             _grid = loaded?.Grid;
             _biomeMap = loaded?.Biomes;
@@ -1140,7 +1241,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         n = res;
                         half = HALF;
-                        Erode(_grid, n, droplets, world.m_seed ^ 0x51ED);
+                        _half = half;   // CarveRivers reads _half; it held the previous world's span here
+                        Erode(_grid, n, droplets, world.m_seed ^ 0x51ED, half);
                         _riverMask = CarveRivers(_grid, n, world.m_seed, out _waterLevel);
                         source = "image base";
                     }
@@ -1150,7 +1252,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     _grid = LoadVahcBase(vahc, res, out n, out half);
                     if (_grid != null)
                     {
-                        Erode(_grid, n, droplets, world.m_seed ^ 0x51ED);
+                        _half = half;   // The VAHC base's own span, for the erosion and CarveRivers below
+                        Erode(_grid, n, droplets, world.m_seed ^ 0x51ED, half);
                         _riverMask = CarveRivers(_grid, n, world.m_seed, out _waterLevel);
                         source = "vahc base";
                     }
@@ -1162,6 +1265,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 if (_grid == null)
                 {
+                    _half = HALF;   // BuildGrid's CarveRivers reads _half (a VAHC world earlier this session left its span)
                     _grid = BuildGrid(world.m_seed, res, droplets, out _riverMask, out _waterLevel);
                     n = res;
                     half = HALF;
@@ -1191,7 +1295,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // Runs at GEN only and rides in the cache — a load never
                 // re-plans, and nothing downstream re-derives water from
                 // heights. This replaces the four seeders and the basin walk.
-                BuildWaterPlan(world.m_seed, n, half);
+                FatSinkFallCuts.Arm(FiresWorldRecords.PathFor(world.m_name, FatSinkFallCuts.Suffix), FiresVoxelConfig.GeneratesCaves);   // Big sinkholes cut rivers
+                try { BuildWaterPlan(world.m_seed, n, half); } finally { FatSinkFallCuts.Disarm(); }
                 steps.Lap($"generate ({source})");
             }
             _res = n;
@@ -1214,9 +1319,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     Save(path, _grid, _biomeMap, _riverMask, _waterLevel, n, half, _plan);
                     FiresLogger.LogInfo($"[FiresWorldGen] worldgen grid cached ({source}) in {swSave.Elapsed.TotalSeconds:0.0}s.");
+                    ShareCacheWithClients(path, world.m_name);   // Joining clients download it instead of generating
                 }
                 catch (Exception ex) { FiresLogger.LogWarning($"[FiresWorldGen] cache save failed ({ex.Message}) — world still active, regenerates next load."); }
                 steps.Lap("cache save");
+            }
+            if (source == "cache")
+            {
+                if (path != bakedPath) ShareCacheWithClients(path, world.m_name);   // A generated cache loaded on the server
+                if (synced && syncedCuts != null) FiresLogger.LogDebug($"[SinkFall] big: the server's sinkhole list came with the join sync ({Path.GetFileName(syncedCuts)})");
+                FatSinkFallCuts.Load(synced ? syncedCuts : FiresWorldRecords.PathFor(world.m_name, FatSinkFallCuts.Suffix), world.m_seed, anySeed: path == bakedPath);
             }
             // Composition on EVERY load — cheap, and it keeps the pond
             // keep-chances tunable: the selection re-rolls deterministically
@@ -1239,6 +1351,8 @@ namespace VerdantsAscent.Terrain.Voxel
             else FiresLogger.LogInfo("[FiresWorldGen] FAITHFUL cache — tarn seeding SKIPPED; this world's ground is the source world's and nothing may excavate it.");
             _plan?.BuildIndex(n, half);
             steps.Lap("water plan index");
+            ClampStrandedBodies(n, half);   // A body levelled before its river was cut/carved sits on that river's level
+            steps.Lap("stranded bodies");
             // The plan already decided every level; this only translates it
             // into the 8m class grid the paint/clutter/ice samplers read.
             StampWaterClasses();
@@ -1260,24 +1374,48 @@ namespace VerdantsAscent.Terrain.Voxel
             // the 2m grid's runtime footprint (the dedi OOM). Gen/Save/Normalize/
             // Audit above all ran on the float arrays; every runtime sampler
             // below reads _gridS/_waterS.
+            // Memory: Mono's heap grew 1,862 -> 2,346 MB at the pack and -> 2,863 MB at the
+            // surface reconcile, never returned: on a surface-cache HIT the float fields are needed only for its key. So the
+            // key is taken first, the pack runs, the floats go and a collection runs BEFORE the cached surface/class/shore
+            // fields load, so they reuse the floats' space instead of growing the heap. Exact: same key, same loaded data.
+            bool wantSurface = !LoadedFaithful || FaithfulBakeWaterOn;
+            ulong surfKey = 0; string surfPath = null; bool surfHit = false;
+            if (wantSurface && !s_surfaceRetry) surfHit = SurfaceCacheHeaderMatches(_grid, _waterLevel, n, world.m_name, out surfKey, out surfPath);
             _gridS = PackI16(_grid); _waterS = PackI16(_waterLevel);
             steps.Lap("int16 pack");
+            if (surfHit)
+            {
+                _grid = null; _waterLevel = null;
+                long freedFrom = GC.GetTotalMemory(false);
+                GC.Collect();
+                steps.Lap($"floats freed before the surface load ({(freedFrom - GC.GetTotalMemory(false)) / 1048576L:N0} MB collected)");
+                if (!LoadSurfaceAfterFree(surfPath, surfKey, n))
+                {
+                    // The header matched but the body did not read: the floats are gone, so start the world again without the cache.
+                    try { File.Move(surfPath, surfPath + ".bad"); } catch (Exception ex) { FiresLogger.LogWarning($"[FiresWorldGen] could not set the bad surface cache aside: {ex.Message}"); }
+                    FiresLogger.LogWarning($"[FiresWorldGen] surface cache {Path.GetFileName(surfPath)} matched its key but did not load; set aside as .bad, world init runs again and rebuilds it");
+                    s_surfaceRetry = true;
+                    try { OnWorldInitialize(world); } finally { s_surfaceRetry = false; }
+                    return;
+                }
+                steps.Lap("surface loaded from its cache (floats already freed)");
+            }
             // Carve+fill water: reconcile the filled field against its banks
             // ONCE, here, while the float arrays still exist. Everything
             // downstream (bed carve, water mesh, swim, veg prediction, paint)
             // reads the one reconciled surface.
             // A faithful bake's ground is never excavated (tarns stay skipped above), but with Faithful Bake Water on its
-            // own baked water gets the smooth surface every water reader needs (Fire 10-01: gated test). The reconcile
+            // own baked water gets the smooth surface every water reader needs (gated test). The reconcile
             // only reads the ground and water fields.
-            if (!LoadedFaithful || FaithfulBakeWaterOn)
+            if (wantSurface && !surfHit)
             {
-                BuildReconciledSurface(_grid, _waterLevel, n);
+                BuildOrLoadReconciledSurface(_grid, _waterLevel, n, world.m_name);   // Cached results skip the 4-5 GB build
                 steps.Lap("surface reconcile");
                 if (LoadedFaithful)
                     FiresLogger.LogInfo("[FiresWorldGen] FAITHFUL cache — water surface reconcile RUN (Faithful Bake Water on): the bake's "
                         + "own rivers and lakes are queryable this session.");
             }
-            else FiresLogger.LogInfo("[FiresWorldGen] FAITHFUL cache — water surface reconcile SKIPPED; the water is the flat sea the source world had and is not re-derived from heights.");
+            else if (!wantSurface) FiresLogger.LogInfo("[FiresWorldGen] FAITHFUL cache — water surface reconcile SKIPPED; the water is the flat sea the source world had and is not re-derived from heights.");
             _grid = null; _waterLevel = null;
             // Needs the packed ground grid. The server loads or seeds the world's
             // frozen island set; a client holds islands off until the server's set
@@ -1290,15 +1428,71 @@ namespace VerdantsAscent.Terrain.Voxel
             LogResidentFields();
             if (RunsWholeWorldDiagnostics) LogWorldReport(world.m_name, world.m_seed);
             steps.Lap("reports");
-            FiresLogger.LogInfo($"[FiresWorldGen] world init steps: {steps}.");
+            PackRuntimeFields();   // biome+river one byte, tiled water/surface; every cell verified before the dense copy goes
+            steps.Lap("field pack");
+            FiresLogger.LogInfo($"[FiresWorldGen] world init steps: {steps}. {steps.PeakSummary}");
         }
 
-        // The water audit and the world report scan the whole grid (0.36 s and 0.82 s on the ATomTest dedi, 0.2.618) and
+        // The super flat field. The ground is FatSuperFlat.HeightAt (the same function the seasons mod's WorldGenerator postfix answers
+        // with, so the two can never disagree): y 50 on the land, the shore slope, the sea floor past it. Meadows on the land, Ocean past
+        // it; no rivers, lakes, water plan, climate, lava or hydrology. The world caches are never read or written (a normal world with
+        // the same seed keeps its own), and every peer builds the same field from the profile it already has: there is nothing to sync.
+        // Sky islands follow the profile's SkyIslands choice; caves follow its Caves choice (FiresVoxelConfig.GeneratesCaves).
+        private const float SuperFlatMargin = 512f, SuperFlatCell = 4f;
+
+        private static void BuildSuperFlatField(World world)
+        {
+            var sw = Stopwatch.StartNew();
+            var profile = FiresWorldProfile.Current;
+            float radius = profile?.WorldRadius ?? FiresWorldProfile.SuperFlatRadius;
+            float half = radius + SuperFlatMargin;
+            int n = Mathf.RoundToInt(2f * half / SuperFlatCell) + 1;
+            var grid = new float[n * n];
+            var biomes = new byte[n * n];
+            var water = new float[n * n];
+            byte meadows = (byte)System.Array.IndexOf(BIOME_CODES, Heightmap.Biome.Meadows);
+            byte ocean = (byte)System.Array.IndexOf(BIOME_CODES, Heightmap.Biome.Ocean);
+            float step = 2f * half / (n - 1);
+            for (int z = 0; z < n; z++)
+            {
+                float wz = -half + z * step;
+                for (int x = 0; x < n; x++)
+                {
+                    float wx = -half + x * step;
+                    int i = z * n + x;
+                    float h = FatSuperFlat.HeightAt(wx, wz);
+                    grid[i] = h;
+                    water[i] = h;   // the fill level equals the ground everywhere: nothing on the field is wet (the sea is vanilla's)
+                    biomes[i] = wx * wx + wz * wz <= radius * radius ? meadows : ocean;
+                }
+            }
+            _grid = grid; _biomeMap = biomes; _riverMask = new byte[n * n]; _waterLevel = water;
+            _plan = null;
+            _res = n; _half = half; _seed = world.m_seed;
+            LoadedBakePath = null;
+            LoadedCutsPath = null;
+            LoadedSurfacePath = null;
+            BakeLavaField();
+            BuildZoneSurvey();
+            StampWaterClasses();
+            _gridS = PackI16(_grid); _waterS = PackI16(_waterLevel);
+            _grid = null; _waterLevel = null;   // no reconciled water surface: nothing to reconcile, every water query answers "none"
+            bool islands = profile?.SkyIslands == true;
+            if (islands) FiresSkyIslands.Initialize(world);
+            _active = true;
+            PackRuntimeFields();
+            FiresLogger.LogInfo($"[FiresWorldGen] super flat field for '{world.m_name}': grid {n} ({step:0.#} m cells) over radius {radius:0} + "
+                + $"{SuperFlatMargin:0} m, y {FiresWorldProfile.SuperFlatHeight:0} Meadows, no water plan / rivers / climate / hydrology, world caches "
+                + $"not read or written; sky islands {(islands ? "ON" : "off")}, caves {(FiresVoxelConfig.GeneratesCaves ? "ON" : "off")}; built in "
+                + $"{sw.Elapsed.TotalMilliseconds:0} ms.");
+        }
+
+        // The water audit and the world report scan the whole grid (0.36 s and 0.82 s on a test dedi) and
         // say the same on every peer, so the server logs them and a client only when verbose: on a client they ran inside
         // every join's RPC_PeerInfo.
         private static bool RunsWholeWorldDiagnostics => ZNet.instance == null || ZNet.instance.IsServer() || FiresLogger.VerboseEnabled;
 
-        // The whole-world fields this peer keeps for the session, by size ([perf] 2026-09-28, weighing ATomTest's managed
+        // The whole-world fields this peer keeps for the session, by size (weighing the managed
         // heap against its GC stops and page faults). Every one is a pointer-free array: Boehm never scans its contents.
         private static void LogResidentFields()
         {
@@ -1332,8 +1526,9 @@ namespace VerdantsAscent.Terrain.Voxel
             parts.Add($"{name} {bytes / ResidentBytesPerMegabyte:N0} MB");
         }
 
-        private const float PlayableRadius = 10000f;
-        private const float PlayableRadiusSqr = PlayableRadius * PlayableRadius;
+        // The world's playable radius (FatWorldSize; 10000 on a vanilla-size world).
+        private static float PlayableRadius => FatWorldSize.Radius;
+        private static float PlayableRadiusSqr => PlayableRadius * PlayableRadius;
 
         // Set by the vanilla-profile branch above; consumed from ZNet.Start, which is where the world is actually
         // loaded. The profile branch runs during world INIT, and WorldGenerator.instance does not exist yet there.
@@ -1399,7 +1594,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // ── BIOME WATER STYLES ───────────────────────────────────────────
         // Biome rules govern HOW a water body is BUILT, not what appears
-        // (user doctrine): excavation depths, berm crest height, and the
+        // (design rule): excavation depths, berm crest height, and the
         // shore paint's reach/rise/weight + beach readiness. One table, one
         // tuning surface — every seeder, the walk's berms, and PaintWet01
         // read it. Indexed by biome code (BIOME_CODES order).
@@ -1441,6 +1636,30 @@ namespace VerdantsAscent.Terrain.Voxel
         // agree. The sea is laid on afterwards because the ocean conforms
         // nothing, and the coastline gets the same buried-edge treatment as
         // every inland boundary. From here the plan is READ, never re-derived.
+        // Straight 50 m walls and terraced strips showed across the
+        // sea: the planner emits some still bodies only 1-3 cells wide and tens to hundreds long (seed 777: 20 of 153,
+        // e.g. a Pond 2 x 343 cells at level 53.2 over 14 m ground). Conform's BuryMeshEdges then raises the ground to
+        // meet that sheet, column by column. No real lake is a 4 m-wide line, so such a body loses its footprint here,
+        // before Conform: no water, no shaping. New generations only.
+        private const int LineBodyMaxWidth = 3, LineBodyMinLength = 30;
+
+        private static void DropLineBodies(FiresWaterPlan plan, int n, float half)
+        {
+            if (plan == null) return;
+            int dropped = 0;
+            foreach (var b in plan.Bodies)
+            {
+                if (b.Kind == WaterBodyKind.Ocean || b.Mask == null) continue;
+                bool line = (b.W <= LineBodyMaxWidth && b.H >= LineBodyMinLength) || (b.H <= LineBodyMaxWidth && b.W >= LineBodyMinLength);
+                if (!line) continue;
+                System.Array.Clear(b.Mask, 0, b.Mask.Length);
+                dropped++;
+                float cell = (2f * half) / (n - 1);
+                FiresLogger.LogDebug($"[FiresWorldGen] line-shaped {b.Kind} dropped: {b.W}x{b.H} cells at ({b.Gx0 * cell - half:0},{b.Gz0 * cell - half:0}), level {b.Level:0.0}");
+            }
+            if (dropped > 0) FiresLogger.LogInfo($"[FiresWorldGen] water plan: {dropped} line-shaped still bod(ies) dropped (a 1-3 cell wide strip is no lake; it walled the sea in)");
+        }
+
         private static void BuildWaterPlan(int seed, int n, float half)
         {
             if (_grid == null || _waterLevel == null || _riverMask == null) return;
@@ -1464,6 +1683,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 _plan = null;
                 FiresLogger.LogError($"[FiresWorldGen] water planner FAILED ({ex.Message}) — this world gets rivers and sea only.\n{ex.StackTrace}");
             }
+            DropLineBodies(_plan, n, half);
             _riverPolys = null;
             if (_plan == null)
             {
@@ -1482,6 +1702,17 @@ namespace VerdantsAscent.Terrain.Voxel
             SeedMountainTarns();
             // RIVERS ARE THE PLAN'S CONNECTION RUNS — placement with provenance
             // (body→body, body→sea, spring→…), carved once, from the plan.
+            // Big waterfall sinkholes end chosen runs in a shaft BEFORE the levels and the carve see them.
+            // With the planning ground (metres, bilinear, before the rivers are carved), so a run is only cut where
+            // its sinkhole has room (FatSinkFallCuts.NodeRoom); the runtime check reads the final ground the same way.
+            var planGrid = _grid; float planCell = (2f * half) / (n - 1);
+            float PlanGround(float wx, float wz)
+            {
+                float gx = Mathf.Clamp((wx + half) / planCell, 0f, n - 1.001f), gz = Mathf.Clamp((wz + half) / planCell, 0f, n - 1.001f);
+                int xi = (int)gx, zi = (int)gz, i = zi * n + xi; float fx = gx - xi, fz = gz - zi;
+                return planGrid[i] * (1f - fx) * (1f - fz) + planGrid[i + 1] * fx * (1f - fz) + planGrid[i + n] * (1f - fx) * fz + planGrid[i + n + 1] * fx * fz;
+            }
+            FatSinkFallCuts.Run(_plan, seed, PlanGround);
             var connPolys = PlanConnectionsToPolys(_plan, _waterLevel, _grid, n, (2f * half) / (n - 1),
                                                    out int springRuns, out int culledSprings);
             FiresLogger.LogInfo($"[FiresWorldGen] rivers = plan connections: {(connPolys != null ? connPolys.Count : 0)} run(s) " +
@@ -1650,13 +1881,13 @@ namespace VerdantsAscent.Terrain.Voxel
                     // CLIFF-STRADDLE VETO: a ring spanning a big drop anchors
                     // the level at the cliff BASE and the dig then quarries
                     // the high side 20-50m down — the "massive holes that
-                    // aren't even sinkholes" (user screenshots). A tarn needs
+                    // aren't even sinkholes". A tarn needs
                     // a feasible bowl; the lattice just rolls elsewhere.
                     if (ringMax - ringMin > 7f) continue;
                     // Level sits a touch above the lowest rim: the low side
                     // then needs a MODEST berm (which buries the shoreline),
                     // while the high side still reads as dug-in.
-                    // STRICTLY below the lowest bank (user: "drops a bit below
+                    // STRICTLY below the lowest bank (it "drops a bit below
                     // the lowest bank and levels perfectly"). The old relief
                     // bonus could push the level ABOVE ringMin on a high-relief
                     // ring — that lowest bank then floated. −0.35 guarantees
@@ -1864,6 +2095,8 @@ namespace VerdantsAscent.Terrain.Voxel
             float lvMin = float.MaxValue, lvMax = float.MinValue;
             int violChanChan = 0, violChanOnly = 0, violNbrChan = 0, violPlain = 0, violOverCap = 0;
             var examples = new System.Text.StringBuilder(128);
+            string dumpPath = System.Environment.GetEnvironmentVariable("FIRES_WATER_AUDIT_DUMP");
+            var dump = string.IsNullOrEmpty(dumpPath) ? null : new System.Text.StringBuilder("wx,wz,water,ground,mask,nbrGround,nbrMask,dx,dz,nbrWater\n");
             for (int z = 1; z < n - 1; z++)
             {
                 for (int x = 1; x < n - 1; x++)
@@ -1889,7 +2122,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         int j = (z + RIV_DZ[e]) * n + (x + RIV_DX[e]);
                         byte mj = m[j];
                         bool jWet = (mj == 1 || mj == 3) ? w[j] - g[j] >= 0.4f : w[j] - g[j] >= 1.2f;
-                        if (jWet || g[j] >= w[i] - 0.35f) continue;
+                        if (jWet || g[j] >= w[i] - 0.35f || w[j] >= w[i] - 0.35f) continue;   // A neighbour holding water at about this level (a shallow shore cell of the same body) is not a dry wall
                         bad = true;
                         float drop = w[i] - g[j];
                         if (drop > worstDrop) { worstDrop = drop; nbrChan = mj != 0; }
@@ -1904,11 +2137,33 @@ namespace VerdantsAscent.Terrain.Voxel
                     // under existing water — perpetual violations in the
                     // unplayable margin. Acceptance is the INLAND count.
                     float wx = -half + x * cell, wz = -half + z * cell;
-                    if (wx * wx + wz * wz >= 9300f * 9300f) { violRim++; continue; }
+                    if (wx * wx + wz * wz >= (PlayableRadius - 700f) * (PlayableRadius - 700f)) { violRim++; continue; }   // 9300 at vanilla size
                     violIn++;
+                    // Diagnose the 17,848 "plain-beside-plain" violations, don't nudge: a full dump for
+                    // offline clustering, only when FIRES_WATER_AUDIT_DUMP names a file (the World Gen Studio sets it; the game
+                    // never does).
+                    if (dump != null)
+                    {
+                        int jw = -1; float jg = 0f; byte jm = 0;
+                        for (int e = 0; e < 8; e++)
+                        {
+                            int j = (z + RIV_DZ[e]) * n + (x + RIV_DX[e]);
+                            byte mj = m[j];
+                            bool jWet = (mj == 1 || mj == 3) ? w[j] - g[j] >= 0.4f : w[j] - g[j] >= 1.2f;
+                            if (jWet || g[j] >= w[i] - 0.35f || w[j] >= w[i] - 0.35f) continue;
+                            if (jw < 0 || g[j] < jg) { jw = e; jg = g[j]; jm = mj; }
+                        }
+                        dump.AppendLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "{0:0},{1:0},{2:0.00},{3:0.00},{4},{5:0.00},{6},{7},{8},{9:0.00}", wx, wz, w[i], g[i], mk, jg, jm, RIV_DX[jw], RIV_DZ[jw], w[(z + RIV_DZ[jw]) * n + (x + RIV_DX[jw])]));
+                    }
                     if (violIn <= 5)
                         examples.Append($" ({wx:0},{wz:0})Δ{w[i] - g[i]:0.0}m");
                 }
+            }
+            if (dump != null)
+            {
+                try { System.IO.File.WriteAllText(dumpPath, dump.ToString()); FiresLogger.LogInfo($"[FiresWorldGen] WATER AUDIT dump: {violIn:N0} inland violation(s) -> {dumpPath}"); }
+                catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresWorldGen] WATER AUDIT dump failed: {ex.Message}"); }
             }
             FiresLogger.LogInfo($"[FiresWorldGen] WATER AUDIT: {wet:N0} wet cells, lvl {lvMin:F1}-{lvMax:F1}, " +
                       $"inland above-bank violations {violIn} (rim band: {violRim})" +
@@ -1954,11 +2209,14 @@ namespace VerdantsAscent.Terrain.Voxel
 
             float baseN = h / 200f;
             float r = Mathf.Sqrt(wx * wx + wy * wy);
-            if (r > 10000f)
+            // The fade to sea starts at the world's radius and the cliff stands 10 m inside its edge (FatWorldSize;
+            // 10000 / 500 m / 10490 on a vanilla-size world, the same floats as before).
+            float radius = FatWorldSize.Radius, edge = FatWorldSize.EdgeRadius;
+            if (r > radius)
             {
-                baseN = Mathf.Lerp(baseN, -0.2f, Mathf.Clamp01((r - 10000f) / 500f));
-                if (r > 10490f)
-                    baseN = Mathf.Lerp(baseN, -2f, Mathf.Clamp01((r - 10490f) / 10f));
+                baseN = Mathf.Lerp(baseN, -0.2f, Mathf.Clamp01((r - radius) / (edge - radius)));
+                if (r > edge - 10f)
+                    baseN = Mathf.Lerp(baseN, -2f, Mathf.Clamp01((r - (edge - 10f)) / 10f));
             }
             return baseN;
         }
@@ -1970,6 +2228,9 @@ namespace VerdantsAscent.Terrain.Voxel
             int n = res;
             var h = new float[n * n];
             float cell = (2f * HALF) / (n - 1);
+            // FatWorldSize, read once for the build: the grid's span, the playable radius, the edge and the ring scale.
+            // Vanilla size: 10500 / 10000 / 10500 / 1, so every expression below yields the floats it always did.
+            float halfSpan = HALF, worldR = FatWorldSize.Radius, worldEdge = FatWorldSize.EdgeRadius, worldK = FatWorldSize.Scale;
             int s = seed * 7;
             var gsw = System.Diagnostics.Stopwatch.StartNew();
             FiresLogger.LogInfo($"[FiresWorldGen] GENERATING {n}x{n} grid (~{cell:F1}m cells) — first-load build. On a 2m grid this takes SEVERAL MINUTES (mono is ~3x the offline tool); watch these stage logs so you know it is alive, not hung.");
@@ -2018,7 +2279,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // v33 — WANDERING CRESTS: short segments with per-system
             // curvature drift + jitter — a range is an ARC with kinks, never
             // a ruler bar; the world-rim 90° turn is replaced by a smooth
-            // steer back toward the map (user mandate: no straight ranges,
+            // steer back toward the map (no straight ranges,
             // no right angles).
             var sr = new Random(seed ^ 0x0051DE5);
             const int SYS = 5, SEGS = 24;
@@ -2085,8 +2346,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     FiresLogger.LogInfo($"[FiresWorldGen]  │   base relief {rowsDone * 100L / n}% ({gsw.Elapsed.TotalSeconds:0}s)");
                 for (int x = 0; x < n; x++)
                 {
-                    float wx = -HALF + x * cell;
-                    float wz = -HALF + z * cell;
+                    float wx = -halfSpan + x * cell;
+                    float wz = -halfSpan + z * cell;
                     float r = Mathf.Sqrt(wx * wx + wz * wz);
 
                     float qx = wx + (Fbm(wx, wz, 1f / 1800f, 3, s + 401) - 0.5f) * 1300f;
@@ -2094,14 +2355,15 @@ namespace VerdantsAscent.Terrain.Voxel
 
                     float c = Fbm(qx, qz, 1f / 5200f, 4, s + 11);
                     c += (Fbm(qx, qz, 1f / 1400f, 3, s + 12) - 0.5f) * 0.52f;
-                    c += 0.36f * (1f - Smooth(9400f, 10200f, r));        // land to the world edge
-                    c -= Smooth(9500f, 10400f, r) * 0.7f;                // thin rim margin
+                    c += 0.36f * (1f - Smooth(worldR - 600f, worldR + 200f, r));        // land to the world edge (9400..10200)
+                    c -= Smooth(worldR - 500f, worldEdge - 100f, r) * 0.7f;            // thin rim margin (9500..10400)
                     c -= Smooth(0.55f, 0.75f, Fbm(qx, qz, 1f / 3400f, 3, s + 15)) * 0.62f;   // inland seas
                     c += Mathf.Exp(-(r * r) / (650f * 650f)) * 0.22f;    // gentle spawn dome
                     // Polar arcs (Ashlands south / DeepNorth north) get
                     // guaranteed land — their locations need ground.
-                    float ashD = Mathf.Sqrt(wx * wx + (wz - 3810f) * (wz - 3810f)) - 11430f;
-                    float dnD = Mathf.Sqrt(wx * wx + (wz + 3810f) * (wz + 3810f)) - 11430f;
+                    float arcC = 3810f * worldK, arcR = 11430f * worldK;   // vanilla's polar arcs, scaled with the world
+                    float ashD = Mathf.Sqrt(wx * wx + (wz - arcC) * (wz - arcC)) - arcR;
+                    float dnD = Mathf.Sqrt(wx * wx + (wz + arcC) * (wz + arcC)) - arcR;
                     c += Smooth(-150f, 250f, ashD) * 0.20f;
                     c += Smooth(-150f, 250f, dnD) * 0.18f;
 
@@ -2150,8 +2412,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     // winning segment switched — two systems passing near each
                     // other, or one range hairpinning onto itself — and the
                     // equidistance line rendered as a dead-straight sheer wall
-                    // spanning whole zones with a mesa top (user screenshots:
-                    // "looks like the height got broken"). Segments within
+                    // spanning whole zones with a mesa top (it
+                    // looked like the height got broken). Segments within
                     // 420m of along-distance are the SAME crest (continuous
                     // profile — no blend needed); a second identity further
                     // away gets tracked and blended below.
@@ -2247,7 +2509,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         // Amplitudes tamed again (34/12 → 24/8): even with
                         // the talus pass, the raw field kept throwing spike
-                        // fins with crater Vs beside them (user screenshots);
+                        // fins with crater Vs beside them;
                         // the ridged STRUCTURE survives at lower amplitude
                         // and the 45° mountain talus mounds what remains.
                         float crest = Ridged(wx, wz, 1f / 340f, 4, s + 205) - 0.5f;
@@ -2319,12 +2581,12 @@ namespace VerdantsAscent.Terrain.Voxel
             });
 
             FiresLogger.LogInfo($"[FiresWorldGen]  ├ base relief done ({gsw.Elapsed.TotalSeconds:0}s); eroding {(long)droplets * n * n / (2048L * 2048L):N0} droplets...");
-            Erode(h, n, droplets, seed ^ 0x51ED);
+            Erode(h, n, droplets, seed ^ 0x51ED, halfSpan);
             FiresLogger.LogInfo($"[FiresWorldGen]  ├ erosion done ({gsw.Elapsed.TotalSeconds:0}s); relaxing slopes...");
             // THERMAL RELAXATION before the river carve. The old single 58°
             // limit (3.2m over 2m) let the ridged field's knife fins STAND —
             // giant spikes with crater-deep Vs beside them ("that's not what
-            // a landslide looks like" — user screenshots). Real scree rests
+            // a landslide looks like"). Real scree rests
             // near 45°: above the mountain line the limit tightens to 2.0m
             // per cell and a fourth pass runs, so fins shed into mounded
             // aprons and the Vs between them FILL (the moved material lands
@@ -2408,7 +2670,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static byte[] BuildBiomes(float[] h, int n, float half, int seed, bool generated)
         {
-            const float R = 10000f;
+            float R = FatWorldSize.Radius;   // The world's radius (10000 on a vanilla-size world; k below = R / 10000)
             int s = seed * 7;
             float cellM = (2f * half) / (n - 1);
             var b = new byte[n * n];
@@ -2514,8 +2776,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         else if (tC < FiresGenTuning.DeepNorthTemp && wz < -2500f * k) v = 7;
                         else if (tC < FiresGenTuning.MountainSnowTemp) v = 3;
                         // SWAMP DISTRICTS — broad, chunky LOWLAND regions, not
-                        // HAND floodplain ribbons (user: swamps came out "just
-                        // a river"). A ~1.5km district noise picks swamp
+                        // HAND floodplain ribbons (swamps had come out as
+                        // just a river). A ~1.5km district noise picks swamp
                         // COUNTRY inside genuinely low + flat + moist land; the
                         // sheet-lay then floods each region below its own
                         // border level so terrain dips in and out of one flat
@@ -2604,7 +2866,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // physical features whether a cell is 10m or 2m. RS==1 at n=2048.
             float cellM = (2f * _half) / (n - 1);
             float cellA = cellM * cellM;
-            float RS = 2047f / (n - 1);
+            float RS = 2047f / (n - 1) * SpanScale;   // X (edge / 10500), exactly 1 on a vanilla-size world
 
             // v10 — CONVERGENT drainage. On broad uniform slopes pure
             // steepest-descent forms SHEETS of parallel streams ("30 rivers
@@ -2642,7 +2904,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // v32 — D-INFINITY flow (Tarboton 1997): CONTINUOUS flow direction,
             // replacing the D8 single-flow that locked every channel to one of 8
             // compass headings — rivers drew as straight axis/diagonal segments
-            // with 45°/90° jogs (user-caught at native res). Each cell takes the
+            // with 45°/90° jogs (visible at native resolution). Each cell takes the
             // steepest of its 8 triangular facets → a REAL-VALUED flow angle, and
             // SPLITS its flow between the two neighbours bracketing that angle, so
             // accumulation (and every incised channel) follows smooth curves.
@@ -2764,7 +3026,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // the headwater-pool pass reads THIS, not a level heuristic. The
             // old "no higher neighbour" test misfired on the monotone-clamped
             // flat runs and carved a pool bowl at EVERY clamped cell — the
-            // beaded pit trenches (user screenshots).
+            // beaded pit trenches.
             var polySources = new HashSet<int>();
             const float AREA_ONSET = 60000f;    // m² — below = ephemeral, no channel
             const float WK = 0.039f, WP = 0.36f;
@@ -2775,7 +3037,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     int nn = poly.Length / 4;
                     bool sourceMarked = false;
-                    // REVERTED to the original level rule (user mandate): the
+                    // REVERTED to the original level rule: the
                     // monotone running-min collapsed the level downstream of
                     // any deep dip and the uncapped carve then trenched whole
                     // mountainsides (locations dragged, mountain water dug to
@@ -3068,8 +3330,8 @@ namespace VerdantsAscent.Terrain.Voxel
             // tributary-start cell → the JUNCTION cell it branched from, so the
             // tributary's mouth can be curved into the main channel's flow (a
             // natural Y confluence) instead of meeting it at the grid-flow
-            // angle — often a hard 90° (user: "rivers should not be meeting at
-            // hard 90°s").
+            // angle — often a hard 90° (rivers should not meet at
+            // hard 90° angles).
             var tribJunction = new System.Collections.Generic.Dictionary<int, int>();
             foreach (var mm in mstart) q.Enqueue(mm);
             while (q.Count > 0)
@@ -3123,8 +3385,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 // 4 Chaikin passes (was 3): the extra corner-cut rounds the
                 // grid-flow staircase kinks that still read as hard turns on
-                // the 2m grid (user: "rivers should not be making hard 90°
-                // turns"). Confluence mouths are curved via the tribJunction
+                // the 2m grid (rivers should not make hard 90°
+                // turns). Confluence mouths are curved via the tribJunction
                 // seed above.
                 if (raw.Count >= 12) polys.Add(ChaikinSmooth(raw, cellM, half, 4));
             }
@@ -3236,8 +3498,8 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void GetRiverSpringSpots(Vector2i zone, List<Vector3> outSpots)
         {
             outSpots.Clear();
-            var m = _riverMask;
-            var w = _waterS;
+            var m = RiverF;   // Packed views
+            var w = WaterF;
             int n = _res;
             float half = _half;
             if (m == null || w == null) return;
@@ -3367,7 +3629,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // channel?
         public static bool IsRiverAt(float wx, float wy)
         {
-            var m = _riverMask;
+            var m = RiverF;   // Packed view
             int n = _res;
             float half = _half;
             if (m == null) return false;
@@ -3567,7 +3829,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // Droplet erosion — straight port of the proven offline pass
         // (Tools/FiresWorldGen/Program.cs). Grid units are metres; droplets die
         // when they reach the sea so coasts keep their shelves.
-        private static void Erode(float[] h, int n, int count, int seed)
+        // `half` is the span
+        // of THIS grid. It read HALF, the generated grid's span, so a VAHC base of another radius eroded at the wrong cell size.
+        // Image bases and generated grids pass HALF and erode exactly as before; VAHC bases re-erode once (their cache name
+        // changed to _vahc2, so an old VAHC cache is rebuilt rather than reused).
+        private static void Erode(float[] h, int n, int count, int seed, float half)
         {
             // Resolution-INDEPENDENT erosion (the 2m "30 parallel rills" fix): a
             // droplet models a fixed PHYSICAL rain path, so its LIFE must scale
@@ -3577,7 +3843,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // Longer paths mean each droplet covers more ground, so COUNT scales
             // only LINEARLY with side length: total work stays ~constant across
             // resolutions and the droplets consolidate into a dendritic tree.
-            float cellM = (2f * HALF) / (n - 1);
+            float cellM = (2f * half) / (n - 1);
             float resK = 10.2591f / cellM;                 // 1 at 2048, ~5.1 at 2m
             int LIFE = (int)(64f * resK);                  // physical path length constant
             const int RADIUS = 2;
@@ -3707,14 +3973,14 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     else
                     {
-                        // SLOPE-GATE the carve (user directive): droplets do NOT
+                        // SLOPE-GATE the carve (design rule): droplets do NOT
                         // erode gentle floodplains — only real hillsides/mountains
                         // carve. Rivers in the flats are drawn by CarveRivers'
                         // stream-power incision, not by parallel droplet rills.
                         // grade = vertical drop per metre this step (dh<=0 here).
                         float slopeGate = Smooth(0.12f, 0.30f, -dh / cellM);
-                        // STEEP BEDROCK RESISTS INCISION (user: landslide/
-                        // erosion "only ADD not REMOVE" — stop the giant holes
+                        // STEEP BEDROCK RESISTS INCISION (landslide/
+                        // erosion only ADDS, never REMOVES — stop the giant holes
                         // gouged into mountain faces). Deposition already
                         // mounds slide-aprons at slope bases; the CARVE had no
                         // upper limit, so on a steep face slopeGate saturated
@@ -3731,8 +3997,8 @@ namespace VerdantsAscent.Terrain.Voxel
                             if (bx < 0 || bx >= n || by < 0 || by >= n) continue;
                             int ci = by * n + bx;
                             h[ci] -= amount * bw[b];
-                            // HARD DEPTH CAP (user: "cap the max depth it can
-                            // carve into a surface"). No droplet run may incise
+                            // HARD DEPTH CAP (cap the max depth it can
+                            // carve into a surface). No droplet run may incise
                             // a cell more than MAX_CARVE below its PRE-erosion
                             // surface — thousands of droplets converging can
                             // no longer gouge a bottomless crater; a real
@@ -3831,10 +4097,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // the older signals (a baked cache, then the name prefix).
         private static string WorldChoicePath(string worldName)
         {
-            string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
-            string dir = Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen");
-            Directory.CreateDirectory(dir);
-            return Path.Combine(dir, $"firesgen_{safe}.mode");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(worldName, ".mode");
         }
 
         public static void SetWorldGenChoice(string worldName, bool fires)
@@ -3885,12 +4148,27 @@ namespace VerdantsAscent.Terrain.Voxel
         // built on it from its first join. Core's WorldCacheSync used to send it after the client's terrain was built.
         internal static string LoadedBakePath { get; private set; }
 
+        // A GENERATED world's cache goes to joining clients the same way (LoadedBakePath), so a
+        // client never regenerates a world the server already has (first join was ~7 min and ~14 GB on the client). Its big
+        // waterfall sinkhole list is named after the world, not after the cache file, so it is announced here.
+        internal static string LoadedCutsPath { get; private set; }
+
+        // Server only: offer this world's finished cache (studio bake or generated) through the join sync.
+        private static void ShareCacheWithClients(string cachePath, string worldName)
+        {
+            if (ZNet.instance != null && !ZNet.instance.IsServer()) return;
+            if (string.IsNullOrEmpty(cachePath) || !File.Exists(cachePath)) return;
+            LoadedBakePath = cachePath;
+            string cuts = FiresWorldRecords.PathFor(worldName, FatSinkFallCuts.Suffix);
+            LoadedCutsPath = File.Exists(cuts) ? cuts : null;
+            BcImport.BcJoinSync.Prehash(cachePath);
+            FiresLogger.LogInfo($"[FiresWorldGen] joining clients will DOWNLOAD this world's cache ({Path.GetFileName(cachePath)}, "
+                + $"{new FileInfo(cachePath).Length / (1024d * 1024d):0} MB) through the join sync instead of generating it themselves.");
+        }
+
         internal static string BakedCachePath(string worldName)
         {
-            string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
-            string dir = Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen");
-            Directory.CreateDirectory(dir);
-            return Path.Combine(dir, $"firesgen_{safe}_baked.bin");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(worldName, "_baked.bin");
         }
 
         // True when `path` is a cache this build can load: FGEN magic and this FORMAT_VERSION, the checks TryLoad makes first.
@@ -3910,7 +4188,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // firesgen_<world>_<seed>_r<res>[_vahc].bin: the only derived, regenerable file in FiresWorldGen.
         private static readonly Regex SeedGridCacheName =
-            new Regex(@"^firesgen_.+_-?\d+_r\d+(_vahc)?\.bin$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            new Regex(@"^firesgen_.+_-?\d+_r\d+(_vahc2?)?\.bin$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private static string CachePath(string worldName, int seed, int res, bool vahc)
         {
@@ -3922,9 +4200,11 @@ namespace VerdantsAscent.Terrain.Voxel
             // install found on disk). worlds_local is already shared between
             // both processes; the gen cache now lives beside it.
             string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
-            string file = $"firesgen_{safe}_{seed}_r{res}{(vahc ? "_vahc" : "")}.bin";
-            string dir = Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen");
-            Directory.CreateDirectory(dir);
+            // _vahc2 - a VAHC base now erodes at its own cell size, so an older _vahc cache is never reused.
+            string file = $"firesgen_{safe}_{seed}_r{res}{(vahc ? "_vahc2" : "")}.bin";
+            // One folder per world (FiresWorldRecords): the seed grid lives in FiresWorldGen\<world>\.
+            string dir = VerdantsAscent.Terrain.Voxel.FiresWorldRecords.WorldFolder(worldName);
+            string recordsRoot = VerdantsAscent.Terrain.Voxel.FiresWorldRecords.Folder;
             string shared = Path.Combine(dir, file);
             try
             {
@@ -3945,7 +4225,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 // the seed-grid shape is eligible: baked terrain and island
                 // registries share the prefix and extension, but they are a
                 // world's only copy of its terrain and islands.
-                foreach (var f in Directory.GetFiles(dir, "firesgen_*.bin"))
+                var seedGridDirs = new List<string> { recordsRoot };
+                if (Directory.Exists(recordsRoot)) seedGridDirs.AddRange(Directory.GetDirectories(recordsRoot));
+                foreach (var gridDir in seedGridDirs)
+                foreach (var f in Directory.GetFiles(gridDir, "firesgen_*.bin"))
                 {
                     string name = Path.GetFileName(f);
                     if (string.Equals(name, file, StringComparison.OrdinalIgnoreCase)) continue;
@@ -4130,6 +4413,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                              int n, float half, int seed,
                                              out float[] waterLevel, out byte[] riverMask)
         {
+            ClearPackedFields();   // The menu bake re-plans on the dense fields; a previous world's packed views must not shadow them
             _grid = gridMetres; _biomeMap = biomes; _res = n; _half = half; _seed = seed;
             // NO POLYLINES MEANS SOLVE THEM, NOT PLAN WITHOUT THEM. The planner
             // authors its connections FROM traced polylines; handed none it finds
@@ -4248,6 +4532,10 @@ namespace VerdantsAscent.Terrain.Voxel
     // arcs with guaranteed land, Meadows at spawn). Faster than vanilla too:
     // an array lookup instead of a Perlin stack, which also speeds location
     // placement.
+    // After Expand World Data's own GetBiome prefix, as BetterContinents orders its own (Patcher: after: [EWD.GUID]): every
+    // prefix runs, so whichever runs last decides, and a painted BC biome map must win over EWD's world rules where it
+    // paints (None leaves EWD's or vanilla's answer standing).
+    [HarmonyAfter("expand_world_data")]
     [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiome),
         typeof(float), typeof(float), typeof(float), typeof(bool))]
     internal static class Patch_WorldGenerator_GetBiome_FiresGen
@@ -4283,16 +4571,20 @@ namespace VerdantsAscent.Terrain.Voxel
     [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeHeight))]
     internal static class Patch_WorldGenerator_GetBiomeHeight_FiresGen
     {
+        // __state = this sample's height is already final (zone mode's gate answered it, or the Fires generator owns the
+        // ground), so the Postfix leaves it alone. The gate's own real-height samples are inner calls, corrected there.
         private static bool Prefix(WorldGenerator __instance, Heightmap.Biome biome, float wx, float wy,
-            bool preGeneration, bool riverPreDN, ref Color mask, ref float __result)
+            bool preGeneration, bool riverPreDN, ref Color mask, ref float __result, out bool __state)
         {
+            __state = true;
             if (Zones.ZoneModeGate.TryGateBiomeHeight(__instance, biome, wx, wy, preGeneration, riverPreDN, ref mask, ref __result))
                 return false;
+            __state = FiresWorldGenBase.Active;
             if (!FiresWorldGenBase.Active) return true;
             // PER-BIOME, because vanilla is per-biome. GetBiomeHeight starts at mask = Color.black and only
-            // three biomes overwrite it; every other biome ships with ALPHA 1. Verified in the shipped
-            // assembly_valheim.dll, not the decompiled .cs: `mask = Color.black` at the top of
-            // GetBiomeHeight, then AshLands and Mistlands write (0,0,0,a) and DeepNorth writes (0,g,0,0).
+            // three biomes overwrite it; every other biome ships with ALPHA 1. Measured on the game: the
+            // mask starts black for every biome, then AshLands and Mistlands write (0,0,0,a) and DeepNorth
+            // writes (0,g,0,0).
             //
             // A blanket Color.clear here was the old fix for a real bug - Color.black everywhere made the
             // Ashlands shader read alpha as full LAVA and rendered the whole crescent molten - but it
@@ -4312,7 +4604,12 @@ namespace VerdantsAscent.Terrain.Voxel
             return false;
         }
 
-        // A chunk world's start-cave hill rises from whatever ground the sample returned.
-        private static void Postfix(float wx, float wy, ref float __result) => Zones.ZoneModeStartCave.AddHill(wx, wy, ref __result);
+        // A converted BetterContinents world gets BC's own biome height (roughmap / Override All) and paint, as BC's
+        // postfixes give it (BcWorldGen.ApplyBiomeHeight); then a chunk world's start-cave hill rises from that ground.
+        private static void Postfix(WorldGenerator __instance, Heightmap.Biome biome, float wx, float wy, ref Color mask, ref float __result, bool __state)
+        {
+            if (!__state) global::VerdantsAscent.Terrain.BcImport.BcMigratedWorld.Generator?.ApplyBiomeHeight(__instance, biome, wx, wy, ref mask, ref __result);
+            Zones.ZoneModeStartCave.AddHill(wx, wy, ref __result);
+        }
     }
 }

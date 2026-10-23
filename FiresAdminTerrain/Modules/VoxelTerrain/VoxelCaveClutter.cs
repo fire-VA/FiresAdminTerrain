@@ -17,7 +17,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // vanilla.
     internal static class VoxelCaveClutter
     {
-        private const string Section = "VoxelTerrain Cave Clutter";
+        private const string Section = "Voxel Terrain - Cave clutter";
         private const float MaintainSeconds = 0.25f;
         private const float RangeMargin = 16f;
         private const int MaxInstancesPerDraw = 1023;
@@ -132,7 +132,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_biomeEntries[biome] = cfg.Bind(Section, key, layers,
                     "prefab:surface:per square metre:min-max size in metres, comma separated. surface is floor, wall or ceiling. "
                     + "Any vanilla prefab with a mesh works; it is drawn at the given size and put on the rock by its attach face "
-                    + "('VoxelTerrain Surface Mounting / Attach sides').");
+                    + "('Voxel Terrain / Attach sides').");
         }
 
         internal static void Clear()
@@ -462,7 +462,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var biome = s_columnBiome[column];
             if ((int)biome == -1)
             {
-                biome = WorldGenerator.instance.GetBiome(origin.x + x, origin.z + z);
+                biome = FiresCaveBiome.RegionBiome(origin.x + x, origin.z + z, WorldGenerator.instance.GetBiome(origin.x + x, origin.z + z));   // the cave region's biome
                 s_columnBiome[column] = biome;
             }
             return biome;

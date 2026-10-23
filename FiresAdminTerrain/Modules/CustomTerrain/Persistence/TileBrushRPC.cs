@@ -34,13 +34,14 @@ namespace VerdantsAscent.Terrain.Persistence
         private const string RPC_CLEAR      = "VATileBrushClear";
         private const string RPC_BIOME      = "VATileBrushBiome";
         private const string RPC_HOLE_PUNCH = "VATileBrushHolePunch";
-        private const string RPC_SMOOTH     = "VATileBrushSmooth"; // round-31 B-2
-        private const string RPC_GRAB       = "VATileBrushGrab";   // round-37 B-6
-        private const string RPC_NOISE      = "VATileBrushNoise";  // round-37 B-7
+        private const string RPC_SMOOTH     = "VATileBrushSmooth";
+        private const string RPC_GRAB       = "VATileBrushGrab";
+        private const string RPC_NOISE      = "VATileBrushNoise";
         private const string RPC_HOLE_PATCH = "VATileBrushHolePatch";
         private const string RPC_SLOPE      = "VATileBrushSlope";
 
         private static bool _registered;
+        private static ZRoutedRpc s_rpcOn;   // Also re-register on a new ZRoutedRpc (one per connection)
 
         // Real handler count from the last Register() — feeds the 📡 RPCs
         // mini-banner (VAFatLoadSummary.EmitRpcs).
@@ -48,9 +49,10 @@ namespace VerdantsAscent.Terrain.Persistence
 
         public static void Register()
         {
-            if (_registered) return;
             var rpc = ZRoutedRpc.instance;
             if (rpc == null) return;
+            if (ReferenceEquals(s_rpcOn, rpc)) return;   // instance identity only: a reset flag never re-registers on the same bus
+            s_rpcOn = rpc;
             _registered = true;
 
             // ZPackage-based handlers — flexible payload, easy to extend.
@@ -158,7 +160,7 @@ namespace VerdantsAscent.Terrain.Persistence
             pkg.Write(radius);
             pkg.Write(height);
             pkg.Write(square);
-            pkg.Write(islandMode); // round-30: tail-appended for back-compat with older clients (they'll read past end and default to false on EOF inside Recv_Flat)
+            pkg.Write(islandMode); // Tail-appended for back-compat with older clients (they'll read past end and default to false on EOF inside Recv_Flat)
             rpc.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_FLAT, pkg);
         }
 
@@ -175,7 +177,7 @@ namespace VerdantsAscent.Terrain.Persistence
             pkg.Write(radius);
             pkg.Write(delta);
             pkg.Write(falloff);
-            pkg.Write(islandMode); // round-30
+            pkg.Write(islandMode);
             rpc.InvokeRoutedRPC(ZRoutedRpc.Everybody, RPC_RAISE, pkg);
         }
 
@@ -330,7 +332,7 @@ namespace VerdantsAscent.Terrain.Persistence
             float radius = pkg.ReadSingle();
             float height = pkg.ReadSingle();
             bool square = pkg.ReadBool();
-            bool islandMode = TryReadBoolTail(pkg); // round-30: backwards-compat
+            bool islandMode = TryReadBoolTail(pkg); // Backwards-compat
             TileBrush.BrushFlat(center, radius, height, square, islandMode);
         }
 
@@ -340,7 +342,7 @@ namespace VerdantsAscent.Terrain.Persistence
             float radius = pkg.ReadSingle();
             float delta = pkg.ReadSingle();
             float falloff = pkg.ReadSingle();
-            bool islandMode = TryReadBoolTail(pkg); // round-30: backwards-compat
+            bool islandMode = TryReadBoolTail(pkg); // Backwards-compat
             TileBrush.BrushRaise(center, radius, delta, falloff, islandMode);
         }
 

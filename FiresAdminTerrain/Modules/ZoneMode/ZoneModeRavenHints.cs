@@ -5,7 +5,7 @@ namespace VerdantsAscent.Terrain.Zones
     // Hugin's words for a chunk world, through vanilla's own tutorial system, so each is shown once per character and
     // the raven comes down for it: how the world works at the first spawn, the Chunk Hammer the first time it is held,
     // the Chunk Generator the first time one is looked at, and where the hidden Cultivator lies once the first hammer is
-    // found (ZoneModeStartPins, Tools\FAT_START_ITEMS.md).
+    // found (ZoneModeStartPins).
     internal static class ZoneModeRavenHints
     {
         internal const string WorldKey = "fires_chunk_world";

@@ -5,13 +5,13 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // ── Alt-biome paint (Fire, 2026-09-27; Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md, "Alt-biome paint tools") ──────────
+    // ── Alt-biome paint ──────────
     // The Chaos Hammer's Paint entries lay circles over vanilla 1.0's alt-biome map. Each circle carries a brush: one
     // blend (an AltBiome) on one ground biome, the plain ground biome with no blend, or Restore (the world's own sector).
     // The newest circle holding a point decides that point's sector (BiomePaint.Sectors), so weather, music, the biome's
     // name, creature spawns and vegetation all read the painted blend. A paint replaces whatever blends were there.
     //
-    // A paint also turns its circle's ground to the brush's biome (Fire's popup: "Turn the ground too"): its look, what
+    // A paint also turns its circle's ground to the brush's biome: its look, what
     // grows there and what spawns there, never the land's shape (BiomePaint.Ground). The locations under it follow the
     // paint (BiomePaint.Locations).
     //
@@ -257,9 +257,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static string FilePath()
         {
-            string world = ZNet.World?.m_name ?? "world";
-            string safe = string.Concat(world.Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + "_biomepaint.bin");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_biomepaint.bin");
         }
 
         // The server reads its list once per world; a client starts empty and asks.
@@ -414,6 +412,7 @@ namespace VerdantsAscent.Terrain.Zones
         {
             if (ZNet.instance == null || ZNet.World == null) return;
             EnsureWorld();
+            EnsureContentArea();   // painted circles are super flat content areas (every peer)
             EnsureRpcs();
             HookSeasons();
             TickTerrainRefresh();
@@ -423,6 +422,9 @@ namespace VerdantsAscent.Terrain.Zones
                 SettleLocations();
                 PlacePending();
                 GrowPending();
+                ProcessRegenQueue();
+                RunJob();
+                FlushStroke(false);
                 return;
             }
             if (ZRoutedRpc.instance == null || Time.time < s_asked) return;

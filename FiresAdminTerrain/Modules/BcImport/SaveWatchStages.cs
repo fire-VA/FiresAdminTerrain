@@ -8,9 +8,9 @@ using HarmonyLib;
 
 namespace VerdantsAscent.Terrain.BcImport
 {
-    // Marks each stage of a world save in FAT's log, from the save thread, because the rig's quiet filter drops vanilla's own
+    // Marks each stage of a world save in FAT's log, from the save thread, because a quiet log filter can drop vanilla's own
     // "World save (n/5)" lines. `-firessavecrash <stage>` on the command line makes the process kill itself at that stage of
-    // its first world save, the way a crash would, for the save-safety crash test (Tools\SAVE_SAFETY_AUDIT.md, section 4):
+    // its first world save, the way a crash would, for the save-safety crash test:
     // chunk, chunks, db2, fwl2 and ok stop just before that file's writer flushes, so the file is left torn; oldgen stops after
     // the previous generation's main files are deleted and before its old chunk versions are. Without the argument nothing
     // here changes a save.

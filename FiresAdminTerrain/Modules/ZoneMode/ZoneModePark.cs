@@ -13,14 +13,14 @@ namespace VerdantsAscent.Terrain.Zones
 {
     // A world cloned into one zone at a time keeps everything it had. At its first server load every generated zone is
     // PARKED: its objects are written in vanilla's own save format into FiresWorldGen\firesgen_<world>_park\zones.pack
-    // (ZoneModeParkPack; parks written before D6c are one file per zone until their first load repacks them) and leave
+    // (ZoneModeParkPack; older parks are one file per zone until their first load repacks them) and leave
     // the live world, and the zone stops being generated, so it is closed sea like any other. Opening a parked zone
     // RESTORES it: the objects load back the way a world load brings them (new ids, links re-made from their saved hashes)
     // and the zone is marked generated, so the land returns as it was, builds and all. Only a seed planted while wearing
     // the Eye of the Beholder, onto land it does not match, raises other land there and discards what was parked.
     // A restored zone's bytes wait in its Restored slot until a load finds the zone saved as generated; a load that finds
     // it not generated (the session ended before a save) restores it again.
-    internal static class ZoneModePark
+    internal static partial class ZoneModePark
     {
         internal struct ParkedZone
         {
@@ -164,8 +164,41 @@ namespace VerdantsAscent.Terrain.Zones
                 + "came back and nothing it held is lost.");
         }
 
+        // The first load of a converted world sets aside every explored zone in one main-thread loop (58,885 zones on
+        // a large world, minutes). Unity pumps no window messages meanwhile, so after ~5 s Windows marks the game
+        // "Not Responding" and the player (or WER) closes it mid-way (an AppHang). Peeking the queue (PM_NOREMOVE)
+        // once a second tells Windows the thread is alive without handling any input, and a progress line every 15 s
+        // shows the work moving. Windows players only; the dedi has no window.
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool PeekMessage(out NativeMsg msg, IntPtr hWnd, uint filterMin, uint filterMax, uint remove);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct NativeMsg { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int x; public int y; }
+
+        private static long s_lastPumpMs, s_lastProgressMs;
+
+        private static void KeepResponsive(Stopwatch clock, int done, int total)
+        {
+            long now = clock.ElapsedMilliseconds;
+            if (now - s_lastPumpMs >= 1000)
+            {
+                s_lastPumpMs = now;
+                if (Application.platform == RuntimePlatform.WindowsPlayer && !Application.isBatchMode)
+                {
+                    try { PeekMessage(out _, IntPtr.Zero, 0, 0, 0u); } catch { }
+                }
+            }
+            if (now - s_lastProgressMs >= 15000)
+            {
+                s_lastProgressMs = now;
+                FiresLogger.LogInfo($"[FiresZones] setting aside: {done:N0} of {total:N0} zone(s) after {now / 1000} s; the game is working, not frozen.");
+            }
+        }
+
         private static void ParkEverything(ZoneSystem zoneSystem)
         {
+            s_lastPumpMs = 0;
+            s_lastProgressMs = 0;
             var clock = Stopwatch.StartNew();
             var zdoMan = ZDOMan.instance;
             var generated = GeneratedZonesRef(zoneSystem);
@@ -217,6 +250,7 @@ namespace VerdantsAscent.Terrain.Zones
                             index[zone] = entry;
                             objects.AddRange(portals);
                             parked[zone] = objects;
+                            KeepResponsive(clock, index.Count, generated.Count);
                         }
                     }
                     finally { ZDOExtraData.ClearSave(); }
@@ -449,7 +483,7 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // A zone's objects are live again. Load-time passes never saw them while they were parked (the chunk generator
-        // swaps old biome machines here, [generator] 2026-09-27). Subscribers hold no ZDO past the call: pooled objects
+        // swaps old biome machines here). Subscribers hold no ZDO past the call: pooled objects
         // are released after a park (ZoneModeParkMemory). A subscriber's fault is logged and never stops the restore.
         internal static event Action<Vector2s, List<ZDO>> ZoneRestored;
 

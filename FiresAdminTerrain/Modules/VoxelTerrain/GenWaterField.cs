@@ -35,6 +35,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void Clear()
         {
             lock (s_bioMemo) s_bioMemo.Clear();
+            VoxelZoneStreamer.ClearWetMemo();   // The PaintWet01 memo answers from the same field
         }
 
         // Which zones must become voxel for generated water to exist at all: a

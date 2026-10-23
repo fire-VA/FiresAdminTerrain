@@ -9,7 +9,7 @@ using VerdantsAscent.Terrain.Voxel;
 namespace VerdantsAscent.Terrain.Zones
 {
     // ── THE CHAOS HAMMER'S BUILD MENU ───────────────────────────────────────
-    // The Chaos Hammer is the home of every admin terrain tool (Fire, 2026-09-27, Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md).
+    // The Chaos Hammer is the home of every admin terrain tool.
     // It carries a piece table of its own, so right click opens vanilla's own build menu exactly as the hammer and the
     // hoe open theirs, and every tool is a piece in that grid. It is the hammer's advanced menu, not the hoe's flat grid:
     // Core's BuildMenuPages gives this table its own top tabs (Categories / Biomes / Blueprints, then vanilla's Favorites)
@@ -34,7 +34,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const string SaveAreaToolObject = "fires_chunktool_savearea";
         private const string SaveAreaToolName = "Save an area";
         private const string SaveAreaToolDescription = "Aim at the middle of what you want and swing. Scroll = radius, "
-            + "Shift+scroll = top, Ctrl+scroll = bottom; the popup lets you type them too.";
+            + "Shift+scroll = height (that far above and below the aim); the popup lets you type the top and bottom.";
         private const string SkylandPlaceClonePrefix = "fires_skyplace_";
         private const string SaveSkylandToolObject = "fires_chunktool_saveskyland";
         private const string SaveSkylandToolName = "Save a skyland";
@@ -49,7 +49,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const char SkylandKind = 's';
         private const int KindPrefixLength = 2;
 
-        // The menu reads like the hammer's (Fire, 2026-09-27): top tabs Categories / Biomes / Blueprints / Favorites, each
+        // The menu reads like the hammer's: top tabs Categories / Biomes / Blueprints / Favorites, each
         // with its rows down the left. The values are this table's row keys on BuildMenuPages; an empty row is not shown.
         private enum Row { ChunkTools = 1, ChunkBlueprints, SkyAndAreaBlueprints, Voxel, Paint, Clutter }
 
@@ -107,11 +107,104 @@ namespace VerdantsAscent.Terrain.Zones
         private const byte AskSaveSkyland = 10;
         private const byte AskPlaceSkyland = 11;
         private const byte AskPaint = 12;
+        // Close chunks on a full voxel world and open them again. The park and the registry live in ZoneModePark and
+        // ZoneModeOpening; these are the Chaos Hammer's entries.
+        private const byte AskClose = 13;       // the looked-at zone
+        private const byte AskCloseArea = 14;   // it and the 8 round it
+        private const byte AskOpen = 15;        // the looked-at zone
+        private const byte AskParkList = 16;    // undo of an open / redo of a close: exactly these zones (payload)
+        private const byte AskOpenList = 17;    // undo of a close / redo of an open: exactly these zones (payload)
         private const byte AskOverwrite = 0x80;
         private const byte AskKind = 0x7F;
         private const byte TellMessage = 1;
         private const byte TellList = 2;
         private const byte TellIcon = 3;
+        private const byte TellZoneStep = 5;   // a close or an open made for this admin: the zones it really changed
+        private const byte TellStep = 4;   // a placement or paint made for this admin: one step of the shared undo history
+        private const byte AskApiSave = 18;      // FatApi.RequestChunkBlueprint (Core minimap); payload = the request id
+        private const byte TellApiResult = 6;    // its answer: id, ok, report
+
+        // ── FatApi.RequestChunkBlueprint (the Core minimap's "zone: x/z" line saves that chunk) ──
+        // The same save the Chaos Hammer's Copy tool runs (ZoneModeChunkBlueprint.TrySave, admin-checked on the server), with
+        // a request id so the answer reaches the caller's callback instead of the hammer's message line.
+        private static readonly Dictionary<int, Action<bool, string>> s_apiPending = new Dictionary<int, Action<bool, string>>();
+        private static int s_apiNextId;
+
+        internal static bool ApiRequestSave(Vector2s zone, string name, bool overwrite, Action<bool, string> done, out string problem)
+        {
+            problem = null;
+            var net = ZNet.instance;
+            if (net == null || ZRoutedRpc.instance == null) { problem = "no world loaded"; return false; }
+            if (string.IsNullOrWhiteSpace(name)) { problem = "no name"; return false; }
+            name = name.Trim();
+            byte what = overwrite ? (byte)(AskApiSave | AskOverwrite) : AskApiSave;
+            if (net.IsServer())
+            {
+                bool ok = ZoneModeChunkBlueprint.TrySave(zone, name, overwrite, null, out string report);
+                FiresLogger.LogInfo($"[FiresZones] (FatApi) {report}");
+                Names(ZNet.GetUID(), true);
+                try { done?.Invoke(ok, report); } catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] FatApi save callback threw: {ex.Message}"); }
+                return true;
+            }
+            EnsureRpcs();
+            int id = ++s_apiNextId;
+            if (done != null) s_apiPending[id] = done;
+            Ask(what, name, zone, BitConverter.GetBytes(id));
+            FiresLogger.LogInfo($"[FiresZones] (FatApi) chunk blueprint '{name}' of zone ({zone.x},{zone.y}) asked of the server (request {id})");
+            return true;
+        }
+
+        // ── FatApi.QueueBiomePaintAt (SHIFT+click the minimap biome line copies that spot's paint) ──
+        // The Chaos Hammer in hand (equipped from the inventory when it is only carried), with the Paint brush that matches the
+        // ground biome and blend at (x, z) selected. Paints nothing: the swing does that, through the admin-checked path.
+        internal static bool ApiCanQueuePaint(out ItemDrop.ItemData hammer)
+        {
+            hammer = null;
+            var player = Player.m_localPlayer; var net = ZNet.instance;
+            if (player == null || net == null || !(net.IsServer() || net.LocalPlayerIsAdminOrHost())) return false;
+            hammer = FindChaosHammer(player);
+            return hammer != null;
+        }
+
+        private static ItemDrop.ItemData FindChaosHammer(Player player)
+        {
+            foreach (var item in player.GetInventory().GetAllItems())
+                if (item?.m_dropPrefab != null && item.m_dropPrefab.name == ZoneModePrefabs.ChaosHammerPrefab) return item;
+            return null;
+        }
+
+        internal static bool ApiQueuePaintAt(float x, float z, out string report)
+        {
+            if (!ApiCanQueuePaint(out var hammer)) { report = "Needs an admin with the Chaos Hammer."; return false; }
+            var gen = WorldGenerator.instance;
+            var sector = gen?.GetBiomeSector(x, z, false);   // FAT's paint postfix included: a painted spot copies its paint
+            if (sector == null) { report = "No world generator."; return false; }
+            var ground = sector.Biome;
+            if (ground == Heightmap.Biome.None || ground == Heightmap.Biome.Ocean) { report = $"No land biome at ({x:0},{z:0})."; return false; }
+            string blendName = null;
+            if (sector.AltBiomes != null)
+                foreach (var alt in sector.AltBiomes)
+                    if (alt != null && alt.m_enabled && !string.IsNullOrEmpty(alt.m_name) && (alt.m_biome & ground) != 0) { blendName = alt.m_name; break; }
+            string key = BiomePaint.KeyOf(blendName != null ? BiomePaint.Brush.Blend : BiomePaint.Brush.Plain, ground, blendName);
+            var player = Player.m_localPlayer;
+            if (!player.IsItemEquiped(hammer)) player.EquipItem(hammer);
+            if (s_table == null || !ReferenceEquals(player.m_buildPieces, s_table)) { report = "The Chaos Hammer did not open its build table."; return false; }
+            if (!BiomePaintEntries.TryFindPiece(key, out var piece)) { report = $"No Paint brush for {ground}{(blendName != null ? " / " + blendName : "")} (that blend may be disabled)."; return false; }
+            bool selected = player.SetSelectedPiece(piece) && ReferenceEquals(s_table.GetSelectedPiece(), piece);
+            report = selected ? $"Paint brush ready: {piece.m_name}" : $"Could not select the {piece.m_name} brush.";
+            FiresLogger.LogInfo($"[BiomePaint] (FatApi) copy at ({x:0},{z:0}): {ground}{(blendName != null ? " / " + blendName : " (no blend)")} -> {report}");
+            return selected;
+        }
+
+        private static void SendApiResult(long who, int id, bool ok, string report)
+        {
+            var pkg = new ZPackage();
+            pkg.Write(TellApiResult);
+            pkg.Write(id);
+            pkg.Write(ok);
+            pkg.Write(report ?? string.Empty);
+            ZRoutedRpc.instance.InvokeRoutedRPC(who, RpcTell, pkg);
+        }
 
         private static ZRoutedRpc s_registeredOn;
         private static readonly List<string> s_saved = new List<string>();
@@ -127,6 +220,9 @@ namespace VerdantsAscent.Terrain.Zones
         private static GameObject s_saveSkylandTool;
         private static Sprite s_icon;
         private static bool s_confirming;
+        // Runtime copies of the Remove tool (same badge, own names).
+        private static GameObject s_closeTool, s_closeAreaTool, s_openTool;
+        private const string CloseToolObject = "fires_chunktool_close", CloseAreaToolObject = "fires_chunktool_closearea", OpenToolObject = "fires_chunktool_open";
 
         internal static void EnsureRpcs()
         {
@@ -186,6 +282,7 @@ namespace VerdantsAscent.Terrain.Zones
             // Every tool wears the Chaos Hammer's own icon, the way Infinity Hammer's tools all wear its hammer: the
             // name is what tells them apart.
             s_icon = shared.m_icons != null && shared.m_icons.Length > 0 ? shared.m_icons[0] : null;
+            SizeToolsLikeSeed();   // before any copy is made, so the copies are seed-sized too
             EnsureSaveAreaTool();
             EnsureSaveSkylandTool();
             ZoneModeAreaTool.Ensure();
@@ -207,7 +304,8 @@ namespace VerdantsAscent.Terrain.Zones
 
             Wear(s_copyTool);
             if (s_copyTool != null) AddToRow(Row.ChunkBlueprints, s_copyTool);
-            foreach (var tool in new[] { s_removeTool, s_undoTool, s_redoTool })
+            EnsureCloseTools();
+            foreach (var tool in new[] { s_removeTool, s_closeTool, s_closeAreaTool, s_openTool, s_undoTool, s_redoTool })
             {
                 if (tool == null) continue;
                 Wear(tool);
@@ -243,6 +341,60 @@ namespace VerdantsAscent.Terrain.Zones
             foreach (var piece in lent) AddToRow(Row.Clutter, piece);
         }
 
+        // The Chunk tools' models (and so their placement ghosts) are scaled to the
+        // in-world size of the Chunk Seed the generator drops (FiresChunkSpawner_Plain, same bundle), measured, not guessed:
+        // both sizes are the largest side of their meshes' bounds in the prefab's own space. Done once per source prefab,
+        // before the copies (Save area, Save skyland, Close/Open, saved blueprints) are made from them.
+        private const string SeedPrefab = "FiresChunkSpawner_Plain";
+        private static readonly HashSet<GameObject> s_seedSized = new HashSet<GameObject>();
+
+        private static void SizeToolsLikeSeed()
+        {
+            if (!ZoneModePrefabs.TryGet(SeedPrefab, out var seed) || seed == null) return;
+            float seedSize = ModelSize(seed);
+            if (seedSize <= 0f) return;
+            var sized = new List<string>();
+            foreach (var tool in new[] { s_copyTool, s_placeTemplate, s_removeTool, s_undoTool, s_redoTool })
+            {
+                if (tool == null || !s_seedSized.Add(tool)) continue;
+                float size = ModelSize(tool);
+                if (size <= 0f || Mathf.Abs(size - seedSize) < 0.001f) continue;
+                float factor = seedSize / size;
+                tool.transform.localScale *= factor;
+                sized.Add($"{tool.name} x{factor:0.###}");
+            }
+            if (sized.Count > 0)
+                FiresLogger.LogDebug($"[FiresZones] Chaos Hammer tools sized like a Chunk Seed ({seedSize:0.###} m): {string.Join(", ", sized)}");
+        }
+
+        // The largest side of the model's mesh bounds, in the root's space at the root's own scale (works on inactive prefabs,
+        // where Renderer.bounds is empty).
+        private static float ModelSize(GameObject root)
+        {
+            bool any = false;
+            var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            Matrix4x4 toRoot = Matrix4x4.Scale(root.transform.localScale) * root.transform.worldToLocalMatrix;
+            void Take(Mesh mesh, Transform t)
+            {
+                if (mesh == null) return;
+                var b = mesh.bounds;
+                Matrix4x4 m = toRoot * t.localToWorldMatrix;
+                for (int i = 0; i < 8; i++)
+                {
+                    var corner = b.center + Vector3.Scale(b.extents, new Vector3((i & 1) == 0 ? -1 : 1, (i & 2) == 0 ? -1 : 1, (i & 4) == 0 ? -1 : 1));
+                    var p = m.MultiplyPoint3x4(corner);
+                    min = Vector3.Min(min, p); max = Vector3.Max(max, p); any = true;
+                }
+            }
+            foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true))
+                if (mf.GetComponent<Renderer>() != null) Take(mf.sharedMesh, mf.transform);
+            foreach (var smr in root.GetComponentsInChildren<SkinnedMeshRenderer>(true)) Take(smr.sharedMesh, smr.transform);
+            if (!any) return 0f;
+            var size = max - min;
+            return Mathf.Max(size.x, Mathf.Max(size.y, size.z));
+        }
+
         // A runtime copy of the saving tool: it saves, so it wears the same envelope badge, and its name tells it apart.
         private static void EnsureSaveAreaTool()
         {
@@ -257,6 +409,33 @@ namespace VerdantsAscent.Terrain.Zones
             piece.m_description = SaveAreaToolDescription;
         }
 
+        // Close chunk / Close area / Open chunk: copies of the Remove tool, which they sit beside in the Chunk tools row.
+        private static void EnsureCloseTools()
+        {
+            if (s_removeTool == null) return;
+            if (s_closeTool == null) s_closeTool = CopyOfRemove(CloseToolObject, "Close chunk",
+                "Look at a chunk and swing: it closes to sea, and its builds and everything on it are set aside until it opens again.");
+            if (s_closeAreaTool == null) s_closeAreaTool = CopyOfRemove(CloseAreaToolObject, "Close area (3x3)",
+                "Look at a chunk and swing: it and the eight round it close to sea, their builds set aside until they open again.");
+            if (s_openTool == null) s_openTool = CopyOfRemove(OpenToolObject, "Open chunk",
+                "Look at a closed chunk and swing: it opens, and what was set aside comes back.");
+        }
+
+        private static GameObject CopyOfRemove(string objectName, string name, string description)
+        {
+            var copy = UnityEngine.Object.Instantiate(s_removeTool);
+            copy.name = objectName;
+            copy.SetActive(false);
+            UnityEngine.Object.DontDestroyOnLoad(copy);
+            var piece = copy.GetComponent<Piece>();
+            if (piece != null)
+            {
+                piece.m_name = name;
+                piece.m_description = description;
+            }
+            return copy;
+        }
+
         private static void EnsureSaveSkylandTool()
         {
             if (s_saveSkylandTool != null || s_copyTool == null) return;
@@ -268,6 +447,23 @@ namespace VerdantsAscent.Terrain.Zones
             if (piece == null) return;
             piece.m_name = SaveSkylandToolName;
             piece.m_description = SaveSkylandToolDescription;
+        }
+
+        // The chunk tool in hand, for the
+        // highlight (ZoneModeAreaTool.DrawZone): what it does and whether it reaches the 3x3 round the aimed zone.
+        internal static bool TryGetZoneTool(Player player, out string action, out bool area)
+        {
+            action = null;
+            area = false;
+            if (player == null || s_table == null || !ReferenceEquals(player.m_buildPieces, s_table)) return false;
+            var selected = s_table.GetSelectedPiece();
+            if (selected == null) return false;
+            var go = selected.gameObject;
+            if (s_closeTool != null && ReferenceEquals(go, s_closeTool)) action = "Close";
+            else if (s_closeAreaTool != null && ReferenceEquals(go, s_closeAreaTool)) { action = "Close"; area = true; }
+            else if (s_openTool != null && ReferenceEquals(go, s_openTool)) action = "Open";
+            else if (s_removeTool != null && ReferenceEquals(go, s_removeTool)) action = "Take back";
+            return action != null;
         }
 
         internal static bool IsSaveAreaSelected(Player player)
@@ -443,9 +639,10 @@ namespace VerdantsAscent.Terrain.Zones
 
         // Another mod's UpdateAvailable pass may re-seed this table's selected category (FAP's visibility pass runs on every
         // table): vanilla keeps the selection as a category + grid index, so a Paint swatch then read as the Clutter piece at
-        // the same index (Fire, 2026-09-29: Swamp ground placed a brown shrub, Mountain a bear painting). The piece selected
+        // the same index (Swamp ground placed a brown shrub, Mountain a painting). The piece selected
         // before the pass is selected again after every postfix has run.
         private static Piece s_selectedBefore;
+        private static bool s_selectingClick;   // set while Player_SetSelectedPiece_ByReference_Patch applies a click
         private static bool s_selectionFixLogged;
 
         internal static void RememberSelection(PieceTable table)
@@ -456,6 +653,7 @@ namespace VerdantsAscent.Terrain.Zones
             var wanted = s_selectedBefore;
             s_selectedBefore = null;
             if (wanted == null || s_table == null || !ReferenceEquals(table, s_table)) return;
+            if (s_selectingClick) return;   // a click is being applied right now; putting the old piece back would undo it
             var player = Player.m_localPlayer;
             if (player == null || !ReferenceEquals(player.m_buildPieces, s_table)) return;
             var now = table.GetSelectedPiece();
@@ -466,6 +664,108 @@ namespace VerdantsAscent.Terrain.Zones
             if (!back || !s_selectionFixLogged) FiresLogger.LogWarning(line);
             else FiresLogger.LogVerbose(line);
             s_selectionFixLogged = true;
+        }
+
+        // Clicking an entry in a borrowed tab used to select a different tool.
+        // The build menu hands the clicked Piece to Player.SetSelectedPiece(Piece), and vanilla finds it again by PREFAB NAME
+        // in the per-category lists and selects category = piece.m_category at that list's slot. The Chaos Hammer's entries
+        // are clones and lent pieces whose names can match another entry, or that sit in a list other than their m_category,
+        // so the slot lands on a different tool. On the Chaos Hammer the clicked piece itself is looked up BY REFERENCE and
+        // exactly its category and slot are selected (every page: categories, biomes, blueprints, favorites, the filter box).
+        [HarmonyLib.HarmonyPatch(typeof(Player), nameof(Player.SetSelectedPiece), new[] { typeof(Piece) })]
+        private static class Player_SetSelectedPiece_ByReference_Patch
+        {
+            private const int GridWidth = 15;   // vanilla's GetPieceIndex: x = j % 15, y = j / 15
+
+            private static int FindCategory(List<List<Piece>> lists, Piece p)
+            {
+                if (lists == null) return -1;
+                for (int c = 0; c < lists.Count; c++) if (lists[c] != null && lists[c].IndexOf(p) >= 0) return c;   // by reference
+                return -1;
+            }
+
+            // Vanilla sizes the per-category selection slots for its 9 categories; the mods' categories go past that (15 here).
+            // GetSelectedIndex clamps to the last slot, SetSelected would write past it, so both arrays reach category c.
+            private static void EnsureSlotArrays(PieceTable table, int c)
+            {
+                if (table.m_selectedPiece == null || table.m_selectedPiece.Length <= c) System.Array.Resize(ref table.m_selectedPiece, c + 1);
+                if (table.m_lastSelectedPiece == null || table.m_lastSelectedPiece.Length <= c) System.Array.Resize(ref table.m_lastSelectedPiece, c + 1);
+            }
+
+            [HarmonyLib.HarmonyPrefix]
+            private static bool Prefix(Player __instance, Piece p, ref bool __result)
+            {
+                try
+                {
+                    var table = __instance != null ? __instance.m_buildPieces : null;
+                    if (p == null || s_table == null || !ReferenceEquals(table, s_table)) return true;
+                    var lists = ByCategory(table);
+                    if (lists == null) return true;
+                    int c = FindCategory(lists, p);
+                    if (c < 0) return true;   // not in the lists by reference: vanilla's own lookup
+
+                    // The CATEGORY VALUE, through the enum overload. SetBuildCategory(int) is PieceTable.SetCategory(int) =
+                    // m_categories[index], a position in the category LIST, so category 15 would select some other
+                    // category and the slot would be read from the wrong list.
+                    EnsureSlotArrays(table, c);
+                    s_selectingClick = true;
+                    try { __instance.SetBuildCategory((Piece.PieceCategory)c); }
+                    finally { s_selectingClick = false; }
+                    // SetBuildCategory re-runs UpdateAvailablePiecesList, which rebuilds the lists: find the piece again.
+                    lists = ByCategory(table);
+                    c = FindCategory(lists, p);
+                    if (c < 0) return true;
+                    if ((int)table.GetSelectedCategory() != c) table.SetCategory((Piece.PieceCategory)c);
+                    int j = lists[c].IndexOf(p);
+                    var slot = new Vector2Int(j % GridWidth, j / GridWidth);
+                    EnsureSlotArrays(table, c);
+                    __instance.SetSelectedPiece(slot);
+                    if (!ReferenceEquals(table.GetSelectedPiece(), p))
+                    {
+                        // Last resort: the table's own slot for this category, written directly, and the ghost rebuilt.
+                        table.m_selectedPiece[c] = slot;
+                        __instance.SetupPlacementGhost();
+                    }
+                    __result = ReferenceEquals(table.GetSelectedPiece(), p);
+                    if (__result) FiresLogger.LogDebug($"[FiresZones] Chaos Hammer: selected '{p.m_name}' (category {c} slot {j})");
+                    else FiresLogger.LogWarning($"[FiresZones] Chaos Hammer: '{p.m_name}' is in category {c} slot {j} but the selection reads "
+                        + $"'{table.GetSelectedPiece()?.m_name ?? "nothing"}' (selected category {(int)table.GetSelectedCategory()}).");
+                    return false;
+                }
+                catch (System.Exception e) { FiresLogger.LogWarning("[FiresZones] Chaos Hammer selection: " + e.Message); return true; }
+            }
+        }
+
+        // fat_hammer_selftest - with the Chaos Hammer in hand, selects EVERY piece of its table through the same call
+        // a menu click makes (Player.SetSelectedPiece(Piece)) and reads the selection back. One line per mismatch and a summary;
+        // the original selection is put back. The deterministic check for "clicking X selects X".
+        internal static void RegisterSelfTest()
+        {
+            new Terminal.ConsoleCommand("fat_hammer_selftest",
+                "- with the Chaos Hammer equipped: select every tool as a menu click does and check each selection reads back as that tool",
+                args =>
+                {
+                    var player = Player.m_localPlayer;
+                    if (player == null || s_table == null || !ReferenceEquals(player.m_buildPieces, s_table))
+                    { args.Context?.AddString("fat_hammer_selftest: equip the Chaos Hammer first"); return; }
+                    var lists = ByCategory(s_table);
+                    if (lists == null) { args.Context?.AddString("fat_hammer_selftest: no category lists"); return; }
+                    var before = s_table.GetSelectedPiece();
+                    var all = new List<Piece>();
+                    foreach (var list in lists) if (list != null) foreach (var piece in list) if (piece != null && !all.Contains(piece)) all.Add(piece);
+                    int ok = 0; var bad = new List<string>();
+                    foreach (var piece in all)
+                    {
+                        player.SetSelectedPiece(piece);
+                        var got = s_table.GetSelectedPiece();
+                        if (ReferenceEquals(got, piece)) ok++;
+                        else bad.Add($"'{piece.m_name}' -> '{got?.m_name ?? "nothing"}'");
+                    }
+                    if (before != null) player.SetSelectedPiece(before);
+                    string summary = $"fat_hammer_selftest: {ok} of {all.Count} tool(s) select themselves" + (bad.Count > 0 ? $"; WRONG {bad.Count}: {string.Join(", ", bad)}" : "; none wrong");
+                    args.Context?.AddString(summary);
+                    if (bad.Count > 0) FiresLogger.LogWarning("[FiresZones] " + summary); else FiresLogger.LogInfo("[FiresZones] " + summary);
+                });
         }
 
         private static readonly HarmonyLib.AccessTools.FieldRef<PieceTable, List<List<Piece>>> ByCategory =
@@ -480,6 +780,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal static bool IsOurPiece(Piece piece)
             => piece != null && (s_placeByPiece.ContainsKey(piece) || Is(piece, s_copyTool) || Is(piece, s_removeTool)
+                || Is(piece, s_closeTool) || Is(piece, s_closeAreaTool) || Is(piece, s_openTool)
                 || Is(piece, s_undoTool) || Is(piece, s_redoTool) || Is(piece, s_saveAreaTool) || Is(piece, s_saveSkylandTool)
                 || BiomePaintEntries.TryGet(piece, out _));
 
@@ -491,14 +792,30 @@ namespace VerdantsAscent.Terrain.Zones
         {
             if (player == null || piece == null) return;
             ZoneModeChaosHammer.Laugh(player);
-            if (Is(piece, s_undoTool)) { Ask(AskUndo, null, default); return; }
-            if (Is(piece, s_redoTool)) { Ask(AskRedo, null, default); return; }
+            // The hammer's Undo / Redo step the ONE history (Core's, or Server Devcommands'), as numpad 7 / 9 do.
+            if (Is(piece, s_undoTool)) { FiresCore.Undo.UndoHistory.Undo(); return; }
+            if (Is(piece, s_redoTool)) { FiresCore.Undo.UndoHistory.Redo(); return; }
             if (BiomePaintEntries.TryGet(piece, out var paint))
             {
                 if (!ZoneModeAreaTool.TryGetAim(out var ground))
                 {
                     Tell("Aim at the ground you mean to paint.");
                     return;
+                }
+                // Every tool keeps to the layer it is aimed at: aimed at a cave floor or a skyland, the paint
+                // turns that layer alone, in its chunks (VoxelLayerPaint: synced, saved and undone with them); the ground's circles
+                // stay the server's.
+                if (AdminSyncing.IsLocalAdmin() && BiomePaint.TryParseKey(paint.Key, out var brush, out var biome, out _))
+                {
+                    byte code = brush == BiomePaint.Brush.Restore ? (byte)0 : VoxelLayerPaint.BiomeCode(biome);
+                    string what = $"the {BiomePaint.Describe(paint.Key)} paint";
+                    if (VoxelLayerPaint.TryPaint(ground, ZoneModeAreaTool.PaintRadius, false, 0, true, code, what))
+                    {
+                        Tell(brush == BiomePaint.Brush.Restore
+                            ? "This layer's own biome comes back here."
+                            : $"This layer turns {biome} here{(brush == BiomePaint.Brush.Blend ? " (a blend paints the ground only; here it is the plain biome)" : "")}.");
+                        return;
+                    }
                 }
                 Ask(AskPaint, paint.Key, default, PaintPayload(ground, ZoneModeAreaTool.PaintRadius));
                 return;
@@ -542,6 +859,16 @@ namespace VerdantsAscent.Terrain.Zones
                 RemoveDialog(zone);
                 return;
             }
+            if (Is(piece, s_closeTool) || Is(piece, s_closeAreaTool))
+            {
+                CloseDialog(zone, Is(piece, s_closeAreaTool));
+                return;
+            }
+            if (Is(piece, s_openTool))
+            {
+                Ask(AskOpen, null, zone);
+                return;
+            }
             SaveDialog(zone);
         }
 
@@ -561,6 +888,97 @@ namespace VerdantsAscent.Terrain.Zones
                 () => AnswerRemove(true, zone), () => AnswerRemove(false, zone), false));
         }
 
+        private static void CloseDialog(Vector2s zone, bool area)
+        {
+            byte kind = area ? AskCloseArea : AskClose;
+            if (s_confirming) return;
+            if (!UnifiedPopup.IsAvailable())
+            {
+                Ask(kind, null, zone);
+                return;
+            }
+            s_confirming = true;
+            InputBlock.Block(true);
+            string what = area ? $"the 3x3 chunks round ({zone.x},{zone.y})" : $"chunk ({zone.x},{zone.y})";
+            UnifiedPopup.Push(new YesNoPopup($"Close {what}?",
+                "It closes to sea. Its builds and everything on it are set aside, not deleted, and come back when it opens "
+                + "(Open chunk, a Chunk Seed, a quest, or numpad 7 to undo).",
+                () => AnswerClose(true, kind, zone), () => AnswerClose(false, kind, zone), false));
+        }
+
+        private static void AnswerClose(bool close, byte kind, Vector2s zone)
+        {
+            if (!s_confirming) return;
+            s_confirming = false;
+            UnifiedPopup.Pop();
+            InputBlock.Block(false);
+            if (close) Ask(kind, null, zone);
+        }
+
+        // Zones in a payload: count, then x, y each.
+        private static byte[] ZonesPayload(IList<Vector2s> zones)
+        {
+            var pkg = new ZPackage();
+            pkg.Write(zones.Count);
+            foreach (var z in zones) pkg.Write(z);
+            return pkg.GetArray();
+        }
+
+        private static List<Vector2s> ReadZones(byte[] payload)
+        {
+            var zones = new List<Vector2s>();
+            if (payload == null || payload.Length == 0) return zones;
+            var pkg = new ZPackage(payload);
+            int n = pkg.ReadInt();
+            for (int i = 0; i < n; i++) zones.Add(pkg.ReadVector2s());
+            return zones;
+        }
+
+        private static string ZonesText(IList<Vector2s> zones)
+            => zones.Count == 1 ? $"chunk ({zones[0].x},{zones[0].y})" : $"{zones.Count} chunks round ({zones[zones.Count / 2].x},{zones[zones.Count / 2].y})";
+
+        // Server: close (park) or open exactly these zones for `who`; the report goes back, and a fresh close / open (not an undo or
+        // redo of one) becomes that admin's undo step with the zones it really changed. A close runs over ~2-3 s with players connected
+        // (ownership to the server, clients stop writing, park, clients drop the ids): TryParkOpenZones answers at once
+        // (refused, or "Closing …"), and its `done` brings the zones really parked and the final report.
+        private static void CloseOrOpen(long who, bool local, bool close, IList<Vector2s> zones, bool fresh)
+        {
+            if (close)
+            {
+                ZoneModePark.TryParkOpenZones(zones, who, (parked, final) => Finish(who, local, true, parked, final, fresh), out string first);
+                FiresLogger.LogInfo("[FiresZones] " + first);
+                Reply(who, local, TellMessage, first);
+                return;
+            }
+            var opened = ZoneModeOpening.Open(zones, ZoneOpenReason.Admin, who, "Chaos Hammer " + (fresh ? "Open chunk" : "undo / redo")) ?? new List<Vector2s>();
+            Finish(who, local, false, opened, opened.Count == 0 ? $"{ZonesText(zones)}: nothing to open (already open?)"
+                : $"Opened {ZonesText(opened)}; what was set aside comes back as the chunk loads.", fresh);
+        }
+
+        private static void Finish(long who, bool local, bool close, List<Vector2s> changed, string report, bool fresh)
+        {
+            FiresLogger.LogInfo("[FiresZones] " + report);
+            Reply(who, local, TellMessage, report);
+            if (!fresh || changed == null || changed.Count == 0) return;
+            if (local) { RecordZoneStep(close, changed); return; }
+            var pkg = new ZPackage();
+            pkg.Write(TellZoneStep);
+            pkg.Write(close);
+            pkg.Write(ZonesPayload(changed));
+            ZRoutedRpc.instance.InvokeRoutedRPC(who, RpcTell, pkg);
+        }
+
+        // Client: one step of the shared undo history (numpad 7 / 9). Undo opens what the close closed, or re-closes what the open
+        // opened; redo does it again; the server answers each with its own report.
+        private static void RecordZoneStep(bool closed, List<Vector2s> zones)
+        {
+            string what = (closed ? "closing " : "opening ") + ZonesText(zones);
+            byte[] payload = ZonesPayload(zones);
+            FatUndo.Record(what,
+                () => { Ask(closed ? AskOpenList : AskParkList, null, default, payload); return $"Undoing {what}…"; },
+                () => { Ask(closed ? AskParkList : AskOpenList, null, default, payload); return $"Redoing {what}…"; });
+        }
+
         private static void AnswerRemove(bool remove, Vector2s zone)
         {
             if (!s_confirming) return;
@@ -570,7 +988,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (remove) Ask(AskRemove, null, zone);
         }
 
-        // A popup closed by anything but its own buttons must not leave the controls blocked.
+        // A dialog closed by anything but its own buttons must not leave the controls blocked.
         internal static void ClientTick()
         {
             if (!s_confirming || UnifiedPopup.IsVisible()) return;
@@ -663,6 +1081,9 @@ namespace VerdantsAscent.Terrain.Zones
             return pkg.GetArray();
         }
 
+        // For fat_paint_stroke_test: the Chaos Hammer's own paint request, for one circle.
+        internal static void ApiAskPaint(string key, Vector3 centre, int radius) => Ask(AskPaint, key, default, PaintPayload(centre, radius));
+
         private static byte[] PaintPayload(Vector3 centre, int radius)
         {
             var pkg = new ZPackage();
@@ -726,6 +1147,26 @@ namespace VerdantsAscent.Terrain.Zones
             int kind = what & AskKind;
             switch (kind)
             {
+                case AskClose:
+                case AskCloseArea:
+                {
+                    var zones = new List<Vector2s> { zone };
+                    if (kind == AskCloseArea)
+                    {
+                        zones.Clear();
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++) zones.Add(new Vector2s(zone.x + dx, zone.y + dy));
+                    }
+                    CloseOrOpen(who, local, true, zones, fresh: true);
+                    return;
+                }
+                case AskOpen:
+                    CloseOrOpen(who, local, false, new List<Vector2s> { zone }, fresh: true);
+                    return;
+                case AskParkList:
+                case AskOpenList:
+                    CloseOrOpen(who, local, kind == AskParkList, ReadZones(payload), fresh: false);
+                    return;
                 case AskRemove:
                 {
                     ZoneModeChunkRemoval.TryRemove(zone, out string report);
@@ -743,6 +1184,15 @@ namespace VerdantsAscent.Terrain.Zones
                     Reply(who, local, TellMessage, undone);
                     return;
                 }
+                case AskApiSave:
+                {
+                    int id = payload != null && payload.Length >= 4 ? BitConverter.ToInt32(payload, 0) : 0;
+                    bool ok = ZoneModeChunkBlueprint.TrySave(zone, name, overwrite, null, out string report);
+                    FiresLogger.LogInfo("[FiresZones] (FatApi) " + report);
+                    if (local) Tell(report); else SendApiResult(who, id, ok, report);
+                    Names(who, local);
+                    return;
+                }
                 case AskSave:
                 {
                     ZoneModeChunkBlueprint.TrySave(zone, name, overwrite, payload, out string report);
@@ -753,7 +1203,7 @@ namespace VerdantsAscent.Terrain.Zones
                 }
                 case AskPlace:
                 {
-                    ZoneModeChunkBlueprint.TryPlace(zone, name, out string report);
+                    if (ZoneModeChunkBlueprint.TryPlace(zone, name, out string report)) Step(who, local, $"the chunk '{name}' placed at ({zone.x},{zone.y})");
                     FiresLogger.LogInfo("[FiresZones] " + report);
                     Reply(who, local, TellMessage, report);
                     return;
@@ -773,7 +1223,7 @@ namespace VerdantsAscent.Terrain.Zones
                 case AskPlaceArea:
                 {
                     Vector3 target = new ZPackage(payload ?? Array.Empty<byte>()).ReadVector3();
-                    ZoneModeAreaBlueprint.TryPlace(name, target, out string report);
+                    if (ZoneModeAreaBlueprint.TryPlace(name, target, out string report)) Step(who, local, $"the area '{name}' placed");
                     FiresLogger.LogInfo("[FiresZones] " + report);
                     Reply(who, local, TellMessage, report);
                     return;
@@ -792,7 +1242,7 @@ namespace VerdantsAscent.Terrain.Zones
                 case AskPlaceSkyland:
                 {
                     Vector3 target = new ZPackage(payload ?? Array.Empty<byte>()).ReadVector3();
-                    ZoneModeSkylandBlueprint.TryPlace(name, target, out string report);
+                    if (ZoneModeSkylandBlueprint.TryPlace(name, target, out string report)) Step(who, local, $"the skyland '{name}' placed");
                     FiresLogger.LogInfo("[FiresZones] " + report);
                     Reply(who, local, TellMessage, report);
                     return;
@@ -803,7 +1253,10 @@ namespace VerdantsAscent.Terrain.Zones
                     Vector3 centre = args.ReadVector3();
                     int radius = args.ReadInt();
                     if (BiomePaint.TryPaint(name, centre, radius, who, out uint id, out string report))
+                    {
                         ZoneModeChunkBlueprint.RecordPaint(id, $"the {BiomePaint.Describe(name)} paint");
+                        Step(who, local, $"the {BiomePaint.Describe(name)} paint");
+                    }
                     FiresLogger.LogInfo("[FiresZones] " + report);
                     Reply(who, local, TellMessage, report);
                     return;
@@ -868,6 +1321,13 @@ namespace VerdantsAscent.Terrain.Zones
             ZRoutedRpc.instance.InvokeRoutedRPC(who, RpcTell, pkg);
         }
 
+        // The server made an undoable edit for `who`: it becomes a step of that admin's shared undo history.
+        private static void Step(long who, bool local, string what)
+        {
+            if (local) { ZoneModeChunkKeys.RecordServerStep(what); return; }
+            Send(who, TellStep, what);
+        }
+
         private static void Reply(long who, bool local, byte kind, string message)
         {
             if (local)
@@ -899,6 +1359,28 @@ namespace VerdantsAscent.Terrain.Zones
             if (kind == TellMessage)
             {
                 Tell(pkg.ReadString());
+                return;
+            }
+            if (kind == TellApiResult)
+            {
+                int id = pkg.ReadInt(); bool ok = pkg.ReadBool(); string report = pkg.ReadString();
+                FiresLogger.LogInfo($"[FiresZones] (FatApi) request {id} answered: {(ok ? "saved" : "not saved")} - {report}");
+                if (s_apiPending.TryGetValue(id, out var done))
+                {
+                    s_apiPending.Remove(id);
+                    try { done(ok, report); } catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] FatApi save callback threw: {ex.Message}"); }
+                }
+                return;
+            }
+            if (kind == TellStep)
+            {
+                ZoneModeChunkKeys.RecordServerStep(pkg.ReadString());
+                return;
+            }
+            if (kind == TellZoneStep)
+            {
+                bool closed = pkg.ReadBool();
+                RecordZoneStep(closed, ReadZones(pkg.ReadByteArray()));
                 return;
             }
             if (kind == TellIcon)

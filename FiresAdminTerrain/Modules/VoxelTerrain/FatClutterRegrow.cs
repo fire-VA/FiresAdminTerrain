@@ -2,14 +2,14 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // ── Grass follows the ground after a voxel edit (0.2.690; cut back to vanilla's own path in 0.2.693) ────────────────
-    // Fire 10-01: "We edit the terrain and the grass needs to refresh to the edited level. Just like all other terrain
-    // edits ever in Valheim." Vanilla: a terrain edit rebuilds the heightmap and its collider, then calls
+    // ── Grass follows the ground after a voxel edit (vanilla's own path) ────────────────
+    // Edited terrain must refresh its grass to the edited level, just like all other terrain
+    // edits in Valheim. Vanilla: a terrain edit rebuilds the heightmap and its collider, then calls
     // ClutterSystem.ResetGrass(centre, radius); the patches in that radius are re-rolled on the following frames through
     // GetGroundInfo onto the new surface. FAT does the same, at the same moment: when a voxel chunk's collider is
     // (re)assigned (VoxelChunkView.AssignCollider - every live edit, local or another player's, and every chunk build),
-    // ResetGrass over that collider's own bounds plus 1 m. No queue, no batching (0.2.690 queued 32 m columns and
-    // flushed every 0.5 s).
+    // ResetGrass over that collider's own bounds plus 1 m. No queue, no batching (a queue of 32 m columns
+    // flushed every 0.5 s was tried and dropped).
     // The one addition vanilla has no counterpart for: a zone SWAP from vanilla's heightmap to voxel ground (world load,
     // stream-in). Grass rolled before the swap stood on vanilla's collider, at the original height; the swap re-rolls the
     // zone once, the same ResetGrass over the zone. Clients only (a dedicated server draws no grass).

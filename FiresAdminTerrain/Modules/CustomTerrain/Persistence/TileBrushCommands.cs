@@ -44,7 +44,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 (args) => Cmd_Lower(args),
                 isCheat: true);
 
-            // 2026-05-26 round-30: Floating-Island variants. Same args as
+            // Floating-Island variants. Same args as
             // their non-island counterparts but they ALSO flip the per-tile
             // FloatingIslandMode bit, so any tile section that ends up
             // ≥50m above local terrain renders with a domed teardrop
@@ -87,7 +87,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 (args) => Cmd_Noise(args),
                 isCheat: true);
 
-            // Round-33: manual seam-repair. Brush ops auto-stitch their
+            // Manual seam-repair. Brush ops auto-stitch their
             // own footprint now, but this command fixes PRE-EXISTING broken
             // seams left over from earlier sessions where the stitch logic
             // didn't exist yet. Defaults to a 50m radius centered at the
@@ -127,7 +127,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 },
                 isCheat: true);
 
-            // Round-63 — draw-speed throttle for ALL drag brushes
+            // Draw-speed throttle for ALL drag brushes
             // (terrain + water). Lower = slower deposition = more
             // precision. Persists via PlayerPrefs.
             new Terminal.ConsoleCommand("va_brush_drawspeed",
@@ -347,7 +347,7 @@ namespace VerdantsAscent.Terrain.Persistence
             args.Context.AddString($"va_brush_noise: center=({center.x:F1},{center.y:F1},{center.z:F1}) r={radius:F1} intensity={intensity:F2} scale={scale:F2} → dispatched (MP-broadcast)");
         }
 
-        // Round-33: manual seam-repair tool. Walks every tile within
+        // Manual seam-repair tool. Walks every tile within
         // `radius` of the cursor and stitches their border verts with
         // neighbors. Use to repair pre-existing breaks from before the
         // auto-stitch landed (any new brush op auto-stitches now).
@@ -393,7 +393,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             var color = new Color32(r, g, b, a);
 
-            // 2026-05-26 round-24 ROUTING FIX: previously va_brush_paint
+            // Previously va_brush_paint
             // ALWAYS dispatched to the custom-tile path via TileBrushRPC.
             // SendPaint, which walks TileAnchorRegistry.TilesOverlappingCircle
             // and writes to existing CUSTOM tiles only. When the cursor was
@@ -488,7 +488,7 @@ namespace VerdantsAscent.Terrain.Persistence
         //   AshLands=32, DeepNorth=64, Ocean=256, Mistlands=512, 0=clear.
         // Radius selects which tiles get the new biome (one tile = 64m square).
         //
-        // CURSOR-TARGET ROUTING (user directive 2026-05-25):
+        // CURSOR-TARGET ROUTING:
         //   * Cursor center on CUSTOM tile  → write ONLY to the custom tile
         //                                      mesh via TileBrushRPC.SendBiome
         //                                      (per-vertex biome override).
@@ -519,16 +519,14 @@ namespace VerdantsAscent.Terrain.Persistence
             TileBrush.TryGetPointerTarget(out _, out bool hitCustomTile);
 
             // ── LAVA SPECIAL CASE ────────────────────────────────────────
-            // 2026-05-26 round-25 — DIG REMOVED from both paths. The lava
-            // overlay now sits ON TOP of terrain at an alpha-controlled
-            // Y offset (round-21 in PaintVanillaHeightmapMask wires alpha
+            // No dig on either path. The lava
+            // overlay sits ON TOP of terrain at an alpha-controlled
+            // Y offset (PaintVanillaHeightmapMask wires alpha
             // to vanilla Heightmap.GetHeightOffset's `lerp(0.1m, 0.8m,
             // alpha)` formula, so the surface ramps from +0.8m at center
             // to +0.1m at the edge). Both the vanilla DIG and the custom-
-            // tile LAVA_MAX_DEPTH depression are gone. User directive:
-            // "we also no longer need to terrain op lower the ground by
-            // any amount when placing lava ... just overlay it on top of
-            // terrain and use the alpha channel to blend it right".
+            // tile LAVA_MAX_DEPTH depression are gone; overlaying and
+            // blending with the alpha channel replaces any lowering of the ground.
             //
             // The hitCustomTile classifier still routes to the right
             // surface so the paint lands where the cursor points:
@@ -566,7 +564,7 @@ namespace VerdantsAscent.Terrain.Persistence
             {
                 // Custom tile path — TileBrushRPC fans out to all peers and
                 // calls TileBrush.BrushBiome locally on each (custom only,
-                // no vanilla side-effect after the 2026-05-25 split).
+                // no vanilla side-effect).
                 TileBrushRPC.SendBiome(center, radius, biome);
                 args.Context.AddString($"va_brush_biome → CUSTOM | center=({center.x:F1},{center.y:F1},{center.z:F1}) r={radius:F1} biome={biome} → dispatched (MP-broadcast)");
             }

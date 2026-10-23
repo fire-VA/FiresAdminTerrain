@@ -41,15 +41,15 @@ namespace VerdantsAscent.Terrain.Persistence
 
             TileUndoLog.BeginOperation($"VATileFlat:h={height:F1}{(islandMode ? ",island" : "")}", center, radius);
 
-            // 2026-05-27 round-42 — REVERTED round-41's deferred rebuild
-            // path; tiles were rendering INVISIBLE on placement until a
+            // No deferred rebuild
+            // path: with it, tiles rendered INVISIBLE on placement until a
             // separate op triggered NotifyMutated on the same area. The
-            // round-41 RebuildTouched pass apparently wasn't waking up the
-            // mesh assignment reliably. Restored the original per-tile
-            // immediate rebuild (NotifyMutated inside ApplyOpAndSave) so
+            // deferred RebuildTouched pass apparently wasn't waking up the
+            // mesh assignment reliably. The per-tile
+            // immediate rebuild (NotifyMutated inside ApplyOpAndSave) means
             // visibility works the moment the data lands.
             //
-            // The other round-41 fixes are KEPT:
+            // Seam fixes:
             //   * SmoothHeightsInRadius_Single skips border verts → stitch
             //     owns those deterministically
             //   * ResolveBaseline gives border verts a neighbor-aware
@@ -144,7 +144,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             TileUndoLog.BeginOperation($"VATileRaise:d={delta:F1}", center, radius);
 
-            // Round-42 — see BrushFlat for revert rationale.
+            // See BrushFlat for revert rationale.
             foreach (var tileXZ in TileAnchorRegistry.TilesOverlappingCircle(center, radius))
             {
                 var anchor = TileAnchor.Spawn(tileXZ);
@@ -191,7 +191,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             TileUndoLog.BeginOperation($"VATilePaint:#{color.r:X2}{color.g:X2}{color.b:X2}", center, radius);
 
-            // 2026-05-30 round-54 — paint should NEVER auto-spawn new
+            // Paint should NEVER auto-spawn new
             // tile anchors. The vanilla paint pipeline routes through
             // TileTerrainOpBlocker which calls BrushPaint for any op
             // position near a tile anchor — INCLUDING phantom ops
@@ -201,7 +201,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // ZDOMan is in the wrong state) and floods the log with
             // "invalid ZNetView" + "Can't remove ZNetView" errors.
             //
-            // Switching to GetAt — paint only applies to tiles that
+            // So GetAt — paint only applies to tiles that
             // ALREADY exist. Painting on an area with no custom tile
             // is a no-op (vanilla will handle that area via its own
             // paint mask).
@@ -255,7 +255,6 @@ namespace VerdantsAscent.Terrain.Persistence
         // chooses exactly one path so we never double-paint:
         //   * cursor over custom tile → THIS method (custom only)
         //   * cursor over vanilla     → BiomeOverlayPainter.PaintOverlay
-        // User directive 2026-05-25.
         //
         // Returns the count of tiles touched (any vert changed). MP-safe via
         // TileBrushRPC.
@@ -350,17 +349,14 @@ namespace VerdantsAscent.Terrain.Persistence
         // biome == 0 clears (BiomeModified=false + Biome=0). Otherwise
         // sets Biome=biome + BiomeModified=true.
         //
-        // 2026-05-26 round-25 — LAVA DEPRESSION REMOVED. The earlier
+        // No lava depression. A
         // LAVA_MAX_DEPTH=1m custom-tile depression was a workaround for
         // making the lava mesh sit flush with surrounding un-dug terrain.
-        // Round-21 wired the lava overlay to vanilla's alpha→Y-offset
+        // The lava overlay is wired to vanilla's alpha→Y-offset
         // formula (alpha=1 → +0.8m, alpha=0 → +0.1m), so the lava surface
         // now naturally varies in height across the disk and blends down
-        // to terrain at the edges WITHOUT any depression. User directive:
-        // "we also no longer need to terrain op lower the ground by any
-        // amount when placing lava ... just overlay it on top of terrain
-        // and use the alpha channel to blend it right". So this method
-        // now ONLY writes the biome value — heights stay untouched.
+        // to terrain at the edges WITHOUT any depression. So this method
+        // ONLY writes the biome value — heights stay untouched.
         private static int ApplyBiomeToTile(TerrainTile tile, Vector3 center, float radius, float r2, ushort biome)
         {
             ComputeVertexRange(tile, center, radius, out int iMin, out int iMax, out int jMin, out int jMax);
@@ -610,7 +606,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // i,j in [0, 64] inclusive. The center vertex spacing matches
         // vanilla heightmap (1m).
 
-        // ── 2026-05-26 PHASE 1 (Drawing Feel Parity) ────────────────────
+        // ── Drawing feel ────────────────────
         //
         // Brush ops now use SMOOTHSTEP falloff at the edge instead of a
         // hard cutoff. Mirrors `DirtFloorMeshCombiner.MeshGen.cs:971-993
@@ -621,10 +617,9 @@ namespace VerdantsAscent.Terrain.Persistence
         // overwriting outright.
         //
         // The smoothstep band converts hard brush edges into soft beveled
-        // transitions and lets repeated stamps blend together — matching
-        // the user's stated goal of "lowering ruler and dragging into a
-        // mesh will carve a nice clean path; raising and dragging will
-        // create nice hills".
+        // transitions and lets repeated stamps blend together: lowering
+        // the ruler and dragging into a mesh carves a clean path; raising
+        // and dragging creates smooth hills.
         //
         // After each brush op the controller runs `SmoothHeightsInRadius`
         // (port of RPG-maker's 2-pass 8-neighbor Gaussian) to dissolve
@@ -724,7 +719,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 float w = BrushWeight(dist, radius);
                 if (w <= 0f) continue;
 
-                // Round-41 — at BORDER verts use neighbor-aware baseline so
+                // At BORDER verts use neighbor-aware baseline so
                 // adjacent tiles produce identical Heights at the shared
                 // world XZ (root cause #3 in the stitching plan).
                 float existingH = ResolveBaseline(tile, i, j, idx, gridSize, center.y);
@@ -802,7 +797,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 float scaledDelta = delta * w;
 
                 int idx = j * TerrainTileCodec.VERTEX_GRID_SIZE + i;
-                // Round-41 — neighbor-aware baseline at borders so the
+                // Neighbor-aware baseline at borders so the
                 // raise math is deterministic per world XZ even when one
                 // side was previously modified and the other wasn't.
                 float baseH = ResolveBaseline(tile, i, j, idx, TerrainTileCodec.VERTEX_GRID_SIZE, center.y);
@@ -873,7 +868,7 @@ namespace VerdantsAscent.Terrain.Persistence
             return defaultY;
         }
 
-        // ── 2026-05-26 round-31 BLENDER PORT (Phase B-2) ─────────────────
+        // ── Blender port ─────────────────
         //
         // Smoothing kernel rewritten to match Blender's Smooth brush:
         // UNIFORM 1-ring Laplacian (source/blender/editors/sculpt_paint/
@@ -910,7 +905,7 @@ namespace VerdantsAscent.Terrain.Persistence
             const float SMOOTH_MARGIN = 1.5f;
 
             float marginRadius = radius + SMOOTH_MARGIN;
-            // 2026-05-26 round-32: extend the iteration range to the FULL
+            // Extend the iteration range to the FULL
             // grid so border verts (i=0, i=GRID-1, j=0, j=GRID-1) can be
             // smoothed. Their neighbor lookups fall through to the
             // adjacent tile via SampleHeightAcrossTiles below — without
@@ -930,7 +925,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 int idx = j * gridSize + i;
                 if (!tile.HeightModified[idx]) continue;
 
-                // 2026-05-26 round-41 — SKIP BORDER VERTS. The smoothing
+                // SKIP BORDER VERTS. The smoothing
                 // kernel produces ORDER-DEPENDENT results at tile borders:
                 // when tile A smooths first it reads tile B's pre-smooth
                 // values; when tile B smooths it reads A's post-smooth
@@ -1088,7 +1083,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // write, so the new heights ARE the source of truth.
         private static void SmoothHeightsInRadius(TerrainTile tile, Vector3 center, float radius)
         {
-            // Round-31: legacy post-pass smoothing is now a thin shim over
+            // Legacy post-pass smoothing is now a thin shim over
             // the Blender iteration_strengths dispatcher. Strength=0.5 →
             // 2 full passes at strength 1.0 (matches the old 2-pass
             // weighted Gaussian intensity, but uses the cleaner uniform
@@ -1098,13 +1093,13 @@ namespace VerdantsAscent.Terrain.Persistence
             SmoothHeightsInRadius_Iterated(tile, center, radius, strength: 0.5f, srcSnapshot: null);
         }
 
-        // ── 2026-05-26 round-33 SEAM STITCHING ─────────────────────────
+        // ── SEAM STITCHING ─────────────────────────
         //
         // After any brush op writes to multiple tiles, run a stitch pass
         // that syncs border verts between adjacent tiles. Border verts
         // coincide between tiles by construction (same world XZ), so
         // they MUST have the same Y or the visual mesh splits into
-        // disconnected sheets — exactly the artifact the user reported.
+        // disconnected sheets.
         //
         // Causes of divergence:
         //   1. Brush op writes to tile A but not tile B (radius doesn't
@@ -1126,7 +1121,7 @@ namespace VerdantsAscent.Terrain.Persistence
         //
         // Runs in a separate ApplyOpAndSave so the ZDO write/RPC fires
         // for both tiles, not just the brush-touched ones.
-        // 2026-05-26 round-41 — single rebuild pass over a set of tiles.
+        // Single rebuild pass over a set of tiles.
         // Brush ops collect the set of touched tiles via deferred
         // ApplyOpAndSave calls, then this runs ONCE at the end with
         // fully-stitched data — eliminating the multi-rebuild churn
@@ -1143,7 +1138,7 @@ namespace VerdantsAscent.Terrain.Persistence
             }
         }
 
-        // 2026-05-26 round-41 — overload that defers rebuilds and
+        // Overload that defers rebuilds and
         // accumulates affected tiles into the caller's rebuild set.
         // The legacy signature below delegates to this with deferRebuild=false
         // so external callers (debug commands, manual stitch tool) still
@@ -1182,7 +1177,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // on neighbor tiles whose seams were already in sync).
             var modifiedTiles = new System.Collections.Generic.HashSet<Vector2i>();
 
-            // 2026-05-26 round-35 BUGFIX: previously we mutated tile.Heights
+            // Previously we mutated tile.Heights
             // OUTSIDE an ApplyOpAndSave context, then called ApplyOpAndSave
             // with a no-op lambda hoping it would commit the prior writes.
             // That flow had an ordering hazard: claim-ownership might fail
@@ -1283,21 +1278,21 @@ namespace VerdantsAscent.Terrain.Persistence
                 if (StitchVertPair(tileA, idxA, tileB, idxB)) changed++;
             }
 
-            // Round-63 — soften the crease the averaging leaves behind.
+            // Soften the crease the averaging leaves behind.
             // Averaging ONLY the border verts bends the surface at a
             // single vert width → visible hard ridge along the seam
-            // (user screenshots). Relax each tile's column ADJACENT to
+            // Relax each tile's column ADJACENT to
             // the border halfway toward the midpoint of its lateral
             // neighbors (border col + next-inner col). Each tile relaxes
             // its OWN inner column with its own data + the now-shared
             // border → deterministic, no cross-tile divergence.
             if (changed > 0)
             {
-                // Round-64 — smooth the border LINE itself first. The
-                // smooth brush deliberately skips border verts (round-41
+                // Smooth the border LINE itself first. The
+                // smooth brush deliberately skips border verts (the
                 // order-dependence guard), so after a strong smooth the
                 // interior has moved while the border kept its stale
-                // pre-smooth height → residual hard edge (user report).
+                // pre-smooth height → residual hard edge.
                 // Here in the stitch we have BOTH tiles' final data, so
                 // a border Laplacian is deterministic: blend each border
                 // vert toward the average of its seam neighbours + the
@@ -1364,7 +1359,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             if (changed > 0)
             {
-                // Round-64 — see SmoothSeamColumn.
+                // See SmoothSeamColumn.
                 SmoothSeamRow(tileA, jA, tileB, jB, gridSize);
 
                 SoftenCreaseRow(tileA, jA, gridSize);
@@ -1492,7 +1487,7 @@ namespace VerdantsAscent.Terrain.Persistence
             return false;
         }
 
-        // ── 2026-05-26 round-37 PHASE B-6: GRAB brush (Blender Grab) ─────
+        // ── GRAB brush (Blender Grab) ─────
         //
         // Drags terrain vertically by the cursor's Y delta from stroke start.
         // Uses the per-stroke snapshot from NotifyStrokeStart so the drag
@@ -1517,7 +1512,7 @@ namespace VerdantsAscent.Terrain.Persistence
             int touched = 0;
             TileUndoLog.BeginOperation($"VATileGrab:dy={dragDeltaY:F2}", center, radius);
 
-            // Round-42 — immediate per-tile rebuild (see BrushFlat).
+            // Immediate per-tile rebuild (see BrushFlat).
             // Stitch fires AFTER the loop (was previously per-tile stitch
             // inside ApplyOpAndSave — that nested call was wasteful + bug-
             // prone since each per-tile stitch only saw partial state).
@@ -1574,7 +1569,7 @@ namespace VerdantsAscent.Terrain.Persistence
             return wrote;
         }
 
-        // ── 2026-05-26 round-37 PHASE B-7: NOISE brush (Blender-ish Noise) ──
+        // ── NOISE brush (Blender-ish Noise) ──
         //
         // Perlin-noise displacement for organic terrain detail. Single dab
         // or held-drag both work — the noise is deterministic on world XZ
@@ -1657,7 +1652,7 @@ namespace VerdantsAscent.Terrain.Persistence
             return wrote;
         }
 
-        // ── 2026-05-26 round-31 PHASE B-2: Smooth brush + origHeights snapshot ──
+        // ── Smooth brush + origHeights snapshot ──
         //
         // Dedicated Smooth brush — matches Blender's Smooth (Laplacian)
         // brush behavior. Per-stroke snapshot ensures holding the brush
@@ -1747,8 +1742,8 @@ namespace VerdantsAscent.Terrain.Persistence
                 if (wroteThisTile > 0) touched++;
             }
 
-            // Round-42: stitch fires AFTER all tiles done. The smooth
-            // kernel skips border verts (round-41 in
+            // Stitch fires AFTER all tiles done. The smooth
+            // kernel skips border verts (in
             // SmoothHeightsInRadius_Single) so the stitch's averaging is
             // the authoritative border-vert result, not a cleanup pass.
             if (touched > 0) StitchTileBorders(center, radius);
@@ -1830,7 +1825,6 @@ namespace VerdantsAscent.Terrain.Persistence
                 // position falls back to vanilla biome. Without this, erasing
                 // a tile leaves the biome ghost behind — vegetation, AI, and
                 // ambient sound would still think it's the painted biome.
-                // Spotted 2026-05-25.
                 if (tile.BiomeModified != null && tile.BiomeModified[idx])
                 {
                     tile.BiomeModified[idx] = false;
@@ -1860,9 +1854,9 @@ namespace VerdantsAscent.Terrain.Persistence
         // Resolve "where the player is looking" for a hammer-style pointer.
         // Three-stage resolution:
         //   1. Physics.Raycast 600m — matches tile RENDER LOD so any visible
-        //      tile / vanilla terrain along the camera ray is hit. Bumped
-        //      from 50m 2026-05-25 (user complaint: floors landed under feet
-        //      when looking far away because the short ray missed and the
+        //      tile / vanilla terrain along the camera ray is hit. A short
+        //      ray (50m) landed floors under the player's feet
+        //      when looking far away, because it missed and the
         //      fallback dropped to player feet).
         //   2. Ray-to-player-Y-plane intersection — if the raycast missed
         //      (looking at the sky, or no colliders cooked at distance),
@@ -1890,10 +1884,10 @@ namespace VerdantsAscent.Terrain.Persistence
         //                              biome / paint ops to the VANILLA overlay
         //                              system and SKIP the custom tile path.
         //
-        // User directive 2026-05-25: "if the center of our cursor is on the
-        // custom terrain we JUST write to custom terrain, if were over vanilla
-        // we JUST paint to the vanilla. clean and simple". Previously both
-        // paths fired unconditionally and the user saw double-paint behaviour.
+        // If the center of the cursor is on custom terrain we write ONLY to
+        // custom terrain; over vanilla we paint ONLY the vanilla terrain.
+        // Otherwise both
+        // paths would fire and paint twice.
         public static bool TryGetPointerTarget(out Vector3 hit, out bool hitCustomTile)
         {
             hit = Vector3.zero;

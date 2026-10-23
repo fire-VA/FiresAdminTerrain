@@ -12,7 +12,7 @@ namespace VerdantsAscent.Water.Core
     /// the same disk-footprint + mesh-combine architecture as land ice, so when
     /// disks overlap they should merge into a single smoothed mesh rather than
     /// each rendering their own skirt at the overlap boundary (which is what
-    /// produces the funny "two disks fighting" look the user reported).
+    /// produces a "two disks fighting" look).
     /// </summary>
     public static class LandSnowCombiner
     {

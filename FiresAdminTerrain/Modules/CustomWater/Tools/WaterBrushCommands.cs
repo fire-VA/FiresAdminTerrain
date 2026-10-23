@@ -36,6 +36,8 @@ namespace VerdantsAscent.Water.Tools
         {
             if (_registered) return;
             _registered = true;
+            WaterCleanupCommand.RegisterCommand();   // va_water_cleanup_spread
+            WaterAtCommand.RegisterCommand();        // va_water_at, who claims the water over a point
 
             new Terminal.ConsoleCommand("va_brush_water",
                 "[va_brush_water radius=10 depth=3] Place a Water disk at the IH ruler cursor.",
@@ -67,12 +69,12 @@ namespace VerdantsAscent.Water.Tools
                 args => PlaceDisk(args, CustomLiquidType.Ice, "Ice"),
                 isCheat: true);
 
-            // 2026-05-25 round-19: Snow is fully decoupled from the water
+            // Snow is fully decoupled from the water
             // system. The va_brush_snow command now routes into the
             // LandSnowController (terrain-anchor mesh, no MeshCollider,
             // no WaterMeshCombiner registration). This eliminates all
             // InWater / IsSwimming / wet / swim-trigger side effects that
-            // came from the old water-disk path. EXACT clone of LandIce
+            // came from a water-disk path. EXACT clone of LandIce
             // mesh-generation pipeline; only difference is material +
             // collider absence.
             new Terminal.ConsoleCommand("va_brush_snow",
@@ -85,7 +87,7 @@ namespace VerdantsAscent.Water.Tools
                 args => DeleteDisks(args),
                 isCheat: true);
 
-            // Round-78 — MOP restored for the vanilla-liquid era. Soft,
+            // MOP for the vanilla-liquid era. Soft,
             // precision local removal: takes a fraction of the water depth
             // under the ruler per pass so holding it feathers an edge back
             // instead of punching a hole. Drag-pumped.
@@ -94,7 +96,7 @@ namespace VerdantsAscent.Water.Tools
                 args => MopWater(args),
                 isCheat: true);
 
-            // Round-84 — FREEZE. Holds a spring's mesh in its current shape and
+            // FREEZE. Holds a spring's mesh in its current shape and
             // stops the flow/overflow sim (toggle). Placing a new spring over it
             // unfreezes it so the new source updates the mesh.
             new Terminal.ConsoleCommand("va_brush_water_freeze",
@@ -106,13 +108,12 @@ namespace VerdantsAscent.Water.Tools
             // water disk at (terrainRaycastY + offset) instead of at
             // the ruler surface Y. Drag UP or DOWN a slope to lay a
             // continuous flowing sheet that hugs the cliff face.
-            // (See Docs/PLAN_WaterOverhaul.md §W-2.)
             new Terminal.ConsoleCommand("va_brush_waterfall",
                 "[va_brush_waterfall radius=4] Place a waterfall — each drag dab samples terrain Y, water hugs the slope.",
                 args => PlaceWaterfall(args, CustomLiquidType.Water, "Waterfall"),
                 isCheat: true);
 
-            // Round-56 — Water VOLUME. Pours a cylinder of water (ruler
+            // Water VOLUME. Pours a cylinder of water (ruler
             // radius, filled up to the ruler Y), settles it into the
             // terrain depression over ~1.5s, then gels so it holds shape.
             // Single placement per click — intentionally NOT drag-pumped.
@@ -122,7 +123,7 @@ namespace VerdantsAscent.Water.Tools
                 args => PlaceWaterVolume(args),
                 isCheat: true);
 
-            // Round-58 — SPRING. Infinite flowing source: the ruler circle
+            // SPRING. Infinite flowing source: the ruler circle
             // keeps emitting, the stream runs downhill as a constant-
             // thickness sheet (thickness= arg, default 1m), and gels when
             // the flow front reaches equilibrium. Single placement.
@@ -131,11 +132,11 @@ namespace VerdantsAscent.Water.Tools
                 args => PlaceSpring(args),
                 isCheat: true);
 
-            // Round-63 — LiquidVolume render-chain dump for debugging
+            // LiquidVolume render-chain dump for debugging
             // invisible pours (compares against vanilla tar pits).
             FiresLiquidWaterDebug.RegisterDumpCommand();
 
-            // Round-65 — material A/B switch for the invisible-combiner-water
+            // Material A/B switch for the invisible-combiner-water
             // diagnosis. Mode 1 strips the FTS FiresWater wrap (raw vanilla
             // Custom/Water); mode 2 is a bright opaque Standard material
             // (ground truth that the MESH itself is visible). Hot-swaps all
@@ -156,8 +157,8 @@ namespace VerdantsAscent.Water.Tools
                 },
                 isCheat: true);
 
-            // Round-66 — pour shader choice. The end goal is FiresWater on
-            // ALL custom water (user directive); water_liquid stays the
+            // Pour shader choice. The end goal is FiresWater on
+            // ALL custom water; water_liquid stays the
             // default control case until the pour-destroy bug is resolved.
             new Terminal.ConsoleCommand("va_water_pour_shader",
                 "[va_water_pour_shader 0|1] Liquid pour skin: 0=vanilla water_liquid (default), 1=FiresWater shader. Re-skins live pours + future spawns.",
@@ -170,13 +171,13 @@ namespace VerdantsAscent.Water.Tools
                 },
                 isCheat: true);
 
-            // 2026-05-25 round-4: NO dig, NO biome paint — just the custom
+            // NO dig, NO biome paint: just the custom
             // lava water disk plus a thin 0.002m water overlay that gives
-            // the molten-glass refraction look. User feedback: "our
-            // SWIMMABLE lava is different and should not cause terrain
-            // ops, and should just place a layer of our custom lava water
-            // with a thin layer of water .002 over the top (tighten up
-            // the gap)". The dig + biome paint live in the separate
+            // the molten-glass refraction look. Swimmable
+            // lava must not cause terrain
+            // ops; it only places a layer of custom lava water
+            // with a thin layer of water over the top
+            // (a tight gap). The dig + biome paint live in the separate
             // Biome Ashlands tool now.
             new Terminal.ConsoleCommand("va_brush_swimmable_lava",
                 "[va_brush_swimmable_lava <area>] Place a swimmable custom lava disk at the cursor (no terrain dig, no biome paint).",
@@ -184,7 +185,7 @@ namespace VerdantsAscent.Water.Tools
                 isCheat: true);
         }
 
-        // 2026-05-26 round-26 §2.2: Routes va_brush_snow through the new
+        // Routes va_brush_snow through the
         // VALandSnow anchor pipeline (LandSnowAnchor.SpawnNew). No more
         // ice1 clone — the dedicated prefab owns the ZDO under
         // `va_landsnow_*` keys. Identical UX to LandSnowCommands.PlaceLandSnow
@@ -264,11 +265,9 @@ namespace VerdantsAscent.Water.Tools
                 // Single unified path — CreateDiskOfType makes sure the disk
                 // AND its owning combiner both end up with the right
                 // CustomLiquidType so the variant's material/handler/overlay
-                // all attach correctly. Previously Lava + Boiling + Freezing
-                // + Ice all rendered as plain water because the disk's type
-                // was set after the combiner had already chosen a material
-                // (user complaint 2026-05-25: "all of our water tools just
-                // show up as water not actually working to swap the shaders").
+                // all attach correctly. Otherwise Lava + Boiling + Freezing
+                // + Ice would all render as plain water because the disk's type
+                // would be set after the combiner had already chosen a material.
                 var disk = CustomWaterManager.CreateDiskOfType(center, radius, depth, liquid);
 
                 // Round-W-1 — record the placement so WaterBrushDrag picks
@@ -289,7 +288,7 @@ namespace VerdantsAscent.Water.Tools
             }
         }
 
-        // Round-61 — Water VOLUME now spawns the VANILLA LiquidVolume
+        // Water VOLUME spawns the VANILLA LiquidVolume
         // (FiresLiquidWater = TarLiquid clone, LiquidType.Water +
         // water_liquid material). Vanilla's own fluid sim settles it
         // over terrain with collision, swim, persistence, and the real
@@ -298,15 +297,14 @@ namespace VerdantsAscent.Water.Tools
         // ground; volume = π·r²·depth. Pour MORE on top to build depth
         // (each click is an independent pour that merges as it settles).
         //
-        // (The round-56 grid-sim path — CreateSettlingVolume — remains
+        // (The grid-sim path, CreateSettlingVolume, remains
         // in the codebase powering the Spring; the Volume tool uses the
-        // vanilla system for cookie-milk parity.)
+        // vanilla system for parity with the vanilla liquid look.)
         private static void PlaceWaterVolume(Terminal.ConsoleEventArgs args)
         {
-            // Round-65 — entry log BEFORE any early return. The last test
-            // session had zero trace of this command: we couldn't tell
-            // "command never fired" apart from "center resolve silently
-            // failed". Now both cases are named in the log.
+            // Entry log BEFORE any early return, so
+            // "command never fired" can be told
+            // apart from "center resolve silently
             FiresLogger.LogInfo($"[WaterBrushCommands] va_brush_water_volume fired | line='{args.FullLine}'");
             if (!RulerArgs.TryResolveCenter(args, out var center, out _))
             {
@@ -327,6 +325,7 @@ namespace VerdantsAscent.Water.Tools
                     args.Context.AddString("va_brush_water_volume FAILED: FiresLiquidWater prefab unavailable (see log).");
                     return;
                 }
+                WaterCleanupCommand.TagToolPour(go);   // a deliberate placement; warns past a sane total
                 args.Context.AddString($"va_brush_water_volume → vanilla liquid pour | center=({center.x:F1},{center.y:F1},{center.z:F1}) r={radius:F1} — settling…");
             }
             catch (System.Exception ex)
@@ -336,14 +335,14 @@ namespace VerdantsAscent.Water.Tools
             }
         }
 
-        // Round-58/59 — Spring placement. `thickness=` comes from the YAML
+        // Spring placement. `thickness=` comes from the YAML
         // command string so it's user-tunable per tool entry without a
         // config round-trip. The IH ruler level (from-Y + height offset)
         // is the source POOL fill level — raise the ruler with PgUp to
         // get a deeper pool that overflows into the stream.
-        // Round-80 — SPRING = CUSTOM SHEET SIM (user directive). Vanilla
+        // SPRING = CUSTOM SHEET SIM. Vanilla
         // LiquidVolume can only settle to ONE FLAT level, so it can't make a
-        // sloped river. Back to our combiner sheet sim, but with the fill
+        // sloped river. So it uses the combiner sheet sim, with the fill
         // target reworked: each cell fills to (local bank height − bankOffset)
         // instead of a fixed thickness, so the surface FOLLOWS the channel
         // slope and flat ground (bank≈terrain) stays dry. thickness= is now
@@ -368,7 +367,7 @@ namespace VerdantsAscent.Water.Tools
 
             try
             {
-                // Round-82 — SPRING = FiresLiquidRiver on the vanilla liquid
+                // SPRING = FiresLiquidRiver on the vanilla liquid
                 // mesh (source disk + bank-following sim), not the flat
                 // combiner sheet. bankOffset = "height off bank" X.
                 var go = FiresLiquidWaterPrefab.SpawnSpring(center, radius, bankOffset);
@@ -377,6 +376,7 @@ namespace VerdantsAscent.Water.Tools
                     args.Context.AddString("va_brush_water_spring FAILED: FiresLiquidWater prefab unavailable (see log).");
                     return;
                 }
+                WaterCleanupCommand.TagToolPour(go);   // a deliberate placement (va_water_cleanup_spread keeptool); warns past a sane total
                 args.Context.AddString($"va_brush_water_spring → liquid river | center=({center.x:F1},{center.y:F1},{center.z:F1}) r={radius:F1} offBank={bankOffset:F1}m — source at ruler, flows to bank−{bankOffset:F1} down the slope…");
             }
             catch (System.Exception ex)
@@ -404,7 +404,7 @@ namespace VerdantsAscent.Water.Tools
             const float WATERFALL_DAB_DEPTH = 0.3f;
             const float WATERFALL_OFFSET = 0.5f;
 
-            // Ground Y for the FIRST dab. Round-68: physics probe against
+            // Ground Y for the FIRST dab: physics probe against
             // real colliders — GetGroundHeight is heightmap-blind and put
             // waterfall dabs meters under custom cliffs. After the
             // crosshair correction center already SITS on the visible
@@ -471,7 +471,7 @@ namespace VerdantsAscent.Water.Tools
                 return;
             }
 
-            // Round-78 — RULER-LOCAL liquid removal. The delete tool now
+            // RULER-LOCAL liquid removal. The delete tool
             // zeroes just the water depth WITHIN the ruler circle (not the
             // whole pour) so you can carve a big settled sheet down to the
             // shape you want. A pour whose entire grid drains to nothing is
@@ -481,7 +481,7 @@ namespace VerdantsAscent.Water.Tools
             args.Context.AddString($"va_brush_water_delete: removed {removed} disk(s) + {vol:F0}m³ from {pours} pour(s) within r={radius:F1} of {center}.");
         }
 
-        // Round-78 — Mop: precision, SOFT local removal. Same footprint math
+        // Mop: precision, SOFT local removal. Same footprint math
         // as delete but only takes a fraction of the depth per pass, so
         // holding it over an edge feathers the water back gradually instead
         // of punching a hard hole. Smaller default radius than delete.
@@ -489,7 +489,7 @@ namespace VerdantsAscent.Water.Tools
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
             float radius = RulerArgs.ResolveRadius(args, defaultRadius: 3f);
-            // Round-84 — mop DAMS spring flow (stops re-flow over the mopped edge).
+            // Mop DAMS spring flow (stops re-flow over the mopped edge).
             var (pours, vol) = RemoveLiquidLocal(center, radius, fraction: 0.5f, dam: true);
             // Also mop combiner disks under the cursor (legacy drawn water).
             int mopped = 0;
@@ -508,7 +508,7 @@ namespace VerdantsAscent.Water.Tools
             args.Context.AddString($"va_brush_water_mop: mopped {vol:F0}m³ from {pours} pour(s) + {mopped} disk mesh(es) + {gen} generated column(s) at r={radius:F1}.");
         }
 
-        // Round-84 — Freeze/unfreeze spring flow. Toggles each spring under the
+        // Freeze/unfreeze spring flow. Toggles each spring under the
         // ruler: frozen = mesh held, no overflow sim. Persisted.
         private static void FreezeWater(Terminal.ConsoleEventArgs args)
         {
@@ -568,7 +568,7 @@ namespace VerdantsAscent.Water.Tools
 
                     nv.ClaimOwnership();
 
-                    // Round-84 — MOP = DAM. Mopping a spring stamps a barrier:
+                    // MOP = DAM. Mopping a spring stamps a barrier:
                     // those cells never re-fill and water can't flow across
                     // them, so the mesh stops re-flowing over the mopped edge.
                     // Lets you carve/control the flow after the sim draws it.
@@ -578,7 +578,7 @@ namespace VerdantsAscent.Water.Tools
                         if (river != null) river.BlockCells(centerXZ, radius);
                     }
 
-                    // Round-79 — DELETE OVER THE SOURCE = kill the whole
+                    // DELETE OVER THE SOURCE = kill the whole
                     // spring. A ruler-local zero can't remove a spring: the
                     // emitter re-pumps every reload and the sim reflows water
                     // back into the emptied cells. So when the ring covers the
@@ -617,7 +617,7 @@ namespace VerdantsAscent.Water.Tools
             return (pours, volume);
         }
 
-        // Round-82 — disarm a spring: zero its rate ZDO (the re-attach patch
+        // Disarm a spring: zero its rate ZDO (the re-attach patch
         // skips rate<=0, so no controller re-attaches after reload) and remove
         // the live FiresLiquidRiverController. Safe on non-spring pours (no-op).
         private static void StopSpringEmitter(GameObject root, ZNetView nv)
@@ -635,7 +635,7 @@ namespace VerdantsAscent.Water.Tools
             catch (System.Exception ex) { FiresLogger.LogWarning($"[WaterBrushCommands] StopSpringEmitter: {ex.Message}"); }
         }
 
-        // Round-79 — run the flat-ground spill cull once on a pour under the
+        // Run the flat-ground spill cull once on a pour under the
         // sim lock, so a delete/mop pass also scrubs thin z-fighting remnants.
         private static void CullPour(LiquidVolume lv)
         {

@@ -271,14 +271,17 @@ namespace VerdantsAscent.Terrain.Voxel
             // to — while the north snowline drops toward the lowlands and
             // the southern ranges stay green higher up.
             T = new float[cn];
+            // Latitude runs to the world's own radius (FatWorldSize; 10000 on a vanilla-size world), so the bands keep
+            // their place relative to the edge on an Expand World Size world.
+            float latR = FatWorldSize.Radius;
             for (int zc = 0; zc < nc; zc++)
                 for (int xc = 0; xc < nc; xc++)
                 {
                     int i = zc * nc + xc;
                     float wz2 = -half + (zc + 0.5f) * Cell;
                     float wx2 = -half + (xc + 0.5f) * Cell;
-                    float latN = Mathf.Clamp01(-wz2 / 10000f);
-                    float latS = Mathf.Clamp01(wz2 / 10000f);
+                    float latN = Mathf.Clamp01(-wz2 / latR);
+                    float latS = Mathf.Clamp01(wz2 / latR);
                     T[i] = 14f
                          - 26f * FiresWorldGenBase.Smooth(0.25f, 1f, latN)
                          + 9f * FiresWorldGenBase.Smooth(0.45f, 1f, latS)

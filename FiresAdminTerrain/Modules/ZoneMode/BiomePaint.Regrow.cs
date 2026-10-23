@@ -35,6 +35,8 @@ namespace VerdantsAscent.Terrain.Zones
             internal string Label;
             internal bool HasExcept;
             internal Circle Except;
+            internal int Waits;   // ticks spent waiting for a ghost zone's terrain data
+            internal HashSet<Vector2s> ZoneSet;   // FatApi.RegenerateZones: whole zones instead of a circle
         }
 
         private static readonly List<PendingGrowth> s_pending = new List<PendingGrowth>();
@@ -42,6 +44,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static Circle s_regrowCircle;
         private static bool s_regrowHasExcept;
         private static Circle s_regrowExcept;
+        private static HashSet<Vector2s> s_regrowZoneSet;   // set while a FatApi.RegenerateZones growth is laid
         private static readonly List<(Vector3 Centre, float Radius)> s_keepOut = new List<(Vector3, float)>();
 
         // FiresSkyIslandProps stands down while this lays a circle, so a zone's skyland props are never laid twice.
@@ -60,20 +63,23 @@ namespace VerdantsAscent.Terrain.Zones
             var zones = ZoneSystem.instance;
             if (zones == null || ZDOMan.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return string.Empty;
             if (!Resolve()) return "Its growth could not be renewed: ZoneSystem's internals changed shape.";
-            string swapped = SwapLocations(circle);
-            var loaded = new List<Vector2s>();
-            int notLoaded = 0;
-            foreach (var zone in ZonesOf(circle))
-            {
-                if (HeightmapOf(zones, zone) != null) loaded.Add(zone);
-                else notLoaded++;
-            }
+            // Paint only ever adds locations and never removes builds: no location swap. The stroke's
+            // circles are gathered and, once the stroke ends, the new ground's locations are ADDED where they fit (BiomePaint.Stroke).
+            string swapped = string.Empty;
+            NoteStroke(circle);
+            // A
+            // dedicated server keeps LOADED zones (a live Heightmap) only round its own reference point; round its players it
+            // makes ghost zones. Every zone a player painted was "not loaded here", so nothing was cleared or grown. Now every
+            // zone the circle reaches takes part: the growth standing there is cleared (its ZDOs are on the server either way),
+            // and a zone with no loaded Heightmap grows again through a temporary zone root in Ghost mode, the way vanilla grows
+            // a player's zone on a dedicated server (GrowPending).
+            var all = new List<Vector2s>(ZonesOf(circle));
             CollectKeepOut(zones, circle);
-            int cleared = ClearGrowth(circle, loaded);
-            s_pending.Add(new PendingGrowth { Circle = circle, Zones = loaded, Cleared = cleared, Asker = asker, Due = Time.time + GrowDelaySeconds });
-            string report = $"{cleared} growth cleared; it grows again in a moment";
-            if (notLoaded > 0) report += $". {notLoaded} zone(s) not loaded here keep their old growth (paint again from nearby)";
-            return report + "." + swapped;
+            int cleared = ClearGrowth(circle, all);
+            NoteStrokeCleared(cleared);
+            FiresLogger.LogInfo($"[BiomePaint] paint clear round ({circle.X:0},{circle.Z:0}) r {circle.R:0}: {ClearDiag()}");   // why each object stayed
+            s_pending.Add(new PendingGrowth { Circle = circle, Zones = all, Cleared = cleared, Asker = asker, Due = Time.time + GrowDelaySeconds });
+            return $"{cleared} growth cleared; it grows again in a moment." + swapped;
         }
 
         // From Tick, on the server.
@@ -84,51 +90,109 @@ namespace VerdantsAscent.Terrain.Zones
             s_pending.RemoveAt(0);
             var zones = ZoneSystem.instance;
             if (zones == null || ZDOMan.instance == null) return;
-            CollectKeepOut(zones, pending.Circle);
+            if (pending.ZoneSet != null) CollectKeepOutZones(zones, pending.ZoneSet); else CollectKeepOut(zones, pending.Circle);
+            // A ghost-grown zone needs its terrain data built (vanilla SpawnZone's own check); until it is, the circle waits.
+            foreach (var zone in pending.Zones)
+            {
+                if (HeightmapOf(zones, zone) != null || TerrainReady(zones, zone)) continue;
+                if (++pending.Waits <= MaxTerrainWaits)
+                {
+                    pending.Due = Time.time + GrowDelaySeconds;
+                    s_pending.Add(pending);
+                    return;
+                }
+                break;   // waited long enough: grow what is ready, report the rest
+            }
             int before = ZDOMan.instance.NrOfObjects();
-            int grownZones = 0, missing = 0;
+            int grownZones = 0, missing = 0, ghosted = 0;
             var holder = new GameObject("fires_biomepaint_regrow");
             s_regrowing = true;
+            t_regrow++;
             s_regrowCircle = pending.Circle;
             s_regrowHasExcept = pending.HasExcept;
             s_regrowExcept = pending.Except;
+            s_regrowZoneSet = pending.ZoneSet;
+            if (pending.ZoneSet == null && WorldGenerator.instance != null)   // which biome a paint circle's growth reads
+            {
+                var c0 = new Vector3(pending.Circle.X, 0f, pending.Circle.Z);
+                var sec = WorldGenerator.instance.GetBiomeSector(c0);
+                FiresLogger.LogInfo($"[BiomePaint] paint regrow round ({c0.x:0},{c0.z:0}): painted {pending.Circle.Ground}, the growth reads sector {(sec != null ? sec.Biome.ToString() : "none")} / GetBiome {WorldGenerator.instance.GetBiome(c0)}");
+            }
             try
             {
                 foreach (var zone in pending.Zones)
                 {
                     var hmap = HeightmapOf(zones, zone);
+                    GameObject ghostRoot = null;
+                    var mode = ZoneSystem.SpawnMode.Full;
                     if (hmap == null)
                     {
-                        missing++;
-                        continue;
+                        if (!TerrainReady(zones, zone))
+                        {
+                            missing++;
+                            if (pending.ZoneSet != null) QueueRegen(zone);   // cleared but not grown: grows when its terrain is ready
+                            continue;
+                        }
+                        // The zone's own root, as vanilla SpawnZone makes it, kept only while its vegetation is laid.
+                        ghostRoot = UnityEngine.Object.Instantiate(zones.m_zonePrefab, ZoneSystem.GetZonePos(zone), Quaternion.identity);
+                        hmap = ghostRoot.GetComponentInChildren<Heightmap>();
+                        mode = ZoneSystem.SpawnMode.Ghost;
                     }
                     var clearAreas = Activator.CreateInstance(typeof(List<>).MakeGenericType(s_clearAreaType));
+                    var spawned = new List<GameObject>();
                     try
                     {
+                        if (hmap == null) { missing++; continue; }
                         s_placeVegetation.Invoke(zones, new object[]
                         {
-                            zone, ZoneSystem.GetZonePos(zone), holder.transform, hmap, clearAreas, ZoneSystem.SpawnMode.Full,
-                            new List<GameObject>(),
+                            zone, ZoneSystem.GetZonePos(zone), holder.transform, hmap, clearAreas, mode, spawned,
                         });
                         grownZones++;
+                        if (mode == ZoneSystem.SpawnMode.Ghost) ghosted++;
                     }
                     catch (Exception ex)
                     {
                         FiresLogger.LogWarning($"[BiomePaint] zone ({zone.x},{zone.y}) could not grow again: {ex.InnerException?.Message ?? ex.Message}");
+                    }
+                    finally
+                    {
+                        // Ghost mode: the growth stays as ZDOs (every peer near it makes its own instance); this one goes.
+                        if (mode == ZoneSystem.SpawnMode.Ghost)
+                            foreach (var go in spawned) if (go != null) UnityEngine.Object.Destroy(go);
+                        if (ghostRoot != null) UnityEngine.Object.Destroy(ghostRoot);
                     }
                 }
             }
             finally
             {
                 s_regrowing = false;
+                s_regrowZoneSet = null;
+                t_regrow--;
                 UnityEngine.Object.Destroy(holder);
             }
             int grown = Mathf.Max(0, ZDOMan.instance.NrOfObjects() - before);
-            string report = $"{pending.Label ?? Describe(pending.Circle)} round ({pending.Circle.X:0},{pending.Circle.Z:0}): {pending.Cleared} growth cleared, "
-                + $"{grown} grown again in {grownZones} zone(s)" + (missing > 0 ? $", {missing} zone(s) unloaded before they could grow" : "")
+            string report = (pending.ZoneSet != null ? pending.Label + ": " : $"{pending.Label ?? Describe(pending.Circle)} round ({pending.Circle.X:0},{pending.Circle.Z:0}): ") + $"{pending.Cleared} growth cleared, "
+                + $"{grown} grown again in {grownZones} zone(s)" + (ghosted > 0 ? $" ({ghosted} not loaded on the server, grown as ghost zones)" : "")
+                + (missing > 0 ? $", {missing} zone(s) whose terrain was not ready keep the cleared ground until painted again" : "")
                 + $"; {s_keepOut.Count} location footprint(s) left alone.";
-            FiresLogger.LogInfo("[BiomePaint] " + report);
+            if (pending.ZoneSet != null)   // one Debug line per regrown zone, with the biome it grew from
+                foreach (var z in pending.Zones)
+                    FiresLogger.LogDebug($"[BiomePaint] regrew zone ({z.x},{z.y}): {(ghosted > 0 ? "Ghost" : "Full")} mode, {grown} object(s), "
+                        + $"biome at its centre {(WorldGenerator.instance != null ? WorldGenerator.instance.GetBiome(ZoneSystem.GetZonePos(z)) : Heightmap.Biome.None)}"
+                        + (missing > 0 ? " (terrain not ready: back on the queue)" : ""));
+            if (pending.ZoneSet != null) s_growFold.Log("[BiomePaint] " + report, pending.Cleared, grown, missing > 0);   // folded unless a zone failed
+            else FiresLogger.LogInfo("[BiomePaint] " + report);
             if (pending.Asker != 0L) ZoneModeChunkTools.Notify(pending.Asker, report);
+        }
+
+        // vanilla SpawnZone's gate: the zone's terrain data is built (HeightmapBuilder), so a root made there has its heights.
+        private const int MaxTerrainWaits = 10;
+
+        private static bool TerrainReady(ZoneSystem zones, Vector2s zone)
+        {
+            var template = zones.m_zonePrefab != null ? zones.m_zonePrefab.GetComponentInChildren<Heightmap>() : null;
+            return template != null && HeightmapBuilder.instance != null && WorldGenerator.instance != null
+                && HeightmapBuilder.instance.IsTerrainReady(ZoneSystem.GetZonePos(zone), template.m_width, template.m_scale, template.IsDistantLod, WorldGenerator.instance);
         }
 
         private static Heightmap HeightmapOf(ZoneSystem zones, Vector2s zone)
@@ -143,16 +207,22 @@ namespace VerdantsAscent.Terrain.Zones
             EnsureVegetation();
             int removed = 0;
             var found = new List<ZDO>();
+            ResetClearDiag();
             foreach (var zone in zones)
             {
                 found.Clear();
                 ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(0, 0), found);
                 foreach (var zdo in found)
                 {
-                    if (zdo == null || !s_vegetation.Contains(zdo.GetPrefab())) continue;
+                    if (zdo == null) continue;
                     var at = zdo.GetPosition();
-                    if (!circle.Holds(at.x, at.z) || zdo.GetLong(ZDOVars.s_creator) != 0L || InKeepOut(at)) continue;
-                    if (ZoneModeChunkMachines.IsProtected(zdo) || FiresSkyIslands.TrySkylandAt(at, out _)) continue;
+                    bool inside = circle.Holds(at.x, at.z);
+                    if (inside) s_dSeen++;
+                    if (!s_vegetation.Contains(zdo.GetPrefab())) { if (inside) NoteNotVeg(zdo.GetPrefab()); continue; }
+                    if (!inside) continue;
+                    if (zdo.GetLong(ZDOVars.s_creator) != 0L) { s_dCreator++; continue; }
+                    if (InKeepOut(at)) { s_dKeepOut++; continue; }
+                    if (ZoneModeChunkMachines.IsProtected(zdo) || FiresSkyIslands.TrySkylandAt(at, out _)) { s_dProtected++; continue; }
                     zdo.SetOwner(ZDOMan.GetSessionID());
                     ZDOMan.instance.DestroyZDO(zdo);
                     removed++;
@@ -223,7 +293,8 @@ namespace VerdantsAscent.Terrain.Zones
             private static bool Prefix(Vector3 point, ref bool __result)
             {
                 if (!s_regrowing) return true;
-                if (s_regrowCircle.Holds(point.x, point.z) && !InKeepOut(point) && !(s_regrowHasExcept && s_regrowExcept.Holds(point.x, point.z)))
+                bool holds = s_regrowZoneSet != null ? s_regrowZoneSet.Contains(ZoneSystem.GetZone(point)) : s_regrowCircle.Holds(point.x, point.z);
+                if (holds && !InKeepOut(point) && !(s_regrowHasExcept && s_regrowExcept.Holds(point.x, point.z)))
                     return true;
                 __result = true;
                 return false;

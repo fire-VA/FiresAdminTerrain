@@ -9,7 +9,7 @@ namespace VerdantsAscent.Water.Core
     /// <summary>
     /// The wave field's wind on a peer without a camera: the dedicated server.
     /// Vanilla's EnvMan takes its biome from the main camera, so the server never picks a weather and its sea blows the
-    /// default environment's wind everywhere (R36b boat_test: server wind 1.00, both clients 0.50). There each water point
+    /// default environment's wind everywhere (e.g. server wind 1.00 while clients see 0.50). There each water point
     /// gets the wind a client standing on it works out: the point's biome sector, vanilla's seeded weather pick for the
     /// period (GetAvailableEnvironments, so Vedr's seasons apply) and vanilla's four seeded octaves. A client starts a
     /// transition the moment its target changes, and a new weather reaches its wind one transition later (its first

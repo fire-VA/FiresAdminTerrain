@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -35,11 +36,33 @@ namespace VerdantsAscent.Terrain.Voxel
         private static MaterialPropertyBlock s_mpb;
         private static readonly List<MeshRenderer> s_mrScratch = new List<MeshRenderer>(4);
         private static readonly int P_FarClipRadius = Shader.PropertyToID("_FiresFarClipRadius");
+        // Custom/FiresInlandWater names them _FarClip / _FarCenter (FiresInlandWater.shader): the
+        // _FiresFarClip* names matched nothing, so the near hole never clipped and the static 8 m far quilt drew through the
+        // shallows next to the waving near sheet (a hard stepping edge that doesn't move). Both pairs are set.
+        private static readonly int P_FarClip = Shader.PropertyToID("_FarClip"), P_FarCenter = Shader.PropertyToID("_FarCenter");
         private static readonly int P_FarClipCenter = Shader.PropertyToID("_FiresFarClipCenter");
 
+
+        // `fat_farwater on|off` (client render only, this session): hides or shows every far-water tile, the A/B
+        // for "is this static stepped water layer the far quilt?" (pale squares along a shore).
+        internal static bool Hidden;
+        private static bool s_clipLogged;
+
+        internal static void RegisterCommand()
+        {
+            new Terminal.ConsoleCommand("fat_farwater", "on|off - show or hide the far-water tiles (render only, this session)",
+                args =>
+                {
+                    if (args.Args.Length > 1) Hidden = args.Args[1].Equals("off", System.StringComparison.OrdinalIgnoreCase);
+                    if (s_root != null) s_root.SetActive(!Hidden);
+                    string line = $"[FiresFarWater] far tiles {(Hidden ? "HIDDEN" : "shown")} ({s_tiles.Count} tile(s))";
+                    FiresLogger.LogInfo(line);
+                    args.Context?.AddString(line);
+                });
+        }
         internal static void Tick(Vector3 center)
         {
-            if (!FiresWorldGenBase.Active || !FiresWorldGenBase.WaterSurfaceReady)
+            if (FatSuperFlat.On || !FiresWorldGenBase.Active || !FiresWorldGenBase.WaterSurfaceReady)   // No far water tiles on super flat
             {
                 if (s_tiles.Count > 0) Clear();
                 return;
@@ -48,8 +71,15 @@ namespace VerdantsAscent.Terrain.Voxel
             s_nextTick = Time.time + 0.25f;
             // NEVER build without the material: a tile built before the near
             // system bound its sheet material rendered Unity's MAGENTA error
-            // colour forever (user screenshots). Wait for the bind.
+            // colour forever. Wait for the bind.
             if (VoxelChunkView.BoundSheetMaterial == null) return;
+            if (s_root != null && s_root.activeSelf == Hidden) s_root.SetActive(!Hidden);
+            if (!s_clipLogged)
+            {
+                s_clipLogged = true;   // Which near-hole names the LIVE shader has (the source on disk may be older than the bundle)
+                var m = VoxelChunkView.BoundSheetMaterial;
+                FiresLogger.LogInfo($"[FiresFarWater] sheet shader {(m.shader != null ? m.shader.name : "null")}: _FarClip {m.HasProperty("_FarClip")}, _FarCenter {m.HasProperty("_FarCenter")}, _FiresFarClipRadius {m.HasProperty("_FiresFarClipRadius")}, _FiresFarClipCenter {m.HasProperty("_FiresFarClipCenter")}");
+            }
             if (s_root == null)
             {
                 s_root = new GameObject("FiresFarWater");
@@ -82,7 +112,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (d > BUILD_R * BUILD_R || d >= bestD) continue;
                     bestD = d; best = key; found = true;
                 }
+            UpdateHole(center);
             if (found) BuildTile(best);
+            else if (s_holeStale.Count > 0) RebuildNearest(s_holeStale, center);
             else if (s_stale.Count > 0) RebuildNearestStale(center);
 
             // NEAR-HOLE clip: the quilt covers everywhere (baked meshes can't hold a
@@ -98,6 +130,8 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_mpb == null) s_mpb = new MaterialPropertyBlock();
             s_mpb.SetFloat(P_FarClipRadius, clipR);
             s_mpb.SetVector(P_FarClipCenter, new Vector4(center.x, 0f, center.z, 0f));
+            s_mpb.SetFloat(P_FarClip, clipR);
+            s_mpb.SetVector(P_FarCenter, new Vector4(center.x, 0f, center.z, 0f));
             foreach (var kv in s_tiles)
             {
                 if (kv.Value == null) continue;
@@ -123,10 +157,13 @@ namespace VerdantsAscent.Terrain.Voxel
             foreach (var kv in s_tiles) s_stale.Add(kv.Key);
         }
 
-        private static void RebuildNearestStale(Vector3 center)
+        private static void RebuildNearestStale(Vector3 center) => RebuildNearest(s_stale, center);
+
+        // The nearest tile of `set` rebuilt in place (BuildTile replaces the old one only once the new one exists).
+        private static void RebuildNearest(HashSet<Vector2Int> set, Vector3 center)
         {
             Vector2Int best = default; float bestD = float.MaxValue; bool found = false;
-            foreach (var key in s_stale)
+            foreach (var key in set)
             {
                 float dx = (key.x + 0.5f) * TILE - center.x, dz = (key.y + 0.5f) * TILE - center.z;
                 float d = dx * dx + dz * dz;
@@ -134,11 +171,50 @@ namespace VerdantsAscent.Terrain.Voxel
                 bestD = d; best = key; found = true;
             }
             if (!found) return;
-            s_stale.Remove(best);
-            if (!s_tiles.TryGetValue(best, out var old)) return;
-            if (old != null) Object.Destroy(old);
-            s_tiles.Remove(best);
+            set.Remove(best);
+            if (!s_tiles.ContainsKey(best)) return;
             BuildTile(best);
+        }
+
+        // ── the NEAR HOLE, on the CPU ───────────────────────────────────────────────────────────────────────
+        // A static, 8 m-stepped water layer showed under the waving near sheet at every shore. The live
+        // Custom/FiresInlandWater (Core's built-in port) has NO far-clip property of any name, so the MPB clip
+        // below never did anything and every far tile drew right under the player's feet, 0.18 m under the near sheet,
+        // showing through its translucent shallows. Tiles are now built WITHOUT the cells inside a hole around the player
+        // (HoleRadius = the streamer's guaranteed near coverage less HoleMargin, which also absorbs the player's movement
+        // between rebuilds); once the player has moved HoleStep m, the tiles touching the old or the new hole are rebuilt in
+        // place, nearest first.
+        private const float HoleMargin = 40f, HoleStep = 24f;
+        private static readonly HashSet<Vector2Int> s_holeStale = new HashSet<Vector2Int>();
+        private static Vector2 s_hole;
+        private static bool s_holeSet;
+        private static float s_holeR;
+
+        private static float HoleRadius
+            => Mathf.Max(0f, (FiresVoxelConfig.WrapKeepRadius != null ? FiresVoxelConfig.WrapKeepRadius.Value : 128f) - HoleMargin);
+
+        private static bool InHole(float x, float z)
+        {
+            if (!s_holeSet || s_holeR <= 0f) return false;
+            float dx = x - s_hole.x, dz = z - s_hole.y, edge = s_holeR - 6f;   // the cell centre, a cell's half-diagonal inside
+            return dx * dx + dz * dz < edge * edge;
+        }
+
+        private static void UpdateHole(Vector3 center)
+        {
+            var now = new Vector2(center.x, center.z);
+            if (s_holeSet && (now - s_hole).sqrMagnitude < HoleStep * HoleStep) return;
+            var before = s_hole;
+            bool had = s_holeSet;
+            s_hole = now;
+            s_holeSet = true;
+            s_holeR = HoleRadius;
+            float reach = s_holeR + TILE;   // a tile within this of either hole centre may hold hole cells
+            foreach (var key in s_tiles.Keys)
+            {
+                var tc = new Vector2((key.x + 0.5f) * TILE, (key.y + 0.5f) * TILE);
+                if ((tc - now).magnitude < reach || (had && (tc - before).magnitude < reach)) s_holeStale.Add(key);
+            }
         }
 
         // Vanilla's overworld render group flipped (interior entered or left).
@@ -170,6 +246,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     float wx = x0 + cx * CELL;
                     byte cls = FiresWorldGenBase.WaterClassAt(wx + CELL * 0.5f, wz + CELL * 0.5f);
                     if (cls == FiresWorldGenBase.WC_NONE) continue;
+                    if (InHole(wx + CELL * 0.5f, wz + CELL * 0.5f)) continue;   // The near system draws this water
                     if (!FiresWorldGenBase.TryGetWaterSurfaceSmooth(wx + CELL * 0.5f, wz + CELL * 0.5f,
                             out float lc, out _)) continue;
                     // corners bilinear off the same surface; fall back to the
@@ -204,6 +281,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             var go = new GameObject($"farwater_{key.x}_{key.y}");
             go.transform.SetParent(s_root.transform, false);
+            if (s_tiles.TryGetValue(key, out var previous) && previous != null) Object.Destroy(previous);   // Replaced in place, never blinks
             s_tiles[key] = go;
             if (s_t.Count > 0)
                 AddPart(go, "water", s_v, s_uv, s_t, VoxelChunkView.BoundSheetMaterial);
@@ -234,6 +312,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var mesh = new Mesh { name = "farwater", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
             mesh.SetVertices(v);
             mesh.SetUVs(0, uv);
+            mesh.SetUVs(3, new Vector4[v.Count].ToList());   // Explicit zero disturbance (see VoxelChunkView.ZeroUv3)
             var norms = new Vector3[v.Count];
             for (int i = 0; i < norms.Length; i++) norms[i] = Vector3.up;
             mesh.SetNormals(norms);

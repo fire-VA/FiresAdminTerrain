@@ -14,15 +14,35 @@ namespace VerdantsAscent.Terrain.Voxel
         internal sealed class BiomeTable
         {
             public WeightedPrefabs Floor, Ceiling, Wall, Rubble, Props, Ores, Chests, Spawners;
+            public WeightedPrefabs Dark;   // Mushrooms for dark floors
         }
+
+        // The darker areas (longer tunnels, deeper and further from the light) get the mushroom placements, and cave mushrooms are
+        // pickable and respawn over time: each biome's own vanilla mushroom pickables.
+        private static readonly Dictionary<string, string> DarkDefaults = new Dictionary<string, string>
+        {
+            { "Meadows", "Pickable_Mushroom" },
+            { "Black Forest", "Pickable_Mushroom_yellow:2,Pickable_Mushroom_blue:1,Pickable_Mushroom:1" },
+            { "Swamp", "Pickable_Mushroom_yellow" },
+            { "Mountain", "Pickable_Mushroom_blue" },
+            { "Plains", "Pickable_Mushroom" },
+            { "Mistlands", "Pickable_Mushroom_JotunPuffs:2,Pickable_Mushroom_Magecap:1" },
+            { "Ashlands", "" },
+            { "Deep North", "Pickable_Mushroom_blue" },
+        };
+
+        private static ConfigEntry<float> s_mushroomChance;
+        private static ConfigEntry<int> s_mushroomsPerZone;
+        internal static float MushroomChance => s_mushroomChance.Value;
+        internal static int MushroomsPerZone => s_mushroomsPerZone.Value;
 
         internal const float FallbackDayLengthSeconds = 1200f;
         internal const float ChestIdealHeadroom = 6f;
         internal const float PoolSpacing = 24f;
         internal const float PoolSourceLift = 0.6f;
 
-        private const string Section = "VoxelTerrain Cave Content";
-        private const string BiomeSectionPrefix = "VoxelTerrain Cave Content ";
+        private const string Section = "Voxel Terrain - Cave content";   // Formerly "VoxelTerrain Cave Content" (one spelling; values moved by FatConfigRetire.MoveSections)
+        private const string BiomeSectionPrefix = "Voxel Terrain - Cave content ";   // Formerly "VoxelTerrain Cave Content "
 
         private static ConfigEntry<float> s_floorChance, s_ceilingChance, s_wallChance, s_wallScaleMin, s_wallScaleMax,
             s_rubbleChance, s_propChance, s_oreChance;
@@ -72,10 +92,15 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static BiomeTable For(Heightmap.Biome biome) => s_tables.TryGetValue(biome, out var table) ? table : null;
 
+        // Every biome's table (caves_test reads the Ceiling lists).
+        internal static IEnumerable<KeyValuePair<Heightmap.Biome, BiomeTable>> AllTables => s_tables;
+
         internal static void Bind(ConfigFile cfg)
         {
             VoxelSurfaceSnap.Bind(cfg);
             VoxelCaveClutter.Bind(cfg);
+            VoxelUnderwaterClutter.Bind(cfg);
+            CaveLight.Bind(cfg);   // Cave grass by light
             s_floorChance = cfg.Bind(Section, "Floor pickable chance", 0.10f, new ConfigDescription(
                 "Chance per cave floor spot (one every ~4 m) of a floor pickable or prop from the biome's Floor list. Small ones come in clumps of 1-3.",
                 new AcceptableValueRange<float>(0f, 1f)));
@@ -136,15 +161,32 @@ namespace VerdantsAscent.Terrain.Voxel
             s_spawnerSpacing = cfg.Bind(Section, "Monster spawner spacing", 24f, new ConfigDescription(
                 "Least distance between two spawners in the same zone (metres).", new AcceptableValueRange<float>(4f, 64f)));
 
+            s_mushroomChance = cfg.Bind(Section, "Dark mushroom chance", 0.12f, new ConfigDescription(
+                "Chance per cave floor spot of a clump of the biome's 'Dark floor' mushrooms, times (1 - light)^2: none near cave mouths, "
+                + "sun shafts and sinkholes, the most deep in long tunnels. Mushrooms on the biome's Floor list only come this way.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            s_mushroomsPerZone = cfg.Bind(Section, "Dark mushrooms per zone", 6, new ConfigDescription(
+                "Most dark-floor mushroom clumps one zone gets.", new AcceptableValueRange<int>(0, 64)));
+
             foreach (var defaults in DefaultTables)
             {
                 string section = BiomeSectionPrefix + defaults.Key;
+                var ceiling = cfg.Bind(section, "Ceiling", defaults.Ceiling,
+                    "Things hanging from cave ceilings, as prefab:weight (the weights are this biome's mix). Each goes on the rock by the "
+                    + "face 'Voxel Terrain / Attach sides' names for it (its bottom unless listed), and one longer than the "
+                    + "cave is tall is scaled down to fit when the prefab syncs its scale (a giant Yggdrasil root becomes a mini one).");
+                // More kinds of roots: a list still at its old default takes the wider
+                // pool; one anybody edited is left as it is.
+                if (OldCeilingDefaults.TryGetValue(defaults.Key, out string oldCeiling) && ceiling.Value == oldCeiling && oldCeiling != defaults.Ceiling)
+                {
+                    ceiling.Value = defaults.Ceiling;
+                    FiresLogger.LogInfo($"[FiresVoxel] '{section} / Ceiling' was the old default: now {defaults.Ceiling}.");
+                }
                 s_tables[defaults.Biome] = new BiomeTable
                 {
                     Floor = new WeightedPrefabs(cfg.Bind(section, "Floor", defaults.Floor,
                         "Pickables and small props on cave floors.")),
-                    Ceiling = new WeightedPrefabs(cfg.Bind(section, "Ceiling", defaults.Ceiling,
-                        "Things hanging from cave ceilings. Each goes on the rock by the face 'VoxelTerrain Surface Mounting / Attach sides' names for it (its bottom unless listed).")),
+                    Ceiling = new WeightedPrefabs(ceiling),
                     Wall = new WeightedPrefabs(cfg.Bind(section, "Wall", defaults.Wall,
                         "Pieces laid on cave walls (roots, ice spikes, creep) by their attach face.")),
                     Rubble = new WeightedPrefabs(cfg.Bind(section, "Rubble", defaults.Rubble,
@@ -157,6 +199,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         "Treasure chest prefabs; the chest's own Container loot table fills it.")),
                     Spawners = new WeightedPrefabs(cfg.Bind(section, "Monster spawners", defaults.Spawners,
                         "Vanilla creature spawner prefabs. A spawner is placed only where its creature fits.")),
+                    Dark = new WeightedPrefabs(cfg.Bind(section, "Dark floor", DarkDefaults.TryGetValue(defaults.Key, out var dark) ? dark : "",
+                        "Pickables for dark cave floors (mushrooms), weighted toward the darkest tunnels ('Dark mushroom chance').")),
                 };
             }
         }
@@ -167,13 +211,21 @@ namespace VerdantsAscent.Terrain.Voxel
             public string Key, Floor, Ceiling, Wall, Rubble, Props, Ores, Chests, Spawners;
         }
 
+        private static readonly Dictionary<string, string> OldCeilingDefaults = new Dictionary<string, string>
+        {
+            { "Meadows", "root07:2,root11:1" },
+            { "Black Forest", "root07:2,root11:1,Greydwarf_Root:0.3" },
+            { "Swamp", "root07:2,root11:1" },
+            { "Mistlands", "CreepProp_hanging01:2,CreepProp_egg_hanging01:1,CreepProp_egg_hanging02:1" },
+        };
+
         private static readonly TableDefaults[] DefaultTables =
         {
             new TableDefaults
             {
                 Biome = Heightmap.Biome.Meadows, Key = "Meadows",
                 Floor = "Pickable_Mushroom:4,Pickable_Stone:3,Pickable_Flint:1,Pickable_ForestCryptRemains01:1,Pickable_ForestCryptRemains02:1",
-                Ceiling = "root07:2,root11:1",
+                Ceiling = "root07:2,root11:1,root08:1,root12:1,YggdrasilRoot:0.7",
                 Wall = "root08:1,root12:1",
                 Rubble = "Rock_4:2,Rock_3:1",
                 Props = "Skull1:1,LargeBone_half01:0.5",
@@ -185,7 +237,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 Biome = Heightmap.Biome.BlackForest, Key = "Black Forest",
                 Floor = "Pickable_Mushroom_yellow:4,Pickable_Mushroom_blue:1,Pickable_ForestCryptRemains01:2,Pickable_ForestCryptRemains02:2,Pickable_ForestCryptRemains03:1,Pickable_ForestCryptRemains04:1,Pickable_ForestCryptRandom:1,Pickable_Stone:2,Pickable_SurtlingCoreStand:0.5",
-                Ceiling = "root07:2,root11:1,Greydwarf_Root:0.3",
+                Ceiling = "root07:2,root11:1,root08:1,root12:1,Greydwarf_Root:0.6,YggdrasilRoot:0.7",
                 Wall = "root08:1,root12:1",
                 Rubble = "Rock_3:2,Rock_4:1",
                 Props = "Skull1:1,LargeBone_half01:0.5,LargeBone_half02:0.5",
@@ -197,7 +249,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 Biome = Heightmap.Biome.Swamp, Key = "Swamp",
                 Floor = "Pickable_Mushroom_yellow:3,Pickable_SunkenCryptRandom:2,Pickable_ForestCryptRemains01:1,Pickable_ForestCryptRemains02:1,Pickable_Stone:1",
-                Ceiling = "root07:2,root11:1",
+                Ceiling = "root07:2,root11:1,root08:1,root12:1,Greydwarf_Root:0.3,YggdrasilRoot:0.7",
                 Wall = "root08:1,root12:1",
                 Rubble = "Rock_4",
                 Props = "LargeBone_half01:1,LargeBone_half02:1,Skull1:1",
@@ -233,7 +285,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 Biome = Heightmap.Biome.Mistlands, Key = "Mistlands",
                 Floor = "Pickable_RoyalJelly:2,Pickable_DvergrMineTreasure:1,Pickable_Mushroom_Magecap:1,Pickable_BlackCoreStand:0.3",
-                Ceiling = "CreepProp_hanging01:2,CreepProp_egg_hanging01:1,CreepProp_egg_hanging02:1",
+                Ceiling = "CreepProp_hanging01:2,CreepProp_egg_hanging01:1,CreepProp_egg_hanging02:1,YggdrasilRoot:1.5",
                 Wall = "CreepProp_wall01",
                 Rubble = "",
                 Props = "LargeBone_half02:0.5",
@@ -280,6 +332,15 @@ namespace VerdantsAscent.Terrain.Voxel
         internal WeightedPrefabs(ConfigEntry<string> entry) { m_entry = entry; }
 
         internal bool TryPick(System.Random rng, out GameObject prefab) => TryPick(rng, null, out prefab);
+
+        // The resolved prefabs and their weights (prefabs the game lacks are already left out).
+        internal List<KeyValuePair<GameObject, float>> Entries()
+        {
+            Resolve();
+            var list = new List<KeyValuePair<GameObject, float>>();
+            for (int i = 0; i < m_prefabs.Count; i++) list.Add(new KeyValuePair<GameObject, float>(m_prefabs[i], m_weights[i]));
+            return list;
+        }
 
         internal bool TryPick(System.Random rng, Func<GameObject, bool> accept, out GameObject prefab)
         {

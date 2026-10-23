@@ -130,7 +130,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // DEAD BY DOCTRINE: generated rivers/lakes/streams are the MESH —
         // the liquid engine is reserved for admin hammer placement only
-        // (user mandate; auto-pours were double-placing sim water on gen
+        // (auto-pours were double-placing sim water on gen
         // rivers). The UpdateHeights clamp guard above stays live for
         // hand-poured volumes.
         private static bool AutoEnabled => false;

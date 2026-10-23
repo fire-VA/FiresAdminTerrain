@@ -16,7 +16,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // missing biome therefore costs you EVERY remaining location in the world.
     //
     // A world only has to lack ONE biome for this to fire. Ours did on
-    // 2026-09-19 (Meadows 0.0%, Plains 0.0%): StartTemple 0/1, Eikthyrnir 0/3,
+    // (Meadows 0.0%, Plains 0.0%): StartTemple 0/1, Eikthyrnir 0/3,
     // and the world's biome cache was never written because VerifyBiomeData
     // never reached SaveCache. The generator bug behind that is fixed
     // separately — this is the seatbelt, because the vanilla defect bites any

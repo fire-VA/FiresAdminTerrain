@@ -24,7 +24,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private const int RES = 1024;            // grid cells per axis
         private const float SEA = 30f;
         internal const int GridRes = RES;
-        internal const float GridRadius = 10240f;
+        // Scaled with the world's edge (FatWorldSize); exactly 10240 on a vanilla-size world (20 m cells). An Expand
+        // World Size world keeps the 1024 cells over its own span.
+        internal static float GridRadius => 10240f * (FatWorldSize.EdgeRadius / FatWorldSize.VanillaEdge);
 
         private static float[] s_ground;          // baked WG ground height
         private static float[] s_bedY;            // carved bed Y (MaxValue = no river)
@@ -94,6 +96,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var wg = WorldGenerator.instance;
             int gen = s_gen;
             var guards = new List<HydrologyGuards.Disc>(s_guards);
+            s_worldRadius = GridRadius;   // this world's span, read here on the main thread before the worker starts
             var t = new Thread(() => Build(wg, gen, guards)) { IsBackground = true, Name = "FiresVoxelHydrology" };
             t.Start();
         }
@@ -329,7 +332,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // ── Samplers (worker-safe once Ready; pure array reads) ─────────────
         // Bilinear carved-bed Y at a world position; MaxValue = no river here.
         //
-        // W2.1 EROSION DETAIL — the hydrology grid is 20m; raw bilinear gives
+        // EROSION DETAIL — the hydrology grid is 20m; raw bilinear gives
         // soft, straight-ish banks. Three deterministic noise terms restore
         // voxel-scale character:
         //   * DOMAIN WARP (±4m) — the sampled position wobbles, so the whole

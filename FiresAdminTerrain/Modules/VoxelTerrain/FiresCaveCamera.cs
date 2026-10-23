@@ -42,7 +42,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // LOW-HEADROOM PIN. In tight caves the vanilla spherecast can't fit a
         // camera behind the player, and the solve leaves the camera OUTSIDE
-        // the terrain looking at the mesh's dark underside (user screenshot)
+        // the terrain looking at the mesh's dark underside
         // instead of collapsing toward first person. If the eye is in a cave
         // and the solved position sits at/above the generated surface, the
         // camera doesn't belong there — pin it just behind the eye.

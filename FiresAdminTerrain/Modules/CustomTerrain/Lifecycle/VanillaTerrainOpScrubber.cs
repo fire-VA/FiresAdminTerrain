@@ -9,8 +9,8 @@ namespace VerdantsAscent.Terrain.Lifecycle
     // overlay + painted clutter + vanilla grass in the same radius so the
     // new vanilla paint shows clean.
     //
-    // User directive 2026-05-25: "vanilla / infinity hammer terrain ops like
-    // dirt and paved should clear our biome overlay and place their paint".
+    // Vanilla / Infinity Hammer terrain ops like dirt and paved clear our
+    // biome overlay and place their paint.
     //
     // Boundaries:
     //   * Does NOT touch our custom-tile data (TileBrush.BrushClear is for
@@ -59,7 +59,7 @@ namespace VerdantsAscent.Terrain.Lifecycle
         //   1. Legacy ClutterPaintTool fires a TerrainOp at world origin
         //      (0, ~50, 0) during player-spawn init. Without this guard the
         //      scrubber unnecessarily wipes any biome paint that happens to
-        //      live near (0,0,0). Visible in the user log 2026-05-25 as
+        //      live near (0,0,0). Visible in a log as
         //      two `Vanilla paint at (0.00, 50.00, 0.00)` lines back-to-back
         //      on every login.
         //   2. Vanilla heightmap init occasionally instantiates a no-op
@@ -91,7 +91,7 @@ namespace VerdantsAscent.Terrain.Lifecycle
         // command calls TerrainComp.DoOperation DIRECTLY on the matching
         // TerrainComp without instantiating a TerrainOp prefab. That bypasses
         // the TerrainOp.Awake postfix above, which is why IH paint operations
-        // didn't clear our biome overlay in the user's 2026-05-25 report.
+        // didn't clear our biome overlay.
         //
         // Hooking DoOperation catches:
         //   * WEC / IH `terrain paint=…` console paths (the common case here)

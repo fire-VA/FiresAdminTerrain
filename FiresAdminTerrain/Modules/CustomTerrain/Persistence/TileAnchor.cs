@@ -294,7 +294,7 @@ namespace VerdantsAscent.Terrain.Persistence
         //
         // Returns the wrote count from the callback (0 = no save).
         //
-        // 2026-05-26 round-41 — `deferRebuild` flag. When true, the ZDO
+        // `deferRebuild` flag. When true, the ZDO
         // write still happens (so data persists), but the per-tile mesh
         // rebuild is skipped. Brush ops use this so they can apply the
         // op to all overlapping tiles, stitch the borders, and THEN
@@ -482,7 +482,7 @@ namespace VerdantsAscent.Terrain.Persistence
             //   - WriteToZdo's Snapshot returns null arrays → codec rejects
             //     with "Heights must be length 4225" OR
             //   - NotifyMutated finds no TileMeshRenderer → warning, no render
-            // Caught in the log analysis 2026-05-24 — all 4 symptoms vanish
+            // All 4 symptoms vanish
             // once InitializeEmpty runs here.
             var go = new GameObject($"Tile_{TileXZ.x}_{TileXZ.y}");
             go.transform.SetParent(transform, worldPositionStays: false);
@@ -533,7 +533,7 @@ namespace VerdantsAscent.Terrain.Persistence
         //   * The spawned GameObject is missing the TileAnchor component
         public static TileAnchor Spawn(Vector2i tileXZ)
         {
-            // The 2D tile layer is retired (Fire, 2026-09-29: FAT's terrain tools are the voxel tools only; on voxel worlds
+            // The 2D tile layer is retired (FAT's terrain tools are the voxel tools only; on voxel worlds
             // its leftovers floated as "pixels of previous terrain"). No caller gets an anchor to create or edit; what a save
             // still holds is only there to be purged (TileAnchorHeal, mode Purge / fat_tile_purge).
             if (Retired) return null;
@@ -548,7 +548,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             // Only the server creates a tile's anchor. Every tile op reaches every peer (TileBrushRPC), and a de-dupe against
             // this peer's registry alone let the editor, the server and the bot each spawn one on a fresh tile before the
-            // others' ZDO arrived: the edits split across them and a reload kept one (R70, OPEN_BUGS #47). A client's edit on
+            // others' ZDO arrived: the edits split across them and a reload kept one. A client's edit on
             // a fresh tile lands through the server's anchor, which then replicates here.
             if (ZNet.instance != null && !ZNet.instance.IsServer())
             {

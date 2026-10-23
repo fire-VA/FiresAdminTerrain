@@ -7,7 +7,7 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // ── `fishwater_test <x> <z>`: the inland-water ecology contract ([lead] 10-01, for the unattended runner, which only
+    // ── `fishwater_test <x> <z>`: the inland-water ecology contract (for the unattended runner, which only
     // accepts "[F5 test]" commands). On demand: without x z every step SKIPs. Four steps, AdminToolsTest's lines:
     //   1 water   FAT inland water at least 1 m deep at the point (every source printed)
     //   2 clutter a grass patch centred there grows against that water, not vanilla's sea level
@@ -25,7 +25,7 @@ namespace VerdantsAscent.Terrain.Testing
         private const string ModVersion = global::VerdantsAscent.FiresAdminTerrain.PluginVersion;
         private const int Steps = 4;
         private const float EstimateSeconds = 15f;
-        // `near [radius]` (0.2.668): a find step first, then a teleport to the water it finds.
+        // `near [radius]`: a find step first, then a teleport to the water it finds.
         private const string NearWord = "near";
         private const float NearRadius = 600f, MaxNearRadius = 2000f, FindStep = 4f, NearEstimateSeconds = 90f;
         private const int ProbesPerFrame = 1500;
@@ -56,7 +56,7 @@ namespace VerdantsAscent.Terrain.Testing
             if (s_running) { Say($"{Tag} a run is already going."); return; }
             if (ZNet.instance == null || Player.m_localPlayer == null || ZoneSystem.instance == null) { Say($"{Tag} join a world first."); return; }
             // On demand only: a full fires_test_all calls every marker test without arguments, and this one would spawn a fish
-            // wherever the tester stands, or FAIL on dry land. Without x z every step SKIPs ([lead] 10-01, until FDT lists it
+            // wherever the tester stands, or FAIL on dry land. Without x z every step SKIPs (until FDT lists it
             // in OnDemandTests).
             if (args.Length == 0) { ZNet.instance.StartCoroutine(SkipAll()); return; }
             var inv = CultureInfo.InvariantCulture;
@@ -221,7 +221,7 @@ namespace VerdantsAscent.Terrain.Testing
                     Step("spawn", Fail, $"{chosen.Entry.m_name}: no new live fish after {SpawnSettleSeconds:0} s");
                 else
                 {
-                    // A spawned fish swims off at once (R32: 3.0 m in the 2 s wait), so the reach allows for it; it must
+                    // A spawned fish swims off at once (e.g. 3.0 m in the 2 s wait), so the reach allows for it; it must
                     // also be IN the water, which is the point of the test.
                     Vector3 f = found.transform.position;
                     bool inWater = !found.IsOutOfWater();

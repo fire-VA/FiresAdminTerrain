@@ -16,29 +16,116 @@ namespace VerdantsAscent.Terrain.Voxel
     internal sealed class FiresWorldProfile
     {
         internal const byte Version = 1;
+        // Version 2 = version 1 plus one byte at the end: island water off. Written only for a world that switched it off,
+        // so every other world keeps version 1 on the wire and older builds still read it.
+        private const byte VersionIslandWater = 2;
+        // Version 3 = version 2's layout with the island-water byte ALWAYS written, plus the world's size (four
+        // floats: radius, edge, stretch, biome stretch). Written only for a world whose recorded size is not vanilla, so a
+        // 10 km world keeps version 1 or 2 on the wire byte for byte. The writer picks the lowest version that carries what
+        // the world needs; the reader takes 1..3.
+        private const byte VersionWorldSize = 3;
+        // Version 4 (the admin "Super flat" build world) = version 3's layout (size always written) plus one
+        // byte: super flat. Written only for a super flat world; every other world keeps 1..3 on the wire byte for byte.
+        private const byte VersionSuperFlat = 4;
         internal const string CloneSourcePrefix = "clone of ";
 
         internal ProfileGenerator Generator;
         internal ProfileTerrain Terrain;
         internal bool ZoneMode;
         internal bool? SkyIslands, Hydrology, Caves;
+        internal bool? SkyIslandWater;   // null/true = islands get their ponds, rivers and falls; false = born dry
         internal string ImageBase = "", BiomeImage = "", VahcBase = "";
         internal string Source = "created";
         internal DateTime CreatedUtc = DateTime.UtcNow;
+        // The world's size (FatWorldSize): null = vanilla. Recorded once, from Expand World Size, when the world is
+        // created or first initialised by a server with EWS making a non-vanilla world; never changed afterwards.
+        internal float? WorldRadius, WorldEdge, WorldStretch, BiomeStretch;
+        // An admin build / test / blueprint world. Flat Meadows ground at y = SuperFlatHeight, 25% of the vanilla
+        // size, no locations, no vegetation or clutter, no spawning of any kind. Chosen once on the New World screen; never changes.
+        internal bool SuperFlat;
+        internal const float SuperFlatHeight = 50f;
+        internal const float SuperFlatRadius = 2500f, SuperFlatEdge = 2625f;
+
+        /// <summary>THE super flat profile - the New World toggle and the unattended -fat-new-superflat path both build it here.</summary>
+        internal static FiresWorldProfile NewSuperFlat(string source) => NewSuperFlat(source, ProfileTerrain.Heightmap, false, false);
+
+        // Super flat takes the terrain choice; sky islands + caves are optional toggles: Heightmap keeps the
+        // stock generator (patched flat by FatSuperFlat); Voxel wrap / Full voxel use the Fires generator, whose field is flat on a super
+        // flat world (FiresWorldGenBase's branch). Rivers and lakes stay off. Sky islands and caves only exist in voxel terrain.
+        internal static FiresWorldProfile NewSuperFlat(string source, ProfileTerrain terrain, bool skyIslands, bool caves)
+        {
+            bool voxel = terrain != ProfileTerrain.Heightmap;
+            var flat = new FiresWorldProfile
+            {
+                Generator = voxel ? ProfileGenerator.Fires : ProfileGenerator.Vanilla,
+                Terrain = terrain,
+                ZoneMode = false,
+                SkyIslands = voxel && skyIslands,
+                Hydrology = false,
+                Caves = voxel && caves,
+                SuperFlat = true,
+                Source = source,
+            };
+            flat.RecordSize(new FatWorldSize.Size { Radius = SuperFlatRadius, Edge = SuperFlatEdge, Stretch = 1f, BiomeStretch = 1f });
+            return flat;
+        }
+
+        // For unattended runs: `-fat-new-superflat <world>` on the SERVER. A world of that name with no profile
+        // and no save data is created super flat - the same profile the New World toggle writes - instead of being inferred from config.
+        internal const string NewSuperFlatArgument = "-fat-new-superflat";
+        internal static bool LaunchAsksSuperFlat(string worldName)
+        {
+            var args = Environment.GetCommandLineArgs();
+            int i = Array.IndexOf(args, NewSuperFlatArgument);
+            return i >= 0 && i + 1 < args.Length && string.Equals(args[i + 1], worldName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The current world is super flat (server: its file; client: the server's handshake profile).</summary>
+        internal static bool CurrentIsSuperFlat => s_current != null && s_current.SuperFlat;
+
+        internal bool HasRecordedSize => WorldRadius.HasValue && WorldEdge.HasValue && WorldStretch.HasValue && BiomeStretch.HasValue;
+
+        internal FatWorldSize.Size RecordedSize => new FatWorldSize.Size
+        {
+            Radius = WorldRadius ?? FatWorldSize.VanillaRadius,
+            Edge = WorldEdge ?? FatWorldSize.VanillaEdge,
+            Stretch = WorldStretch ?? 1f,
+            BiomeStretch = BiomeStretch ?? 1f,
+        };
+
+        internal void RecordSize(FatWorldSize.Size size)
+        {
+            WorldRadius = size.Radius;
+            WorldEdge = size.Edge;
+            WorldStretch = size.Stretch;
+            BiomeStretch = size.BiomeStretch;
+        }
+
+        private bool SizeIsNonVanilla => HasRecordedSize && !RecordedSize.IsVanilla;
 
         private static FiresWorldProfile s_current;
         private bool _fromFile;
 
         // Read from the world's own file and chosen for it (New World, a clone, a test's setup), not inferred from a
         // machine's config: such a profile says whether the world is one zone at a time, and the -fireszones launch flag
-        // never overrules it (R22 2026-09-28: the rig's flag turned a whole-world ATomTest into a zone-mode world).
+        // never overrules it (the launch flag once turned a whole-world test world into a zone-mode world).
         internal bool Chosen => _fromFile && Source != InferredSource && Source != FromRecordsSource;
 
         internal static FiresWorldProfile Current => s_current;
 
-        internal static void Set(FiresWorldProfile profile) => s_current = profile;
+        // Every change of the current profile re-reads the world's size: a client's comes from the server's
+        // handshake profile here, never from its own Expand World Size config.
+        internal static void Set(FiresWorldProfile profile)
+        {
+            s_current = profile;
+            FatWorldSize.Refresh();
+        }
 
-        internal static void Clear() => s_current = null;
+        internal static void Clear()
+        {
+            s_current = null;
+            FatWorldSize.Refresh();
+        }
 
         internal bool IsClone => Source != null && Source.StartsWith(CloneSourcePrefix, StringComparison.Ordinal);
 
@@ -46,7 +133,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Why a world could not be built this way, or null. The Fires generator runs only on voxel terrain. One zone at a
         // time runs on either generator: the Fires generator's own samplers ask the zone gate first (ZoneModeGate.
-        // SamplerSeesClosed), so its far view, map, water and voxel ground keep closed zones as sea (Fire, 2026-09-27).
+        // SamplerSeesClosed), so its far view, map, water and voxel ground keep closed zones as sea.
         //
         // VANILLA + FULL VOXEL IS LEGAL, and is how an existing world is converted: the vanilla heightmap sets the
         // ground and the voxel field is built from it, then the river carve, caves and sky islands run on that data.
@@ -121,18 +208,28 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static void OnWorldInitialize(World world)
         {
             s_current = null;
+            FatWorldSize.Refresh();   // never the previous world's size; a client's arrives with the handshake (Set)
             if (world == null || world.m_menu) return;
             var net = ZNet.instance;
             if (net == null || !net.IsServer()) return;
             s_current = Read(world.m_name);
             if (s_current != null)
             {
+                // A profile written before FAT knew world sizes takes Expand World Size's (once, if EWS makes a
+                // non-vanilla world); one that recorded a size keeps it and names a differing EWS config.
+                // New World writes the profile before the first save, so "existing" means the world has save data.
+                if (FatWorldSize.RecordFromExpandWorldSize(s_current, world.m_name, existingWorld: !Zones.ZoneModeRegistry.IsNeverSaved(world)))
+                    s_current.Write(world.m_name);
+                FatWorldSize.Refresh();
                 FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' profile: {s_current.Describe()}.");
                 return;
             }
 
             bool neverSaved = Zones.ZoneModeRegistry.IsNeverSaved(world);
-            s_current = neverSaved ? Infer(world.m_name, configMayChooseTheGenerator: true) : FromWorldRecords(world.m_name);
+            s_current = neverSaved && LaunchAsksSuperFlat(world.m_name) ? NewSuperFlat("created (" + NewSuperFlatArgument + ")")
+                : neverSaved ? Infer(world.m_name, configMayChooseTheGenerator: true) : FromWorldRecords(world.m_name);
+            FatWorldSize.RecordFromExpandWorldSize(s_current, world.m_name, existingWorld: !neverSaved);
+            FatWorldSize.Refresh();
             FiresLogger.LogInfo(neverSaved
                 ? $"[FiresWorldGen] world '{world.m_name}' has no profile and no save data, so it is being created: this "
                     + $"machine's config decides it, once - {s_current.Describe()}."
@@ -170,15 +267,15 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal string Describe()
             => $"{Generator} generation, {Terrain} terrain" + (ZoneMode ? ", one zone at a time" : "")
-               + Flag("sky islands", SkyIslands) + Flag("rivers & lakes", Hydrology) + Flag("caves", Caves)
-               + (Generator == ProfileGenerator.Image ? $", image '{ImageBase}'" : "") + $" ({Source})";
+               + Flag("sky islands", SkyIslands) + Flag("water on sky islands", SkyIslandWater) + Flag("rivers & lakes", Hydrology) + Flag("caves", Caves)
+               + (Generator == ProfileGenerator.Image ? $", image '{ImageBase}'" : "")
+               + (SizeIsNonVanilla ? $", world {RecordedSize}" : "") + (SuperFlat ? ", SUPER FLAT (admin build world)" : "") + $" ({Source})";
 
         private static string Flag(string name, bool? value) => value.HasValue ? $", {name} {(value.Value ? "on" : "off")}" : "";
 
         internal static string PathFor(string worldName)
         {
-            string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + ".profile");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(worldName, ".profile");
         }
 
         internal static bool Exists(string worldName) => File.Exists(PathFor(worldName));
@@ -189,13 +286,14 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 string path = PathFor(worldName);
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                FiresCore.IO.AtomicFile.WriteAllText(path, string.Join(Environment.NewLine, new List<string>
+                var lines = new List<string>
                 {
                     $"version={Version}",
                     $"generator={Generator.ToString().ToLowerInvariant()}",
                     $"terrain={Terrain.ToString().ToLowerInvariant()}",
                     $"zonemode={(ZoneMode ? "true" : "false")}",
                     $"skyislands={Tri(SkyIslands)}",
+                    $"skyislandwater={Tri(SkyIslandWater)}",
                     $"hydrology={Tri(Hydrology)}",
                     $"caves={Tri(Caves)}",
                     $"imagebase={ImageBase}",
@@ -203,7 +301,17 @@ namespace VerdantsAscent.Terrain.Voxel
                     $"vahcbase={VahcBase}",
                     $"source={Source}",
                     $"created={CreatedUtc.ToString("O", CultureInfo.InvariantCulture)}",
-                }) + Environment.NewLine);
+                };
+                if (SuperFlat) lines.Add("superflat=true");   // Only on a super flat world (every other file stays as it was)
+                // The world's size, only when it is not vanilla (a 10 km world's file stays as it was).
+                if (SizeIsNonVanilla)
+                {
+                    lines.Add($"worldradius={WorldRadius.Value.ToString("R", CultureInfo.InvariantCulture)}");
+                    lines.Add($"worldedge={WorldEdge.Value.ToString("R", CultureInfo.InvariantCulture)}");
+                    lines.Add($"worldstretch={WorldStretch.Value.ToString("R", CultureInfo.InvariantCulture)}");
+                    lines.Add($"biomestretch={BiomeStretch.Value.ToString("R", CultureInfo.InvariantCulture)}");
+                }
+                FiresCore.IO.AtomicFile.WriteAllText(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
                 return true;
             }
             catch (Exception ex)
@@ -232,12 +340,18 @@ namespace VerdantsAscent.Terrain.Voxel
                         case "terrain": profile.Terrain = ParseEnum(value, ProfileTerrain.Heightmap); break;
                         case "zonemode": profile.ZoneMode = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;
                         case "skyislands": profile.SkyIslands = ParseTri(value); break;
+                        case "skyislandwater": profile.SkyIslandWater = ParseTri(value); break;
                         case "hydrology": profile.Hydrology = ParseTri(value); break;
                         case "caves": profile.Caves = ParseTri(value); break;
                         case "imagebase": profile.ImageBase = value; break;
                         case "biomeimage": profile.BiomeImage = value; break;
                         case "vahcbase": profile.VahcBase = value; break;
                         case "source": profile.Source = value; break;
+                        case "worldradius": profile.WorldRadius = ParseSize(value); break;
+                        case "worldedge": profile.WorldEdge = ParseSize(value); break;
+                        case "worldstretch": profile.WorldStretch = ParseSize(value); break;
+                        case "biomestretch": profile.BiomeStretch = ParseSize(value); break;
+                        case "superflat": profile.SuperFlat = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;
                         case "created":
                             if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var created))
                                 profile.CreatedUtc = created;
@@ -255,6 +369,11 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static string Tri(bool? value) => value.HasValue ? (value.Value ? "true" : "false") : "default";
 
+        // A missing, unreadable or non-positive size reads as no size (vanilla), never as a guess.
+        private static float? ParseSize(string value)
+            => float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed) && parsed > 0f && !float.IsInfinity(parsed)
+                ? parsed : (float?)null;
+
         private static bool? ParseTri(string value)
         {
             if (value.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;
@@ -268,7 +387,10 @@ namespace VerdantsAscent.Terrain.Voxel
         // ── Handshake ───────────────────────────────────────────────────────
         internal void Write(ZPackage pkg)
         {
-            pkg.Write(Version);
+            bool dryIslands = SkyIslandWater == false;
+            bool sized = SizeIsNonVanilla;
+            byte version = SuperFlat && HasRecordedSize ? VersionSuperFlat : sized ? VersionWorldSize : dryIslands ? VersionIslandWater : Version;
+            pkg.Write(version);
             pkg.Write((byte)Generator);
             pkg.Write((byte)Terrain);
             pkg.Write(ZoneMode);
@@ -279,13 +401,23 @@ namespace VerdantsAscent.Terrain.Voxel
             pkg.Write(BiomeImage ?? "");
             pkg.Write(VahcBase ?? "");
             pkg.Write(Source ?? "");
+            if (version >= VersionIslandWater) pkg.Write(TriByte(SkyIslandWater));
+            if (version >= VersionWorldSize)
+            {
+                pkg.Write(WorldRadius.Value);
+                pkg.Write(WorldEdge.Value);
+                pkg.Write(WorldStretch.Value);
+                pkg.Write(BiomeStretch.Value);
+            }
+            if (version >= VersionSuperFlat) pkg.Write(SuperFlat);
         }
 
         internal static FiresWorldProfile Read(ZPackage pkg)
         {
             byte version = pkg.ReadByte();
-            if (version != Version) throw new InvalidDataException($"world profile version {version}, this build reads {Version}");
-            return new FiresWorldProfile
+            if (version < Version || version > VersionSuperFlat)
+                throw new InvalidDataException($"world profile version {version}, this build reads {Version}-{VersionSuperFlat}");
+            var profile = new FiresWorldProfile
             {
                 Generator = (ProfileGenerator)pkg.ReadByte(),
                 Terrain = (ProfileTerrain)pkg.ReadByte(),
@@ -298,6 +430,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 VahcBase = pkg.ReadString(),
                 Source = pkg.ReadString(),
             };
+            if (version >= VersionIslandWater) profile.SkyIslandWater = TriFrom(pkg.ReadByte());
+            if (version >= VersionWorldSize)
+            {
+                profile.WorldRadius = pkg.ReadSingle();
+                profile.WorldEdge = pkg.ReadSingle();
+                profile.WorldStretch = pkg.ReadSingle();
+                profile.BiomeStretch = pkg.ReadSingle();
+            }
+            if (version >= VersionSuperFlat) profile.SuperFlat = pkg.ReadBool();
+            return profile;
         }
 
         private static byte TriByte(bool? value) => value.HasValue ? (value.Value ? (byte)1 : (byte)2) : (byte)0;

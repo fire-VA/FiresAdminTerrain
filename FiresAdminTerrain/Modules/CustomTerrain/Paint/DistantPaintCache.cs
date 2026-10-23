@@ -55,6 +55,15 @@ namespace VerdantsAscent.Terrain.Paint
         private static float s_nextFlush;
         // Vanilla TerrainLod heightmaps we've injected into — texture reused across re-Regenerates.
         private static readonly Dictionary<Heightmap, Texture2D> s_injected = new Dictionary<Heightmap, Texture2D>();
+
+        // Memory line: cached zone pixels (managed) and injected LOD textures (native, counted by size).
+        internal static void MemoryReport(out int zones, out long pixelBytes, out int injected, out long textureBytes)
+        {
+            zones = s_cache.Count; pixelBytes = 0;
+            foreach (var e in s_cache.Values) if (e != null && e.Pixels != null) pixelBytes += e.Pixels.Length * 4L;
+            injected = s_injected.Count; textureBytes = 0;
+            foreach (var t in s_injected.Values) if (t != null) textureBytes += (long)t.width * t.height * 4L;
+        }
         // TerrainLod heightmaps that regenerated before the worldgen water field
         // was queryable — binding then would freeze a wet-free horizon (the
         // near-field stamp's load-window lesson). Retried from VanillaLodSweep.
@@ -69,12 +78,13 @@ namespace VerdantsAscent.Terrain.Paint
 
         public static void Bind(ConfigFile config)
         {
-            s_enabled = config.Bind("07 - Distant Paint", "01 Enabled", true,
+            s_enabled = config.Bind("02 - Terrain", "02 Distant paint", true,   // Was [07 - Distant Paint] 01 Enabled
                 "Show terrain PAINT (paved/cultivated/dirt — e.g. carved river beds and the worldgen river "
                 + "shore sand) on the distant low-LOD terrain beyond the loaded zones. Player paint is cached "
                 + "per zone as zones load and persisted per world; the worldgen shore band is computed "
                 + "directly, so rivers keep their beds out to the horizon even where you've never been. "
                 + "Off = vanilla (paint pops out at the loaded-zone edge).");
+            FatConfigRetire.Move(config, "07 - Distant Paint", "01 Enabled", s_enabled);
         }
 
         private static bool Active =>
@@ -236,10 +246,34 @@ namespace VerdantsAscent.Terrain.Paint
             mat.SetTexture(s_propClearedMask, tex);
         }
 
+        // A TerrainLod heightmap that is destroyed used to leave its injected texture behind
+        // (native memory, one per LOD rebuild across teleports). Every 10 s the dead heightmaps' textures are destroyed;
+        // a world change (now) does the same at once. Live heightmaps keep their texture and binding, as before.
+        private static float s_nextInjectedPrune;
+        private static readonly List<Heightmap> s_deadInjected = new List<Heightmap>();
+
+        private static void PruneInjected(bool now)
+        {
+            if (!now && Time.time < s_nextInjectedPrune) return;
+            s_nextInjectedPrune = Time.time + 10f;
+            s_deadInjected.Clear();
+            foreach (var kv in s_injected) if (kv.Key == null) s_deadInjected.Add(kv.Key);
+            for (int i = 0; i < s_deadInjected.Count; i++)
+            {
+                var hm = s_deadInjected[i];
+                if (s_injected.TryGetValue(hm, out Texture2D tex) && tex != null) UnityEngine.Object.Destroy(tex);
+                s_injected.Remove(hm);
+            }
+            if (s_deadInjected.Count > 0)
+                FiresLogger.LogDebug($"[DistantPaintCache] released {s_deadInjected.Count} injected texture(s) of destroyed LOD heightmaps ({s_injected.Count} live)");
+            s_deadInjected.Clear();
+        }
+
         // Ticked from VoxelZoneStreamer — re-runs TerrainLod tiles that built
         // before the water field was ready, once it is.
         internal static void VanillaLodSweep()
         {
+            PruneInjected(false);
             if (s_lodPending.Count == 0) return;
             if (!FiresWorldGenBase.Active) { s_lodPending.Clear(); return; }
             if (!FiresWorldGenBase.WaterSurfaceReady || !Active) return;
@@ -265,7 +299,7 @@ namespace VerdantsAscent.Terrain.Paint
                 World world = null;
                 if (ZNet.instance != null) world = ZNet.World;
                 if (world == null || string.IsNullOrEmpty(world.m_name)) return null;
-                string dir = Path.Combine(BepInEx.Paths.ConfigPath, "FiresDistantPaint");
+                string dir = global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "DistantPaint");   // Out of config
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 return Path.Combine(dir, world.m_name + ".fdp");
             }
@@ -277,7 +311,7 @@ namespace VerdantsAscent.Terrain.Paint
             string path = ResolvePath();
             if (path == null || path == s_loadedPath) return;
             s_cache.Clear();
-            s_injected.Clear();
+            PruneInjected(true);
             s_lodPending.Clear();
             s_dirty = false;
             s_loadedPath = path;

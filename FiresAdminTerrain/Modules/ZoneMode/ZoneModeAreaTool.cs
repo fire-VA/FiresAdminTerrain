@@ -2,10 +2,10 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The Chaos Hammer's "Save an area" ring (Fire, 2026-09-27: mouse wheel on the ring like Infinity Hammer, then the
-    // popup). While the tool is selected an upright cylinder follows the point the admin looks at: the wheel sizes its
-    // radius, Shift+wheel moves its top and Ctrl+wheel its bottom, both measured from the aimed point. The swing then
-    // opens the save popup with these numbers, editable. Camera zoom stands down while it is selected
+    // The Chaos Hammer's "Save an area" ring (sized with the mouse wheel like Infinity Hammer, then the save
+    // window). While the tool is selected an upright cylinder follows the point the admin looks at: the wheel sizes its
+    // radius and Shift+wheel its height above and below the aimed point. The swing then
+    // opens the save window with these numbers, editable. Camera zoom stands down while it is selected
     // (VoxelToolPieces' scroll patch asks WantsWheel). The Paint entries share it as a single flat ring whose radius the
     // wheel sets.
     internal sealed class ZoneModeAreaTool : MonoBehaviour
@@ -88,6 +88,13 @@ namespace VerdantsAscent.Terrain.Zones
         private void Update()
         {
             var player = Player.m_localPlayer;
+            if (ZoneModeChunkTools.TryGetZoneTool(player, out string zoneAction, out bool zoneArea) && TryGetAim(out var zoneAim))
+            {
+                DrawZone(player, zoneAim, zoneAction, zoneArea);
+                return;
+            }
+            m_lastZoneMessage = null;
+            if (m_zone != null) m_zone.gameObject.SetActive(false);
             if (!WantsWheel(player) || !TryGetAim(out var aim))
             {
                 if (m_root != null) m_root.SetActive(false);
@@ -105,7 +112,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void ReadPaintWheel(Player player)
         {
-            float wheel = Input.mouseScrollDelta.y;
+            float wheel = VerdantsAscent.Terrain.FatInput.CtrlHeld || VerdantsAscent.Terrain.FatInput.AltHeld ? 0f : VerdantsAscent.Terrain.FatInput.WheelNotches();   // as Core RadiusWheel
             if (Mathf.Approximately(wheel, 0f)) return;
             s_paintRadius = Mathf.Clamp(s_paintRadius + Mathf.Sign(wheel) * RadiusStep, BiomePaint.MinRadius, BiomePaint.MaxRadius);
             player.Message(MessageHud.MessageType.TopLeft, $"Paint: radius {PaintRadius} m");
@@ -116,6 +123,7 @@ namespace VerdantsAscent.Terrain.Zones
             EnsureLines();
             m_root.SetActive(true);
             var centre = new Vector3(Mathf.Round(aim.x), 0f, Mathf.Round(aim.z));
+            m_top.gameObject.SetActive(true);   // the zone highlight hides it
             m_top.startColor = m_top.endColor = PaintColor;
             Circle(m_top, centre, PaintRadius, aim.y + PaintLift);
             m_bottom.gameObject.SetActive(false);
@@ -124,25 +132,30 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void ReadWheel()
         {
-            float wheel = Input.mouseScrollDelta.y;
+            float wheel = VerdantsAscent.Terrain.FatInput.CtrlHeld || VerdantsAscent.Terrain.FatInput.AltHeld ? 0f : VerdantsAscent.Terrain.FatInput.WheelNotches();   // as Core RadiusWheel
             if (Mathf.Approximately(wheel, 0f)) return;
             float sign = Mathf.Sign(wheel);
-            if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
-                s_above = Mathf.Clamp(s_above + sign * HeightStep, MinHeight, ZoneModeAreaBlueprint.MaxSpan);
-            else if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))
-                s_below = Mathf.Clamp(s_below + sign * HeightStep, MinHeight, ZoneModeAreaBlueprint.MaxSpan);
+            // Like every radius tool: wheel = radius, Shift+wheel = ONE height, reaching that far above AND below the aim.
+            // The save window can still type the two separately.
+            if (VerdantsAscent.Terrain.FatInput.ShiftHeld)
+            {
+                float height = Mathf.Clamp(Mathf.Max(s_above, s_below) + sign * HeightStep, MinHeight, ZoneModeAreaBlueprint.MaxSpan);
+                s_above = s_below = height;
+            }
             else
                 s_radius = Mathf.Clamp(s_radius + sign * RadiusStep, ZoneModeAreaBlueprint.MinRadius, ZoneModeAreaBlueprint.MaxRadius);
             var player = Player.m_localPlayer;
             if (player != null)
-                player.Message(MessageHud.MessageType.TopLeft,
-                    $"Area: radius {Radius} m, {Mathf.RoundToInt(s_below)} m below to {Mathf.RoundToInt(s_above)} m above the aim");
+                player.Message(MessageHud.MessageType.TopLeft, Mathf.Approximately(s_above, s_below)
+                    ? $"Area: radius {Radius} m, height {Mathf.RoundToInt(s_above)} m above and below the aim"
+                    : $"Area: radius {Radius} m, {Mathf.RoundToInt(s_below)} m below to {Mathf.RoundToInt(s_above)} m above the aim");
         }
 
         private void Draw(Vector3 aim)
         {
             EnsureLines();
             m_root.SetActive(true);
+            m_top.gameObject.SetActive(true);   // the zone highlight hides it
             m_top.startColor = m_top.endColor = TopColor;
             m_bottom.gameObject.SetActive(true);
             foreach (var post in m_posts) post.gameObject.SetActive(true);
@@ -157,6 +170,83 @@ namespace VerdantsAscent.Terrain.Zones
                 m_posts[i].SetPosition(0, foot + Vector3.up * bottom);
                 m_posts[i].SetPosition(1, foot + Vector3.up * top);
             }
+        }
+
+        // ── The aimed zone's outline for the chunk tools ─────────────────────────────────────────────────────
+        // A 64 x 64 square (3 x 3 zones for Close area) following the ground along its edges, green when the swing would go
+        // through and red when it would be refused for a reason this client can see (the server still decides: it alone
+        // knows tombstones). The reason shows top-left when the zone or the verdict changes.
+        private const int ZoneEdgePoints = 24;
+        private const float ZoneLift = 0.6f;
+        private static readonly Color ZoneGo = new Color(0.4f, 1f, 0.45f, 0.95f);
+        private static readonly Color ZoneRefused = new Color(1f, 0.3f, 0.25f, 0.95f);
+        private LineRenderer m_zone;
+        private string m_lastZoneMessage;
+
+        private void DrawZone(Player player, Vector3 aim, string action, bool area)
+        {
+            EnsureLines();
+            m_root.SetActive(true);
+            m_top.gameObject.SetActive(false);
+            m_bottom.gameObject.SetActive(false);
+            foreach (var post in m_posts) post.gameObject.SetActive(false);
+            m_zone.gameObject.SetActive(true);
+
+            var zone = ZoneSystem.GetZone(aim);
+            string why = PredictRefusal(action, zone, player);
+            m_zone.startColor = m_zone.endColor = why == null ? ZoneGo : ZoneRefused;
+            Vector3 centre = ZoneSystem.GetZonePos(zone);
+            float half = ZoneSystem.c_ZoneSizeHalf * (area ? 3f : 1f);
+            var corners = new[]
+            {
+                new Vector2(centre.x - half, centre.z - half), new Vector2(centre.x + half, centre.z - half),
+                new Vector2(centre.x + half, centre.z + half), new Vector2(centre.x - half, centre.z + half),
+            };
+            int i = 0;
+            for (int edge = 0; edge < 4; edge++)
+            {
+                var a = corners[edge];
+                var b = corners[(edge + 1) % 4];
+                for (int k = 0; k < ZoneEdgePoints; k++, i++)
+                {
+                    var p = Vector2.Lerp(a, b, k / (float)ZoneEdgePoints);
+                    float ground = ZoneSystem.instance != null ? ZoneSystem.instance.GetGroundHeight(new Vector3(p.x, 0f, p.y)) : WaterLevel;
+                    m_zone.SetPosition(i, new Vector3(p.x, Mathf.Max(ground, WaterLevel) + ZoneLift, p.y));
+                }
+            }
+
+            string message = why == null
+                ? $"{action} {(area ? "the 3x3 round " : "chunk ")}({zone.x},{zone.y})"
+                : $"{action} ({zone.x},{zone.y}): no, {why}";
+            if (message != m_lastZoneMessage)
+            {
+                m_lastZoneMessage = message;
+                player.Message(MessageHud.MessageType.TopLeft, message, 0, null, false);
+            }
+        }
+
+        // The refusals this peer can predict, worded as the server words them.
+        private static string PredictRefusal(string action, Vector2s zone, Player player)
+        {
+            if (!ZoneModeRegistry.ModeActive) return "this world is not one zone at a time";
+            if (!ZoneOpenSet.InRange(zone.x, zone.y)) return "it is beyond the zone grid";
+            bool open = ZoneModeRegistry.IsOpen(zone);
+            switch (action)
+            {
+                case "Open": return open ? "it is open already" : null;
+                case "Take back": return open ? null : "it is closed, there is nothing to take back";
+            }
+            if (!open) return "it is not open";
+            Vector3 centre = ZoneSystem.GetZonePos(zone);
+            foreach (var other in Player.GetAllPlayers())
+            {
+                if (other == null) continue;
+                Vector3 p = other.transform.position;
+                if (Mathf.Max(0f, Mathf.Abs(p.x - centre.x) - ZoneSystem.c_ZoneSizeHalf) <= ZoneModePark.ClosePlayerClearance
+                    && Mathf.Max(0f, Mathf.Abs(p.z - centre.z) - ZoneSystem.c_ZoneSizeHalf) <= ZoneModePark.ClosePlayerClearance)
+                    return $"{other.GetPlayerName()} is within {ZoneModePark.ClosePlayerClearance:0} m";
+            }
+            return null;
         }
 
         private static void Circle(LineRenderer line, Vector3 centre, float radius, float height)
@@ -178,6 +268,7 @@ namespace VerdantsAscent.Terrain.Zones
             m_bottom = Line("bottom", material, BottomColor, RingSegments, true);
             m_posts = new LineRenderer[Posts];
             for (int i = 0; i < Posts; i++) m_posts[i] = Line("post", material, TopColor, 2, false);
+            m_zone = Line("zone", material, ZoneGo, ZoneEdgePoints * 4, true);
         }
 
         private LineRenderer Line(string name, Material material, Color color, int points, bool loop)

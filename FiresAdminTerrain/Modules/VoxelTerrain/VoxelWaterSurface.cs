@@ -17,8 +17,15 @@ namespace VerdantsAscent.Terrain.Voxel
         // in lockstep with the shader — the visual roll wasn't seam-safe and
         // broke the river mesh, so physics must not bob either. FlowWaveY kept
         // for the seam-safe re-approach.)
+        private const float ShaftBedMargin = 0.3f;
+
         public static float SurfaceAt(Vector3 pos)
         {
+            // A player was still swimming in mid-air 7.6 m under the river bed in a big sinkhole's shaft: the swim checks
+            // (CustomWaterPatches.GetValidWaterLevelForCharacter: InWater / IsSwimming / GetLiquidLevel) read THIS, not
+            // CustomWaterManager.GetWaterLevelAt where the floor is applied. Inside a big shaft below the river bed, the
+            // river is not this point's water (the pond's own sheet is).
+            if (FatSinkFallCuts.BelowShaftBed(pos, ShaftBedMargin)) return -10000f;
             return SurfaceAtBase(pos);
         }
 
@@ -51,7 +58,67 @@ namespace VerdantsAscent.Terrain.Voxel
             return (swell + chop) * amp * spd01;
         }
 
-        private static float SurfaceAtBase(Vector3 pos)
+        // `fat_swim_probe <x> <z> [y]` (admin, read-only; for swimming below the drawn surface): at a point, the swim/float level
+        // the OLD way (stored columns), the sheet-following way, the drawn sheet itself, their delta, and the switch, so the fix is
+        // chosen on numbers. y defaults to the player's height (the layer scan reaches one layer above it).
+        internal static void RegisterSwimProbe()
+        {
+            new Terminal.ConsoleCommand("fat_swim_probe",
+                "<x> <z> [y] - generated water at a point: the old swim level, the drawn sheet's level, the delta (read-only)",
+                args =>
+                {
+                    var inv = System.Globalization.CultureInfo.InvariantCulture;
+                    if (args.Length < 3 || !float.TryParse(args[1], System.Globalization.NumberStyles.Float, inv, out float x)
+                        || !float.TryParse(args[2], System.Globalization.NumberStyles.Float, inv, out float z))
+                    { args.Context?.AddString("fat_swim_probe <x> <z> [y]"); return; }
+                    float y = args.Length > 3 && float.TryParse(args[3], System.Globalization.NumberStyles.Float, inv, out float yy) ? yy
+                        : (Player.m_localPlayer != null ? Player.m_localPlayer.transform.position.y : 40f);
+                    var p = new Vector3(x, y, z);
+                    float oldLevel = SurfaceAtBase(p, false), sheetLevel = SurfaceAtBase(p, true);
+                    int cx = Mathf.FloorToInt(x / VoxelChunk.CELLS), cz = Mathf.FloorToInt(z / VoxelChunk.CELLS);
+                    float lxf = x - cx * VoxelChunk.CELLS, lzf = z - cz * VoxelChunk.CELLS;
+                    int lx = Mathf.FloorToInt(lxf), lz = Mathf.FloorToInt(lzf);
+                    string drawn = "no sheet cell here (edge, dry or no sheet)";
+                    for (int ky = -2; ky <= 12; ky++)
+                        if (SheetSurfaceAt(new Vector3Int(cx, ky, cz), lx, lz, lxf - lx, lzf - lz, out float d))
+                        { drawn = string.Format(inv, "{0:0.000} (chunk ({1},{2},{3}))", d, cx, ky, cz); break; }
+                    bool on = FiresVoxelConfig.SwimFollowsDrawnWater != null && FiresVoxelConfig.SwimFollowsDrawnWater.Value;
+                    string line = string.Format(inv,
+                        "[FatSwimProbe] ({0:0.0},{1:0.0},{2:0.0}): swim level OLD (stored columns) {3}, SHEET-following {4}, drawn sheet {5}; delta sheet-old {6}; " +
+                        "in use: {7} ([Voxel Terrain] Swim level follows the drawn water = {8})",
+                        x, y, z, Fmt(oldLevel), Fmt(sheetLevel), drawn,
+                        oldLevel > -9999f && sheetLevel > -9999f ? (sheetLevel - oldLevel).ToString("+0.000;-0.000;0.000", inv) + " m" : "n/a",
+                        on ? "SHEET-following" : "OLD", on);
+                    FiresLogger.LogInfo(line);
+                    args.Context?.AddString(line);
+                },
+                isCheat: true);
+        }
+
+        private static string Fmt(float v) => v <= -9999f ? "none" : v.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+
+        // The drawn sheet's surface in a chunk cell, from the view's captured smoothed corners; false at the sheet's edge
+        // (any corner dry or frozen) or when the chunk has no sheet. Used by the trigger (switch) and the point probe (always).
+        internal static bool SheetSurfaceAt(Vector3Int key, int lx, int lz, float fx, float fz, out float level)
+        {
+            level = 0f;
+            if (!VoxelWorld.TryGetView(key, out var view) || view == null) return false;
+            var h = view.SheetCornerH;
+            if (h == null) return false;
+            int n = VoxelChunk.CELLS + 1;
+            if (lx < 0 || lz < 0 || lx + 1 >= n || lz + 1 >= n) return false;
+            float h00 = h[lx + n * lz], h10 = h[lx + 1 + n * lz], h01 = h[lx + n * (lz + 1)], h11 = h[lx + 1 + n * (lz + 1)];
+            if (h00 <= 0f || h10 <= 0f || h01 <= 0f || h11 <= 0f) return false;
+            float bx = key.x * VoxelChunk.CELLS, bz = key.z * VoxelChunk.CELLS;
+            if (FrozenAt(bx + lx, bz + lz) || FrozenAt(bx + lx + 1, bz + lz) || FrozenAt(bx + lx, bz + lz + 1) || FrozenAt(bx + lx + 1, bz + lz + 1)) return false;
+            level = h00 * (1f - fx) * (1f - fz) + h10 * fx * (1f - fz) + h01 * (1f - fx) * fz + h11 * fx * fz;
+            return true;
+        }
+
+        private static float SurfaceAtBase(Vector3 pos) => SurfaceAtBase(pos, FiresVoxelConfig.SwimFollowsDrawnWater != null && FiresVoxelConfig.SwimFollowsDrawnWater.Value);
+
+        // useSheet explicit, so fat_swim_probe can read the old trigger and the sheet-following one at the same point.
+        internal static float SurfaceAtBase(Vector3 pos, bool useSheet)
         {
             if (FiresVoxelConfig.LegacyMeshWater != null && FiresVoxelConfig.LegacyMeshWater.Value)
                 return VoxelGenWaterMesh.SurfaceAt(pos);
@@ -75,10 +142,27 @@ namespace VerdantsAscent.Terrain.Voxel
             // spreads water on the layer it touched, the others keep baseline.
             // Scan the whole stack and keep the best answer.
             float surface = -10000f;
-            for (int ky = -2; ky <= 7; ky++)
+            // Water on the sky islands: the scan stopped at ky 7 (y 256), so a sky island's stored
+            // pond at y 600 was never water to swimmers or FatWaterChecks. It now reaches the layer just above the asker and
+            // no higher: water stored in an island's layers counts for someone up there, never for someone on the ground
+            // below. Below y 224 the scan is exactly the old one.
+            int kyTop = Mathf.Max(7, Mathf.FloorToInt(pos.y / VoxelChunk.CELLS) + 1);
+            for (int ky = -2; ky <= kyTop; ky++)
             {
                 if (!VoxelWorld.TryGetChunk(new Vector3Int(cx, ky, cz), out var ch)
                     || ch == null || !ch.TryGetWater3x3(lx, lz, s_nine)) continue;
+
+                // Swimming with the drawn surface well above the player ([Voxel Terrain] "Swim level follows
+                // the drawn water", default OFF): inside the sheet (all four corners wet), read the SAME smoothed corner heights
+                // the sheet was drawn from (VoxelChunkView.SheetCornerH, captured after BuildSheet's smoothing), not the stored
+                // columns: those differ by the smoothing, and by a whole reach step where the old rule took the wet MIN. At the
+                // edge (any dry corner) the old stored-column rule below still runs.
+                if (useSheet
+                    && SheetSurfaceAt(new Vector3Int(cx, ky, cz), lx, lz, fx, fz, out float drawn))
+                {
+                    if (drawn > surface) surface = drawn;
+                    continue;
+                }
 
                 // CLAMPED TO THE MESH. The sheet's quads interpolate linearly
                 // between the stored corner levels with dry corners taking the

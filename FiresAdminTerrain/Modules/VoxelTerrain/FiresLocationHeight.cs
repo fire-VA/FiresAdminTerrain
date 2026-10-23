@@ -48,6 +48,9 @@ namespace VerdantsAscent.Terrain.Voxel
             // this line, and the log said so plainly the whole time:
             //   location 'Runestone_Greydwarfs' at (1233,555): incoming y=31.3,
             //   generated surface=37.1, delta=-5.8m — corrected.
+            // A NEW placement may go into the cave under its spot (FatUndergroundLocations), and a placement already
+            // underground (a saved one, a proxy's respawn) keeps its depth: neither is ever snapped to the surface.
+            if (FatUndergroundLocations.TryPlace(location, ref pos)) { FatUndergroundLocations.BeforeSpawn(location, pos); return; }
             if (FiresWorldGenBase.LoadedFaithful) return;
 
             float y = FiresWorldGenBase.SampleFinalMeters(pos.x, pos.z);

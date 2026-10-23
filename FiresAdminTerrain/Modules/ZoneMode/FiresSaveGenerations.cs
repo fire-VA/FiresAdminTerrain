@@ -13,9 +13,9 @@ namespace VerdantsAscent.Terrain.Zones
     // "_main.9", and "_main.9." before "_main.90"), so it can pick a torn meta that fails to load (a dedicated server then
     // creates a NEW world under the name) or bring back a stale generation many saves later. (Vanilla 1.0.15 instead keeps the
     // newest generation with all four main files at its first save lookup and DELETES the rest, so FiresWorldLoadGuard sorts
-    // before that lookup: crash series 2026-09-29, OPEN_BUGS #44.) This keeps one generation: the
+    // before that lookup.) This keeps one generation: the
     // newest complete one. The other generations' main files, and copies of chunk files written after the kept meta, go into a
-    // snapshot folder, so nothing is lost. Tools\SAVE_SAFETY_AUDIT.md
+    // snapshot folder, so nothing is lost.
     internal static class FiresSaveGenerations
     {
         private static readonly Regex MainFile = new Regex(@"^_main\.(\d+)\.(fwl2|db2|chunks|ok)$", RegexOptions.CultureInvariant);
@@ -115,8 +115,8 @@ namespace VerdantsAscent.Terrain.Zones
 
         // Copies first, then moves the other generations' main files. A failed copy stops before anything is moved. Copied: every
         // chunk file the kept generation's chunk map does not list - vanilla's load deletes those as orphans, and they are the
-        // other generations' chunk versions, older (a set-aside older save needs them to be restored on its own; crash series
-        // rerun 2026-09-29, OPEN_BUGS #44) or newer - plus, as before, any written after the kept meta.
+        // other generations' chunk versions, older (a set-aside older save needs them to be restored on its own)
+        // or newer - plus, as before, any written after the kept meta.
         internal static bool Apply(Plan plan, string saveDirectory, string snapshotFolder, out int copied, out int moved, out string error)
         {
             error = null;

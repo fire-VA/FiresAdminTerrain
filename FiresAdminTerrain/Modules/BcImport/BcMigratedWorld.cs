@@ -47,6 +47,7 @@ namespace VerdantsAscent.Terrain.BcImport
             _checked = false;
             _ownData = null;
             _lastLoad = new LoadFacts();
+            s_usable.Clear();   // Expand World Data's biomes can change between worlds
         }
 
         /// <summary>Runs from FAT's one WorldGenerator.Initialize hook. Menu terrain has no world file, and a
@@ -189,9 +190,29 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             biome = Heightmap.Biome.None;
             if (_generator == null) return false;
-            biome = _generator.GetBiomeOverride(_generator.Settings.Normalize(wx), _generator.Settings.Normalize(wy));
+            biome = _generator.MapBiomeAt(_generator.Settings.Normalize(wx), _generator.Settings.Normalize(wy));
+            if (biome != Heightmap.Biome.None && !Usable(biome)) biome = Heightmap.Biome.None;
             return biome != Heightmap.Biome.None;
         }
+
+        // BetterContinents' "usable" rule (ImageMapBiome.Usable, 0.9.3): a biome the map holds but nothing here defines now (an
+        // Expand World Data biome with EWD not installed, or its yaml changed) reads as None, so the default generation decides
+        // there and the map keeps the value for when it is defined again. A vanilla biome is always usable; another single bit
+        // only while Heightmap.Biome lists it (Expand World Data adds its biomes to the enum's values). Said once per biome.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<Heightmap.Biome, bool> s_usable =
+            new System.Collections.Concurrent.ConcurrentDictionary<Heightmap.Biome, bool>();
+        private const Heightmap.Biome VanillaBiomes = Heightmap.Biome.Meadows | Heightmap.Biome.Swamp | Heightmap.Biome.Mountain
+            | Heightmap.Biome.BlackForest | Heightmap.Biome.Plains | Heightmap.Biome.AshLands | Heightmap.Biome.DeepNorth
+            | Heightmap.Biome.Ocean | Heightmap.Biome.Mistlands;
+
+        private static bool Usable(Heightmap.Biome biome) => s_usable.GetOrAdd(biome, b =>
+        {
+            bool usable = (VanillaBiomes & b) == b || Array.IndexOf(Enum.GetValues(typeof(Heightmap.Biome)), b) >= 0;
+            if (!usable)
+                FiresLogger.LogWarning($"[BcImport] '{_worldName}': the biome map holds biome {(int)b}, which nothing here defines "
+                    + "(an Expand World Data biome without Expand World Data, or with a changed yaml); the default generation decides there.");
+            return usable;
+        });
 
         public static bool RiversDisabled => _generator != null && !_generator.Settings.RiversEnabled;
 
@@ -199,7 +220,7 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             if (_generator == null) return false;
             BcWorldSettings settings = _generator.Settings;
-            forestFactor = _generator.ApplyForest(settings.Normalize(position.x), settings.Normalize(position.z), forestFactor);
+            forestFactor = _generator.ForestFactorAt(settings.Normalize(position.x), settings.Normalize(position.z), forestFactor);
             return true;
         }
 

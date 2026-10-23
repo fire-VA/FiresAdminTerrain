@@ -12,7 +12,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // Steam Cloud worlds cannot be cleared by deleting files: Steam restores anything removed from its userdata folder
     // behind its back. This moves them off the cloud the way Valheim's own Manage saves "Move" does (copy while the
     // storage is mounted, then SaveSystem.Delete the cloud copy), except that the copy lands in an archive folder
-    // instead of the local world list. Nothing is deleted until its bytes are on disk; the archive is Fire's to delete.
+    // instead of the local world list. Nothing is deleted until its bytes are on disk; the archive is the player's to delete.
     // Main menu only. A bare run lists what would move; "confirm" moves it.
     internal static class FiresWorldCloudArchive
     {
@@ -101,7 +101,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return plan;
         }
 
-        // Beside the earlier wipe's archive when there is one, so everything Fire may delete sits in one place.
+        // Beside the earlier wipe's archive when there is one, so everything the player may delete sits in one place.
         private static string ArchiveFolder()
         {
             string root = Utils.GetSaveDataPath(FileHelpers.FileSource.Local);

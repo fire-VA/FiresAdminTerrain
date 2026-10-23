@@ -131,7 +131,7 @@ namespace VerdantsAscent.Terrain.Persistence
             int beforeListCount = ZNetScene.instance.m_prefabs?.Count ?? -1;
             FiresLogger.LogVerbose($"[TileAnchorPrefab] Ensure: starting | hash={hash} | dict={beforeDictCount} list={beforeListCount}");
 
-            // ZNetScene.Awake's "tile anchor" step is 146-215 ms of one join frame (R42); this says which part.
+            // ZNetScene.Awake's "tile anchor" step is 146-215 ms of one join frame; this says which part.
             var steps = new StepTimes();
 
             // ── Step 1: scrub pre-existing fake-nulls left by other mods ──
@@ -185,7 +185,7 @@ namespace VerdantsAscent.Terrain.Persistence
             steps.Lap("summary");
 
             // TileHammerCompat (IH's ruler snapped onto 2D tiles) and TileBrushDrag (the tile brush tools) are not started: the 2D
-            // tile layer is retired (Fire, 2026-09-29). The prefab itself stays registered so saved anchors still load and can
+            // tile layer is retired. The prefab itself stays registered so saved anchors still load and can
             // be purged.
 
             // World Edit Commands sorts after FiresAdminTerrain, so its assembly only exists by ZNetScene.Awake. The bridge
@@ -200,7 +200,7 @@ namespace VerdantsAscent.Terrain.Persistence
             try { VerdantsAscent.Water.Tools.WaterBrushDrag.EnsureAttached(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] WaterBrushDrag.EnsureAttached threw — {ex}"); }
 
-            // Round-57 — IH ruler ring tint (green=terrain, blue=water).
+            // IH ruler ring tint (green=terrain, blue=water).
             try { VerdantsAscent.Terrain.Lifecycle.RulerColorDriver.EnsureAttached(); }
             catch (Exception ex) { FiresLogger.LogError($"[TileAnchorPrefab] RulerColorDriver.EnsureAttached threw — {ex}"); }
             steps.Lap("drag + ruler");

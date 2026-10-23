@@ -8,11 +8,12 @@ namespace VerdantsAscent.Terrain.Zones
     // the server sends to each peer when it joins (ZoneSystem.OnNewPeer) and after a location with an icon is placed. On a
     // BetterContinents world FAT places the temple at BC's start (BcLocationPatches), and a peer on a BC world only gets
     // its icons after FAT's join sync (BcJoinSync holds PeerInfo). These lines say where the temple is on the server and
-    // where each client will spawn, so "waiting on (0,0,0)" can be told apart from a missing or doubled temple (R53).
+    // where each client will spawn, so "waiting on (0,0,0)" can be told apart from a missing or doubled temple.
     internal static class StartTempleReport
     {
         private const string TempleName = "StartTemple";
         private static bool s_serverReported;
+        private static int s_sends;
 
         [HarmonyPatch(typeof(ZoneSystem), "SendLocationIcons")]
         private static class ZoneSystem_SendLocationIcons
@@ -20,10 +21,17 @@ namespace VerdantsAscent.Terrain.Zones
             private static void Prefix(ZoneSystem __instance)
             {
                 if (s_serverReported || ZNet.instance == null || !ZNet.instance.IsServer()) return;
-                s_serverReported = true;
                 var temples = new List<Vector3>();
                 foreach (var instance in __instance.m_locationInstances.Values)
                     if (instance.m_location != null && instance.m_location.m_prefabName == TempleName) temples.Add(instance.m_position);
+                // The first send can run before the world's locations are in, so an empty answer then is not
+                // a finding. Only a later send that still has none is reported as an error.
+                if (temples.Count == 0 && s_sends++ == 0)
+                {
+                    FiresLogger.LogDebug($"[FiresWorld] no {TempleName} known yet at the first location-icon send; checking again on the next.");
+                    return;
+                }
+                s_serverReported = true;
                 if (temples.Count == 1)
                     FiresLogger.LogInfo($"[FiresWorld] StartTemple at ({temples[0].x:0},{temples[0].z:0}); new characters spawn there.");
                 else if (temples.Count == 0)
@@ -48,6 +56,10 @@ namespace VerdantsAscent.Terrain.Zones
             }
         }
 
-        internal static void OnWorldTeardown() => s_serverReported = false;
+        internal static void OnWorldTeardown()
+        {
+            s_serverReported = false;
+            s_sends = 0;
+        }
     }
 }

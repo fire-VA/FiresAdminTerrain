@@ -77,7 +77,7 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// Round-65 — the RAW captured vanilla Custom/Water material,
+        /// The RAW captured vanilla Custom/Water material,
         /// explicitly bypassing the FiresTossinShade WaterShaderBridge wrap.
         /// Used by the `va_water_mat_debug 1` A/B switch: if raw vanilla
         /// renders on a combiner mesh while the wrapped material doesn't,
@@ -166,7 +166,7 @@ namespace VerdantsAscent.Water.Core
             Material baseMat = s_iceMaterial != null ? s_iceMaterial
                               : (s_waterMaterial != null ? s_waterMaterial : null);
 
-            // 2026-05-25 round-20: Real-snow tint instead of pure white
+            // Real-snow tint instead of pure white
             // (looked like cardboard in-game). Slight cool blue cast in
             // the shadows + medium-high smoothness for a soft sparkle.
             // The geometric bumpiness from LandSnowController.GetSnowBump

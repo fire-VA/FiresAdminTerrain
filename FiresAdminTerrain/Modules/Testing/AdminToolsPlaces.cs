@@ -27,7 +27,7 @@ namespace VerdantsAscent.Terrain.Testing
         private const float SurfaceMinDistance = 300f;
         private const float SurfaceMaxDistance = 1500f;
         private const float SurfaceSearchStep = 16f;
-        private const float SurfaceFlatness = 3.0f;       // the largest bump off the grid's fitted plane (R70: best 1.8 m at 4.6 deg; R75: 2.1 m; R77: 2.6 m)
+        private const float SurfaceFlatness = 3.0f;       // the largest bump off the grid's fitted plane (e.g. best 1.8 m at 4.6 deg; others 2.1 m, 2.6 m)
         private const float SurfaceMaxSlopeDegrees = 6f;  // each cell takes its own ground, so an even slope is fine
         private const float DryAboveSea = 4f;
         private const int FlatnessSamples = 5;
@@ -73,7 +73,7 @@ namespace VerdantsAscent.Terrain.Testing
         // Rings outward from `near` for the first spot whose whole grid stands on gently sloping dry ground. Each cell takes
         // its own ground (CellGround), so an even slope is fine; what fails is a steep plane or bumps off it. The first rule
         // (the grid's whole height range within SurfaceFlatness, i.e. under 1 degree over the ~100 m grid) found nothing
-        // on hilly ATomTest (R69, 2026-09-29). `best` says how close the search came when nothing passes.
+        // on a hilly test world. `best` says how close the search came when nothing passes.
         // Spread over frames like FindCave: out to SurfaceMaxDistance a failing search samples ~650k heights. done(spot, why):
         // spot null = nothing passed, and `why` says how close the search came.
         internal static IEnumerator FindSurface(Vector3 near, int cases, Action<Vector3?, string> done)
@@ -86,8 +86,9 @@ namespace VerdantsAscent.Terrain.Testing
             var clock = System.Diagnostics.Stopwatch.StartNew();
             // Flat candidates are then checked by the SERVER, which holds every ZDO and every location even where this
             // client has loaded nothing: no build piece within the arrival rule's radius, no placed location close by
-            // (R72/R73: the find picked a spot under a tree, then one 26 pieces deep beside the mausoleum).
+            // (e.g. the find picked a spot under a tree, then one 26 pieces deep beside the mausoleum).
             var batch = new List<Vector3>();
+            var nearLocations = new List<string>();
             int rejectedPieces = 0, rejectedLocation = 0;
             bool serverChecked = false, unanswered = false;
             for (float ring = SurfaceMinDistance; ring <= SurfaceMaxDistance + SurfaceSearchStep; ring += SurfaceSearchStep)
@@ -120,7 +121,7 @@ namespace VerdantsAscent.Terrain.Testing
                     }
                     // A full batch: ask the server about all of them in one round trip.
                     Vector3? pick = null;
-                    yield return CheckWithServer(batch, (found, pieces, location, asked) =>
+                    yield return CheckWithServer(batch, span, nearLocations, (found, pieces, location, asked) =>
                     {
                         pick = found; rejectedPieces += pieces; rejectedLocation += location; serverChecked |= asked; unanswered = !asked;
                     });
@@ -132,7 +133,7 @@ namespace VerdantsAscent.Terrain.Testing
                 if (lastRing && batch.Count > 0)
                 {
                     Vector3? pick = null;
-                    yield return CheckWithServer(batch, (found, pieces, location, asked) =>
+                    yield return CheckWithServer(batch, span, nearLocations, (found, pieces, location, asked) =>
                     {
                         pick = found; rejectedPieces += pieces; rejectedLocation += location; serverChecked |= asked; unanswered = !asked;
                     });
@@ -142,8 +143,9 @@ namespace VerdantsAscent.Terrain.Testing
                 }
             }
             string rejected = rejectedPieces + rejectedLocation > 0
-                ? string.Format(CultureInfo.InvariantCulture, "; {0} flat place(s) had build pieces within {1:0} m and {2} a location within {3:0} m (server-checked)",
-                    rejectedPieces, AdminToolsProbe.PieceNearMetres, rejectedLocation, LocationClearMetres)
+                ? string.Format(CultureInfo.InvariantCulture, "; {0} flat place(s) had build pieces within {1:0} m and {2} a location within {3:0} m of the grid's edge (server-checked){4}",
+                    rejectedPieces, AdminToolsProbe.PieceNearMetres, rejectedLocation, LocationEdgeClearMetres,
+                    nearLocations.Count > 0 ? ": " + string.Join(", ", nearLocations.ToArray()) + (rejectedLocation > nearLocations.Count ? ", ..." : "") : "")
                 : serverChecked ? "" : "; the server did not answer the piece/location check";
             done(null, string.Format(CultureInfo.InvariantCulture, "{0:0}x{0:0} m grid, rings {1:0}-{2:0} m; {3}{4}", span, SurfaceMinDistance, SurfaceMaxDistance, best, rejected));
         }
@@ -153,19 +155,26 @@ namespace VerdantsAscent.Terrain.Testing
             AdminToolsProbe.AnswerSeconds);
         private const int CandidateBatch = 16;
         private const float CandidateSpacing = 60f;
-        private const float LocationClearMetres = 100f;
+        // A location must stand this far beyond the grid's EDGE (half its span from the centre), so
+        // a bigger grid needs a wider clearance instead of the old flat 100 m from the centre (76 m at a 72 m grid, 88 m at 96 m).
+        private const float LocationEdgeClearMetres = 40f;
+        private const int NamedLocationsMax = 6;
+        private const int ProbesPerCandidate = 4;
 
         // done(the first candidate with no build piece near and no location close, pieces-rejected, location-rejected, the
         // server answered). A peer that holds no world data answers NaN, and only the server's reading counts. Read-only on
         // the server (ZDO and location lookups), CandidateBatch points per round trip, AnswerSeconds to answer. Without a
-        // server answer the find fails ("server probe unanswered"), never picking an unchecked place.
-        private static IEnumerator CheckWithServer(List<Vector3> candidates, Action<Vector3?, int, int, bool> done)
+        // server answer the find fails ("server probe unanswered"), never picking an unchecked place. Each place a location
+        // rules out goes into nearLocations (up to NamedLocationsMax) with that location's name and distance.
+        private static IEnumerator CheckWithServer(List<Vector3> candidates, float span, List<string> nearLocations, Action<Vector3?, int, int, bool> done)
         {
-            var points = new List<ProbePoint>(candidates.Count * 2);
+            var points = new List<ProbePoint>(candidates.Count * ProbesPerCandidate);
             foreach (var c in candidates)
             {
                 points.Add(new ProbePoint(ProbeKind.PiecesNear, c));
                 points.Add(new ProbePoint(ProbeKind.LocationNear, c));
+                points.Add(new ProbePoint(ProbeKind.LocationHashHigh, c));
+                points.Add(new ProbePoint(ProbeKind.LocationHashLow, c));
             }
             float[] values = null;
             if (ZNet.instance != null && ZNet.instance.IsServer()) values = AdminToolsProbe.ReadLocal(points);
@@ -176,15 +185,24 @@ namespace VerdantsAscent.Terrain.Testing
                 var server = peers?.Find(p => p.Role == "server" && p.Values != null && p.Values.Length == points.Count);
                 values = server?.Values;
             }
-            // No server answer: never fall back to an unchecked place (the lead's rule); the find stops and says so.
+            // No server answer: never fall back to an unchecked place; the find stops and says so.
             if (values == null) { done(null, 0, 0, false); yield break; }
             int pieces = 0, location = 0;
+            float clear = span * 0.5f + LocationEdgeClearMetres;
             for (int i = 0; i < candidates.Count; i++)
             {
-                float p = values[i * 2], l = values[i * 2 + 1];
+                int k = i * ProbesPerCandidate;
+                float p = values[k], l = values[k + 1];
                 if (float.IsNaN(p) || float.IsNaN(l)) continue;
                 if (p > 0f) { pieces++; continue; }
-                if (l < LocationClearMetres) { location++; continue; }
+                if (l < clear)
+                {
+                    location++;
+                    if (nearLocations.Count < NamedLocationsMax)
+                        nearLocations.Add(string.Format(CultureInfo.InvariantCulture, "({0:0}, {1:0}) {2} {3:0} m", candidates[i].x, candidates[i].z,
+                            AdminToolsProbe.LocationName(values[k + 2], values[k + 3]), l));
+                    continue;
+                }
                 done(candidates[i], pieces, location, true);
                 yield break;
             }
@@ -240,14 +258,21 @@ namespace VerdantsAscent.Terrain.Testing
         private const float CaveSearchMax = 1500f;
         private const float CaveSearchStep = 8f;
         private const float CaveScanStep = 0.5f;
-        private const float CaveCellSearchRadius = 30f;
+        // 42 m, not 30 (at 30: "60 cave floor(s) tried, none with room for 37 cells 5 m apart; roomiest 35"),
+        // so a floor's cells may follow its tunnels further. The spacing stays 5 m: the brushes are 2.5 m in radius, and closer
+        // cells would read each other's edits.
+        private const float CaveCellSearchRadius = 42f;
+        // ...and a floor with room for this share of the cases is taken when none has room for all; the cases past its cells
+        // SKIP on "no room" (named in the run). Far above the 2-3-cell finds the all-cases rule was made against.
+        private const float CaveAcceptShare = 0.9f;
         private const float CaveCellReach = 8f;
         private const long FrameBudgetMs = 8;
 
-        // A cave floor only counts when the run's own cell rule (CaveFloorSpots) fits every case around it: R75 and R76's finds
+        // A cave floor only counts when the run's own cell rule (CaveFloorSpots) fits every case around it: earlier finds
         // passed spots with room for 2 and 3 cells, and the runs SKIPped 16 and 15 cases on "no room". Floors closer than
         // CaveTrySpacing to one already tried are the same tunnel and are skipped; past CaveTriesMax the roomiest one found
-        // so far is not returned (a place the run can't use is a FAIL here, not 15 SKIPs later), only named in `why`.
+        // so far is returned only when it has room for CaveAcceptShare of the cases; otherwise a place the run
+        // can't use is a FAIL here, not 15 SKIPs later, and the roomiest is only named in `why`.
         private const float CaveTrySpacing = 60f;
         private const int CaveTriesMax = 60;
 
@@ -284,6 +309,15 @@ namespace VerdantsAscent.Terrain.Testing
                     yield return null;
                     clock.Restart();
                 }
+            }
+            if (roomiestCells > 0 && roomiestCells >= Mathf.CeilToInt(cases * CaveAcceptShare))
+            {
+                FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture,
+                    "[AdminToolsTest] cave/find: no floor has room for all {0} cases; took the roomiest, {1} cell(s) at ({2:0},{3:0},{4:0}) "
+                    + "({5} floor(s) tried); the last {6} case(s) SKIP on no room", cases, roomiestCells, roomiest.x, roomiest.y, roomiest.z,
+                    tried.Count, cases - roomiestCells));
+                done(roomiest, null);
+                yield break;
             }
             done(null, tried.Count == 0 ? $"no cave floor within {CaveSearchMax:0} m"
                 : string.Format(CultureInfo.InvariantCulture, "{0} cave floor(s) tried, none with room for {1} cells {2:0} m apart; roomiest {3} cell(s) at ({4:0}, {5:0})",
@@ -344,8 +378,14 @@ namespace VerdantsAscent.Terrain.Testing
         internal static float CellGround(PlaceKind kind, Vector3 cell, float placeY)
         {
             float nearY = kind == PlaceKind.Cave ? cell.y : placeY;
-            bool voxel = VoxelWorld.TryFindSurfaceY(cell.x, cell.z, nearY, VoxelReach(kind), out float surface);
-            // No heightmap here yet = not ready (NaN), never the place's own y: that fallback let R74's surface cases start
+            // A CAVE cell takes the FLOOR (the highest solid-to-air crossing from inside the cave down). The nearest
+            // crossing either way could be the roof: a cave/vcarve case stood at 41.15 while its cell read the roof at
+            // 47.00, so the carve went into the ceiling (+2.57 m) and failed "did not fall".
+            float surface;
+            bool voxel = kind == PlaceKind.Cave
+                ? VoxelWorld.TrySampleSurfaceY(cell.x, cell.z, cell.y + CaveHeadroom * 0.5f, cell.y - CaveCellReach, out surface, out _)
+                : VoxelWorld.TryFindSurfaceY(cell.x, cell.z, nearY, VoxelReach(kind), out surface);
+            // No heightmap here yet = not ready (NaN), never the place's own y: that fallback let surface cases start
             // on ground this client had not loaded.
             if (kind == PlaceKind.Surface) return voxel ? surface : Heightmap.GetHeight(cell, out float height) ? height : float.NaN;
             if (!voxel) return float.NaN;
@@ -364,7 +404,7 @@ namespace VerdantsAscent.Terrain.Testing
         {
             var head = at + Vector3.up * HeadHeight;
             // Ground only (voxel chunks, and so cave roofs, overhangs and islands, sit on the terrain layer): a tree's canopy
-            // is open sky for this test (R72: every surface case SKIPped on "something 9 m overhead" under a tree).
+            // is open sky for this test (e.g. every surface case SKIPped on "something 9 m overhead" under a tree).
             bool roof = Physics.Raycast(head, Vector3.up, out RaycastHit above, SkyCheckMetres, LayerMask.GetMask("terrain"));
             switch (kind)
             {
@@ -373,7 +413,7 @@ namespace VerdantsAscent.Terrain.Testing
                     var pieces = new List<Piece>();
                     Piece.GetAllPiecesInRadius(at, PieceClearMetres, pieces);
                     // Player-placed only, as the server's find probe counts them: some mod gives trees and rocks a Piece component
-                    // on the client (R76: "95 build piece(s) … top: FirTree_small 27, Rock_4 18, FirTree 12").
+                    // on the client (e.g. "95 build piece(s) … top: FirTree_small 27, Rock_4 18, FirTree 12").
                     pieces.RemoveAll(p => p == null || !p.IsPlacedByPlayer());
                     return pieces.Count > 0 ? $"{pieces.Count} build piece(s) within {PieceClearMetres:0} m (top: {TopPrefabs(pieces, 3)})" : null;
                 case PlaceKind.Cave:
@@ -385,7 +425,7 @@ namespace VerdantsAscent.Terrain.Testing
             return null;
         }
 
-        // "name count, name count, …" for the most common prefabs among the pieces (R75 SKIPped 26 cases on a bare count).
+        // "name count, name count, …" for the most common prefabs among the pieces (a bare count is not enough to act on).
         private static string TopPrefabs(List<Piece> pieces, int top)
         {
             var counts = new Dictionary<string, int>();

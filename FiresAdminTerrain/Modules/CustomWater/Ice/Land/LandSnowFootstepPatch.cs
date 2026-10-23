@@ -7,7 +7,7 @@ namespace VerdantsAscent.Water.Core
     /// Forces snow-biome footstep FX (sound + VFX) when the player walks
     /// over any LandSnowController footprint, regardless of underlying biome.
     ///
-    /// Vanilla decision path (verified 2026-05-25):
+    /// Vanilla decision path:
     ///   FootStep.OnFoot → FootStep.GetGroundMaterial → Character.m_lastGroundCollider
     ///     → if collider has Heightmap → Heightmap.GetGroundMaterial(normal, point)
     ///       → biome switch (Mountain/DeepNorth → Snow)

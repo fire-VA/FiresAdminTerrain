@@ -15,7 +15,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // cell cold, and high ground is exactly where the rain shadow puts the
         // DRY land — so Mountain+DeepNorth ate the entire dry end of the
         // moisture percentile before Plains or Meadows were ever tested, and
-        // both came out 0.0% (2026-09-19 log: no StartTemple, no Eikthyrnir,
+        // both came out 0.0% (no StartTemple, no Eikthyrnir,
         // and 1.0's AltBiomeWorldData then threw on the empty Meadows list).
         // Elevation also happens to be what a Valheim mountain actually is.
         public static float MountainStartM     = 200f;   // metres above sea where Mountain begins

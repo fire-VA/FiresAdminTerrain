@@ -77,20 +77,14 @@ namespace VerdantsAscent.Water.Core
         /// How far to extend water mesh UNDER terrain at bank edges (meters).
         /// This allows the water to clip through terrain banks, hiding the
         /// sharp "staircase" edge that would otherwise be visible.
-        ///
-        /// 2026-05-25 round-2: RESTORED to 2.0f (briefly zeroed earlier this
-        /// session). With the type-aware combiner fix in place — different
-        /// CustomLiquidTypes get their own combiners — the bank extension can
-        /// safely give natural-looking shores again and the waterfall effect
-        /// from dragging the ruler up an elevation works as before.
         /// </summary>
-        private const float BANK_EXTENSION_DISTANCE = 2.0f;
+        // Placed water ends at its circles (the mesh must not be larger than the ruler circle).
+        // A token width keeps the bank formulas' divisions finite; nothing reaches past the disk.
+        private const float BANK_EXTENSION_DISTANCE = 0.01f;
 
         /// <summary>
         /// How far below terrain to push water vertices in bank areas.
         /// This ensures the water surface dips below terrain so it's clipped.
-        ///
-        /// 2026-05-25 round-2: RESTORED to 0.5f — see BANK_EXTENSION_DISTANCE.
         /// </summary>
         private const float BANK_DEPTH_BELOW_TERRAIN = 0.5f;
 
@@ -239,7 +233,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private void RegenerateMesh()
         {
-            // ── Volume settle/gel guards (round-56) ─────────────────────
+            // ── Volume settle/gel guards ─────────────────────
             // Settling: the pour coroutine owns the grid + mesh; any regen
             // here would fight it mid-animation.
             // Gelled: the stored surface grid IS the data — rebuilding
@@ -327,7 +321,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void RegenerateMeshAsync()
         {
-            // Round-56 volume guards — same rationale as RegenerateMesh:
+            // Volume guards, same rationale as RegenerateMesh:
             // settling combiners are owned by the pour coroutine; gelled
             // combiners rebuild straight from their stored grid.
             if (_isSettling) return;
@@ -554,26 +548,25 @@ namespace VerdantsAscent.Water.Core
                 _maxDiskY = Mathf.Max(_maxDiskY, pos.y);
             }
 
-            // 2026-05-27 round-W-5 — RULER-Y AUTHORITY. User spec:
-            //   "we should be able to set the height of our water with
-            //    our infinity hammer ruler and thats the height it
-            //    should place at period, the settle with gravity is
-            //    only meant to be for letting the skirts settle and
-            //    for it to smooth out over slopes"
+            // RULER-Y AUTHORITY. The height set with the
+            // Infinity Hammer ruler is the height the water
+            // is placed at; gravity settling is
+            // only for letting the skirts settle and
+            // for smoothing out over slopes.
             //
-            // Previously POND MODE averaged every disk's Y into a
-            // single _settledWaterLevel — so if the player placed two
-            // disks at different ruler heights, both moved to the
-            // average. That broke "place at exactly Y" semantics.
+            // POND MODE averaging every disk's Y into a
+            // single _settledWaterLevel would move two
+            // disks at different ruler heights both to the
+            // average, breaking "place at exactly Y" semantics.
             //
-            // Now always use per-point interpolation (formerly RIVER
+            // So always use per-point interpolation (formerly RIVER
             // MODE): the surface at each grid cell is an IDW-weighted
             // blend of the nearest disks' own Ys, so a single disk
             // renders at its placed Y, two disks at different heights
             // give a natural slope between them, and the bank/skirt
             // settling (in TerrainClipPass / GravitySettleEdges below)
-            // still handles the meet-the-terrain rounding the user
-            // does want.
+            // still handles the meet-the-terrain rounding that
+            // is wanted.
             float heightVariance = _maxDiskY - _minDiskY;
             _settledWaterLevel = -1f;
             _isPondMode = false;
@@ -593,6 +586,7 @@ namespace VerdantsAscent.Water.Core
                 new Vector3(minX, minY, minZ),
                 new Vector3(maxX, maxY, maxZ)
             );
+            BoundsVersion++;   // FatWaterLevelGate's zone index rebuilds on the next lookup (moved or resized water)
 
             // Position combiner at center, Y at settled water level or average
             float combinerY = _isPondMode ? _settledWaterLevel : (_minDiskY + _maxDiskY) * 0.5f;
@@ -642,7 +636,7 @@ namespace VerdantsAscent.Water.Core
 
         #region Terrain Sampling
 
-        // 0.2.683 ([lead] H10 follow-up, 10-01): the terrain under the water, from VoxelWorld's EDITED density where it is
+        // The terrain under the water, from VoxelWorld's EDITED density where it is
         // loaded. A VoxelWrap dedicated server builds voxel data (VAVoxel edits imported per zone) but no voxel colliders,
         // so GetGroundHeight there is vanilla's uncarved ground and a carved pond read dry in the server's grid. The
         // density read is a dictionary lookup plus one column scan: it never builds a zone, only answers where a column is
@@ -652,7 +646,7 @@ namespace VerdantsAscent.Water.Core
         private float _voxelProbeTop = float.NaN;
         private static bool s_voxelSampleLogged;
 
-        // 0.2.685 (H12: no "water grids sample the edited voxel ground" line on the dedi): on a dedicated server, every grid
+        // On a dedicated server, every grid
         // build reports how many of its cells the voxel density answered, so "the server never builds a grid" and "it builds
         // one but no column is loaded" can be told apart. One line per build; builds are rare (create, restore, reseat).
         private int _voxelAnswered, _voxelAsked;
@@ -668,7 +662,7 @@ namespace VerdantsAscent.Water.Core
 
         private void SetVoxelProbeTop()
         {
-            _voxelAnswered = _voxelAsked = 0;
+            _voxelAnswered = _voxelAsked = _rimCells = _moppedCells = 0;
             _voxelProbeTop = float.NaN;
             foreach (var d in _waterDisks)
                 if (d != null && (float.IsNaN(_voxelProbeTop) || d.Position.y + VoxelProbeAbove > _voxelProbeTop))
@@ -680,7 +674,7 @@ namespace VerdantsAscent.Water.Core
             ground = 0f;
             if (float.IsNaN(_voxelProbeTop)) return false;
             _voxelAsked++;
-            if (!VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleSurfaceY(worldPos.x, worldPos.z, _voxelProbeTop, _voxelProbeTop - VoxelProbeBelow,
+            if (!VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleWaterFloorY(worldPos.x, worldPos.z, _voxelProbeTop, _voxelProbeTop - VoxelProbeBelow,
                     out float surf, out bool solidAtTop))
             {
                 // Solid at the top of the window: the bank stands above the water there (a dry cell).
@@ -744,19 +738,84 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private static int s_terrainOnlyMask = -1;
 
+        // Past a sky island's rim the voxel window finds
+        // nothing and a world-ground fallback would answer hundreds of metres down, so a pour or pool would drape its sheet
+        // down to it. Ground deeper than the whole probe window under the water is no pond floor: that cell is the edge,
+        // and it reads dry (as high as the window top). A fall over the edge is the Vfall tool's curtain, not a drape.
+        private int _rimCells, _moppedCells;
+
+        // The saved-grid restore builds without sampling: dry the mopped cells of the restored surface the same way.
+        private int DryMoppedCells()
+        {
+            if (!VerdantsAscent.Terrain.Voxel.VoxelWorld.AnyMops || _surfaceHeights == null) return 0;
+            int dried = 0;
+            for (int z = 0; z < _gridHeight; z++)
+                for (int x = 0; x < _gridWidth; x++)
+                {
+                    int idx = z * _gridWidth + x;
+                    if (idx >= _surfaceHeights.Length || _surfaceHeights[idx] <= -50f) continue;
+                    Vector3 p = GridToWorld(x, z);
+                    if (!VerdantsAscent.Terrain.Voxel.VoxelWorld.IsMoppedAt(p.x, _surfaceHeights[idx], p.z)) continue;
+                    _surfaceHeights[idx] = -100f;
+                    if (_waterDepths != null && idx < _waterDepths.Length) _waterDepths[idx] = 0f;
+                    dried++;
+                }
+            return dried;
+        }
+
+        // Vmop on this peer, or a chunk whose mop mask changed arriving from another: rebuild this water from its disks
+        // (the mask is read while it samples), locally only - no anchor save. Returns how many it rebuilt.
+        internal static int RefreshMopsIn(Vector3 center, float radius)
+        {
+            int n = 0;
+            foreach (var c in new List<WaterMeshCombiner>(s_allCombiners))
+            {
+                if (c == null || c.WaterDisks == null || c.WaterDisks.Count == 0) continue;
+                var b = c.GetCombinedBounds();
+                float dx = Mathf.Max(b.min.x - center.x, 0f, center.x - b.max.x);
+                float dz = Mathf.Max(b.min.z - center.z, 0f, center.z - b.max.z);
+                if (dx * dx + dz * dz > radius * radius) continue;
+                // A sky island's water and the ground's below share XZ: only the one near the mop's height.
+                float dy = Mathf.Max(b.min.y - center.y, 0f, center.y - b.max.y);
+                if (dy > radius + 32f) continue;
+                c.RegenerateMesh();
+                n++;
+            }
+            return n;
+        }
+
         private float SampleTerrainHeightAt(Vector3 worldPos)
+        {
+            // Vmop: a column the mop mask covers at this water's height is bank, never water, so hand-drawn water
+            // stays out of it on every rebuild, on every peer (the mask persists on the voxel chunk anchors).
+            if (!float.IsNaN(_voxelProbeTop)
+                && VerdantsAscent.Terrain.Voxel.VoxelWorld.IsMoppedAt(worldPos.x, _voxelProbeTop - VoxelProbeAbove, worldPos.z))
+            {
+                _moppedCells++;
+                return _voxelProbeTop;
+            }
+            float h = SampleTerrainHeightBelow(worldPos);
+            if (!float.IsNaN(_voxelProbeTop) && h < _voxelProbeTop - VoxelProbeBelow)
+            {
+                if (_rimCells++ == 0)
+                    FiresLogger.LogDebug($"[FiresWater] water grid at ({transform.position.x:F0},{transform.position.y:F1},{transform.position.z:F0}): "
+                        + $"ground at ({worldPos.x:F0},{worldPos.z:F0}) is {h:F1}, below the {VoxelProbeBelow:F0} m window under the water "
+                        + $"(top {_voxelProbeTop:F1}) - an island rim, read dry instead of draping.");
+                return _voxelProbeTop;
+            }
+            return h;
+        }
+
+        private float SampleTerrainHeightBelow(Vector3 worldPos)
         {
             // PHASE F+: custom-tile FIRST, with a small XZ search radius
             // so that grid samples just past the modified part of a tile
             // (or just past the platform edge) STILL pick up the tile Y
             // rather than draping down to vanilla. Without this widen,
-            // water disks placed on a sky-built platform tried to drape
+            // water disks placed on a sky-built platform would drape
             // down to vanilla terrain 30-50m below at the edges, producing
-            // huge waterfalls instead of a clean flood-fill pool.
-            //
-            // 2026-05-25 user complaint: "make sure that the water mesh
-            // doesnt try to automatically pull down to meet vanilla
-            // terrain when placed on custom".
+            // huge waterfalls instead of a clean flood-fill pool. The water mesh
+            // must not pull down to meet vanilla terrain when placed on custom.
             //
             // Search radius is small (~2m) so the effect only kicks in
             // when there's a custom tile RIGHT THERE — actually-off-tile
@@ -767,7 +826,7 @@ namespace VerdantsAscent.Water.Core
                 return customY;
             }
 
-            // 0.2.683: the edited voxel ground where it is loaded (see TryVoxelGround).
+            // The edited voxel ground where it is loaded (see TryVoxelGround).
             if (TryVoxelGround(worldPos, out float voxelY))
                 return voxelY;
 
@@ -850,7 +909,7 @@ namespace VerdantsAscent.Water.Core
                 // Small ring of 4 samples around the point. Use the HIGHEST
                 // tile Y found — water should pool ABOVE the platform, so
                 // when in doubt we prefer "platform is here" over "vanilla
-                // is here", matching the user's flood-fill intent.
+                // is here", matching the flood-fill intent.
                 float r = Mathf.Max(searchRadius, 0.5f);
                 var samples = new[]
                 {
@@ -1016,17 +1075,17 @@ namespace VerdantsAscent.Water.Core
                 if (distToEdge > maxExtendedDist)
                     continue;
 
-                // 2026-05-26 round-22: ALWAYS track the nearest disk for
+                // ALWAYS track the nearest disk for
                 // any disk within maxExtendedDist, regardless of which
-                // weight branch the cell falls into. Previously only
+                // weight branch the cell falls into. If only
                 // the `weight > 0.001f` branch updated nearestCenterDist;
                 // cells in the bank-extension overflow ring (where the
-                // disk passed only the bank-weight branch) left
-                // nearestCenterDist=float.MaxValue. That cascaded into
+                // disk passed only the bank-weight branch) would leave
+                // nearestCenterDist=float.MaxValue. That cascades into
                 // paintedSurfaceY falling through to terrainY+0.02 below,
-                // which neutered the round-17 kill threshold and let
+                // which neuters the kill threshold and lets
                 // bank-extension write cliff-height vertices — the
-                // upward mesh spikes the user has reported multiple times.
+                // upward mesh spikes.
                 if (!_isPondMode)
                 {
                     float cdx0 = worldPos.x - cached.PosX;
@@ -1120,27 +1179,27 @@ namespace VerdantsAscent.Water.Core
                 }
 
                 // NOTE: No terrain cap - the disk Y IS the intended water level.
-                // The user set this height via the IH ruler; we must respect it.
+                // The height was set via the IH ruler; we must respect it.
                 // Terrain clip pass (step 4.7) will remove cells where terrain
                 // actually rises above the surface.
             }
 
-            // 2026-05-25 round-17: capture the IDW-blended PAINTED water
+            // Capture the IDW-blended PAINTED water
             // surface BEFORE any modifications (edge-fade, bank-extension,
-            // pond-river curl). This is the user's intended water height
+            // pond-river curl). This is the intended water height
             // from the IH ruler — bank-extension uses it as a CEILING so
             // it never pushes the mesh UP onto cliff terrain.
             //
-            // 2026-05-26 round-22: paintedSurfaceY MUST be the disk's
+            // paintedSurfaceY MUST be the disk's
             // intended height. If surfaceY came from the third fallback
-            // at line 980 (`terrainY + WATER_TERRAIN_OFFSET`), the
+            // (`terrainY + WATER_TERRAIN_OFFSET`), the
             // downstream kill threshold (`terrainY > paintedSurfaceY +
             // 0.75f`) becomes `terrainY > terrainY + 0.77f` (impossible),
             // so the spike rejection never fires for the exact cells
-            // that produce the spikes. Prefer nearestDiskY — now always
-            // set when hasContribution=true thanks to the round-22
+            // that produce the spikes. Prefer nearestDiskY, always
+            // set when hasContribution=true thanks to the nearest-disk
             // tracking lift above. Only fall back to surfaceY in the
-            // (now-extremely-rare) case nearestCenterDist is still
+            // (extremely rare) case nearestCenterDist is still
             // unset, which means a non-pond cell with no disks in range
             // at all — and that path returned -100f earlier.
             float paintedSurfaceY = (nearestCenterDist < float.MaxValue - 1f)
@@ -1152,27 +1211,26 @@ namespace VerdantsAscent.Water.Core
             // This handles the case where a pond overhangs a river at a lower elevation.
             surfaceY = ApplyPondRiverCurl(worldPos, surfaceY, minDistToEdge);
 
-            // 2026-05-26 round-26: EDGE FADE TO TERRAIN REMOVED.
+            // No edge fade to terrain.
             //
-            // The fade attempted to smoothly slope the water surface down
-            // to terrain at the boundary, but it interacted badly with
+            // A fade that smoothly slopes the water surface down
+            // to terrain at the boundary interacts badly with
             // the marching-squares interpolation between inside and
-            // outside cells — the inside cell ended up faded to terrain,
-            // the outside was kill (-100), and the interpolated boundary
-            // crossing's Y had no relationship to terrain at the crossing's
-            // actual XZ. When terrain at the crossing was higher than the
-            // crossing's interpolated Y, the bank-extension pass then wrote
-            // a vertex at terrain-height — producing the upward fin
-            // spikes the user kept reporting (same root cause as the
-            // LandSnow edge-fade pathology, fixed by removing the fade).
+            // outside cells: the inside cell ends up faded to terrain,
+            // the outside is kill (-100), and the interpolated boundary
+            // crossing's Y has no relationship to terrain at the crossing's
+            // actual XZ. When terrain at the crossing is higher than the
+            // crossing's interpolated Y, the bank-extension pass then writes
+            // a vertex at terrain-height, producing upward fin
+            // spikes (same root cause as the
+            // LandSnow edge-fade pathology).
             //
-            // The water mesh now ends flat at the disk surface; the
+            // The water mesh ends flat at the disk surface; the
             // bank-extension pass below still tucks the mesh UNDER terrain
             // when terrain rises slightly above water (sloped shore),
             // and the kill threshold drops the cell entirely when terrain
             // rises sharply (cliff). Terrain (opaque) visually clips
-            // the boundary. Same approach FloatingIce uses — which the
-            // user confirmed works.
+            // the boundary. Same approach FloatingIce uses.
 
             // Optional: Add very subtle center channel for boat navigation
             // Only if enabled and we have good coverage
@@ -1192,7 +1250,7 @@ namespace VerdantsAscent.Water.Core
 
             if (surfaceY <= minWaterY)
             {
-                // 2026-05-25 round-17: if terrain rises FAR above the
+                // If terrain rises FAR above the
                 // PAINTED water level (cliff face, tall rock, tree base),
                 // don't try to bank-extend up — kill the cell so the mesh
                 // ends cleanly instead of poking up as a vertical sliver.
@@ -1226,7 +1284,7 @@ namespace VerdantsAscent.Water.Core
                     float absoluteMinY = surfaceY - maxDepth;
                     bankSurfaceY = Mathf.Max(bankSurfaceY, absoluteMinY);
 
-                    // 2026-05-25 round-17: CEILING — never push the bank
+                    // CEILING: never push the bank
                     // vertex ABOVE the painted water surface. Otherwise a
                     // slight slope above water level produces a vertex
                     // higher than the painted Y → spike. Min() against
@@ -1496,25 +1554,22 @@ namespace VerdantsAscent.Water.Core
                         }
                     }
 
-                    // 2026-05-30 round-55 — DISABLED edge gravity-settle
-                    // pull-down. User spec (round-W-5):
-                    //   "the settle with gravity is only meant to be for
-                    //    letting the skirts settle and for it to smooth
-                    //    out over slopes"
+                    // Edge gravity-settle pull-down DISABLED: gravity
+                    // settling is only for the skirts and for
+                    // smoothing out over slopes.
                     //
-                    // Previously: every edge cell >0.5m above terrain
-                    // with no nearby bank support got yanked DOWN to
+                    // Otherwise every edge cell >0.5m above terrain
+                    // with no nearby bank support gets yanked DOWN to
                     // `terrainY + WATER_TERRAIN_OFFSET` (~terrain Y).
                     // For a small ruler-placed disk in mid-air, EVERY
                     // cell is an edge cell with no bank support, so the
-                    // entire visible surface dropped 10m below the
-                    // ruler Y while the swim trigger stayed at the
-                    // ruler Y. User saw "water mesh ~10m below the
-                    // swim plane".
+                    // entire visible surface would drop 10m below the
+                    // ruler Y while the swim trigger stays at the
+                    // ruler Y.
                     //
-                    // The balloon-shell wall (round-49/52b) is what
+                    // The balloon-shell wall is what
                     // visually bridges floating water down to terrain
-                    // now — we don't need GravitySettleEdges to also
+                    // now; we don't need GravitySettleEdges to also
                     // be dragging the surface down. Rule 2 above (push
                     // buried disk-center cells UP) is still active for
                     // the case where IDW interpolation underestimated
@@ -1645,7 +1700,7 @@ namespace VerdantsAscent.Water.Core
 
                 // Flat level = interpolated disk height.
                 // Disk heights are authoritative - they encode the water level
-                // the user or auto-generator intended. We only use the bed as a
+                // the player or auto-generator intended. We only use the bed as a
                 // FLOOR (water can't be below terrain), never as a ceiling that
                 // pulls the surface down to terrain + 1.2m.
                 float interpY = (diskWorldY[dA] + diskWorldY[dB]) * 0.5f;
@@ -2161,10 +2216,10 @@ namespace VerdantsAscent.Water.Core
             // - Normal water (surface > -50 and depth > 0)
             // - Bank extension (surface > -50 and depth <= 0, meaning surface is below terrain)
             //
-            // 2026-05-25 round-5: STRICT FOOTPRINT CULL re-added (tight 0.1m
+            // STRICT FOOTPRINT CULL (tight 0.1m
             // margin). Without this, FillSurfaceGaps's outward bleed + the
             // rectangular bounding box make small circular disks render as
-            // squares. User has asked multiple times for the mesh to match
+            // squares; the mesh should match
             // the ruler's circle. Bank pull-down still works for cells INSIDE
             // the disk (where terrain rises above water → bank extension
             // logic in CalculateSurfaceWithGravity handles it); we just don't
@@ -2173,7 +2228,7 @@ namespace VerdantsAscent.Water.Core
             for (int i = 0; i < _surfaceHeights.Length; i++)
             {
                 if (_surfaceHeights[i] <= -50f) { validCells[i] = false; continue; }
-                // Round-56: settling/gelled volumes legitimately spread
+                // Settling/gelled volumes legitimately spread
                 // OUTSIDE the original ruler circle (that's the settle) —
                 // the strict disk-footprint cull would clip the spread.
                 // The -50 sentinel above already culls dry cells for them.
@@ -2284,8 +2339,8 @@ namespace VerdantsAscent.Water.Core
                 // so the closed-volume mesh shows up regardless of
                 // whether the async worker fired or we fell back to
                 // sync. Without this wrapper the sync path was a
-                // single-sided flat sheet and the user's "drop / pool
-                // / tube" shape never appeared.
+                // sync. Without this wrapper the sync path would be a
+                // single-sided flat sheet with no "drop / pool / tube" shape.
                 if (WaterBalloonShell.Enabled)
                 {
                     // Build per-vertex depths the shell needs. The
@@ -2349,7 +2404,7 @@ namespace VerdantsAscent.Water.Core
             for (int i = 0; i < _waterDepths.Length; i++)
             {
                 if (_surfaceHeights[i] <= -50f) { validCells[i] = false; continue; }
-                // Round-56: settled volumes spread outside the ruler circle;
+                // Settled volumes spread outside the ruler circle;
                 // skip the footprint cull for them (see sync path comment).
                 if (_isGelled || _isSettling) { validCells[i] = true; continue; }
                 int gx = i % _gridWidth;
@@ -2577,18 +2632,18 @@ namespace VerdantsAscent.Water.Core
 
         #region Material Setup
 
-        // Round-65/66 — material A/B debug switch (`va_water_mat_debug`).
+        // Material A/B debug switch (`va_water_mat_debug`).
         //   0 = normal (wrapped FiresWater when FTS installed)
         //   1 = vanilla `water_liquid` (Custom/Tar family, the tar-pit
         //       shader tinted for water) — a shader PROVEN to render in
-        //       this world (tar pits use it). Round-66: was "raw captured
+        //       this world (tar pits use it). Not "raw captured
         //       vanilla water", but FTS swaps zone water IN PLACE before
         //       FAT captures, so the captured material is ALREADY
-        //       FiresWater — mode 1 was comparing FiresWater to itself.
+        //       FiresWater, and mode 1 would compare FiresWater to itself.
         //   2 = bright debug material — ground truth for "is the MESH
-        //       visible at all". Round-66: Shader.Find("Standard")
-        //       returned null in-game (no per-combiner log lines after
-        //       ReapplyMaterialsAll mode=2), so we now walk a candidate
+        //       visible at all". Shader.Find("Standard") can return
+        //       null in-game, so we
+        //       walk a candidate
         //       list and LOG the outcome instead of failing silently.
         public static int DebugMaterialMode;
         private static Material s_debugBrightMaterial;
@@ -2648,7 +2703,7 @@ namespace VerdantsAscent.Water.Core
             return null;
         }
 
-        // Round-65 — force every live combiner to re-resolve its material
+        // Force every live combiner to re-resolve its material
         // through SetupMaterial. Clears the cached _waterMaterial first so
         // switching debug modes (including back to 0) actually swaps the
         // renderer material instead of hitting the early-return cache.
@@ -2668,7 +2723,7 @@ namespace VerdantsAscent.Water.Core
 
         private void SetupMaterial()
         {
-            // Debug override wins over everything (round-65).
+            // Debug override wins over everything.
             var dbg = GetDebugOverrideMaterial();
             if (dbg != null)
             {
@@ -2677,6 +2732,13 @@ namespace VerdantsAscent.Water.Core
                 FiresLogger.LogInfo($"[WaterMeshCombiner] SetupMaterial DEBUG override mode={DebugMaterialMode} mat={dbg.name} shader={dbg.shader?.name} queue={dbg.renderQueue}");
                 return;
             }
+
+            // Placed fresh water is calm every build, also after an anchor restored a saved wave strength.
+            if (CustomLiquidType == CustomLiquidType.Water && LiquidType == LiquidType.Water) WaveIntensity = 0f;
+            // Placed fresh water is drawn by PlacedWaterSheets with the skyland sheet builder; this grid mesh would
+            // stack a second, stepped surface on it. The swim trigger is a separate object and stays.
+            if (_meshRenderer != null)
+                _meshRenderer.enabled = !(CustomLiquidType == CustomLiquidType.Water && LiquidType == LiquidType.Water && PlacedWaterSheets.Active);
 
             if (_waterMaterial != null)
             {
@@ -2692,7 +2754,13 @@ namespace VerdantsAscent.Water.Core
             }
             else
             {
-                _waterMaterial = WaterMaterialManager.GetWaterMaterial(LiquidType);
+                // Placed water is calm like inland rivers (no wind or ocean waves):
+                // plain placed water wears the generated rivers' calm Custom/FiresInlandWater sheet
+                // material and has no gameplay waves, so its surface stays exactly at the swim trigger's height. The ocean
+                // wrap is the fallback when the inland shader is not loaded.
+                _waterMaterial = VerdantsAscent.Terrain.Voxel.VoxelChunkView.ResolveSheetMaterial()
+                    ?? WaterMaterialManager.GetWaterMaterial(LiquidType);
+                WaveIntensity = 0f;
             }
 
             if (_waterMaterial != null)
@@ -2736,17 +2804,17 @@ namespace VerdantsAscent.Water.Core
         /// Players must be within this distance below the water surface to trigger swimming.
         /// </summary>
         private const float SWIM_TRIGGER_MAX_DEPTH = 3f;
-        // 0.2.683: below that, down to the bed (minus a margin), but never deeper than this under the surface.
+        // Below that, down to the bed (minus a margin), but never deeper than this under the surface.
         private const float SWIM_TRIGGER_BED_MARGIN = 0.5f, SWIM_TRIGGER_BED_LIMIT = 30f;
 
         /// <summary>
         /// Maximum size of a single swim trigger BoxCollider segment (meters per axis).
         ///
-        /// 2026-05-26 round-27 — reduced from 340m → 2m. The old size meant
-        /// a single 20m circular disk got ONE 20×20m BoxCollider covering
-        /// its entire bounding box, so the trigger fired in the CORNERS of
-        /// the square where there's no actual water. User: "we sometimes
-        /// extend our swim trigger out past the actual water".
+        /// 2m. A larger size means
+        /// a single 20m circular disk gets ONE 20×20m BoxCollider covering
+        /// its entire bounding box, so the trigger fires in the CORNERS of
+        /// the square where there's no actual water (the swim trigger
+        /// extends past the actual water).
         ///
         /// At 2m, the segments approximate the circular disk shape closely
         /// enough that the bounding-box overshoot is bounded to ~1m around
@@ -2773,9 +2841,9 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private void SetupSwimTrigger()
         {
-            // 2026-05-25 round-7: Snow has no water beneath it (no _waterGO
-            // either) — skip the swim trigger entirely. User: "snow should
-            // not have a swim trigger or water effects". Also tear down any
+            // Snow has no water beneath it (no _waterGO
+            // either), so skip the swim trigger entirely (no swim trigger
+            // or water effects). Also tear down any
             // pre-existing trigger if the combiner was previously something
             // else (water → snow type-switch).
             if (CustomLiquidType == CustomLiquidType.Snow)
@@ -2848,8 +2916,8 @@ namespace VerdantsAscent.Water.Core
             float triggerTop = maxSurfaceY;
             float totalY = triggerTop - triggerBottom;
 
-            // 2026-05-26 round-27: REMOVED the single-BoxCollider fast path.
-            // It was emitting ONE BoxCollider covering the disk's bounding
+            // No single-BoxCollider fast path:
+            // ONE BoxCollider covering the disk's bounding
             // box — for a 20m circular disk that's a 20×20m square that
             // triggered swimming in the corners where there's no water.
             // Now ALL disks (pond or river) flow through the segmented
@@ -2900,7 +2968,7 @@ namespace VerdantsAscent.Water.Core
                     if (!segHasWater) continue;
 
                     // KEY FIX: segment top is at the resting water surface for this segment
-                    // 0.2.683 (H11, 10-01: a Fish2 lay on a 3.8 m pool well "given level never set"): the trigger reaches the
+                    // The trigger reaches the
                     // deepest bed in the segment, so a fish or a drop on the floor of water deeper than SWIM_TRIGGER_MAX_DEPTH
                     // is still in it (vanilla's WaterVolume reaches the seabed too). Bounded to SWIM_TRIGGER_BED_LIMIT.
                     float segBottom = segMinSurfY - SWIM_TRIGGER_MAX_DEPTH;
@@ -3233,7 +3301,10 @@ namespace VerdantsAscent.Water.Core
             _inWater.Clear();
             _combiner = null;
 
-            FiresLogger.LogDebug("[WaterCombinerTrigger] OnDestroy: Cleaned up all tracked water interactables");
+            // Destroy logging (hundreds of lines at quit/unload) is capped at one line a
+            // minute, counting the rest (FatLogGate).
+            if (VerdantsAscent.Terrain.Voxel.FatLogGate.Allow("combiner-destroy", out int heldD))
+                FiresLogger.LogDebug("[WaterCombinerTrigger] OnDestroy: cleaned up tracked water interactables" + VerdantsAscent.Terrain.Voxel.FatLogGate.Held(heldD));
         }
 
         /// <summary>

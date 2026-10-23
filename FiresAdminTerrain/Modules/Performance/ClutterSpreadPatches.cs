@@ -59,6 +59,29 @@ namespace VerdantsAscent.Performance
             // ClutterSystem.m_waterLevel while the GenerateVegPatch hook held the patch: the water-ecology move is
             // restored before this builder runs.
             public float WaterLevel;
+            // Grass must not blank on every cave crossing: a RESET patch's old grass, kept drawn until this
+            // builder has filled the replacement, then destroyed (build-then-swap). Null for a fresh patch.
+            public List<GameObject> Retiring;
+            // The cave light at this patch (CaveLight), NaN until its first cave-floor candidate.
+            public float Light = float.NaN;
+        }
+
+        // A deterministic 0..1 from a candidate's position and type (does not touch UnityEngine.Random, so vanilla's sequence holds).
+        private static float CandidateHash(Vector3 p, int type)
+        {
+            unchecked
+            {
+                uint h = (uint)(Mathf.RoundToInt(p.x * 8f) * 73856093 ^ Mathf.RoundToInt(p.z * 8f) * 19349663 ^ type * 83492791);
+                h ^= h >> 13; h *= 0x5bd1e995; h ^= h >> 15;
+                return (h & 0xFFFFFF) / 16777216f;
+            }
+        }
+
+        private static void DestroyRetiring(Builder b)
+        {
+            if (b?.Retiring == null) return;
+            foreach (var go in b.Retiring) if (go != null) UnityEngine.Object.Destroy(go);
+            b.Retiring = null;
         }
 
         private static readonly Dictionary<Vector2Int, Builder> s_builders =
@@ -164,8 +187,25 @@ namespace VerdantsAscent.Performance
             f_pdCenter.SetValue(patch, center);
             var objects = (List<GameObject>) f_pdObjects.GetValue(patch);
 
+            // Build-then-swap: vanilla destroys the old patch's objects right after this returns. Take them out of its list
+            // (vanilla then destroys nothing) and keep them until the new patch is filled. If an earlier swap was still
+            // pending here, ITS old (complete) grass stays the stand-in and the half-built patch goes as vanilla meant.
+            List<GameObject> retiring = null;
+            var live = (IDictionary) f_patches.GetValue(cs);
+            if (s_builders.TryGetValue(patchID, out Builder pending) && pending.Retiring != null)
+            {
+                retiring = pending.Retiring;
+                pending.Retiring = null;
+            }
+            else if (live != null && live.Contains(patchID))
+            {
+                var old = (List<GameObject>) f_pdObjects.GetValue(live[patchID]);
+                if (old != null && old.Count > 0) { retiring = new List<GameObject>(old); old.Clear(); }
+            }
+
             s_builders[patchID] = new Builder
             {
+                Retiring = retiring,
                 Id = patchID,
                 Patch = patch,
                 Objects = objects,
@@ -226,6 +266,7 @@ namespace VerdantsAscent.Performance
                     object live = patches[key];
                     if (live == null || !ReferenceEquals(live, b.Patch))
                     {
+                        DestroyRetiring(b);
                         s_builders.Remove(key);
                         continue;
                     }
@@ -234,6 +275,7 @@ namespace VerdantsAscent.Performance
                     {
                         if (AdvanceBuilder(cs, b, quality, grassRoot, sw))
                         {
+                            DestroyRetiring(b);
                             s_builders.Remove(key);
                             s_winDone++;
                             s_winLatencySum += Time.unscaledTime - b.EnqueuedAt;
@@ -241,6 +283,7 @@ namespace VerdantsAscent.Performance
                     }
                     catch (Exception ex)
                     {
+                        DestroyRetiring(b);
                         s_builders.Remove(key);
                         if (!s_loggedError)
                         {
@@ -304,7 +347,7 @@ namespace VerdantsAscent.Performance
             Stopwatch sw)
         {
             if (!c.m_enabled || (b.Biomes & c.m_biome) == Heightmap.Biome.None) return true;
-            // 0.2.693: a patch with no voxel edit anchor within reach skips the per-candidate edit lookup.
+            // A patch with no voxel edit anchor within reach skips the per-candidate edit lookup.
             bool patchNearEdits = global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.HasEditsXZ(b.Center.x, b.Center.z, b.HalfSize * 1.5f);
 
             InstanceRenderer instanceRenderer = null;
@@ -352,7 +395,7 @@ namespace VerdantsAscent.Performance
                     UnityEngine.Random.Range(center.x - halfSize, center.x + halfSize), 0f,
                     UnityEngine.Random.Range(center.z - halfSize, center.z + halfSize));
                 float rotY = UnityEngine.Random.Range(0, 360);
-                // 0.2.693 (Fire 10-01: "no more grass over edited terrain at all"): which vanilla gate refuses each candidate,
+                // No grass floating over edited terrain: which vanilla gate refuses each candidate,
                 // split by whether it stands on voxel-EDITED ground (a VAVoxel edit anchor's chunk). Read by clutterfloat_test.
                 bool edited = patchNearEdits && global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.HasEditsXZ(pos.x, pos.z, 0f);
 
@@ -369,7 +412,7 @@ namespace VerdantsAscent.Performance
 
                 if (!cs.GetGroundInfo(pos, out Vector3 point, out Vector3 normal, out Heightmap hmap, out Heightmap.Biome biome))
                 { GateCount(edited, Gate.NoGround); continue; }
-                // 0.2.694: from here on, "edited" is the ground itself, off the generated height (FatGroundProbe.IsGroundEdited).
+                // From here on, "edited" is the ground itself, off the generated height (FatGroundProbe.IsGroundEdited).
                 edited = global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.IsGroundEdited(point.x, point.z, point.y);
                 if ((c.m_biome & biome) == Heightmap.Biome.None) { GateCount(edited, Gate.Biome); continue; }
 
@@ -381,21 +424,35 @@ namespace VerdantsAscent.Performance
                 {
                     // Vanilla's ocean depth is the ZONE's depth under the sea (Heightmap.UpdateCornerDepths: max(0, 30 - height)
                     // at the heightmap's four corners, lerped). It keeps a clutter such as instanced_waterlilies (ocean depth
-                    // 0..1) out of the open sea, and it reads 0 at an inland pond, which is right as it is. 0.2.662-0.2.676
-                    // replaced it with the pond's local depth, which refused every lily deep enough for its altitude band
-                    // (bed 3.2-4.5 m under the surface): removed in 0.2.677 (R47, 10-01).
+                    // 0..1) out of the open sea, and it reads 0 at an inland pond, which is right as it is. Replacing
+                    // it with the pond's local depth refused every lily deep enough for its altitude band
+                    // (bed 3.2-4.5 m under the surface), so vanilla's stays.
                     float od = hmap.GetOceanDepth(pos);
                     if (od < c.m_minOceanDepth || od > c.m_maxOceanDepth) { GateCount(edited, Gate.OceanDepth); continue; }
                 }
+                // Layered clutter: on a cave floor the heightmap's mask is the SURFACE's above it; the cave's own hoe /
+                // cultivator paint (VoxelLayerPaint) decides instead: painted = cleared, no vegetation.
+                bool caveFloor = ClutterGroundProbe.CameraInCave;
+                byte cavePaint = caveFloor ? global::VerdantsAscent.Terrain.Voxel.VoxelLayerPaint.PaintedMaskAt(point) : (byte)0;
                 if (c.m_minVegetation != c.m_maxVegetation)
                 {
-                    float vm = hmap.GetVegetationMask(point);
+                    float vm = caveFloor ? (cavePaint != 0 ? 0f : 1f) : hmap.GetVegetationMask(point);
                     if (vm > c.m_maxVegetation || vm < c.m_minVegetation) { GateCount(edited, Gate.VegetationMask); continue; }
                 }
                 if (!c.m_onCleared || !c.m_onUncleared)
                 {
-                    bool cleared = hmap.IsCleared(point);
+                    bool cleared = caveFloor ? cavePaint != 0 : hmap.IsCleared(point);
                     if ((c.m_onCleared && !cleared) || (c.m_onUncleared & cleared)) { GateCount(edited, Gate.Cleared); continue; }
+                }
+                // Cave clutter by light: in a cave the biome's clutter keeps 'Dark density' of its pieces at
+                // 'Dark scale' where no light reaches, rising to all of them at full size toward mouths, shafts and sinkholes.
+                float lightScale = 1f;
+                if (caveFloor)
+                {
+                    if (float.IsNaN(b.Light)) b.Light = global::VerdantsAscent.Terrain.Voxel.CaveLight.At(point);
+                    float keep = Mathf.Lerp(global::VerdantsAscent.Terrain.Voxel.CaveLight.DarkDensity, 1f, b.Light);
+                    if (CandidateHash(pos, index1) >= keep) { GateCount(edited, Gate.Cleared); continue; }
+                    lightScale = Mathf.Lerp(global::VerdantsAscent.Terrain.Voxel.CaveLight.DarkScale, 1f, b.Light);
                 }
                 GateCount(edited, Gate.Placed);
 
@@ -416,13 +473,14 @@ namespace VerdantsAscent.Performance
                         if (instanceRenderer.m_lodMaxDistance > lodCap) instanceRenderer.m_lodMaxDistance = lodCap;
                         b.Objects.Add(go);
                     }
-                    float scale = UnityEngine.Random.Range(c.m_scaleMin, c.m_scaleMax);
+                    float scale = UnityEngine.Random.Range(c.m_scaleMin, c.m_scaleMax) * lightScale;
                     instanceRenderer.AddInstance(pos, rot, scale);
                     s_winPlaced++;
                 }
                 else
                 {
                     GameObject go = UnityEngine.Object.Instantiate(c.m_prefab, pos, rot, grassRoot.transform);
+                    if (lightScale != 1f) go.transform.localScale *= lightScale;
                     b.Objects.Add(go);
                     s_winPlaced++;
                 }
@@ -430,7 +488,7 @@ namespace VerdantsAscent.Performance
             return true;
         }
 
-        // ── 0.2.693: the gate census (Fire 10-01, bare grass over edited ground) ─────────────────────────────────────
+        // ── the gate census (bare grass over edited ground) ─────────────────────────────────────
         internal enum Gate { Forest, Fractal, NoGround, Biome, Altitude, Tilt, OceanDepth, VegetationMask, Cleared, Placed }
         private static readonly int[] s_gateEdited = new int[10], s_gatePlain = new int[10];
 
@@ -450,14 +508,14 @@ namespace VerdantsAscent.Performance
             return $"placed {placed} of {total} ({100f * placed / total:0} %); refused: {(parts.Count > 0 ? string.Join(", ", parts) : "none")}";
         }
 
-        // 0.2.693: builders waiting, and frames the fill was held back by a queued heightmap rebuild (since the census reset).
+        // Builders waiting, and frames the fill was held back by a queued heightmap rebuild (since the census reset).
         internal static int s_starvedTotal;
         internal static int BuildersPending => s_builders.Count;
 
         internal static void ResetGateCensus() { s_starvedTotal = 0; System.Array.Clear(s_gateEdited, 0, s_gateEdited.Length); System.Array.Clear(s_gatePlain, 0, s_gatePlain.Length); }
 
-        internal static void OnClearAll() => s_builders.Clear();
-        internal static void OnAwake() => s_builders.Clear();
+        internal static void OnClearAll() { foreach (var b in s_builders.Values) DestroyRetiring(b); s_builders.Clear(); }
+        internal static void OnAwake() { foreach (var b in s_builders.Values) DestroyRetiring(b); s_builders.Clear(); }
 
         // ── Harmony hooks (thin — all logic lives above) ──────────────────────
         // OnGenerateVegPatch runs from FAT's one ClutterSystem.GenerateVegPatch hook (FatVanillaHooks).
@@ -478,6 +536,36 @@ namespace VerdantsAscent.Performance
         {
             [HarmonyPostfix]
             private static void Postfix() => OnClearAll();
+        }
+
+        // An endless "InvalidOperationException: Instancing is not supported" came from
+        // Graphics.DrawMeshInstanced in InstanceRenderer.CustomUpdate on a dedi. A headless server (-batchmode -nographics) cannot instance-draw;
+        // vanilla's ClutterSystem skips its grass there (Awake returns on GraphicsDeviceType.Null), but clutter a mod spawns itself
+        // (FAT's ClutterSpread builder, environment-box clutter, other mods) still brings InstanceRenderers. On a headless process an
+        // InstanceRenderer never registers for CustomUpdate and is disabled; each source is logged once by name.
+        [HarmonyPatch(typeof(InstanceRenderer), "OnEnable")]
+        private static class HeadlessInstanceRenderer_Patch
+        {
+            private static readonly HashSet<string> s_logged = new HashSet<string>(StringComparer.Ordinal);
+            private static int s_count;
+
+            [HarmonyPrefix]
+            private static bool Prefix(InstanceRenderer __instance)
+            {
+                if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null) return true;
+                s_count++;
+                try
+                {
+                    var t = __instance.transform; string path = t.name;
+                    for (var p = t.parent; p != null; p = p.parent) path = p.name + "/" + path;
+                    string key = __instance.name.Replace("(Clone)", "");
+                    if (s_logged.Add(key))
+                        FiresLogger.LogInfo($"[FAT] headless server: InstanceRenderer '{key}' disabled (no instanced drawing without a GPU; {s_count} so far), first at {path}");
+                }
+                catch { }
+                __instance.enabled = false;
+                return false;
+            }
         }
 
         [HarmonyPatch(typeof(ClutterSystem), "Awake")]

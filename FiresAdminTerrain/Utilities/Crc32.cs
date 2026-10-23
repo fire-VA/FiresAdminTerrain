@@ -1,8 +1,8 @@
 namespace VerdantsAscent
 {
-    // CRC-32 (IEEE 802.3, the zip and PNG polynomial). The park pack checks each record with it (D6c): a record reads back
-    // only as the bytes that were written. A client's replayed river grid is summed with it and compared with the server's
-    // (D13). Of() sums a buffer at once; Start, Add and Finish sum values as they come, without building a buffer.
+    // CRC-32 (IEEE 802.3, the zip and PNG polynomial). The park pack checks each record with it: a record reads back
+    // only as the bytes that were written. A client's replayed river grid is summed with it and compared with the server's.
+    // Of() sums a buffer at once; Start, Add and Finish sum values as they come, without building a buffer.
     internal static class Crc32
     {
         internal const uint Start = AllOnes;

@@ -6,7 +6,8 @@ namespace VerdantsAscent.Terrain.Zones
 {
     // ── NOTHING ENTERS A CLOSED ZONE ────────────────────────────────────────
     // A closed zone must stay empty so that opening it later shows the world exactly as generated:
-    //   * building: the placement ghost goes red and placing is refused;
+    //   * building: allowed over a closed zone (tagged, taken down when it opens: ZoneModeOverClosed), except
+    //     terrain tools; with 'Build over closed zones' off the ghost goes red and placing is refused, as before;
     //   * terrain: any terrain op, hoe stroke or dig whose footprint touches a closed zone is refused
     //     whole — a half-applied edit at the edge would split the shared border of two heightmaps;
     //   * teleports into closed sea are refused, and a saved logout or bed point there is cleared;
@@ -31,6 +32,7 @@ namespace VerdantsAscent.Terrain.Zones
             AccessTools.FieldRefAccess<Game, PlayerProfile>("m_playerProfile");
 
         private static float s_lastMessageTime = -100f;
+        // (placement over a closed zone: see GhostRefused and ZoneModeOverClosed)
         private static TerrainOp s_lastCancelledOp;
 
         internal static int BuildsRefused;
@@ -65,15 +67,19 @@ namespace VerdantsAscent.Terrain.Zones
             return modifier != null ? modifier.GetRadius() : 0f;
         }
 
+        // Players need to build over the edge of unopened zones (platforms down to
+        // the water), so a piece over a closed zone is allowed anywhere, and ZoneModeOverClosed tags it so it is
+        // taken down, materials to a chest, when that zone opens. A terrain tool there stays refused: a dig never touches
+        // closed ground. 'Build over closed zones' off brings back the old rule (everything over a closed zone refused).
         private static bool GhostRefused(GameObject ghost, out string message)
         {
             Vector3 position = ghost.transform.position;
-            if (IsClosedAt(position))
+            float radius = TerrainRadiusOf(ghost);
+            if (IsClosedAt(position) && (radius > 0f || ZoneModeConfig.BuildOverClosedZones == null || !ZoneModeConfig.BuildOverClosedZones.Value))
             {
                 message = ClosedSquareMessage;
                 return true;
             }
-            float radius = TerrainRadiusOf(ghost);
             if (radius > 0f && TerrainEditTouchesClosed(position, radius))
             {
                 message = NearEdgeMessage;
@@ -118,6 +124,13 @@ namespace VerdantsAscent.Terrain.Zones
             if (ghost == null || !GhostRefused(ghost, out string message)) return false;
             TellLocalPlayer(message);
             BuildsRefused++;
+            // Which rule refused which placement where.
+            Vector3 at = ghost.transform.position;
+            var zone = ZoneSystem.GetZone(at);
+            FiresLogger.LogDebug($"[FiresZones] build refused at ({at.x:0.0},{at.y:0.0},{at.z:0.0}) in "
+                + $"{(ZoneModeGate.IsClosedForTerrain(at.x, at.z) ? "closed" : "open")} zone ({zone.x},{zone.y}): "
+                + $"{Utils.GetPrefabName(ghost)} - \"{message}\" (terrain tool radius {TerrainRadiusOf(ghost):0.0} m, "
+                + $"build over closed zones {(ZoneModeConfig.BuildOverClosedZones?.Value ?? false ? "on" : "off")})");
             return true;
         }
 
@@ -138,7 +151,7 @@ namespace VerdantsAscent.Terrain.Zones
             return false;
         }
 
-        // The prefix of FAT's one Player.TeleportTo hook (FatVanillaHooks, 0.2.697): false refuses the teleport.
+        // The prefix of FAT's one Player.TeleportTo hook (FatVanillaHooks): false refuses the teleport.
         internal static bool AllowTeleport(Player __instance, Vector3 pos, ref bool __result)
         {
             if (!ZoneModeGate.Active || !IsClosedAt(pos)) return true;

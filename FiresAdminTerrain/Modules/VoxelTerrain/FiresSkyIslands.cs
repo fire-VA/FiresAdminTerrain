@@ -5,7 +5,7 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // ── SKY ISLANDS (P10 phase 1) ────────────────────────────────────────
     // Rare floating islands, deterministic per seed: flat-ish carved top,
-    // pointed ridged underside (the user's scaled-cube prototype is the
+    // pointed ridged underside (a scaled-cube prototype is the
     // shape target). Placed ≥200m above the LOCAL terrain — a mountain at
     // y400 gets its island around y600+. Pure voxel additions: the 2D
     // heightmap, the minimap, spawns and vegetation never see them; the
@@ -44,7 +44,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // whole-metre offset carries it to where it stands. Every query that takes or answers a world position
             // translates at its door. Zero for every island the world grew itself, which then reads exactly as before.
             public float OffX, OffY, OffZ;
-            // The world a blueprint's skyland grew in (Fire, 2026-09-27: "make them work anywhere"): its noise seed, the
+            // The world a blueprint's skyland grew in (so blueprints work anywhere): its noise seed, the
             // seed its atoll crescents are laid out from, and its biome. A skyland carrying them derives the same shape,
             // ground, caves and biome in any world. False for every island this world grew, which reads this world's.
             public bool OwnSeeds;
@@ -80,7 +80,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static int IslandCount => s_islands.Count;
         internal static int ClusterCount;
 
-        internal static bool Enabled => s_any && FiresVoxelConfig.BuildsSkyIslands;
+        internal static bool Enabled => s_any && FiresVoxelConfig.BuildsSkyIslands && !(FatSuperFlat.On && FiresWorldProfile.Current?.SkyIslands != true);   // On super flat only when its Sky islands row is ticked
 
         internal static void Clear()
         {
@@ -88,6 +88,7 @@ namespace VerdantsAscent.Terrain.Voxel
             s_index.Clear();
             s_any = false;
             ClusterCount = 0;
+            s_dryReported = false;
             ClearFormations();
             ResetRegistryState();
         }
@@ -100,10 +101,12 @@ namespace VerdantsAscent.Terrain.Voxel
             int idx = s_islands.Count;
             var derived = isl;
             derived.Variety = unchecked((int)SourceHash(in isl));
+            bool water = IslandWaterOn;
+            if (!water) BornDry(ref derived);
             if (derived.Kind == ShapedKind) derived.Shape = ShapeFor(in derived);
             if (IsSkyland(derived.Kind))
             {
-                derived.Waters = DeriveWaters(in derived);
+                derived.Waters = water ? DeriveWaters(in derived) : null;
                 derived.Biome = derived.FixedBiome != Heightmap.Biome.None ? derived.FixedBiome : RollSkylandBiome(in derived);
                 RollSkylandSite(ref derived);
             }
@@ -118,6 +121,25 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (!s_index.TryGetValue(key, out var list)) s_index[key] = list = new List<int>(2);
                     list.Add(idx);
                 }
+        }
+
+        // New World's "Auto-place water on sky islands", kept in the world's profile.
+        // Off: every island is born dry - no pond bowl or rill, no river or lake carved, so no island water and no falls -
+        // and its dressing stands on the dry top, for shaping water on it by hand. Variety stays the wet source's, so the
+        // island's look and biome roll do not change; its id and chunk hashes do, as its density does.
+        internal static bool IslandWaterOn => FiresWorldProfile.Current?.SkyIslandWater != false;
+
+        private static bool s_dryReported;
+
+        private static void BornDry(ref Island isl)
+        {
+            isl.PondX = isl.PondZ = isl.PondR = isl.PondLvl = 0f;
+            isl.RillAng = float.NaN;
+            isl.RillLen = isl.RillEndLvl = 0f;
+            if (s_dryReported) return;
+            s_dryReported = true;
+            FiresLogger.LogDebug("[FiresSkyIslands] this world places no water on sky islands (its profile: water on sky islands off): "
+                + "islands are born dry - no ponds, rivers or falls carved, no island water placed.");
         }
 
         private static long CellKey(float wx, float wz)
@@ -153,19 +175,25 @@ namespace VerdantsAscent.Terrain.Voxel
             float chance = FiresVoxelConfig.SkyIslandRarity != null
                 ? FiresVoxelConfig.SkyIslandRarity.Value : 0.30f;
             if (chance <= 0f) return;
-            const float HALF = 10000f;   // stay inside the playable disc
+            // With FatWorldSize: the placement lattice stays anchored at the vanilla -10000 and only grows OUTWARD on a
+            // bigger world (Expand World Size), so every island a 10 km world has is in the same place on any size: cells
+            // 0..13 as before, plus cells below 0 and past 13 out to the world's radius. The rim is Radius - 700 (9300).
+            const float HALF = 10000f;   // the lattice's anchor (the vanilla playable radius)
+            float radius = FatWorldSize.Radius;
+            float rim = radius - 700f;
             int cells = Mathf.CeilToInt(HALF * 2f / PLACE_CELL);
+            int extra = radius > HALF ? Mathf.CeilToInt((radius - HALF) / PLACE_CELL) : 0;
             int clusters = 0;
-            for (int cz = 0; cz < cells; cz++)
-                for (int cx = 0; cx < cells; cx++)
+            for (int cz = -extra; cz < cells + extra; cz++)
+                for (int cx = -extra; cx < cells + extra; cx++)
                 {
                     if (Hash(cx, cz, seed, 0x51AB) >= chance) continue;
                     float wx = -HALF + (cx + 0.2f + 0.6f * Hash(cx, cz, seed, 0x11)) * PLACE_CELL;
                     float wz = -HALF + (cz + 0.2f + 0.6f * Hash(cx, cz, seed, 0x22)) * PLACE_CELL;
-                    if (wx * wx + wz * wz > 9300f * 9300f) continue;   // off the rim
+                    if (wx * wx + wz * wz > rim * rim) continue;   // off the rim
                     if (!GetGround(wx, wz, out float ground0)) continue;
 
-                    // Two placement kinds (user spec): rare CLUSTERS — an
+                    // Two placement kinds: rare CLUSTERS — an
                     // ARCHIPELAGO of many smaller satellites stepping upward
                     // and culminating in one large MOTHER island at the top
                     // of the climb — and SINGLES roaming the full 30-300m
@@ -178,7 +206,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     for (int ci = 0; ci < count; ci++)
                     {
                         int salt = 0x100 + ci * 37;
-                        if (wx * wx + wz * wz > 9300f * 9300f) break;   // chain wandered off the rim
+                        if (wx * wx + wz * wz > rim * rim) break;   // chain wandered off the rim
                         bool mother = clusterKind && ci == count - 1;
                         float h = Hash(cx, cz, seed, salt);
                         float r = clusterKind
@@ -190,8 +218,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         // across its WHOLE footprint, not just its centre. A
                         // low-band island whose rim reached over a rising
                         // mountain flank fused into the slope as a sheer
-                        // flat-topped cliff shelf (user report at y555:
-                        // "chunks ripped out"). Sample the rim; the island
+                        // flat-topped cliff shelf (seen at y 555:
+                        // chunks ripped out). Sample the rim; the island
                         // floats above the HIGHEST ground it overhangs.
                         float gMax = ground;
                         for (int rp = 0; rp < 4; rp++)
@@ -490,7 +518,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
 
-        // Console listing (va_skyislands): nearest first so the user can fly
+        // Console listing (va_skyislands): nearest first so an admin can fly
         // straight to one and verify the emission in-world.
         internal static void PrintIslands(Terminal ctx)
         {
@@ -815,7 +843,7 @@ namespace VerdantsAscent.Terrain.Voxel
             float dx = wx - isl.X, dz = wz - isl.Z;
             float rr = Mathf.Sqrt(dx * dx + dz * dz) / isl.R;
             if (rr >= 0.999f) return Outside;
-            // ARCHETYPES (user spec): rolling plains, MINI-MOUNTAIN peaks,
+            // ARCHETYPES: rolling plains, MINI-MOUNTAIN peaks,
             // CRATER bowls, and GROTTO hollows.
             float top = TopAt(in isl, wx, wz);
 

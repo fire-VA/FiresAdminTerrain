@@ -75,7 +75,7 @@ namespace VerdantsAscent.Terrain.BcImport
         private const float MinBodyHeight = 60f;
         private const float RowsGap = 18f;
         private const float ButtonGap = 34f;
-        private const int ControlRows = 4;
+        private const int ControlRows = 5;
         private const float BodyGap = 10f;
         private const float RowHeight = 34f;
         private const float RowGap = 10f;
@@ -90,7 +90,7 @@ namespace VerdantsAscent.Terrain.BcImport
         private GameObject _root;
         private TMP_InputField _cloneName;
         private TMP_Text _status;
-        private Toggle _voxel, _fullVoxel, _caves, _skyIslands, _hydrology, _oneZone;
+        private Toggle _voxel, _fullVoxel, _caves, _skyIslands, _skyWater, _hydrology, _oneZone;
 
         public static void Open(World world)
         {
@@ -217,7 +217,19 @@ namespace VerdantsAscent.Terrain.BcImport
             _caves = CloneToggle(fejd, dialog, "Caves", RowY(top, row), -columnX, columnWidth);
             _skyIslands = CloneToggle(fejd, dialog, "Sky islands", RowY(top, row++), columnX, columnWidth);
             _hydrology = CloneToggle(fejd, dialog, "Rivers and lakes", RowY(top, row), -columnX, columnWidth);
-            _oneZone = CloneToggle(fejd, dialog, "One zone at a time", RowY(top, row++), columnX, columnWidth);
+            // New World's dependent box, here too, right under Sky islands: shown only while Sky
+            // islands is ticked, ticked by default. Off = the copy's islands are born dry (no ponds, rivers, falls or water).
+            _skyWater = CloneToggle(fejd, dialog, "Auto-place water on sky islands", RowY(top, row++), columnX, columnWidth);
+            _oneZone = CloneToggle(fejd, dialog, "One zone at a time", RowY(top, row++), -columnX, columnWidth);
+            if (_skyWater != null)
+            {
+                _skyWater.isOn = true;
+                bool skyOn = _skyIslands != null && _skyIslands.isOn;
+                _skyWater.gameObject.SetActive(skyOn);
+                _skyWater.interactable = skyOn;
+                if (_skyIslands != null)
+                    _skyIslands.onValueChanged.AddListener(on => { _skyWater.gameObject.SetActive(on); _skyWater.interactable = on; });
+            }
 
             OnlyOneTerrain(_voxel, _fullVoxel);
             OnlyOneTerrain(_fullVoxel, _voxel);
@@ -375,6 +387,8 @@ namespace VerdantsAscent.Terrain.BcImport
             if (_voxel != null && _voxel.isOn) options.Terrain = ProfileTerrain.VoxelWrap;
             if (_caves != null) options.Caves = _caves.isOn;
             if (_skyIslands != null) options.SkyIslands = _skyIslands.isOn;
+            // Stated only with sky islands on: water on writes skyislandwater=true, off writes false (the islands born dry).
+            if (_skyIslands != null && _skyIslands.isOn && _skyWater != null) options.SkyIslandWater = _skyWater.isOn;
             if (_hydrology != null) options.Hydrology = _hydrology.isOn;
             if (_oneZone != null) options.ChunkByChunk = _oneZone.isOn;
             return options;
@@ -404,7 +418,7 @@ namespace VerdantsAscent.Terrain.BcImport
         private static readonly AccessTools.FieldRef<FejdStartup, World> SelectedWorldRef =
             AccessTools.FieldRefAccess<FejdStartup, World>("m_world");
 
-        // The new world was missing from Select World until the menu was left and re-entered (Fire, 2026-09-27): the save
+        // The new world was missing from Select World until the menu was left and re-entered: the save
         // cache was dropped but vanilla's list was never rebuilt. Rebuild it now with the copy selected, so Start plays it.
         private static void ShowAndSelect(string worldName)
         {

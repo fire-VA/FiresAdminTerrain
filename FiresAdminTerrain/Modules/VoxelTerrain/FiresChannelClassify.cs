@@ -37,13 +37,13 @@ namespace VerdantsAscent.Terrain.Voxel
             double relSum = 0, hardSum = 0; int nSamp = 0;
 
             // ═══ CANYONS ARE PLACED ON THE BEST GROUND THIS WORLD HAS, NOT ON AN ABSOLUTE BAR ══════════════
-            // (2026-08-16, user: "canyons can be deliberately placed based on logical spots they should sit if
-            // you cannot work out the logic to work them into the generation naturally".)
+            // (Canyons may be deliberately placed on logical spots when the logic to work them into
+            // the generation naturally cannot be found.)
             // A fixed CANYON_RELIEF of 26 m returned ZERO canyons on every seed, and that was not a shy
             // threshold — mean relief along our rivers is 12 m, because §1a's formative process (the plateau
             // RISING while the river holds its course) is not modelled at all. Detection can only ever find
             // what the terrain already contains, so it will keep returning zero however the number moves.
-            // Ranking answers the question the user actually asked: WHERE SHOULD ONE SIT. Take the relief
+            // Ranking answers the real question: WHERE SHOULD ONE SIT. Take the relief
             // distribution along this world's own rivers and cut it at a percentile — the reaches that are
             // most enclosed by high ground, whatever that means on this planet — then keep the ARID, BEDDED,
             // real-river gates unchanged so the ones selected are still justified by §1a's other conditions.
@@ -261,8 +261,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     + $"Windowed over {INC_WINDOW_M:0} m; mean relief {(nSamp > 0 ? relSum / nSamp : 0):0.0} m, mean rock hardness {(nSamp > 0 ? hardSum / nSamp : 0):0.00}. "
                     + "Water/wind gaps are NOT detected here — see the note above: our drainage is solved on finished terrain, so it already avoids every ridge and a detector would find nothing.");
             // ═══ WHERE ARE THEY? COORDINATES, SO A RENDER CAN BE AIMED AT ONE ═══════════════════════════
-            // (2026-08-22, user: "we have built so many studio tools to allow you to visualize the water
-            // generation and you just guess and get it wrong over and over".) He is right, and the reason a
+            // (Without coordinates, studio renders guessed where the canyons were
+            // and got it wrong.) The reason a
             // render was not aimed at a canyon before is that nothing printed WHERE one is — the census gives
             // counts, and a count cannot be looked at. `watermesh` paints the incision class ORANGE and takes
             // a zoom, so a coordinate is the only missing piece.
@@ -400,7 +400,7 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresLogger.LogInfo(sb.ToString());
         }
 
-        // (v133) THE WATER TABLE MAKES THE BIOME, not the other way round.
+        //  THE WATER TABLE MAKES THE BIOME, not the other way round.
         //
         // Set by ClassifyWetlands: every cell of every closed basin it judged a WETLAND rather than a lake.
         // Read TWICE, and the two readers are the point of the design:

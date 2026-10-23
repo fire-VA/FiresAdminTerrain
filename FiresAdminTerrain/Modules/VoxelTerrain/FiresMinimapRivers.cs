@@ -34,7 +34,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static void MapReady(string source)
         {
-            // One line per event — the 0.2.260 session had NO stamp log and
+            // One line per event — a session once had NO stamp log and
             // NO vanilla minimap log either; this says which side went silent.
             FiresLogger.LogInfo($"[FiresMinimapRivers] map event: {source}.");
             s_mapReady = true;

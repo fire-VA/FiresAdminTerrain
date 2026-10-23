@@ -6,12 +6,12 @@ using FiresCore.Bridge;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // World Gen Studio (Tools\WorldGenReal) turns a Gaea export folder into a baked Fires world. It is a separate app that never
-    // ships with the mod (Fire, 2026-09-27), and a public mod neither launches programs nor reads folders outside the Valheim and
-    // BepInEx folders (Fire, 2026-09-29): so the private FDT hosts the Studio behind Core's WorldGenStudioBridge (finds it,
+    // World Gen Studio turns a Gaea export folder into a baked Fires world. It is a separate app that never
+    // ships with the mod, and a public mod neither launches programs nor reads folders outside the Valheim and
+    // BepInEx folders: so the private FDT hosts the Studio behind Core's WorldGenStudioBridge (finds it,
     // checks the Gaea folder, starts it, has it import and bake, stops it), and FAT only asks. New World's "From Gaea" path
     // makes a work folder in Valheim's save data, asks the bridge to bake into it, and installs the bake where the game loads
-    // it by name. Without FDT's host the button isn't there. Tools\GAEA_WORLD_BUTTON.md.
+    // it by name. Without FDT's host the button isn't there.
     internal static class FiresGaeaStudio
     {
         private const string WorkFolder = "gaea_work";
@@ -24,7 +24,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float MinPeakY = 60f;
         private const float MaxPeakY = 1500f;
         private const float MinWorldSize = 1000f;
-        private const float MaxWorldSize = 21000f;
+        // A world as wide as Expand World Size makes it (edge to edge) may be imported; 21000 without EWS.
+        private static float MaxWorldSize
+            => FatWorldSize.TryReadExpandWorldSize(out var ews, out _) ? UnityEngine.Mathf.Max(21000f, 2f * ews.Edge) : 21000f;
 
         // A Studio host is there (FDT, on a machine with the Studio); otherwise New World offers no Gaea import.
         internal static bool Available => WorldGenStudioBridge.Available;
@@ -131,6 +133,14 @@ namespace VerdantsAscent.Terrain.Voxel
             string flowTarget = Path.ChangeExtension(target, FlowExtension);
             if (File.Exists(flow)) File.Copy(flow, flowTarget, true);
             else if (File.Exists(flowTarget)) File.Delete(flowTarget);
+            // The bake's big waterfall sinkholes (firesgen_<name>_sinkfalls.txt beside it). A bake without one
+            // (faithful, or from an older studio) still overwrites the target, so an older world's cuts never linger.
+            const string bakedSuffix = "_baked.bin";
+            string cuts = baked.EndsWith(bakedSuffix, StringComparison.OrdinalIgnoreCase)
+                ? baked.Substring(0, baked.Length - bakedSuffix.Length) + FatSinkFallCuts.Suffix : null;
+            string cutsTarget = FiresWorldRecords.PathFor(worldName, FatSinkFallCuts.Suffix);
+            if (cuts != null && File.Exists(cuts)) File.Copy(cuts, cutsTarget, true);
+            else File.WriteAllText(cutsTarget, "# FAT big waterfall sinkholes: none in this bake\n");
         }
     }
 }

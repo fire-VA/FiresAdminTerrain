@@ -25,15 +25,15 @@ namespace VerdantsAscent.Terrain.Voxel
     // are bit-identical vanilla.
     // Apply is a prefix and Restore a finalizer of FAT's one ClutterSystem.GenerateVegPatch hook (FatVanillaHooks).
     //
-    // 0.2.662 (Fire 09-30: "inland water ... grow water clutter at its shores and over its water (lillies and vass)"):
+    // Inland water grows water clutter at its shores and over its water (lilies and vass):
     //  * The spread builder (ClutterSpread, on by default) places a patch frames AFTER this hook has restored
     //    m_waterLevel, so it read 27 and the move never reached a single instance. It now takes WaterLevel and
     //    Surface from here when the patch is queued.
     //  * A patch whose centre is dry but which lies on a shore looks for the water around it (ShoreRings), so the
     //    bank grows vass as well as the water its lilies.
     //  * Surface is the water's own level (diagnostics). The ocean-depth bands keep vanilla's zone-level depth under the
-    //    sea, which reads 0 inland (0.2.677: substituting the local depth refused every lily).
-    //  * What grows where, from the runtime rules (R47, 10-01; m_waterLevel ~27 against the 30 m sea, so the move keeps
+    //    sea, which reads 0 inland (substituting the local depth refused every lily).
+    //  * What grows where, from the runtime rules (m_waterLevel ~27 against the 30 m sea, so the move keeps
     //    the 3 m gap): instanced_waterlilies alt -1.5..-0.2 → a bed 3.2-4.5 m under the surface; instanced_vass alt
     //    -1..-0.1 → 3.1-4.0 m. Fish1 (SpawnSystem, against 30) wants a bed 1.5-3 m deep. A Vpool pond is shaped for both.
     internal static class ClutterSystem_GenerateVegPatch_WaterEcology
@@ -56,14 +56,14 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             s_mutated = false;
             Surface = float.NaN;
-            // No hydrology needed: tool ponds count too (0.2.673), and Wet asks the generated field first.
+            // No hydrology needed: tool ponds count too, and Wet asks the generated field first.
             if (!FiresVegWaterEcology.Enabled) return;
             var c = __instance.GetVegPatchCenter(patchID);
             if (!TryPatchWater(c, out float lvl)) return;
 
             s_saved = __instance.m_waterLevel;
             // Keep vanilla's DESIGN gap between the sea plane and this constant (30 - 27 = 3 m), so a band that sits at
-            // the shoreline in vanilla sits at ours. 0.2.679 (H7, 10-01): not the live value's gap. Galaxies' tide moves
+            // the shoreline in vanilla sits at ours, not the live value's gap. Galaxies' tide moves
             // m_waterLevel with the sea (it read 25.15, a 4.85 m gap), and an inland pond has no tide, so the lily band
             // drifted 1.85 m deeper than any pond is cut.
             __instance.m_waterLevel = lvl - VanillaClutterGap;
@@ -85,7 +85,7 @@ namespace VerdantsAscent.Terrain.Voxel
             __instance.m_waterLevel = s_saved;
         }
 
-        // 0.2.668 (R29a, [lead] 10-01): a client learns its generated water late (the hydrology solve runs on a worker
+        // A client learns its generated water late (the hydrology solve runs on a worker
         // thread), and the grass already built around it keeps the sea-level bands until each patch happens to rebuild.
         // Called every frame from ClutterSpread's LateUpdate postfix: the first frame the water is queryable, the grass
         // around the camera is rebuilt once, so the shore and lake patches grow against it.
@@ -120,7 +120,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return level > float.MinValue;
         }
 
-        // FatWaterChecks.TryWaterAt (0.2.673): the generated field, else tool ponds and other FAT water over solid ground.
+        // FatWaterChecks.TryWaterAt: the generated field, else tool ponds and other FAT water over solid ground.
         private static bool Wet(float x, float z, out float level)
             => VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(x, z, MinDepth, false, out level, out _);
     }

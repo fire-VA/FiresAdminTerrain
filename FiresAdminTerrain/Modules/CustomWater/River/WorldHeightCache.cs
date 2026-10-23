@@ -179,43 +179,7 @@ namespace VerdantsAscent.Water.Core
             int[] biomes = IncludeBiomeData ? new int[size * size] : null;
 
             // Determine world bounds
-            // Use BC's TotalRadius if available, otherwise vanilla default
-            float totalRadius = 10500f;
-            float worldRadius = 10000f;
-
-            if (WorldGeneratorAccess.IsBetterContinentsLoaded && WorldGeneratorAccess.IsBetterContinentsEnabled)
-            {
-                // Try to read BC's world size via reflection
-                try
-                {
-                    var bcType = Type.GetType("BetterContinents.BetterContinents, BetterContinents");
-                    if (bcType != null)
-                    {
-                        var trField = HarmonyLib.AccessTools.Field(bcType, "TotalRadius");
-                        var wrField = HarmonyLib.AccessTools.Field(bcType, "WorldRadius");
-                        if (trField != null)
-                        {
-                            float bcTR = (float)trField.GetValue(null);
-                            if (bcTR > 100f)
-                            {
-                                totalRadius = bcTR > 15000f ? bcTR / 2f : bcTR;
-                            }
-                        }
-                        if (wrField != null)
-                        {
-                            float bcWR = (float)wrField.GetValue(null);
-                            if (bcWR > 100f)
-                            {
-                                worldRadius = bcWR > 15000f ? bcWR / 2f : bcWR;
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    FiresLogger.LogWarning($"[WorldHeightCache] Failed to read BC world size: {ex.Message}");
-                }
-            }
+            ResolveRadii(out float worldRadius, out float totalRadius);
 
             float totalSize = totalRadius * 2f;
 
@@ -318,6 +282,50 @@ namespace VerdantsAscent.Water.Core
             onComplete?.Invoke(snapshot);
         }
 
+        // The span the cache covers: BetterContinents' own radii when it runs, else the world's (FatWorldSize, the
+        // profile's recorded size; 10000 / 10500 on a vanilla-size world, as the fixed defaults were). BC's fields are radii;
+        // the old "over 15000 must be a diameter" guess halved a real Expand-World-sized radius, so on a non-vanilla world
+        // it only applies to a value past 1.5x the world's edge.
+        // The span a loaded cache must have, or false while the world's size is not applied yet (no world profile): then the
+        // check is skipped rather than judged against vanilla defaults (a good 20 km cache would otherwise be thrown
+        // away and rebuilt for ~23 min, maybe at the wrong span).
+        private static bool TryWantedRadii(out float worldRadius, out float totalRadius)
+        {
+            worldRadius = totalRadius = float.NaN;
+            if (VerdantsAscent.Terrain.Voxel.FiresWorldProfile.Current == null) return false;
+            ResolveRadii(out worldRadius, out totalRadius);
+            return true;
+        }
+
+        private static void ResolveRadii(out float worldRadius, out float totalRadius)
+        {
+            totalRadius = VerdantsAscent.Terrain.Voxel.FatWorldSize.EdgeRadius;
+            worldRadius = VerdantsAscent.Terrain.Voxel.FatWorldSize.Radius;
+            if (!WorldGeneratorAccess.IsBetterContinentsLoaded || !WorldGeneratorAccess.IsBetterContinentsEnabled) return;
+            float diameterGuess = VerdantsAscent.Terrain.Voxel.FatWorldSize.IsVanilla ? 15000f : 1.5f * totalRadius;
+            try
+            {
+                var bcType = Type.GetType("BetterContinents.BetterContinents, BetterContinents");
+                if (bcType == null) return;
+                var trField = HarmonyLib.AccessTools.Field(bcType, "TotalRadius");
+                var wrField = HarmonyLib.AccessTools.Field(bcType, "WorldRadius");
+                if (trField != null)
+                {
+                    float bcTR = (float)trField.GetValue(null);
+                    if (bcTR > 100f) totalRadius = bcTR > diameterGuess ? bcTR / 2f : bcTR;
+                }
+                if (wrField != null)
+                {
+                    float bcWR = (float)wrField.GetValue(null);
+                    if (bcWR > 100f) worldRadius = bcWR > diameterGuess ? bcWR / 2f : bcWR;
+                }
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"[WorldHeightCache] Failed to read BC world size: {ex.Message}");
+            }
+        }
+
         #region Disk Persistence
 
         // Binary format: VAHC v2
@@ -378,7 +386,7 @@ namespace VerdantsAscent.Water.Core
             if (string.IsNullOrEmpty(worldName))
                 return null;
 
-            string cacheDir = Path.Combine(BepInEx.Paths.ConfigPath, "FiresAdminTerrain", "Cache");
+            string cacheDir = global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "Cache");   // cache folder, not config
             Directory.CreateDirectory(cacheDir);
             return Path.Combine(cacheDir, $"{worldName}_heightcache_{gridSize}.bin");
         }
@@ -452,6 +460,14 @@ namespace VerdantsAscent.Water.Core
 
                     float worldRadius = reader.ReadSingle();
                     float totalRadius = reader.ReadSingle();
+                    // A cache built for another world size covers the wrong span; never reuse it.
+                    if (TryWantedRadii(out float wantRadius, out float wantTotal)
+                        && (Mathf.Abs(worldRadius - wantRadius) > 1f || Mathf.Abs(totalRadius - wantTotal) > 1f))
+                    {
+                        FiresLogger.LogWarning($"[WorldHeightCache] Cache spans radius {worldRadius:F0}/{totalRadius:F0}, this world is "
+                            + $"{wantRadius:F0}/{wantTotal:F0} - rebuilding");
+                        return false;
+                    }
                     bool hasBiomes = reader.ReadByte() != 0;
 
                     // Read compressed heights
@@ -555,6 +571,7 @@ namespace VerdantsAscent.Water.Core
 
             // Capture locals for the background thread
             int requestedGridSize = GridSize;
+            bool checkRadii = TryWantedRadii(out float wantRadius, out float wantTotal);   // read here on the main thread
             string cachePath = path;
 
             ThreadPool.QueueUserWorkItem(_ =>
@@ -592,6 +609,12 @@ namespace VerdantsAscent.Water.Core
 
                         float worldRadius = reader.ReadSingle();
                         float totalRadius = reader.ReadSingle();
+                        if (checkRadii && (Math.Abs(worldRadius - wantRadius) > 1f || Math.Abs(totalRadius - wantTotal) > 1f))
+                        {
+                            errorMsg = $"Cache spans radius {worldRadius:F0}/{totalRadius:F0}, this world is {wantRadius:F0}/{wantTotal:F0}";
+                            Interlocked.Exchange(ref completionFlag[0], -1);
+                            return;
+                        }
                         bool hasBiomes = reader.ReadByte() != 0;
 
                         int compressedHeightsLen = reader.ReadInt32();

@@ -11,11 +11,11 @@ using VerdantsAscent.Terrain.Zones;
 
 namespace VerdantsAscent.Terrain
 {
-    // `worldgen_test`, FAT's part of Fire's F5 test contract (Tools\FIRES_F5_TESTS.md): the BetterContinents data and its
+    // `worldgen_test`, FAT's part of the F5 test contract: the BetterContinents data and its
     // decode, the zone state handshake, the ground under the tester and one parked zone read back. Every step only READS,
     // so it spawns nothing and needs no cleanup. An open -> close round trip is not one of them: opening runs vanilla zone
-    // generation for good and closing parks what spawned, which cannot be undone (Tools\FIRES_TEAM_COORDINATION.md,
-    // decisions for Fire). The tester asks every peer at once through one routed RPC. Each answers with its own facts, the
+    // generation for good and closing parks what spawned, which cannot be undone.
+    // The tester asks every peer at once through one routed RPC. Each answers with its own facts, the
     // server also reads a parked zone back and files its facts in its own results file, and the tester compares them all
     // (the server, itself and every other player, e.g. the test bot) and prints and files every step line.
     internal static class FatWorldgenTest
@@ -177,7 +177,7 @@ namespace VerdantsAscent.Terrain
         }
 
         // The server's own count of joined connections, less this peer when it is one of them. The client's player list was the
-        // first try and counted one too many (R2, 04:2x: "1 of 2 other player(s) did not answer" with only the bot there).
+        // first try and counted one too many ("1 of 2 other player(s) did not answer" with only the bot there).
         private static int ExpectedOtherClients()
         {
             var server = Server();

@@ -5,9 +5,9 @@ namespace VerdantsAscent.Water.Core
 {
     // ── FiresLiquidWater — VANILLA LiquidVolume, water flavored ─────────
     //
-    // Round-61. The custom grid-sim volume (WaterVolumeSettle) produced
-    // swimmable-but-visually-broken water; meanwhile the reference result
-    // (cookie milk's screenshots) is achieved by spawning the VANILLA
+    // The custom grid-sim volume (WaterVolumeSettle) produced
+    // swimmable-but-visually-broken water; the look we want
+    // is achieved by spawning the VANILLA
     // liquid simulation with water settings. Vanilla `LiquidVolume` (the
     // swamp tar-pit system) is a complete fluid sim:
     //
@@ -20,8 +20,8 @@ namespace VerdantsAscent.Water.Core
     //     : InitializeLevels() — heights save compressed to the ZDO, so
     //     a settled pour restores EXACTLY after relog, no custom codec
     //   * vanilla even ships a `water_liquid` material (Custom/Tar
-    //     shader, deep blue, glossiness 0.95) — the exact look in the
-    //     reference screenshots
+    //     shader, deep blue, glossiness 0.95), the look we want
+    //     for water
     //
     // This class clones the vanilla `TarLiquid` prefab (the only
     // LiquidVolume carrier registered in ZNetScene), flips it to water,
@@ -47,9 +47,9 @@ namespace VerdantsAscent.Water.Core
 
         // Registered template, for callers that need their OWN spawn shape
         // rather than Spawn()'s basin-integrated pour (the generated-water
-        // backend seeds its grid directly). Instantiate it with the round-74
-        // pattern — flip the template inactive so the clone is born inactive
-        // at its real position — or the ZDO registers at world origin and
+        // backend seeds its grid directly). Instantiate it with the spawn
+        // pattern below (flip the template inactive so the clone is born inactive
+        // at its real position), or the ZDO registers at world origin and
         // ZNetScene's zone sweep destroys it within a tick.
         public static GameObject Template => _prefab;
 
@@ -60,10 +60,10 @@ namespace VerdantsAscent.Water.Core
         private const float WATER_LIQUID_GLOSS = 0.951f;
         private const float WATER_LIQUID_BUMPSCALE = 0.24f;
 
-        // Round-66 — pours can optionally wear the FiresWater shader (the
+        // Pours can optionally wear the FiresWater shader (the
         // same wrapped material the combiner meshes use) instead of the
-        // vanilla water_liquid tar-family look. OFF by default while the
-        // pour-destroy bug is under investigation: water_liquid is the
+        // vanilla water_liquid tar-family look. OFF by default:
+        // water_liquid is the
         // shader vanilla tar pits PROVE renders, so it stays the control
         // case. Toggle at runtime via `va_water_pour_shader 0|1` — it
         // re-skins live pours immediately and applies to future spawns.
@@ -107,7 +107,7 @@ namespace VerdantsAscent.Water.Core
 
             // ── Preferred source: the FAT asset bundle ──────────────────
             //
-            // Round-62: `FiresLiquidWater.prefab` is authored IN the Unity
+            // `FiresLiquidWater.prefab` is authored IN the Unity
             // project (Assets/Custom/VAitems/pieces/, bundle 'adminterrain')
             // as a proper duplicate of vanilla TarLiquid with:
             //   * LiquidVolume.m_liquidType = Water
@@ -163,18 +163,18 @@ namespace VerdantsAscent.Water.Core
                 foreach (var aoe in clone.GetComponentsInChildren<Aoe>(true))
                     Object.DestroyImmediate(aoe);
 
-                // Round-75 — strip the tar bubble FX (LiquidVolume spawns
+                // Strip the tar bubble FX (LiquidVolume spawns
                 // m_randomEffectList entries on random wet cells every few
-                // seconds; user: no bubbles on water). The authored bundle
+                // seconds; water has no bubbles). The authored bundle
                 // prefab ships with an empty list already.
                 lvClone.m_randomEffectList = new EffectList();
             }
 
-            // Round-91 — pours are BORN wearing Custom/FiresLiquid. The old
-            // flow registered the template with vanilla water_liquid and
-            // re-skinned per spawn after the fact — plain pours
+            // Pours are BORN wearing Custom/FiresLiquid. Registering
+            // the template with vanilla water_liquid and
+            // re-skinning per spawn after the fact would miss plain pours
             // (UseFiresWaterShader=false), ZDO restores and the merge-spawn
-            // path never got the skin and rendered vanilla. The shared pour
+            // path, which would render vanilla. The shared pour
             // material binds ONCE here; every instantiation inherits it.
             // water_liquid remains the headless / bundle-missing fallback
             // and the `va_water_pour_shader 0` comparison skin.
@@ -198,10 +198,10 @@ namespace VerdantsAscent.Water.Core
 
             var lv = clone.GetComponentInChildren<LiquidVolume>(true);
 
-            // Round-81 — WATER must be SWIMMABLE, not walk-on-top. Vanilla
+            // WATER must be SWIMMABLE, not walk-on-top. Vanilla
             // LiquidVolume's solid MeshCollider (m_collider) is the TAR
             // walkable surface — it holds the player UP at the waterline
-            // instead of letting them sink in and swim (why they stood
+            // instead of letting them sink in and swim (they would stand
             // chest-deep instead of swimming). Disable it for water: the
             // player falls in and the LiquidSurface trigger drives real
             // swimming (Character.SetLiquidLevel(Water) → InWater → swim,
@@ -228,12 +228,12 @@ namespace VerdantsAscent.Water.Core
             return true;
         }
 
-        // Round-77 — GROUND-TRUTH material resolution. The old name-search
-        // (`Resources.FindObjectsOfTypeAll` → first "water_liquid") grabbed
+        // GROUND-TRUTH material resolution. A name-search
+        // (`Resources.FindObjectsOfTypeAll` → first "water_liquid") grabs
         // OUR OWN BUNDLE's broken copy once the bundle was loaded — same
         // name, ripped-shader bytecode, error-shader magenta at queue 2000
-        // (log proof: pours rendered `water_liquid Custom/Tar queue=2000`
-        // while real tar pits render queue=2899). Resolution now anchors
+        // (pours rendered `water_liquid Custom/Tar queue=2000`
+        // while real tar pits render queue=2899). Resolution anchors
         // on the LIVE TarLiquid prefab's shader INSTANCE:
         //   1. tarShader = ZNetScene TarLiquid renderer's material.shader —
         //      guaranteed the working in-game Custom/Tar.
@@ -304,11 +304,11 @@ namespace VerdantsAscent.Water.Core
         public static GameObject Spawn(Vector3 center, float radius, float volumeMultiplier)
             => Spawn(center, radius, volumeMultiplier, 0f, 1f);
 
-        // Round-82 — SPRING path: springMode makes the pour a FiresLiquidRiver
+        // SPRING path: springMode makes the pour a FiresLiquidRiver
         // (source disk at ruler level, bank-following sloped flow). bankOffset
         // X = how far below the local bank the surface sits.
         //
-        // Round-85 — MERGE: if the new spring lands inside an existing pour's
+        // MERGE: if the new spring lands inside an existing pour's
         // grid, add it as an extra source disk on that pour (ONE continuous
         // mesh) instead of spawning an overlapping second LiquidVolume — the
         // two grids' surfaces would double-blend + z-fight at the seam
@@ -377,7 +377,7 @@ namespace VerdantsAscent.Water.Core
             return best;
         }
 
-        // Round-82 — springRate > 0 marks a SPRING: attaches a
+        // springRate > 0 marks a SPRING: attaches a
         // FiresLiquidRiverController (source disk + bank-following sim that
         // replaces vanilla's flat settle). bankOffset X = surface depth below
         // the local bank. Water Volume passes springRate 0 → plain vanilla pour.
@@ -389,10 +389,10 @@ namespace VerdantsAscent.Water.Core
                 return null;
             }
 
-            // Round-68 — physics probe for the pour's base. GetGroundHeight
+            // Physics probe for the pour's base. GetGroundHeight
             // is heightmap-blind (meters low on FAT custom terrain), which
-            // both buried the pour GO under the visible ground and inflated
-            // depth/volume. center is the ruler position VERBATIM (round-69);
+            // would both bury the pour GO under the visible ground and inflate
+            // depth/volume. center is the ruler position VERBATIM;
             // the probe finds the real collider under it.
             float groundY = center.y;
             if (Tools.WaterBrushDrag.TryProbeGroundBelow(center, out float g))
@@ -405,11 +405,11 @@ namespace VerdantsAscent.Water.Core
                 groundY = gh;
             }
 
-            // Round-77 — BASIN-INTEGRATED volume (user spec: "drop our pool
+            // BASIN-INTEGRATED volume: drop the pool
             // at the cursor with the volume calculated so that it doesn't
-            // spread past the low spots it's hovered over"). The old
-            // π·r²·depth cylinder poured far more than the hovered dent
-            // could hold, so the excess flooded outward. Now: sample the
+            // spread past the low spots it's hovered over. A plain
+            // π·r²·depth cylinder pours far more than the hovered dent
+            // could hold, so the excess floods outward. Instead: sample the
             // real ground (physics probe — heightmap, custom tiles, rocks,
             // pieces) on a grid across the ruler circle and integrate the
             // deficit up to the fill level. The pour is exactly what the
@@ -450,14 +450,14 @@ namespace VerdantsAscent.Water.Core
             FiresLogger.LogInfo($"[FiresLiquidWater] Basin integration: {wetSamples}/{samples} samples below fill, " +
                 $"basin={basinVolume:F0}m³ deepest={deepest:F1}m → pouring {volume:F0}m³ (×{Mathf.Max(0.1f, volumeMultiplier):F1}).");
 
-            // Round-74 — THE DESTROY BUG, caught by the ResetZDO tracer:
-            // the old pattern (instantiate under the inactive root →
-            // SetParent(null) → set position → SetActive) ACTIVATED the
-            // clone at SetParent(null), so ZNetView.Awake registered the
-            // ZDO at world origin (TRACE: pos=(0.00, 0.00, 0.00)). Liquid
-            // volumes have no transform sync, so the ZDO stayed at zone
-            // (0,0) and ZNetScene's zone sweep destroyed the pour within
-            // a tick — every pour since 0.2.0 died this way. Correct
+            // Spawn pattern that avoids a destroyed pour:
+            // instantiating under the inactive root →
+            // SetParent(null) → set position → SetActive ACTIVATES the
+            // clone at SetParent(null), so ZNetView.Awake registers the
+            // ZDO at world origin. Liquid
+            // volumes have no transform sync, so the ZDO would stay at zone
+            // (0,0) and ZNetScene's zone sweep would destroy the pour within
+            // a tick. Correct
             // pattern: momentarily flip the TEMPLATE inactive so the clone
             // is born activeSelf=false at its REAL position, set fields,
             // then activate — Awake fires in the right zone.
@@ -483,15 +483,15 @@ namespace VerdantsAscent.Water.Core
 
             go.SetActive(true);
 
-            // Round-63 — scheduled render-chain diagnostics on every spawned
-            // pour (0.5s → 15s). Round-86 — gated behind the FiresLiquid
+            // Scheduled render-chain diagnostics on every spawned
+            // pour (0.5s → 15s), gated behind the FiresLiquid
             // Diagnostics config toggle (dev-only; off = not even attached).
             if (FiresLiquidConfig.Diagnostics != null && FiresLiquidConfig.Diagnostics.Value)
                 go.AddComponent<FiresLiquidWaterDebug>();
 
             var nv = go.GetComponent<ZNetView>();
 
-            // Round-82 — SPRING = FiresLiquidRiver. Attach the controller that
+            // SPRING = FiresLiquidRiver. Attach the controller that
             // replaces vanilla's flat-settle sim with a source-disk +
             // bank-following flow. fillY (center.y) + bankOffset persist in ZDO
             // so the river re-attaches its controller after reload.
@@ -507,12 +507,12 @@ namespace VerdantsAscent.Water.Core
                 river.m_bankOffset = bankOffset;
                 river.m_sourceCenter = center;
                 river.m_sourceRadius = radius;
-                // Round-85 — persist the primary source so a later merge restores whole.
+                // Persist the primary source so a later merge restores whole.
                 river.SeedPrimarySource();
 
-                // Round-84 — a new source unfreezes nearby FROZEN springs so
-                // they resume updating the mesh with the added water ("until
-                // another water source is placed").
+                // A new source unfreezes nearby FROZEN springs so
+                // they resume updating the mesh with the added water (frozen
+                // until another water source is placed).
                 UnfreezeOverlapping(center, radius, go);
             }
 
@@ -525,7 +525,7 @@ namespace VerdantsAscent.Water.Core
             return go;
         }
 
-        // Round-91 — ONE shared pour material for everything custom-water:
+        // ONE shared pour material for everything custom-water:
         // the registered template (born with it), every pour instance, the
         // VoxelGenWater river/lake surfaces. Built once; the config
         // hot-reload and ocean-texture backfill mutate THIS instance in
@@ -565,18 +565,18 @@ namespace VerdantsAscent.Water.Core
             FiresLiquidConfig.Apply(mat);
         }
 
-        // Round-66 — skin one pour with either the FiresWater wrap (the
+        // Skin one pour with either the FiresWater wrap (the
         // combiner meshes' material, via WaterMaterialManager → FUC
         // WaterShaderBridge) or the vanilla water_liquid look. The
         // LiquidVolume sim rebuilds its MESH continuously but never
         // touches the renderer's material, so a one-time assignment
         // sticks for the pour's lifetime.
-        // Round-77 — the FiresWater pour skin is a per-pour CLONE of the
+        // The FiresWater pour skin is a per-pour CLONE of the
         // wrapped zone-water material with _FiresLiquidGrid=1 (the shader's
         // wet-mask: clips dry cells of the 64m draped sim mesh via vertex
         // alpha) and calmed waves. Setting the flag on the SHARED wrap
         // would clip zone water by its unused vertex alpha — never do that.
-        // Round-83 — DEDICATED Custom/FiresLiquid shader for all custom water.
+        // DEDICATED Custom/FiresLiquid shader for all custom water.
         // Prefer it; fall back to a per-pour clone of the FiresWater ocean wrap
         // (old path) if the FiresLiquid shader isn't in the loaded bundle yet.
         private static Material BuildFiresWaterPourMaterial()
@@ -599,7 +599,7 @@ namespace VerdantsAscent.Water.Core
                         if (oceanMat.HasProperty(tp) && mat.HasProperty(tp))
                             mat.SetTexture(tp, oceanMat.GetTexture(tp));
                 }
-                // Round-85 — override the pixelated vanilla foam with the HD
+                // Override the pixelated vanilla foam with the HD
                 // baked foam (2K seamless) on all three foam layers; the shader's
                 // per-layer tiling/speed still differentiates them.
                 ApplyFiresWaterNormals(mat);   // ours over vanilla's creased ocean normals
@@ -617,16 +617,16 @@ namespace VerdantsAscent.Water.Core
                     mat.SetFloat("_FiresStencilComp", 8f);   // Always — never stencil-culled
                     mat.SetFloat("_FiresStencilWriteMask", 0f);
                 }
-                // Round-84 — apply the live config sliders (colour/hue/gloss/
+                // Apply the live config sliders (colour/hue/gloss/
                 // fresnel/normals/edge). These override the shader defaults so
-                // the user can tune in-game; whatever they land on becomes the
-                // baked default.
+                // the look can be tuned in-game and the result baked
+                // in as the default.
                 FiresLiquidConfig.Apply(mat);
                 FiresLogger.LogInfo($"[FiresLiquidWater] built Custom/FiresLiquid material (queue={mat.renderQueue}).");
                 return mat;
             }
 
-            // Fallback — clone the FiresWater ocean wrap with liquid-grid + stencil bypass (round-77/78 path). The
+            // Fallback — clone the FiresWater ocean wrap with liquid-grid + stencil bypass. The
             // broker already warned if Core's shader bundle lacks Custom/FiresLiquid; on a dedicated server there is no
             // GPU and the shader is absent by design.
             FiresLogger.LogVerbose("[FiresLiquidWater] Custom/FiresLiquid is not live here — using the FiresWater wrap.");
@@ -648,13 +648,16 @@ namespace VerdantsAscent.Water.Core
             "_Normal", "_NormalFine", "_FoamTex", "_FoamHighTex", "_RandomFoamTex",
         };
 
-        // ── Round-84 — SWIM registry. Our pours are vanilla LiquidVolumes,
+        // ── SWIM registry. Our pours are vanilla LiquidVolumes,
         // not combiners/legacy water, so CustomWaterPatches' swim query
         // (GetValidWaterLevelForCharacter → InWater/IsSwimming/GetLiquidLevel
         // postfixes) never sees them. Track every live pour and expose its
         // surface so the swim patches can trigger swimming at the water top.
         private static readonly System.Collections.Generic.List<LiquidVolume> s_activePours =
             new System.Collections.Generic.List<LiquidVolume>();
+
+        // The live pours, for the per-source water report (va_water_at).
+        internal static System.Collections.Generic.IReadOnlyList<LiquidVolume> ActivePours => s_activePours;
 
         internal static void RegisterPour(LiquidVolume lv)
         {
@@ -677,7 +680,43 @@ namespace VerdantsAscent.Water.Core
             return false;
         }
 
-        // Round-84 — unfreeze frozen springs whose grid the new source overlaps
+        // Vmop: a tiny cave pool can be an old pour, which the generated-column and drawn-water mop never touches. So
+        // every loaded pour whose grid reaches into the ring, at the mop's height (within the grid's
+        // depth band), is destroyed - claimed, then removed through ZNetScene, so it is gone for every peer and from the save.
+        // Returns how many went.
+        public static int RemovePoursIn(Vector3 center, float radius)
+        {
+            int removed = 0;
+            for (int i = s_activePours.Count - 1; i >= 0; i--)
+            {
+                var lv = s_activePours[i];
+                if (lv == null) { s_activePours.RemoveAt(i); continue; }
+                Vector3 p = lv.transform.position;
+                float half = lv.m_width * lv.m_scale * 0.5f;
+                float dx = Mathf.Max(Mathf.Abs(center.x - p.x) - half, 0f), dz = Mathf.Max(Mathf.Abs(center.z - p.z) - half, 0f);
+                if (dx * dx + dz * dz > radius * radius) continue;
+                if (Mathf.Abs(center.y - p.y) > radius + lv.m_maxDepth + 4f) continue;   // a pour far above or below the mop
+                var root = lv.transform.root.gameObject;
+                var nv = root.GetComponentInChildren<ZNetView>(true);
+                try
+                {
+                    if (nv != null && nv.IsValid())
+                    {
+                        if (!nv.IsOwner()) nv.ClaimOwnership();
+                        ZNetScene.instance?.Destroy(root);
+                    }
+                    else Object.Destroy(root);
+                    s_activePours.RemoveAt(i);
+                    removed++;
+                }
+                catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresWater] Vmop: removing the pour at {p} threw: {ex.Message}"); }
+            }
+            if (removed > 0)
+                FiresLogger.LogDebug($"[FiresWater] Vmop removed {removed} pour(s) (spring / water volume) reaching into r={radius:0.0} at ({center.x:0.0},{center.y:0.0},{center.z:0.0}).");
+            return removed;
+        }
+
+        // Unfreeze frozen springs whose grid the new source overlaps
         // (skips the just-spawned pour `self`).
         private static void UnfreezeOverlapping(Vector3 center, float radius, GameObject self)
         {
@@ -699,10 +738,37 @@ namespace VerdantsAscent.Water.Core
         // Highest water surface (world Y) of any pour whose grid covers `pos`
         // AND whose water column actually reaches down to `pos` — the query
         // point must sit ABOVE the pour's BED at that cell. Without the bed
-        // check, standing UNDER a floating voxel rock that carries water made
+        // check, standing UNDER a floating voxel rock that carries water would make
         // every water query (env/fog/swim) think the player was submerged in
-        // the water 20m overhead (round-87 fix; real fix long-term = voxel
+        // the water 20m overhead (long-term fix = voxel
         // water). Dry cells still return below-ground via GetSurface.
+        private const float MinPourDepth = 0.01f;   // a pour cell shallower than this holds no water (vanilla's 0.001 dry test, rounded up)
+
+        internal static bool IsPour(LiquidVolume lv) => lv != null && s_activePours.Contains(lv);
+
+        // A shore pour could claim the sea beside it at its DRY bed, so
+        // swimmers there floated on that line. This says whether the pour holds liquid at the point. Vanilla's LiquidVolume.GetSurface
+        // answers bed + height - 0.5 where the depth is 0, so every caller that treats its answer as water must ask this first.
+        // The four grid corners around the point, as GetSurface interpolates them. True when the grid cannot be read.
+        internal static bool PourCellWet(LiquidVolume lv, Vector3 pos)
+        {
+            var depths = FiresLiquidGridOps.Depths(lv);
+            if (depths == null) return true;
+            int num = lv.m_width + 1;
+            if (depths.Count < num * num) return true;
+            var lp = lv.transform.position;
+            float half = lv.m_width * lv.m_scale * 0.5f;
+            float gx = Mathf.Clamp((pos.x - lp.x + half) / lv.m_scale, 0f, num - 1);
+            float gz = Mathf.Clamp((pos.z - lp.z + half) / lv.m_scale, 0f, num - 1);
+            int x0 = (int)gx, z0 = (int)gz, x1 = Mathf.Min(x0 + 1, num - 1), z1 = Mathf.Min(z0 + 1, num - 1);
+            // Bilinear, as GetSurface interpolates it (a shore cell with one wet corner can interpolate to ~0 and
+            // GetSurface then answers its bed - 0.5; a corner max would call that water).
+            float tx = gx - x0, tz = gz - z0;
+            float wet = Mathf.Lerp(Mathf.Lerp(depths[z0 * num + x0], depths[z0 * num + x1], tx),
+                                   Mathf.Lerp(depths[z1 * num + x0], depths[z1 * num + x1], tx), tz);
+            return wet > MinPourDepth;
+        }
+
         public static float GetSurfaceAt(Vector3 pos)
         {
             float best = float.MinValue;
@@ -727,6 +793,7 @@ namespace VerdantsAscent.Water.Core
                         float bedY = lp.y + heights[idx];
                         if (pos.y < bedY - 1.5f) continue;   // under the bed — not in this water
                     }
+                    if (!PourCellWet(lv, pos)) continue;   // a dry cell is not water
                 }
 
                 float surf = lv.GetSurface(pos);
@@ -769,7 +836,7 @@ namespace VerdantsAscent.Water.Core
 
         internal static Texture2D GetFiresFoamHD() => FiresCore.Materials.FiresShaderBroker.GetTexture("FiresFoamHD");
 
-        // Round-90 — restored springs (ZNetScene re-instantiates the TEMPLATE,
+        // Restored springs (ZNetScene re-instantiates the TEMPLATE,
         // which wears vanilla water_liquid) must re-apply the FiresLiquid skin.
         // Called from the controller re-attach patch + controller init.
         internal static void ApplyFiresLiquidSkin(GameObject root) => ApplyPourMaterial(root, true);
@@ -814,7 +881,7 @@ namespace VerdantsAscent.Water.Core
             return n;
         }
 
-        // Round-84 — config hot-reload path. Round-91: the shared material
+        // Config hot-reload path. The shared material
         // mutates IN PLACE (every pour + gen-water surface reads the same
         // instance), then any pour toggled off the skin gets re-bound.
         public static int ReapplyFiresLiquidToAll()
@@ -838,7 +905,7 @@ namespace VerdantsAscent.Water.Core
             return n;
         }
 
-        // Round-91 — pours 32m apart overlap 64m grids, and a rebuilt mesh's
+        // Pours 32m apart overlap 64m grids, and a rebuilt mesh's
         // recalculated bounds can hug a sparse wet region; at some camera
         // angles one volume frustum-culls while its neighbour stays visible —
         // a sharp square hole in the water sheet. Force full-grid bounds with
@@ -872,6 +939,59 @@ namespace VerdantsAscent.Water.Core
         {
             [HarmonyPostfix]
             private static void Postfix(LiquidVolume __instance) => ExpandLiquidBounds(__instance);
+        }
+    }
+
+    // A FAT pour's trigger (vanilla LiquidSurface.UpdateFloaters) writes GetSurface to everything inside its square
+    // every update, and Character.SetLiquidLevel keeps the last writer. Over a dry cell that wrote the pour's bed - 0.5 over the
+    // sea's level (a float line under the sea; no diving). A pour now writes only where it holds
+    // liquid; over a dry cell it writes nothing while another liquid volume of that type also holds the body (that one keeps
+    // writing its own level), and "no liquid" (-10000) when it is the body's only one, so nothing swims on a dry pour bed.
+    // Vanilla LiquidSurfaces (tar pits, Ashlands) are untouched.
+    [HarmonyPatch(typeof(LiquidSurface), "UpdateFloaters")]
+    internal static class PourFloatersOnlyWhereWet
+    {
+        internal static readonly AccessTools.FieldRef<LiquidSurface, LiquidVolume> LiquidOf =
+            AccessTools.FieldRefAccess<LiquidSurface, LiquidVolume>("m_liquid");
+        private static readonly AccessTools.FieldRef<LiquidSurface, System.Collections.Generic.List<IWaterInteractable>> InWaterOf =
+            AccessTools.FieldRefAccess<LiquidSurface, System.Collections.Generic.List<IWaterInteractable>>("m_inWater");
+
+        private static bool Prefix(LiquidSurface __instance)
+        {
+            var lv = LiquidOf(__instance);
+            if (!FiresLiquidWaterPrefab.IsPour(lv)) return true;
+            var inWater = InWaterOf(__instance);
+            if (inWater == null || inWater.Count == 0) return false;
+            for (int i = inWater.Count - 1; i >= 0; i--)
+            {
+                var who = inWater[i];
+                Transform t = who?.GetTransform();
+                if (who == null || !t) { inWater.RemoveAt(i); continue; }
+                Vector3 p = t.position;
+                if (FiresLiquidWaterPrefab.PourCellWet(lv, p))
+                {
+                    who.SetLiquidLevel(lv.GetSurface(p), lv.m_liquidType, __instance);
+                    continue;
+                }
+                int holders = who.Increment(lv.m_liquidType) - 1;   // how many volumes of this type hold it (read, then put back)
+                who.Decrement(lv.m_liquidType);
+                if (holders <= 1) who.SetLiquidLevel(-10000f, lv.m_liquidType, __instance);
+            }
+            return false;
+        }
+    }
+
+    // The dry pour would still read its bed - 0.5, though FAT's own GetSurfaceAt said none:
+    // vanilla's Floating.GetWaterLevel / GetLiquidLevel / IsUnderWater each take the max with LiquidSurface.GetSurface of every
+    // liquid trigger at the point, and over a dry cell that is the bed. For a FAT pour a dry cell now answers "no liquid" (-10000),
+    // so boats, items, the underwater view and every other caller see no water there. Vanilla tar pits and Ashlands untouched.
+    [HarmonyPatch(typeof(LiquidSurface), nameof(LiquidSurface.GetSurface))]
+    internal static class PourSurfaceOnlyWhereWet
+    {
+        private static void Postfix(LiquidSurface __instance, Vector3 p, ref float __result)
+        {
+            var lv = PourFloatersOnlyWhereWet.LiquidOf(__instance);
+            if (FiresLiquidWaterPrefab.IsPour(lv) && !FiresLiquidWaterPrefab.PourCellWet(lv, p)) __result = -10000f;
         }
     }
 }

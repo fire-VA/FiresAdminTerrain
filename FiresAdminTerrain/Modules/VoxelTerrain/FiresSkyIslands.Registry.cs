@@ -130,9 +130,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static string RegistryPath(string worldName)
         {
-            string safe = string.Concat((worldName ?? "world").Split(Path.GetInvalidFileNameChars()));
-            string dir = Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen");
-            return Path.Combine(dir, "firesgen_" + safe + RegistryFileSuffix);
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(worldName, RegistryFileSuffix);
         }
 
         // Client delivery goes through Core. Registered alongside the baked-terrain
@@ -203,9 +201,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     return;
                 }
-                FiresLogger.LogWarning(
-                    $"[FiresSkyIslands] registry {file} rejected: {failure}. Kept as {file}{RejectedSuffix} "
-                    + "and rebuilding it.");
+                // For a clean log: a registry of another world with THIS seed is what a recreate or a
+                // clone (new uid, same seed) leaves; rebuilding it is expected, so it is said at Info. Anything else stays a Warning.
+                string rejected = $"[FiresSkyIslands] registry {file} rejected: {failure}. Kept as {file}{RejectedSuffix} and rebuilding it.";
+                if (s_rejectedSameSeed) FiresLogger.LogInfo(rejected + " (Same seed: expected after a recreate or a clone.)");
+                else FiresLogger.LogWarning(rejected);
+                s_rejectedSameSeed = false;
                 Quarantine(path);
             }
 
@@ -346,9 +347,13 @@ namespace VerdantsAscent.Terrain.Voxel
             => VoxelZoneStreamer.MarkAreaDirty(new UnityEngine.Vector3(WorldX(in isl), 0f, WorldZ(in isl)), isl.R);
 
         // ── Load / save ─────────────────────────────────────────────────────
+        // Set by TryLoadRegistry when the file was refused only for another world's uid with the same seed.
+        private static bool s_rejectedSameSeed;
+
         private static bool TryLoadRegistry(string path, World world, out string failure)
         {
             failure = null;
+            s_rejectedSameSeed = false;
             byte[] bytes;
             try { bytes = File.ReadAllBytes(path); }
             catch (Exception ex) { failure = $"unreadable ({ex.GetType().Name}: {ex.Message})"; return false; }
@@ -382,6 +387,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int seed = r.ReadInt32();
                     if (uid != world.m_uid || seed != world.m_seed)
                     {
+                        s_rejectedSameSeed = seed == world.m_seed;
                         failure = $"belongs to another world (uid {uid}, seed {seed}; this world is uid "
                                   + $"{world.m_uid}, seed {world.m_seed}) — a world by this name was recreated";
                         return false;

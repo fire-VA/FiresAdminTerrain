@@ -5,8 +5,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // FAT's start objects on every player's map, and Hugin's word on the hidden Cultivator (Fire, 2026-09-27,
-    // Tools\FAT_START_ITEMS.md). The server knows where the starter Chunk Generator and the two chests stand; a client
+    // FAT's start objects on every player's map, and Hugin's word on the hidden Cultivator.
+    // The server knows where the starter Chunk Generator and the two chests stand; a client
     // asks for them and is told again whenever one moves. The starter and the hammer chest are pinned at once. The
     // Cultivator chest is pinned only once its opener has found it, and Hugin gives its direction and rough distance
     // when the first Chunk Hammer is found (its chest opened, or the hammer first held).

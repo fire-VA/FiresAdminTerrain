@@ -284,7 +284,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // nothing but the player's tile, the radius config and the camera heading. Standing still and
             // looking one way, it re-derived the same answer every frame and enqueued nothing.
             //
-            // Measured 2026-09-25 on the BlueHills rig: StreamerDriver.Update cost 4.1 ms on EVERY one of
+            // Measured on the BlueHills test machine: StreamerDriver.Update cost 4.1 ms on EVERY one of
             // 5,076 frames, the second-largest site in the game behind object creation, and this scan is its
             // unthrottled half (FiresVoxel's own Tick is already behind a 0.25 s gate).
             //
@@ -522,6 +522,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static bool SampleGround(float wx, float wz, out Heightmap.Biome biome, out float y)
         {
+            if (FatSuperFlat.On) { biome = Heightmap.Biome.Meadows; y = FatSuperFlat.HeightAt(wx, wz); return false; }   // Super flat has no vegetation anywhere, so no impostors (they floated at the real hill heights)
             if (FiresWorldGenBase.Active)
             {
                 biome = FiresWorldGenBase.SampleBiome(wx, wz);
@@ -605,14 +606,14 @@ namespace VerdantsAscent.Terrain.Voxel
         // A FEW SPECIES A TICK, never the whole list at once. Deriving the species from the game turned a fixed eight
         // into as many as forty, and forty ortho renders plus their readbacks in one frame is a hitch at exactly the
         // moment a join is already expensive. Drawing starts as soon as the first one is baked; the rest arrive over
-        // the next couple of seconds ([perf], 2026-09-22).
+        // the next couple of seconds.
         private const int BakePerTick = 3;
 
         private static int s_bakeCursor;
         private static int s_bakedCount;
 
         // Made on first use, never in a field initializer: a marker built before the profiler subsystem is up is a
-        // handle to nothing ([perf], who hit it in EBM).
+        // handle to nothing (seen in EBM).
         private static bool s_markerMade;
         private static Unity.Profiling.ProfilerMarker s_bakeMarkerStorage;
 

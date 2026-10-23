@@ -5,11 +5,11 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
-    // Round-78 — shared reflective access to vanilla LiquidVolume's private
+    // Shared reflective access to vanilla LiquidVolume's private
     // grid, used by the spring emitter, the ruler-local delete, and the mop
     // tool. Centralizes the AccessTools field refs + the cell<->world math
-    // (decompiled from LiquidVolume.CalcVertex / WorldToLocal) so the three
-    // callers can't drift apart.
+    // (the volume's grid: cells at m_scale spacing, centred on its transform) so
+    // the three callers can't drift apart.
     //
     // Grid model: (m_width+1)² cells at m_scale spacing, centered on the
     // volume transform. m_depths = water column per cell; m_heights = raycast
@@ -31,7 +31,7 @@ namespace VerdantsAscent.Water.Core
         internal static readonly AccessTools.FieldRef<LiquidVolume, bool> HaveHeights =
             AccessTools.FieldRefAccess<LiquidVolume, bool>("m_haveHeights");
 
-        // Round-79 — spring ZDO keys (source emit rate + fill level).
+        // Spring ZDO keys (source emit rate + fill level).
         internal const string ZDO_SPRING_RATE = "va_spring_rate";
         internal const string ZDO_SPRING_FILL = "va_spring_fill";
         internal const string ZDO_SPRING_BANKOFFSET = "va_spring_bankoff";
@@ -39,9 +39,9 @@ namespace VerdantsAscent.Water.Core
         internal const string ZDO_SPRING_BLOCKED = "va_spring_blocked";  // dam/barrier cell bitmask
         internal const string ZDO_SPRING_FROZEN = "va_spring_frozen";    // 1 = sim frozen (mesh held)
         internal const string ZDO_SPRING_STILL = "va_spring_still";      // 1 = still water: dead-level cap at the source level (lakes/ponds), not bank-following
-        internal const string ZDO_SPRING_SOURCES = "va_spring_sources";  // round-85 — extra merged source disks (x,z,r,fillY blob)
+        internal const string ZDO_SPRING_SOURCES = "va_spring_sources";  // extra merged source disks (x,z,r,fillY blob)
 
-        // Round-79 — flat-ground spill cull, direction-independent. A wet
+        // Flat-ground spill cull, direction-independent. A wet
         // cell is culled when it is BOTH thin (depth < shallowCull) AND the
         // terrain around it is essentially flat (local relief max-min <
         // bankRelief), i.e. it is NOT sitting in a cut/channel. This is the

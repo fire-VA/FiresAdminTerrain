@@ -22,7 +22,6 @@ namespace VerdantsAscent.Terrain.BcImport
         private const int EightBit = 8;
         private const int SixteenBit = 16;
         private const int MaxBiomeIndices = 32;
-        private const int SentinelDistance = 900;      // RGB distance 30 around the black "use what is underneath" marker
         private const int SnapReportDistance = 4096;   // RGB distance 64 - past this a colour is not a near miss
         private const int FarColoursListed = 6;
         private const float FarWarnPercent = 1f;
@@ -83,7 +82,7 @@ namespace VerdantsAscent.Terrain.BcImport
         // Every value is one of 256 or 65,536 levels, so a map keeps the LEVEL (2 bytes) and one shared table turns it into
         // the float BC computes, by the same division, bit for bit. Rows decode straight into the levels, so an 8192² map
         // costs 128 MB kept instead of 256 MB kept plus a 128 MB raw copy and three copies of its compressed bytes
-        // (a join allocated ~3 GB, [perf] 2026-09-27). A banded image hands over its rows from several threads at once, and
+        // (a join allocated ~3 GB). A banded image hands over its rows from several threads at once, and
         // each call writes only its own row of levels.
         private static BcFloatMap DecodeFloatMap(BcMapImage image)
         {
@@ -208,36 +207,25 @@ namespace VerdantsAscent.Terrain.BcImport
         // sloppy. Letting it into the nearest-colour pool turns an anti-aliased dark edge - a BlackForest border
         // pixel like 013000 sits closer to 000000 than to 007F00 - into a one-pixel hole in the biome map, which
         // reads in game as a speck of the wrong biome and in a census as fall-through the author never asked for.
-        // So black wins only inside a tight radius of itself; everything else picks among the real biomes.
+        // That was FAT's own rule (black only within RGB 30 of itself). BetterContinents (0.7.30 and 0.9.4 alike) has no such
+        // rule: black is an ordinary legend colour, and a pixel takes the nearest legend colour of all, the first one in legend
+        // order on a tie (OrderBy(ColorDistance).First()). The BcRef test showed the difference: dark pixels at
+        // the edges of a map painted with black areas came out a biome here and None in BetterContinents, so scattered points
+        // read a different biome. Now it is BetterContinents' rule exactly; matching it is the point of the import.
         private static Heightmap.Biome NearestBiome(List<KeyValuePair<Heightmap.Biome, Color32>> palette, Color32 pixel,
             out int distance)
         {
             Heightmap.Biome nearest = Heightmap.Biome.None;
             int nearestDistance = int.MaxValue;
-            bool sawSentinel = false;
-            int sentinelDistance = int.MaxValue;
-
             foreach (KeyValuePair<Heightmap.Biome, Color32> candidate in palette)
             {
                 int candidateDistance = SquaredRgbDistance(pixel, candidate.Value);
-                if (candidate.Key == Heightmap.Biome.None)
-                {
-                    sawSentinel = true;
-                    sentinelDistance = candidateDistance;
-                    continue;
-                }
-                if (candidateDistance >= nearestDistance) continue;
+                if (candidateDistance >= nearestDistance) continue;   // strict: the first of equals wins, as OrderBy().First()
                 nearestDistance = candidateDistance;
                 nearest = candidate.Key;
             }
-
-            if (sawSentinel && sentinelDistance <= SentinelDistance)
-            {
-                distance = sentinelDistance;
-                return Heightmap.Biome.None;
-            }
-            distance = nearestDistance == int.MaxValue ? sentinelDistance : nearestDistance;
-            return nearestDistance == int.MaxValue ? Heightmap.Biome.None : nearest;
+            distance = nearestDistance;
+            return nearest;
         }
 
         /// <summary>Names the colours that were nowhere near a palette entry, worst first. A map painted with the
@@ -307,30 +295,104 @@ namespace VerdantsAscent.Terrain.BcImport
             return new BcColorMap { Colors = colors, Size = width };
         }
 
+        // A biome legend the way BetterContinents 0.9.3+ reads it (converted maps erred with Expand World Data's
+        // 1.0 biomes). Before, one name that was not a vanilla biome ("DeadWastes: 8B4513", an Expand World Data biome) threw,
+        // the whole decode failed, and the world was not reproduced at all. Now:
+        //  - names may be written with spaces, underscores or hyphens, in any case ("Black Forest", "deep_north");
+        //  - a name Expand World Data defines (when it is loaded) is that biome, by Expand World Data's own number;
+        //  - a line that cannot be used (no such biome here, a colour that does not parse, not "name: colour") is reported
+        //    and skipped, and the rest of the legend still applies. A skipped name's colour is kept as None, so its pixels
+        //    are left to the default generation instead of snapping to the nearest other biome; a vanilla biome whose colour
+        //    does not parse keeps its default colour.
         private static List<KeyValuePair<Heightmap.Biome, Color32>> ParseBiomeColors(string colors)
         {
             var palette = new List<KeyValuePair<Heightmap.Biome, Color32>>();
-            foreach (string entry in colors.Split('|'))
+            var skipped = new List<string>();
+            foreach (string raw in colors.Split('|', '\n'))
             {
-                string[] parts = entry.Trim().Split(':');
-                if (parts.Length != 2) continue;
-                if (!TryParseBiome(parts[0].Trim(), out Heightmap.Biome biome))
-                    throw new Exception("invalid biome name " + parts[0]);
-                palette.Add(new KeyValuePair<Heightmap.Biome, Color32>(biome, ParseColor(parts[1])));
+                string entry = raw.Trim();
+                if (entry.Length == 0 || entry.StartsWith("#")) continue;
+                int colon = entry.LastIndexOf(':');
+                if (colon <= 0) { skipped.Add($"'{entry}' (not 'name: colour')"); continue; }
+                string name = entry.Substring(0, colon).Trim();
+                bool known = TryParseBiome(name, out Heightmap.Biome biome);
+                Color32 color;
+                try { color = ParseColor(entry.Substring(colon + 1)); }
+                catch (Exception)
+                {
+                    if (known && DefaultBiomeColor(biome, out Color32 fallback))
+                    {
+                        palette.Add(new KeyValuePair<Heightmap.Biome, Color32>(biome, fallback));
+                        skipped.Add($"'{entry}' (colour does not parse; {biome} keeps its default colour)");
+                    }
+                    else skipped.Add($"'{entry}' (colour does not parse)");
+                    continue;
+                }
+                if (!known)
+                {
+                    palette.Add(new KeyValuePair<Heightmap.Biome, Color32>(Heightmap.Biome.None, color));
+                    skipped.Add($"'{entry}' (no biome '{name}' here: Expand World Data not loaded or not defining it; its pixels keep the default generation)");
+                    continue;
+                }
+                palette.Add(new KeyValuePair<Heightmap.Biome, Color32>(biome, color));
             }
-            return palette;
+            if (skipped.Count > 0)
+                FiresLogger.LogWarning($"[BcImport] biome legend: {skipped.Count} line(s) skipped, the rest applies: {string.Join("; ", skipped)}");
+            bool anyBiome = false;
+            foreach (var p in palette) if (p.Key != Heightmap.Biome.None) { anyBiome = true; break; }
+            return anyBiome || ReferenceEquals(colors, DefaultBiomeColors) ? palette : ParseBiomeColors(DefaultBiomeColors);
+        }
+
+        private static bool DefaultBiomeColor(Heightmap.Biome biome, out Color32 color)
+        {
+            foreach (var p in ParseBiomeColors(DefaultBiomeColors))
+                if (p.Key == biome) { color = p.Value; return true; }
+            color = default;
+            return false;
         }
 
         private static bool TryParseBiome(string name, out Heightmap.Biome biome)
         {
+            string key = SquashName(name);
             foreach (Heightmap.Biome candidate in Enum.GetValues(typeof(Heightmap.Biome)))
             {
-                if (!candidate.ToString().Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!SquashName(candidate.ToString()).Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
                 biome = candidate;
                 return true;
             }
+            return ExpandWorldDataBiome(name, out biome) || ExpandWorldDataBiome(key, out biome);
+        }
+
+        private static string SquashName(string name) => name.Replace(" ", "").Replace("_", "").Replace("-", "");
+
+        // Expand World Data's own name lookup (ExpandWorldData.BiomeManager.TryGetBiome(string, out Heightmap.Biome)), by
+        // reflection: FAT does not reference it, and without it no added biome exists.
+        private static System.Reflection.MethodInfo s_ewdTryGetBiome;
+        private static bool s_ewdLooked;
+
+        private static bool ExpandWorldDataBiome(string name, out Heightmap.Biome biome)
+        {
             biome = Heightmap.Biome.None;
-            return false;
+            if (!s_ewdLooked)
+            {
+                s_ewdLooked = true;
+                try
+                {
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.TryGetValue("expand_world_data", out var info) && info?.Instance != null)
+                        s_ewdTryGetBiome = HarmonyLib.AccessTools.Method(info.Instance.GetType().Assembly.GetType("ExpandWorldData.BiomeManager"),
+                            "TryGetBiome", new[] { typeof(string), typeof(Heightmap.Biome).MakeByRefType() });
+                }
+                catch (Exception) { s_ewdTryGetBiome = null; }
+            }
+            if (s_ewdTryGetBiome == null) return false;
+            try
+            {
+                var call = new object[] { name, Heightmap.Biome.None };
+                if (!(s_ewdTryGetBiome.Invoke(null, call) is bool found) || !found) return false;
+                biome = (Heightmap.Biome)call[1];
+                return biome != Heightmap.Biome.None;
+            }
+            catch (Exception) { return false; }
         }
 
         private static Dictionary<int, Color32?> ParseColorTable(string colors, Dictionary<string, Color32?> namedColors)
@@ -527,7 +589,7 @@ namespace VerdantsAscent.Terrain.BcImport
         public Heightmap.Biome GetValue(float x, float y)
         {
             float column = x * (Size - 1);
-            float row = (float)((double)y * (Size - 1));
+            float row = y * (Size - 1);   // float, as BetterContinents' biome map computes it (a double product can floor differently)
             int columnFloor = Mathf.FloorToInt(column);
             int rowFloor = Mathf.FloorToInt(row);
             float columnFraction = column - columnFloor;
@@ -539,7 +601,7 @@ namespace VerdantsAscent.Terrain.BcImport
             Array.Clear(weights, 0, Corners);
             int count = 0;
             int heaviest = 0;
-            Accumulate(columnFloor, rowFloor, (float)((1.0 - columnFraction) * (1.0 - rowFraction)), found, weights, ref count, ref heaviest);
+            Accumulate(columnFloor, rowFloor, (1f - columnFraction) * (1f - rowFraction), found, weights, ref count, ref heaviest);
             Accumulate(columnFloor + 1, rowFloor, columnFraction * (1f - rowFraction), found, weights, ref count, ref heaviest);
             Accumulate(columnFloor, rowFloor + 1, (1f - columnFraction) * rowFraction, found, weights, ref count, ref heaviest);
             Accumulate(columnFloor + 1, rowFloor + 1, columnFraction * rowFraction, found, weights, ref count, ref heaviest);

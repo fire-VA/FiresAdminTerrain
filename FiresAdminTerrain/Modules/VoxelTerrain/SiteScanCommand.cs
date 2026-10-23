@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // ── `va_site_scan [radius=400] [top=10] [x z]`: where to put a base near spawn (Fire, 09-30: the co-op stream's base is
+    // ── `va_site_scan [radius=400] [top=10] [x z]`: where to put a base near spawn (a base spot
     // "auto-picked near spawn: flat, safe, trees and water nearby") ────────────────────────────────────────────────────────
     // Read-only and admin-only: it only asks vanilla's WorldGenerator and the vegetation rules, writes nothing and places
     // nothing. Candidates on a 10 m grid round the centre (default: where the admin stands, i.e. the spawn on a first login),

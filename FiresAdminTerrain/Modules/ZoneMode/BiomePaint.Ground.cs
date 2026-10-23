@@ -6,7 +6,7 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Ground turning (Fire's popup, 2026-09-27: "Turn the ground too"; the circle is exact and its edge a sharp line). A
+    // Ground turning (the circle is exact and its edge a sharp line). A
     // painted circle makes its ground the brush's biome for everything that asks what ground a point is, never for the
     // land's shape: WorldGenerator.GetBiome is left alone, because vanilla and FAT both build heights from it
     // (GetBiomeHeight), and so do the water plan and the alt-biome map. What turns, the way FAT's environment boxes force a
@@ -71,6 +71,8 @@ namespace VerdantsAscent.Terrain.Zones
             [HarmonyPriority(Priority.Low)]
             private static void Postfix(Vector3 point, ref Heightmap.Biome __result)
             {
+                // A biome painted on a cave floor is that floor's (VoxelLayerPaint; a skyland's answers in its own postfix).
+                if (VoxelLayerPaint.TryPaintedBiomeAt(point, out var layered)) { __result = layered; return; }
                 if (__result != Heightmap.Biome.Ocean && TryGround(point.x, point.z, out var ground)) __result = ground;
             }
         }
@@ -167,14 +169,8 @@ namespace VerdantsAscent.Terrain.Zones
             if (poked > 0) FiresLogger.LogInfo($"[BiomePaint] season changed: {poked} painted heightmap(s) rebuild.");
         }
 
-        // Edited voxel ground, as its view takes the mesher's colours (VoxelChunkView.ApplyBuffers). World-space vertices.
-        internal static void TintVoxel(List<Color32> colors, List<Vector3> worldVerts)
-        {
-            if (!Any || colors == null || worldVerts == null) return;
-            int count = Mathf.Min(colors.Count, worldVerts.Count);
-            for (int i = 0; i < count; i++)
-                if (TryGround(worldVerts[i].x, worldVerts[i].z, out var ground)) colors[i] = Heightmap.GetBiomeColor(ground);
-        }
+        // Voxel ground takes its turned colour per vertex in VoxelLayerPaint.Render (ground vertices only, so a cave
+        // floor or a skyland over a painted circle keeps its own).
 
         // The far terrain's tiles (FarQuilt), one colour at a time.
         internal static Color32 Tint(Color32 color, float wx, float wz)
@@ -201,6 +197,7 @@ namespace VerdantsAscent.Terrain.Zones
                 var centre = chunk.WorldOrigin + new Vector3(VoxelChunk.CELLS * 0.5f, 0f, VoxelChunk.CELLS * 0.5f);
                 if (!Touched(centre, VoxelChunk.CELLS)) continue;
                 VoxelMeshPipeline.EnqueueRemesh(chunk);
+                VoxelWorld.MarkPaintDirty(new Vector2Int(chunk.Key.x, chunk.Key.z));   // the column mask's lava alpha follows the ground
                 chunks++;
             }
             if (ClutterSystem.instance != null)

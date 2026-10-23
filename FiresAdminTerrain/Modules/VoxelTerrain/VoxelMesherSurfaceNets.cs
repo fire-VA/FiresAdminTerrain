@@ -75,10 +75,24 @@ namespace VerdantsAscent.Terrain.Voxel
     public static class VoxelMesherSurfaceNets
     {
         private const int S = VoxelChunk.SAMPLES;   // 34
+
+        // Bilinear blend of four columns' inland waterlines, where 0 means "no waterline" (the vanilla look): only
+        // the columns that have one are weighted, so a shore vertex takes the waterline smoothly instead of averaging it
+        // with 0; no column with one gives 0.
+        private static float BlendWetLine(float w00, float w10, float w01, float w11, float fx, float fz)
+        {
+            float a = (1f - fx) * (1f - fz), b = fx * (1f - fz), c = (1f - fx) * fz, d = fx * fz;
+            float sum = 0f, weight = 0f;
+            if (w00 != 0f) { sum += w00 * a; weight += a; }
+            if (w10 != 0f) { sum += w10 * b; weight += b; }
+            if (w01 != 0f) { sum += w01 * c; weight += c; }
+            if (w11 != 0f) { sum += w11 * d; weight += d; }
+            return weight > 1e-4f ? sum / weight : 0f;
+        }
         private const int C = VoxelChunk.CELLS;     // 32
 
         // Corner c = dx | dy<<1 | dz<<2. Edges = corner pairs differing in one bit.
-        private static readonly int[,] EDGES =
+        internal static readonly int[,] EDGES =   // internal, VoxelChunk.CellVertexY reads the same edges
         {
             {0,1},{2,3},{4,5},{6,7},   // X edges
             {0,2},{1,3},{4,6},{5,7},   // Y edges
@@ -96,7 +110,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
         private static int CIdx(int x, int y, int z) => (x + 1) + 34 * ((y + 1) + 34 * (z + 1));
 
-        // EDGE-DRIVEN build (round-87 rework). The old two-pass form gated
+        // EDGE-DRIVEN build. The old two-pass form gated
         // VERTICES on "cell edited", which dropped quads wherever a crossing
         // edge bordered a cell whose corners happened to equal seed (brush SDF
         // ≈ seed there) — the visible mesh SPLITS/slivers. Now the gate is on
@@ -196,10 +210,17 @@ namespace VerdantsAscent.Terrain.Voxel
                 // UV0 = chunk-local 0..1; vertex color = surrounding biome's
                 // blend mask (per-column, sampled at seed).
                 buf.Uvs.Add(new Vector2((world.x - origin.x) / 32f, (world.z - origin.z) / 32f));
-                int bx = Mathf.Clamp(cx + (px * inv > 0.5f ? 1 : 0), -1, C);
-                int bz = Mathf.Clamp(cz + (pz * inv > 0.5f ? 1 : 0), -1, C);
-                buf.Colors.Add(buf.Biome[(bx + 1) + S * (bz + 1)]);
-                buf.Uv1.Add(new Vector2(buf.WetLine[(bx + 1) + S * (bz + 1)], 0f));   // per-vertex inland waterline (same column sample as biome) → shader fWL
+                // Biome blending between two paints, and the shore band, drew as steps: the vertex took
+                // the NEAREST column's paint mask and waterline (frac > 0.5 ? next : this), so both
+                // switched on a cell line and every paint edge and wet band drew as 90-degree notches. Now the four columns
+                // around the vertex are blended bilinearly by its position in the cell: a soft, continuous transition.
+                float fx = Mathf.Clamp01(px * inv), fz = Mathf.Clamp01(pz * inv);
+                int x0 = Mathf.Clamp(cx, -1, C), x1 = Mathf.Clamp(cx + 1, -1, C);
+                int z0 = Mathf.Clamp(cz, -1, C), z1 = Mathf.Clamp(cz + 1, -1, C);
+                int i00 = (x0 + 1) + S * (z0 + 1), i10 = (x1 + 1) + S * (z0 + 1), i01 = (x0 + 1) + S * (z1 + 1), i11 = (x1 + 1) + S * (z1 + 1);
+                Color b0 = Color.Lerp(buf.Biome[i00], buf.Biome[i10], fx), b1 = Color.Lerp(buf.Biome[i01], buf.Biome[i11], fx);
+                buf.Colors.Add(Color.Lerp(b0, b1, fz));
+                buf.Uv1.Add(new Vector2(BlendWetLine(buf.WetLine[i00], buf.WetLine[i10], buf.WetLine[i01], buf.WetLine[i11], fx, fz), 0f));   // per-vertex inland waterline → shader fWL
                 return idx;
             }
 
@@ -294,7 +315,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         EmitEdge(1, x, y, C);   // in-plane Y-edges at z=32
                     }
 
-            // ── SHINGLE LIPS (round-92 mechanism, re-aimed). The in-plane
+            // ── SHINGLE LIPS. The in-plane
             // quads of every face belong to the neighbour on the positive
             // side; where no neighbour covers a face (wrap frontier, absent or
             // gated chunk) those quads are emitted by NOBODY and the skin

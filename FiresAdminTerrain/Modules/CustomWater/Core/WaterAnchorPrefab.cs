@@ -16,7 +16,7 @@ namespace VerdantsAscent.Water.Core
     // ZNetScene-registered prefab named "CustomRiver". In the legacy mod
     // FiresNPCs the VAPieceManager registered it; FAT doesn't have that
     // class, so without this file every water disk fails to persist
-    // (errors visible in user's log 2026-05-25 as "CustomRiver prefab
+    // (the log otherwise shows "CustomRiver prefab
     // NOT found in ZNetScene! Water persistence will FAIL!").
     //
     // INVISIBLE BY DESIGN — water anchor lives at Y=-10 with all renderers

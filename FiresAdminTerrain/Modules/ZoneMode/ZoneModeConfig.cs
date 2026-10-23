@@ -27,6 +27,7 @@ namespace VerdantsAscent.Terrain.Zones
             + "Mistlands_Excavation1|Mistlands_Excavation2, FaderLocation, CharredFortress x3, LeviathanLava, DN_Bossroom";
 
         internal static ConfigEntry<bool> OfferAtWorldCreation;
+        internal static ConfigEntry<bool> BuildOverClosedZones;
         internal static ConfigEntry<float> CoastWidth;
         internal static ConfigEntry<float> SeaFloorDepth;
         internal static ConfigEntry<int> StartAreaRadius;
@@ -36,8 +37,6 @@ namespace VerdantsAscent.Terrain.Zones
         internal static ConfigEntry<string> RevealOptOut;
         internal static ConfigEntry<string> GuaranteedLocations;
         internal static ConfigEntry<bool> SummaryLogging;
-        internal static ConfigEntry<UnityEngine.KeyCode> ChunkUndoKey;
-        internal static ConfigEntry<UnityEngine.KeyCode> ChunkRedoKey;
 
         private static bool s_bound;
 
@@ -46,6 +45,10 @@ namespace VerdantsAscent.Terrain.Zones
             if (s_bound || cfg == null) return;
             s_bound = true;
 
+            BuildOverClosedZones = cfg.Bind(Section, "Build over closed zones", true,
+                "Let players build over a zone that is not open yet (piers and platforms down to the water). Such a piece is "
+                + "taken down when its zone opens, and its materials go into a chest with the builder's name at the nearest "
+                + "dry ground. Terrain tools are never allowed there. Off: building over a closed zone is refused. Live.");
             OfferAtWorldCreation = cfg.Bind(Section, "Offer at world creation", true,
                 "Ask 'one zone at a time?' when a new world is created from the main menu. The answer is stored "
                 + "with that world and cannot be changed later. Existing worlds are never affected.");
@@ -86,15 +89,10 @@ namespace VerdantsAscent.Terrain.Zones
                 + "of them. Until enough stand in open zones, the nearest one a player comes within the reveal distance of "
                 + "rises with its zone, whatever its island roll or the opt-out list say, and a biome swap never moves them. "
                 + "Server-side, live.");
-            SummaryLogging = cfg.Bind(Section, "Summary logging", true,
+            SummaryLogging = cfg.Bind(Section, "Summary logging", false,
                 "Write a [FiresZones] activity summary to the log once a minute while anything happened: terrain "
-                + "samples gated, closed zones kept empty, refused edits, planning passes left ungated.");
-            ChunkUndoKey = cfg.Bind(Section, "Chunk undo key", UnityEngine.KeyCode.Keypad7,
-                "Admin: take back the last chunk placement, putting that zone back as it was. Numpad 7 by default, "
-                + "the same key Infinity Hammer undoes with, so one key serves both. Ignored while typing or in a menu.");
-            ChunkRedoKey = cfg.Bind(Section, "Chunk redo key", UnityEngine.KeyCode.Keypad9,
-                "Admin: place again what the last chunk undo took back. Numpad 9 by default, the same key Infinity "
-                + "Hammer redoes with.");
+                + "samples gated, closed zones kept empty, refused edits, planning passes left ungated. Off by default "
+                + "(a diagnostics aid for testing).");
         }
     }
 }

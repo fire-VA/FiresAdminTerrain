@@ -106,8 +106,17 @@ namespace VerdantsAscent.Terrain.Voxel
 
             try
             {
-                FiresWorldGenBase.PlanImportedWorld(heights, biomes, null, resolution, half, world.m_seed,
-                    out float[] waterLevel, out byte[] riverMask);
+                // A converted world plans rivers like a generated one, so it gets the big sinkhole cuts too.
+                var profile = FiresWorldProfile.Read(world.m_name);
+                FatSinkFallCuts.Arm(FiresWorldRecords.PathFor(world.m_name, FatSinkFallCuts.Suffix), profile?.Caves ?? (FiresVoxelConfig.GenerateCaves != null && FiresVoxelConfig.GenerateCaves.Value));
+                float[] waterLevel;
+                byte[] riverMask;
+                try
+                {
+                    FiresWorldGenBase.PlanImportedWorld(heights, biomes, null, resolution, half, world.m_seed,
+                        out waterLevel, out riverMask);
+                }
+                finally { FatSinkFallCuts.Disarm(); }
                 FiresWorldGenBase.SaveImportedCache(FiresWorldGenBase.BakedCachePath(world.m_name),
                     heights, biomes, riverMask, waterLevel, resolution, half);
             }
@@ -143,8 +152,11 @@ namespace VerdantsAscent.Terrain.Voxel
         /// has none, so the configured resolution stands in.</summary>
         private static int ResolutionFor(string worldName, out float half, out string sourceKind)
         {
-            half = VanillaWorldRadius;
-            sourceKind = "vanilla generation";
+            // A procedural world's span is ITS playable radius (FatWorldSize: the profile's record or Expand World
+            // Size's), 10000 on a vanilla-size world as before.
+            var size = FatWorldSize.SizeForWorld(worldName, out string sizeSource);
+            half = size.Radius == FatWorldSize.VanillaRadius ? VanillaWorldRadius : size.Radius;
+            sourceKind = half == VanillaWorldRadius ? "vanilla generation" : $"vanilla generation at radius {half:0} ({sizeSource})";
             try
             {
                 if (BcWorldData.Exists(worldName, out BcSaveLocation location)

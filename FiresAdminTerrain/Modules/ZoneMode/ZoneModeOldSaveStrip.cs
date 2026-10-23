@@ -8,7 +8,7 @@ namespace VerdantsAscent.Terrain.Zones
 {
     // Loading a pre-1.0 save, vanilla's ZDOMan.RemoveObsoleteData strips retired keys from every object's data. For each
     // store and each of its strip lists it walks every object and binary-searches every listed hash, about 240 searches
-    // an object, and on a 7.7 M object save that was one 107 s freeze (Va, 2026-09-27). This makes the same removals in
+    // an object, and on a 7.7 M object save that was one 107 s freeze. This makes the same removals in
     // one walk per store: each object's few keys are looked up in one set of that store's strip hashes. A removed key is
     // counted under the first vanilla list that names it, so the log line reads exactly as vanilla's would. The anim_speed
     // pass stays vanilla's own. If a store cannot be found or anything throws, vanilla runs; its removals repeat safely.

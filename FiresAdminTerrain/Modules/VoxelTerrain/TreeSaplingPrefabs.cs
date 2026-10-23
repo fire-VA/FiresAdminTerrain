@@ -31,9 +31,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal const string FrostConeItem = "FirConeFrost";
 
-        private const string Section = "VoxelTerrain Tree Seeds";
+        private const string Section = "Voxel Terrain - Tree seeds";
         private const string DefaultAshlandsTrees = "AshlandsTree3, AshlandsTree4, AshlandsTree5, AshlandsTree6";
-        // SnowFirTree_small carries no TreeBase in 1.0 (R45), so it was always skipped; listing it only logged a warning.
+        // SnowFirTree_small carries no TreeBase in 1.0, so it was always skipped; listing it only logged a warning.
         private const string DefaultSnowFirTrees = "SnowFirTree, SnowFirTree 2";
         private const int SeedCost = 1;
         private const string CultivatorItem = "Cultivator";
@@ -69,7 +69,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ZNetScene and ObjectDB wake in either order, so whichever comes second lists the saplings. Listed only from
-        // ZNetScene, a world whose ObjectDB woke later never had them on the cultivator (SanctuaryAshlands, 2026-09-27).
+        // ZNetScene, a world whose ObjectDB woke later never had them on the cultivator.
         internal static void OnObjectDBAwake()
         {
             if (s_wired) ListOnCultivator();

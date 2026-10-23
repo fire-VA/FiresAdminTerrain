@@ -8,11 +8,10 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The world's first Chunk Hammer lies in a chest IN THE OPEN, close by the spawn (Fire, 2026-09-27,
-    // Tools\FAT_START_ITEMS.md): on a converted map on the nearest spot a player can stand near the spawn's height, build
+    // The world's first Chunk Hammer lies in a chest IN THE OPEN, close by the spawn: on a converted map on the nearest spot a player can stand near the spawn's height, build
     // floors included; on a fresh world on flat natural ground OpenMinDistance to OpenMaxDistance from the spawn, within
     // OpenMaxRise of its height, where the least stands around it. It has a spot of its own, never tied to the starter
-    // Chunk Generator's (Fire, 2026-09-27: "the hammer in one spot the chest in another"): it stands at least
+    // Chunk Generator's: it stands at least
     // ZoneModeStartSpots.ObjectsApart from the starter, and the log names both spots and the distance between them.
     // Every player's map is pinned (ZoneModeStartPins). The hidden search this chest used to make (a cave under the
     // start, or among the trees) now places the Cultivator chest (ZoneModeCultivatorChest).
@@ -326,9 +325,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static string MarkerPath()
         {
-            string world = ZNet.World?.m_name ?? "world";
-            string safe = string.Concat(world.Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + "_hammer.txt");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_hammer.txt");
         }
 
         internal static void Reset()

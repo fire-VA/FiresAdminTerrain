@@ -102,7 +102,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // expands to `from=x,z,y circle=r-r2 …`; standalone console use falls
         // back to player look-raycast.
         //
-        // POST-PHASE-B (2026-05-25): routes through RegionScrubber instead of
+        // POST-PHASE-B: routes through RegionScrubber instead of
         // ZNetScene.Destroy. Anchors stay alive with empty data — this is
         // the "anchor-per-region, never destroy" model. The visual result is
         // identical (tile mesh + vanilla overlay + clutter all gone from

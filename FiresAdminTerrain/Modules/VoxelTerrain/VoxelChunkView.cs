@@ -9,7 +9,7 @@ namespace VerdantsAscent.Terrain.Voxel
     //
     // Material = TerrainMaterialCache.GetCurrentMaterial() — the SAME captured
     // vanilla Custom/Heightmap material the tile/disk terrain renders with
-    // (user: voxel surfaces must match the disks). The heightmap shader blends
+    // (voxel surfaces must match the disks). The heightmap shader blends
     // rock onto steep faces by itself, so carve walls/ceilings read as rock
     // while tops read as grass — consistent with vanilla terrain and our tiles.
     // Vertex color = biome mask (Meadows (0,0,0,0) default, like unmodified
@@ -22,19 +22,41 @@ namespace VerdantsAscent.Terrain.Voxel
         private MeshCollider _collider;
         private Mesh _mesh;
         private Color32[] _seasonFreeColors;
+
+        // Memory line: estimated mesh bytes this view holds (CPU copy; the GPU holds about the same again).
+        // 32 B per vertex (position, normal, colour, uv) + 4 B per index.
+        internal long MeshBytes(out int meshes)
+        {
+            meshes = 0;
+            return MeshBytes(_mesh, ref meshes) + MeshBytes(_waterMesh, ref meshes) + MeshBytes(_fallsMesh, ref meshes) + MeshBytes(_iceMesh, ref meshes);
+        }
+
+        private static long MeshBytes(Mesh m, ref int meshes)
+        {
+            if (m == null) return 0;
+            meshes++;
+            long idx = 0;
+            for (int i = 0; i < m.subMeshCount; i++) idx += (long)m.GetIndexCount(i);
+            return m.vertexCount * 32L + idx * 4L;
+        }
         private int _seasonFreeCount;
 
         // True from apply→bake dispatch until the baked collider is assigned —
         // the pipeline defers re-applies so the mesh is never mutated while
         // PhysX reads it on the worker.
         public bool BakeInFlight;
+        // A native crash (ntdll c0000005, dying mid "[FiresVoxel] applied chunk" / remesh churn) came from
+        // two paths that touched a mesh PhysX was cooking on the bake worker. A season recolour (SetColors) now waits for the bake, and
+        // a view destroyed mid-bake hands its mesh to the pipeline, which destroys it only after the bake returns (no use-after-free).
+        private bool _recolourAfterBake;
+        private int _bakingMeshId;   // the mesh id the worker is cooking (0 = none)
 
         // W1 — the zone streamer swaps vanilla off only once every chunk's
         // collider is live (or the chunk has no surface). False while a fresh
         // apply's bake is still in flight.
         public bool ColliderReady { get; private set; }
 
-        // W1.2 — renderer suppressed until the zone swap flips voxel-on /
+        // Renderer suppressed until the zone swap flips voxel-on /
         // vanilla-off in the same frame (no coplanar z-fight window).
         public bool RenderSuppressed;
 
@@ -63,8 +85,10 @@ namespace VerdantsAscent.Terrain.Voxel
             // place is the real fix; this stops it lying in the meantime.
             if (_renderer != null)
                 _renderer.enabled = VertexCount > 0 && !_surfaceNotCollidable && !RenderSuppressed && overworldVisible;
-            if (_waterRenderer != null) _waterRenderer.enabled = overworldVisible;
-            if (_iceRenderer != null) _iceRenderer.enabled = overworldVisible;
+            // The water and ice sheets wait for the swap with their ground (a skyland lake no longer shows over its
+            // far piece before the island does).
+            if (_waterRenderer != null) _waterRenderer.enabled = overworldVisible && !RenderSuppressed;
+            if (_iceRenderer != null) _iceRenderer.enabled = overworldVisible && !RenderSuppressed;
         }
 
         public int VertexCount { get; private set; }
@@ -92,6 +116,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal void RefreshShadowMode() => ApplyShadowMode(_renderer);
 
+        internal Vector3Int Key;   // the chunk this view draws (VoxelWorld.GetOrCreateView)
+
         public void Init()
         {
             // TERRAIN layer, same as the tile meshes (TileMeshRenderer): vanilla
@@ -108,7 +134,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             _filter = gameObject.AddComponent<MeshFilter>();
-            // W3-A3 — headless dedi: colliders ARE the product; no renderer,
+            // Headless dedi: colliders ARE the product; no renderer,
             // no material lookups (shader/bundle access is a client concern).
             if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null)
             {
@@ -153,7 +179,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             _mesh.Clear(false);
             // The three handoffs where the engine allocates on OUR main-thread frame, split so a profile names which:
-            // [perf] pinned 601 blocks of 39,336 B a run to "(native code) under StreamerDriver.Update" with no managed
+            // a profile pinned 601 blocks of 39,336 B a run to "(native code) under StreamerDriver.Update" with no managed
             // frame below, and set-vertices / set-triangles / collider-assign are the candidates.
             using (VertsMarker().Auto())
             {
@@ -169,9 +195,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 // tangents (each mesh averages only its own triangles) and drew
                 // the groove lines along every 32m border.
                 _mesh.SetTangents(buf.Tangents);
+                // Each vertex wears its own layer's paint - the ground the column's mask and turned-ground circles,
+                // a cave floor or a skyland the paint laid on it (VoxelLayerPaint; UV0 into the mask's palette texels).
+                VoxelLayerPaint.Render(Key, buf.Verts, buf.Uvs, buf.Uv1, buf.Colors);
                 _mesh.SetUVs(0, buf.Uvs);
                 _mesh.SetUVs(1, buf.Uv1);   // UV1.x = per-vertex inland waterline (FiresVoxelHeightmap reads v.texcoord1.x)
-                Zones.BiomePaint.TintVoxel(buf.Colors, buf.Verts);   // turned ground, at render time only
                 KeepSeasonFreeColors(buf.Colors);
                 _mesh.SetColors(FatSeasons.RenderColors(buf.Colors, buf.Verts));
             }
@@ -214,7 +242,18 @@ namespace VerdantsAscent.Terrain.Voxel
         internal void RecolourForSeason()
         {
             if (_renderer == null || _seasonFreeColors == null || _seasonFreeCount != _mesh.vertexCount) return;
+            if (BakeInFlight) { _recolourAfterBake = true; return; }   // never write a mesh PhysX is cooking
             _mesh.SetColors(FatSeasons.RenderColors(_seasonFreeColors, _seasonFreeCount, _mesh));
+        }
+
+        // The pipeline's bake bookkeeping (main thread)
+        internal void NoteBakeStarted(int meshId) { BakeInFlight = true; _bakingMeshId = meshId; }
+
+        internal void NoteBakeDone()
+        {
+            BakeInFlight = false;
+            _bakingMeshId = 0;
+            if (_recolourAfterBake) { _recolourAfterBake = false; RecolourForSeason(); }
         }
         private const float MinCollidableCrossSqr = 4f * MinCollidableTriangleArea * MinCollidableTriangleArea;
 
@@ -251,7 +290,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private Texture2D _paintTex;
         private float _localWaterY;   // 0 = no gen water over this chunk (shader collapses to vanilla)
 
-        // W3.3 — per-column paint mask, bound per-renderer so the SHARED
+        // Per-column paint mask, bound per-renderer so the SHARED
         // material (tiles, FarQuilt, distant-LOD) keeps its blank mask. The
         // property block lives on the renderer, so it survives both remeshes
         // and the sharedMaterial self-heal above. Also carries the per-chunk
@@ -287,12 +326,16 @@ namespace VerdantsAscent.Terrain.Voxel
             if (_collider == null || _mesh == null || VertexCount == 0) return;
             using (ColliderMarker().Auto())
             {
+                var spk = FatSpike.Start();
+                FatNativeTrace.Step("collider swap begin", _mesh != null ? _mesh.GetInstanceID() : 0, name);
                 _collider.sharedMesh = null;
                 _collider.sharedMesh = _mesh;
+                FatNativeTrace.Step("collider swap end", _mesh != null ? _mesh.GetInstanceID() : 0);
+                FatSpike.Add(FatSpike.Stage.ColliderAssign, spk);
             }
             ColliderReady = true;
-            FatClutterRegrow.Collider(_collider.bounds);   // 0.2.690/0.2.693: the grass over this chunk re-rolls on its new surface (vanilla's ResetGrass after an edit)
-            // 0.2.689 ([lead] RIDEg pit): when a dedicated server's voxel collider is (re)built, at Debug.
+            FatClutterRegrow.Collider(_collider.bounds);   // the grass over this chunk re-rolls on its new surface (vanilla's ResetGrass after an edit)
+            // When a dedicated server's voxel collider is (re)built, at Debug.
             if (ZNet.instance != null && ZNet.instance.IsDedicated() && FiresLogger.DebugEnabled)
                 FiresLogger.LogDebug($"[FiresVoxel] server collider built: '{name}' at ({_collider.bounds.center.x:F0},{_collider.bounds.center.y:F0},{_collider.bounds.center.z:F0}), "
                     + $"{VertexCount} vertices, t {Time.time:F1}.");
@@ -329,6 +372,10 @@ namespace VerdantsAscent.Terrain.Voxel
         private Mesh _fallsMesh;
         private Mesh _waterMesh;
         private MeshRenderer _waterRenderer;
+        internal MeshRenderer WaterRenderer => _waterRenderer;
+        internal MeshRenderer GroundRenderer => _renderer;   // fat_seam_suspect
+        internal Mesh GroundMesh => _filter != null ? _filter.sharedMesh : null;   // the seam test compares render border vertices; FatShaftUnderwater sets its underwater MPB
+        internal int WaterVerts => _waterMesh != null ? _waterMesh.vertexCount : 0;   // fat_sheet_probe_test
         // FROZEN-class columns render as ICE instead: walkable MeshCollider
         // on a GO named "IceShell" — IceSlidingPatches detects ground
         // colliders by that name, so generated lakes slide exactly like the
@@ -407,7 +454,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (from.HasProperty(src) && to.HasProperty(dst)) to.SetTexture(dst, from.GetTexture(src));
         }
 
-        private static Material ResolveSheetMaterial()
+        internal static Material ResolveSheetMaterial()   // internal, placed water uses the calm inland sheet material too
         {
             if (s_sheetMat != null) return s_sheetMat;
             switch (s_sheetMatMode)
@@ -423,6 +470,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 // remains the default, so this is a live A/B.
                 case 3:
                 {
+                    // A dedicated server has no graphics device, so no shader is ever
+                    // live there and nothing draws the sheet: it takes the fallback quietly. The warning is for a CLIENT whose
+                    // Core bundle lacks the shader (clients list firesinlandwater and bind it).
+                    if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
+                    {
+                        s_sheetMat = VerdantsAscent.Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
+                        break;
+                    }
                     var inland = FiresCore.Materials.FiresShaderBroker.Get("Custom/FiresInlandWater");
                     if (inland == null)
                     {
@@ -456,6 +511,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             $"foam={(im.GetTexture("_FoamTex") != null ? im.GetTexture("_FoamTex").name : "MISSING")}.");
                     }
                     VerdantsAscent.Water.Core.FiresInlandWaterConfig.Apply(im);
+                    VerdantsAscent.Water.Core.InlandLookConfig.Apply(im);
                     im.renderQueue = 3000;
                     s_sheetMat = im;
                     break;
@@ -562,14 +618,142 @@ namespace VerdantsAscent.Terrain.Voxel
         // one snapshot, one lifecycle. There is no separate emission pass left
         // to diverge: if the snapshot's columns say water, the sheet is built
         // in the same call that builds the ground under it.
+        // The sheet's corner heights AFTER its smoothing
+        // (dry corners 0), this chunk's own (CELLS+1)^2 corners, kept for the swim/float trigger (VoxelWaterSurface, behind
+        // [Voxel Terrain] "Swim level follows the drawn water", default OFF) and the point probe. Null until a sheet was built.
+        internal float[] SheetCornerH;
+
+        private void CaptureSheetCorners()
+        {
+            const int RING = 3;   // BuildSheet's ring
+            int C = VoxelChunk.CELLS, R = C + 1 + RING * 2, n = C + 1;
+            if (s_wCornH == null || s_wCornH.Length < R * R) { SheetCornerH = null; return; }
+            if (SheetCornerH == null) SheetCornerH = new float[n * n];
+            for (int cz = 0; cz <= C; cz++)
+                for (int cx = 0; cx <= C; cx++)
+                    SheetCornerH[cx + n * cz] = s_wCornH[(cx + RING) + R * (cz + RING)];
+        }
+
+        // Wave seams at zone borders: the per-renderer _FatBodySize write is
+        // gone, as the ocean does it: big-water weight is a WORLD field baked by TossinShade's FiresInlandField (_FiresInlandField, sampled by world xz,
+        // like the ocean's shore field), so neighbouring sheets agree at every shared point.
+
         private void ApplyGenWater(MeshBuffers buf)
         {
             bool on = FiresVoxelConfig.VoxelWater == null || FiresVoxelConfig.VoxelWater.Value;
             if (!on || buf == null || !buf.HasWater || _renderer == null)
             {
                 if (_waterGO != null) _waterGO.SetActive(false);
+                SheetCornerH = null;   // no sheet, nothing for the trigger to follow
                 return;
             }
+{ var spkW = FatSpike.Start(); BuildSheet(buf, null); FatSpike.Add(FatSpike.Stage.WaterSheet, spkW); }
+            CaptureSheetCorners();
+            ApplyIceSheet();
+            if (s_wTris.Count == 0)
+            {
+                if (_waterGO != null) _waterGO.SetActive(false);
+                return;
+            }
+            if (_waterGO == null)
+            {
+                _waterGO = new GameObject("genwater");
+                // Default layer — the layer the LEGACY gen mesh and the hand
+                // pours both rendered on (proven visible). The Water layer
+                // interacts with vanilla's own water systems; not worth it.
+                _waterGO.transform.SetParent(transform, false);
+                var mf = _waterGO.AddComponent<MeshFilter>();
+                _waterRenderer = _waterGO.AddComponent<MeshRenderer>();
+                _waterRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                _waterRenderer.receiveShadows = false;
+                _waterRenderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.BlendProbesAndSkybox;   // blend, not per-chunk switch
+                _waterMesh = new Mesh { name = "genwater" };
+                mf.sharedMesh = _waterMesh;
+            }
+            // MATERIAL RETRY, not a one-shot, and MODE-based — see
+            // ResolveSheetMaterial. Re-resolve on every apply until a material
+            // binds, and say so in the log either way.
+            if (_waterRenderer != null && _waterRenderer.sharedMaterial == null)
+            {
+                var mat = ResolveSheetMaterial();
+                if (mat != null)
+                {
+                    _waterRenderer.sharedMaterial = mat;
+                    BoundSheetMaterial = mat;   // far-water quilt reuses THE sheet material
+                    if (!s_wMatBound)
+                    {
+                        s_wMatBound = true;
+                        // Say MESH plainly. The material is the shared one the
+                        // pour prefab also uses, so its NAME carries "Pour" —
+                        // and a log line reading "FiresLiquid_Pour" next to
+                        // water work reads as "we went back to pours". We did
+                        // not: generated water is this chunk mesh sheet and
+                        // nothing queues a pour for it.
+                        FiresLogger.LogInfo($"[FiresVoxelWater] chunk water MESH sheet bound (mode {s_sheetMatMode}) — " +
+                                  $"no pours are placed for generated water; material '{mat.name}' is just the shared " +
+                                  $"liquid material: {(mat.shader != null ? mat.shader.name : "null")} queue={mat.renderQueue}");
+                    }
+                }
+                else if (!s_wMatWarned)
+                {
+                    s_wMatWarned = true;
+                    FiresLogger.LogWarning("[FiresVoxelWater] water sheets are building but no sheet material " +
+                                     "resolves yet — sheets invisible until it does; retrying on every apply.");
+                }
+            }
+            _waterGO.SetActive(true);
+            _waterMesh.Clear(false);
+            _waterMesh.SetVertices(s_wVerts);
+            _waterMesh.SetNormals(s_wNorms);
+            _waterMesh.SetUVs(0, s_wUvs);
+            _waterMesh.SetUVs(1, s_wUv1);
+            _waterMesh.SetUVs(2, s_wUv2);
+            _waterMesh.SetUVs(3, ZeroUv3(s_wVerts.Count));   // explicit zeros (see ZeroUv3)
+            _waterMesh.SetColors(s_wCols);
+            _waterMesh.SetTriangles(s_wTris, 0, calculateBounds: true);
+            VoxelSheetFalls.Build(buf, _waterGO, ref _fallsGO, ref _fallsMesh);
+            if (!s_wFirstSheet)
+            {
+                s_wFirstSheet = true;
+                FiresLogger.LogInfo($"[FiresVoxelWater] first water sheet: view '{name}' " +
+                          $"{s_wTris.Count / 6} quad(s) at {_waterMesh.bounds.center:F0}, " +
+                          $"material {(_waterRenderer != null && _waterRenderer.sharedMaterial != null ? _waterRenderer.sharedMaterial.name : "PENDING")}.");
+            }
+        }
+
+        // The sheet builder, lifted out of ApplyGenWater unchanged so placed water (WaterSheets, the
+        // V-tools) renders through the same mesh as generated and skyland water (VoxelWaterSheetMesh.Build). It fills the s_w*
+        // scratch lists from the chunk snapshot `buf` (WaterLvl = where the sheet is, Ground = the bed, <0 = mopped). `surface` (null =
+        // the world's: GenWaterField + the skylands) gives the height at every corner, out to the 3-corner halo past the chunk.
+        // The last BuildSheet's lists into a mesh (VoxelWaterSheetMesh.Build). False when it built nothing.
+        // Every still lake once drew a bright tiled foam ("Eddyline foam" and "Rapids foam tiling" were the only sliders that
+        // changed it). Custom/FiresInlandWater reads uv3 as obstacle disturbance (aeration, vorticity -> eddy foam) and its contract says
+        // "absent -> Unity supplies 0". That is not guaranteed: with no uv3 stream on the mesh the GPU read non-zero values, so the eddy
+        // term fired on still water. The sheet now carries an explicit all-zero uv3, so every disturbance term is exactly 0 on our water.
+        private static readonly System.Collections.Generic.List<Vector4> s_zeroUv3 = new System.Collections.Generic.List<Vector4>(4096);
+        private static System.Collections.Generic.List<Vector4> ZeroUv3(int n)
+        {
+            if (s_zeroUv3.Count > n) s_zeroUv3.RemoveRange(n, s_zeroUv3.Count - n);
+            while (s_zeroUv3.Count < n) s_zeroUv3.Add(Vector4.zero);
+            return s_zeroUv3;
+        }
+
+        internal static bool CopySheetTo(Mesh into)
+        {
+            if (s_wTris.Count == 0) return false;
+            into.SetVertices(s_wVerts);
+            into.SetNormals(s_wNorms);
+            into.SetUVs(0, s_wUvs);
+            into.SetUVs(1, s_wUv1);
+            into.SetUVs(2, s_wUv2);
+            into.SetUVs(3, ZeroUv3(s_wVerts.Count));
+            into.SetColors(s_wCols);
+            into.SetTriangles(s_wTris, 0, calculateBounds: true);
+            return true;
+        }
+
+        internal static void BuildSheet(MeshBuffers buf, WaterSurfaceProvider surface)
+        {
             int S = VoxelChunk.SAMPLES, C = VoxelChunk.CELLS;
 
             // OCEAN-STYLE OVERSHOOT. Vanilla's sea doesn't stop at its
@@ -597,7 +781,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // pushed every skirt cell to its upstream
                             // neighbourhood's highest level, so on sloped
                             // runs the bank columns wore stepped plates that
-                            // rode up the bank faces (user screenshots). The
+                            // rode up the bank faces. The
                             // mean extends the flow gradient sideways.
                             float sum = 0f; int cnt = 0;
                             for (int dz = -1; dz <= 1; dz++)
@@ -618,7 +802,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // banks: an outer skirt cell hanging at all is
                             // past a bank CREST, and keeping it draped the
                             // sheet over the crest and rolled it down the far
-                            // side on steep runs (user screenshot). Grid
+                            // side on steep runs. Grid
                             // index → world: arrays are apron-offset by +1.
                             // Ground from THIS chunk's snapshot (column
                             // resolution, no query): asking the generator meant
@@ -635,7 +819,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 // bank wall the probe hits legitimate buried
                                 // tunnels and culled the wall-side skirt —
                                 // the slits/notches where the sheet failed to
-                                // clip into the bank (user screenshot).
+                            // clip into the bank.
                                 else if (FiresVoxelConfig.GeneratesCaves
                                     && skg - (v - 0.75f) > 0.5f
                                     && skg - v < 6f
@@ -651,13 +835,13 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             var lvls = s_wExtA;
 
-            // SMOOTH SURFACE, ALWAYS (user mandate). Corner heights come from
+            // SMOOTH SURFACE, ALWAYS. Corner heights come from
             // ONE pure world function — TryGetWaterSurfaceSmooth, the same
             // reconciled 2m field the bed carve is cut for — sampled once per
             // corner. The old per-corner mix of stored column levels, flat
             // overshoot and curl-down dives crumpled the shoreline into a
             // folded ribbon that read as TWO see-through water layers at
-            // grazing angles (user screenshot at a bank). The mesh's only job
+            // grazing angles at a bank. The mesh's only job
             // is a continuous sheet; rapids and flowing water are expressed by
             // the SHADER + VFX (slope foam, flow normals), never by splitting
             // or stepping the geometry. Curl-down is deleted with prejudice —
@@ -677,6 +861,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // shallower halo and the two chunks that share that corner derive it
             // from different inputs, which is a crack.
             const int RING = 3;
+            const float CornerBedReach = 32f;   // how far under the surface a corner's voxel bed is looked for
             int R = C + 1 + RING * 2;
             if (s_wCornH == null || s_wCornH.Length < R * R)
             {
@@ -695,20 +880,38 @@ namespace VerdantsAscent.Terrain.Voxel
                     // directly meant a CONVERTED world got zeros here, every
                     // cell fell back to the flat-lid path, and the river
                     // rendered as geometric terraces with hard risers.
-                    bool ok = GenWaterField.TryWaterSurfaceSmooth(
-                        buf.OriginX + cx, buf.OriginZ + cz, out float sl, out float sd) && sl > 0f;
-                    if (FiresSkyIslands.WaterSurfaceAt(buf.OriginX + cx, buf.OriginZ + cz, out float il, out float idepth)
-                        && il >= buf.OriginY - 2f && il <= buf.OriginY + 34f)
+                    bool ok;
+                    float sl, sd;
+                    if (surface != null)
+                        ok = surface(buf.OriginX + cx, buf.OriginZ + cz, out sl, out sd) && sl > 0f;   // placed water's own heights
+                    else
                     {
-                        ok = true;
-                        sl = il;
-                        sd = idepth;
+                        ok = GenWaterField.TryWaterSurfaceSmooth(
+                            buf.OriginX + cx, buf.OriginZ + cz, out sl, out sd) && sl > 0f;
+                        if (FiresSkyIslands.WaterSurfaceAt(buf.OriginX + cx, buf.OriginZ + cz, out float il, out float idepth)
+                            && il >= buf.OriginY - 2f && il <= buf.OriginY + 34f)
+                        {
+                            ok = true;
+                            sl = il;
+                            sd = idepth;
+                        }
                     }
+                    // Pale squares/triangles and a "clear then hard blue" step showed in the shallows: the
+                    // shader's opacity, shore fade and collar key off this corner depth (UV2.x), and it came from the
+                    // generated field, which disagrees with the voxel bed wherever a bank was shaped by a bake or a carve:
+                    // one corner read 0, its neighbour metres, and the fade jumped across one triangle. The depth is now the
+                    // water column over the VOXEL bed under the corner (smoothed below with its neighbours).
+                    if (ok && VoxelWorld.TrySampleWaterFloorY(buf.OriginX + cx, buf.OriginZ + cz, sl + 0.05f, sl - CornerBedReach, out float bed, out bool wall) && !wall)
+                        sd = Mathf.Max(0f, sl - bed);
+                    // Over a big sinkhole's shaft the voxel bed under the river is the grotto ~25 m
+                    // down; the river's own column ends at its bed (the shaft's lip height). The shader tints the underside by this.
+                    if (ok && FatSinkFallCuts.InShaft(buf.OriginX + cx, buf.OriginZ + cz, out float riverBed) && !float.IsNaN(riverBed))
+                        sd = Mathf.Min(sd, Mathf.Max(0f, sl - riverBed));
                     int gi = (cx + RING) + R * (cz + RING);
                     s_wCornH[gi] = ok ? sl : 0f;
                     s_wCornD[gi] = ok ? sd : 0f;
                 }
-            // SMOOTH THE SURFACE (user: water must "SMOOTH and FLOW", not step
+            // SMOOTH THE SURFACE (water must "SMOOTH and FLOW", not step
             // rigidly down a slope). The level field descends a steep river in
             // discrete reaches, and the mesh rendered each as a flat terrace
             // with a hard riser between. Two Jacobi passes average each WET
@@ -795,11 +998,32 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
             }
 
+            // One 1-2-1 pass over the corner depths (the shader's opacity / shore fade input), wet corners only, so the
+            // fade is a smooth gradient across cells instead of following each triangle. World data on a grid both chunks share
+            // inside the halo, so a shared corner gets the same value on both sides.
+            for (int cz = -(RING - 1); cz <= C + RING - 1; cz++)
+                for (int cx = -(RING - 1); cx <= C + RING - 1; cx++)
+                {
+                    int gi = (cx + RING) + R * (cz + RING);
+                    s_wCornT[gi] = s_wCornDx[gi];
+                    if (s_wCornHx[gi] <= 0f) continue;
+                    float sum = 4f * s_wCornDx[gi], w = 4f;
+                    int[] nb = { gi - 1, gi + 1, gi - R, gi + R };
+                    foreach (int j in nb) if (s_wCornHx[j] > 0f) { sum += s_wCornDx[j]; w += 1f; }
+                    s_wCornT[gi] = sum / w;
+                }
+            for (int cz = -(RING - 1); cz <= C + RING - 1; cz++)
+                for (int cx = -(RING - 1); cx <= C + RING - 1; cx++)
+                {
+                    int gi = (cx + RING) + R * (cz + RING);
+                    s_wCornDx[gi] = s_wCornT[gi];
+                }
+
             // DOWNHILL FLOW per corner — pure world data, cross-chunk
             // continuous like the heights. Two regimes:
             //   * RIVER/STREAM: the flood-leveled surface is near-FLAT along
-            //     whole reaches (surface gradient ~0 = "river doesn't flow",
-            //     user screenshot), so channels take a minimum visible drift
+            //     whole reaches (surface gradient ~0 = no visible flow),
+            //     so channels take a minimum visible drift
             //     whose DIRECTION comes from the BED gradient (the carve
             //     always descends downstream; ±3m central differences smooth
             //     it down-channel). Real surface slope still wins when
@@ -980,7 +1204,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     float y01 = h01 > 0f ? h01 : hmx;
                     float y11 = h11 > 0f ? h11 : hmx;
                     float wx0 = buf.OriginX + x, wz0 = buf.OriginZ + z;
-                    // ICE IS FLAT, PERIOD (user rule: the lake is leveled and
+                    // ICE IS FLAT (the lake is leveled and
                     // frozen is a LOOK on the flat sheet — only hammer ice
                     // rides terrain). The 8m class lookup bleeds FROZEN onto
                     // neighbouring sloped CHANNEL columns (a stream running
@@ -990,7 +1214,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // vary on EVERY rim cell, so the old dilated-corner test
                     // rejected the whole edge ring and rendered a liquid
                     // staircase around each ice disc that never reached the
-                    // banks (user screenshot). Store-flat cells — and the
+                    // banks. Store-flat cells — and the
                     // pure-skirt fringe past the last store column — snap
                     // every corner to ONE level, so the disc is coplanar,
                     // fills the bowl and clips into the banks; genuinely
@@ -999,7 +1223,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // a frozen pond's rim quads often land in unclassified
                     // (or neighbouring-body) blocks — they routed to
                     // TRANSPARENT liquid and the snow-top sheet ended in
-                    // square 8m cuts short of the banks (user screenshots).
+                    // square 8m cuts short of the banks.
                     // Any frozen block within 4m claims the quad; the
                     // store-flatness test below still rejects sloped channel
                     // bleed, so ice ramps cannot return.
@@ -1066,82 +1290,17 @@ namespace VerdantsAscent.Terrain.Voxel
                         // from the buffer, which is view-dependent and breaks at grazing
                         // angles across an estuary. s_wCornD is the same smooth-field
                         // depth the corner heights came from, so the two cannot disagree.
-                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0]), 0f, 0f, 0f));
-                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0 + 1]), 0f, 0f, 0f));
-                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0 + R]), 0f, 0f, 0f));
-                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0 + R + 1]), 0f, 0f, 0f));
+                        // UV2.y = this quad's water class (water look by class and biome), UV2.z = its biome code
+                        // (FiresWorldGenBase order), one value per quad (the cell centre), read by Custom/FiresInlandWater's look tables.
+                        float qCls = FiresWorldGenBase.WaterClassAt(wx0 + 0.5f, wz0 + 0.5f), qBio = FiresWorldGenBase.BiomeCodeAt(wx0 + 0.5f, wz0 + 0.5f);
+                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0]), qCls, qBio, 0f));
+                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0 + 1]), qCls, qBio, 0f));
+                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0 + R]), qCls, qBio, 0f));
+                        s_wUv2.Add(new Vector4(Mathf.Max(0f, s_wCornDx[gi0 + R + 1]), qCls, qBio, 0f));
                     }
                     tl.Add(b); tl.Add(b + 2); tl.Add(b + 1);
                     tl.Add(b + 1); tl.Add(b + 2); tl.Add(b + 3);
                 }
-            }
-            ApplyIceSheet();
-            if (s_wTris.Count == 0)
-            {
-                if (_waterGO != null) _waterGO.SetActive(false);
-                return;
-            }
-            if (_waterGO == null)
-            {
-                _waterGO = new GameObject("genwater");
-                // Default layer — the layer the LEGACY gen mesh and the hand
-                // pours both rendered on (proven visible). The Water layer
-                // interacts with vanilla's own water systems; not worth it.
-                _waterGO.transform.SetParent(transform, false);
-                var mf = _waterGO.AddComponent<MeshFilter>();
-                _waterRenderer = _waterGO.AddComponent<MeshRenderer>();
-                _waterRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                _waterRenderer.receiveShadows = false;
-                _waterMesh = new Mesh { name = "genwater" };
-                mf.sharedMesh = _waterMesh;
-            }
-            // MATERIAL RETRY, not a one-shot, and MODE-based — see
-            // ResolveSheetMaterial. Re-resolve on every apply until a material
-            // binds, and say so in the log either way.
-            if (_waterRenderer != null && _waterRenderer.sharedMaterial == null)
-            {
-                var mat = ResolveSheetMaterial();
-                if (mat != null)
-                {
-                    _waterRenderer.sharedMaterial = mat;
-                    BoundSheetMaterial = mat;   // far-water quilt reuses THE sheet material
-                    if (!s_wMatBound)
-                    {
-                        s_wMatBound = true;
-                        // Say MESH plainly. The material is the shared one the
-                        // pour prefab also uses, so its NAME carries "Pour" —
-                        // and a log line reading "FiresLiquid_Pour" next to
-                        // water work reads as "we went back to pours". We did
-                        // not: generated water is this chunk mesh sheet and
-                        // nothing queues a pour for it.
-                        FiresLogger.LogInfo($"[FiresVoxelWater] chunk water MESH sheet bound (mode {s_sheetMatMode}) — " +
-                                  $"no pours are placed for generated water; material '{mat.name}' is just the shared " +
-                                  $"liquid material: {(mat.shader != null ? mat.shader.name : "null")} queue={mat.renderQueue}");
-                    }
-                }
-                else if (!s_wMatWarned)
-                {
-                    s_wMatWarned = true;
-                    FiresLogger.LogWarning("[FiresVoxelWater] water sheets are building but no sheet material " +
-                                     "resolves yet — sheets invisible until it does; retrying on every apply.");
-                }
-            }
-            _waterGO.SetActive(true);
-            _waterMesh.Clear(false);
-            _waterMesh.SetVertices(s_wVerts);
-            _waterMesh.SetNormals(s_wNorms);
-            _waterMesh.SetUVs(0, s_wUvs);
-            _waterMesh.SetUVs(1, s_wUv1);
-            _waterMesh.SetUVs(2, s_wUv2);
-            _waterMesh.SetColors(s_wCols);
-            _waterMesh.SetTriangles(s_wTris, 0, calculateBounds: true);
-            VoxelSheetFalls.Build(buf, _waterGO, ref _fallsGO, ref _fallsMesh);
-            if (!s_wFirstSheet)
-            {
-                s_wFirstSheet = true;
-                FiresLogger.LogInfo($"[FiresVoxelWater] first water sheet: view '{name}' " +
-                          $"{s_wTris.Count / 6} quad(s) at {_waterMesh.bounds.center:F0}, " +
-                          $"material {(_waterRenderer != null && _waterRenderer.sharedMaterial != null ? _waterRenderer.sharedMaterial.name : "PENDING")}.");
             }
         }
 
@@ -1196,15 +1355,22 @@ namespace VerdantsAscent.Terrain.Voxel
             _iceMesh.RecalculateBounds();
             if (_iceCollider != null)
             {
+                var spkIce = FatSpike.Start();
+                FatNativeTrace.Step("ice collider begin", _iceMesh != null ? _iceMesh.GetInstanceID() : 0, name);
                 _iceCollider.sharedMesh = null;
                 _iceCollider.sharedMesh = _iceMesh;
+                FatNativeTrace.Step("ice collider end", _iceMesh != null ? _iceMesh.GetInstanceID() : 0);
+                FatSpike.Add(FatSpike.Stage.IceCollider, spkIce);
             }
             _iceGO.SetActive(true);
         }
 
         private void OnDestroy()
         {
-            if (_mesh != null) Destroy(_mesh);
+            FatNativeTrace.Step("view destroy", _mesh != null ? _mesh.GetInstanceID() : 0, name + (BakeInFlight ? " (bake in flight: deferred)" : ""));
+            // A mesh the bake worker is still cooking is destroyed by the pipeline once that bake returns
+            if (_mesh != null && BakeInFlight && _bakingMeshId != 0) VoxelMeshPipeline.DestroyAfterBake(_bakingMeshId, _mesh);
+            else if (_mesh != null) Destroy(_mesh);
             if (_waterMesh != null) Destroy(_waterMesh);
             if (_fallsMesh != null) Destroy(_fallsMesh);
             if (_iceMesh != null) Destroy(_iceMesh);

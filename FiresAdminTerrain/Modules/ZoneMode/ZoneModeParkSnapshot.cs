@@ -6,7 +6,7 @@ namespace VerdantsAscent.Terrain.Zones
     // ZDO.Save reads each object's data from ZDOExtraData's s_save* stores, which vanilla's PrepareSave fills by
     // DEEP-CLONING every live store, so a save can run on a worker thread while the game keeps changing the data. The park
     // writes on the main thread with nothing changing, so it points the save stores at the live ones instead. For a
-    // 7.68 M-object world that skips millions of dictionary copies (measured 2026-09-27: 23.9 s of GC inside a 118 s park).
+    // 7.68 M-object world that skips millions of dictionary copies (measured: 23.9 s of GC inside a 118 s park).
     // ClearSave (the park's finally) drops the references again. If vanilla ever renames a store, it falls back to
     // PrepareSave: slower, never wrong.
     internal static class ZoneModeParkSnapshot

@@ -15,8 +15,8 @@ namespace VerdantsAscent.Water.Core
     ///   CLOCK (FiresWaterClock) — a MONOTONIC double, seeded once from net time,
     ///     advanced by dt forever forward. Vanilla lerps its visual time toward
     ///     net-synced wrapped day time, which is nudged BACKWARD by every sync
-    ///     correction and wraps at midnight → the swell visibly REWINDS (user:
-    ///     "waves rewind... jarring"). We don't correct that, we replace it: time
+    ///     correction and wraps at midnight → the swell visibly REWINDS
+    ///     (jarring). We don't correct that, we replace it: time
     ///     never rolls backward, so the swell never does. The clock drives the
     ///     shader global (_WaterTime) and both vanilla statics — s_waterTime
     ///     (zone-water visual) and s_wrappedDayTimeSeconds (what CalcWave floats
@@ -57,10 +57,10 @@ namespace VerdantsAscent.Water.Core
     /// <summary>
     /// Monotonic water clock, one sea for every peer. See FiresWaterAuthority.
     /// It advances by real time once per frame: the first caller's dt used to be FixedUpdate's 0.02 in any frame with a
-    /// physics step, so the sea ran at fps x 0.02 (R33 boat_test: Fire x1.63 at 147 fps, the bot x1.67, the dedi x0.60 at
+    /// physics step, so the sea ran at fps x 0.02 (peers measured x1.63 at 147 fps, x1.67, and a dedicated server x0.60 at
     /// 30 fps, hundreds of seconds apart). It snaps to net time when a session starts: the main menu's sea used to seed it
     /// at 0 for good, so no two peers shared a wave phase and every ownership change re-floated a hull on another sea
-    /// ([fgn], boat_test, 2026-09-28). After that it leans toward net time by at most a tenth of each step, never
+    /// (boat test). After that it leans toward net time by at most a tenth of each step, never
     /// backward, so the swell still never rewinds.
     /// </summary>
     internal static class FiresWaterClock
@@ -97,7 +97,7 @@ namespace VerdantsAscent.Water.Core
                 }
                 // The server OWNS net time: vanilla advances it only while a player is connected, with dt capped at
                 // maximumDeltaTime (ZNet.UpdateNetTime), so adding real time here ran the server's sea ahead on an empty server
-                // or a long hitch (R53b dedi: -0.36 s). Net time never rewinds within a session, so the sea just follows it.
+                // or a long hitch. Net time never rewinds within a session, so the sea just follows it.
                 else if (znet.IsServer()) s_clock = net;
                 else
                 {
@@ -115,7 +115,7 @@ namespace VerdantsAscent.Water.Core
             return s_out;
         }
 
-        // OPEN_BUGS #18 diagnostic ([visual], R52 boat_test sea spikes): the largest offset from net time over each window,
+        // Diagnostic for sea spikes: the largest offset from net time over each window,
         // logged only when it passed WatchOffset. Allocation-free unless it logs.
         private const double WatchOffset = 0.1;
         private const float WatchWindowSeconds = 5f;
@@ -252,8 +252,8 @@ namespace VerdantsAscent.Water.Core
         }
     }
 
-    // ---- 0.2.698 (Fire 10-01: "our swim trigger/float trigger doesn't actually match the waves", against a sea cliff;
-    //      [visual]'s static compare): the clock and the ten trochoids already match the FiresWater shader; the DEPTH term
+    // ---- The swim/float trigger must match the waves (e.g. against a sea cliff):
+    //      the clock and the ten trochoids already match the FiresWater shader; the DEPTH term
     //      did not. Physics took vanilla WaterVolume.Depth (a bilinear of 4 corner depths per 64 m volume), the shader
     //      FTS FiresShoreField's per-texel R (~21 m texels, Lerp(floor, 1, Clamp01(depth / 10)) from the generated ground).
     //      Near cliffs, islands and shores they disagree, so the body floated on a different wave than the one drawn.
@@ -268,7 +268,7 @@ namespace VerdantsAscent.Water.Core
         private const float BindRetrySeconds = 10f, SeaSurfaceBand = 1f;
         private static readonly AccessTools.FieldRef<WaterVolume, bool> UsesGlobalWind = AccessTools.FieldRefAccess<WaterVolume, bool>("m_useGlobalWind");
 
-        // 0.2.699: FTS's sampler is bound (what the FiresWater shader draws is known here).
+        // FTS's sampler is bound (what the FiresWater shader draws is known here).
         internal static bool HasFtsSampler => Bind() != null;
 
         // FTS's value where it covers the point, else none.
@@ -279,7 +279,7 @@ namespace VerdantsAscent.Water.Core
             wave = 0f;
             var s = Bind();
             if (s != null && s(x, z, out wave)) return true;
-            // 0.2.699 ([lead]: server-owned floaters near coasts must match too): without FTS's sampler (a dedicated server,
+            // Server-owned floaters near coasts must match too: without FTS's sampler (a dedicated server,
             // or a client without FiresTossinShade), the SAME field, evaluated here: FTS 0.3.153 snaps its bake centre to the
             // texel grid, so its texel centres sit at (k + 0.5) * texel on one world grid and these values are its values.
             if (WorldGenerator.instance == null) return false;
@@ -298,20 +298,22 @@ namespace VerdantsAscent.Water.Core
         private static float s_texelTide = float.NaN;
         private const int TexelCacheMax = 65536;
 
-        // 0.2.700 ([visual]): the tide FTS bakes with is Galaxies' TideSystem.SurfaceOffset (it writes _FiresTideOffset from
+        // The tide FTS bakes with is Galaxies' TideSystem.SurfaceOffset (it writes _FiresTideOffset from
         // it, Vedr's flood included); a shader global is not trusted on a null-graphics server, so read the source by name,
         // else the global, else 0.
         private static System.Func<float> s_tide;
         private static bool s_tideBound;
 
-        private static float Tide()
+        internal static float Tide()   // internal: wavematch_test adds it to the drawn height
         {
             if (!s_tideBound)
             {
                 s_tideBound = true;
                 var t = AccessTools.TypeByName("VerdantsAscent.Galaxies.TideSystem");
-                var f = t != null ? AccessTools.Field(t, "SurfaceOffset") : null;
-                var pr = f == null && t != null ? AccessTools.Property(t, "SurfaceOffset") : null;
+                // Galaxies' SurfaceOffset is a property; look the property up first so HarmonyX's
+                // AccessTools.Field does not warn "Could not find field" every load. The field path stays for older builds.
+                var pr = t != null ? AccessTools.Property(t, "SurfaceOffset") : null;
+                var f = pr == null && t != null ? AccessTools.Field(t, "SurfaceOffset") : null;
                 if (f != null && f.IsStatic && f.FieldType == typeof(float)) s_tide = () => (float)f.GetValue(null);
                 else if (pr != null && pr.GetGetMethod() != null && pr.GetGetMethod().IsStatic && pr.PropertyType == typeof(float))
                     s_tide = (System.Func<float>)System.Delegate.CreateDelegate(typeof(System.Func<float>), pr.GetGetMethod());
@@ -323,7 +325,9 @@ namespace VerdantsAscent.Water.Core
         internal static float AnalyticWave(float x, float z)
         {
             float tide = Tide();
-            if (!(Mathf.Abs(tide - s_texelTide) < 0.005f) || s_texels.Count > TexelCacheMax) { s_texels.Clear(); s_texelTide = tide; }
+            // The cache holds GROUND heights (tide-free), so a moving tide does not clear it; the depth is
+            // worked out from the current tide on every read.
+            if (s_texels.Count > TexelCacheMax) s_texels.Clear();
             float fx = x / ShoreTexel - 0.5f, fz = z / ShoreTexel - 0.5f;
             int ix = Mathf.FloorToInt(fx), iz = Mathf.FloorToInt(fz);
             float tx = fx - ix, tz = fz - iz;
@@ -334,15 +338,17 @@ namespace VerdantsAscent.Water.Core
         private static float Texel(int i, int k, float tide)
         {
             long key = ((long)i << 32) ^ (uint)k;
-            if (s_texels.TryGetValue(key, out float v)) return v;
-            float wx = (i + 0.5f) * ShoreTexel, wz = (k + 0.5f) * ShoreTexel;
-            float depth = Mathf.Max(0f, ZoneSystem.c_WaterLevel + tide - WorldGenerator.instance.GetHeight(wx, wz));
-            v = depth > 0.05f ? Mathf.Round(Mathf.Clamp01(Mathf.Lerp(ShoreFloor, 1f, Mathf.Clamp01(depth / ShoreFullDepth))) * 255f) / 255f : 0f;
-            s_texels[key] = v;
-            return v;
+            if (!s_texels.TryGetValue(key, out float ground))
+            {
+                float wx = (i + 0.5f) * ShoreTexel, wz = (k + 0.5f) * ShoreTexel;
+                ground = WorldGenerator.instance.GetHeight(wx, wz);
+                s_texels[key] = ground;
+            }
+            float depth = Mathf.Max(0f, ZoneSystem.c_WaterLevel + tide - ground);
+            return depth > 0.05f ? Mathf.Round(Mathf.Clamp01(Mathf.Lerp(ShoreFloor, 1f, Mathf.Clamp01(depth / ShoreFullDepth))) * 255f) / 255f : 0f;
         }
 
-        // 0.2.699: the dedicated server's depth factor at points, for wavematch_test's server step. RPC
+        // The dedicated server's depth factor at points, for wavematch_test's server step. RPC
         // "FiresAdminTerrain_WaveDepthProbe" (client → server): ZPackage { int id, int n, n × (float x, float z) };
         // reply "FiresAdminTerrain_WaveDepthProbeReply": { int id, int n, n × float depth (-1 = no sea volume there) }.
         internal const string ProbeRpc = "FiresAdminTerrain_WaveDepthProbe", ProbeReplyRpc = "FiresAdminTerrain_WaveDepthProbeReply";
@@ -381,7 +387,11 @@ namespace VerdantsAscent.Water.Core
                 var p = new Vector3(points[i].x, ZoneSystem.c_WaterLevel, points[i].y);
                 WaterVolume v = null;
                 Floating.GetWaterLevel(p, ref v);
-                r[i] = v != null && Mathf.Abs(v.transform.position.y - ZoneSystem.c_WaterLevel) <= SeaSurfaceBand ? v.Depth(p) : -1f;
+                if (v != null && Mathf.Abs(v.transform.position.y - ZoneSystem.c_WaterLevel) <= SeaSurfaceBand) r[i] = v.Depth(p);
+                // A dedicated server's zones near a client
+                // are not instantiated there, so a server sea volume can be missing: answer with the field its Depth would return (TrySample),
+                // so the leg still compares the two evaluations; -1 only without a world generator.
+                else r[i] = TrySample(p.x, p.z, out float w) ? w : -1f;
             }
             return r;
         }
@@ -396,8 +406,12 @@ namespace VerdantsAscent.Water.Core
             var reply = new ZPackage();
             reply.Write(id); reply.Write(n);
             foreach (float f in d) reply.Write(f);
+            reply.Write(Tide());   // the server's tide (its shore-field depth uses it), read by newer clients only
             ZRoutedRpc.instance.InvokeRoutedRPC(sender, ProbeReplyRpc, reply);
         }
+
+        // The tide the server answered with (NaN from an older server).
+        internal static float LastServerTide = float.NaN;
 
         private static void OnProbeReply(long sender, ZPackage pkg)
         {
@@ -405,6 +419,7 @@ namespace VerdantsAscent.Water.Core
             int id = pkg.ReadInt(), n = pkg.ReadInt();
             var d = new float[n];
             for (int i = 0; i < n; i++) d[i] = pkg.ReadSingle();
+            LastServerTide = pkg.GetPos() + 4 <= pkg.Size() ? pkg.ReadSingle() : float.NaN;
             if (s_probes.TryGetValue(id, out var cb)) { s_probes.Remove(id); cb(d); }
         }
 
@@ -434,7 +449,7 @@ namespace VerdantsAscent.Water.Core
         }
     }
 
-    // ---- 0.2.698 ([visual]: FiresLiquid draws `CalcWave(...) * _WaveAmplitude`, 0.15 on FAT's pond/pour liquids, 1.0 on
+    // ---- Wave amplitude match (FiresLiquid draws `CalcWave(...) * _WaveAmplitude`, 0.15 on FAT's pond/pour liquids, 1.0 on
     //      the sea; physics had no factor): the wave part of a volume's surface is scaled by its own surface material's
     //      _WaveAmplitude, so a pool's body floats on its drawn 0.15 waves. Cached per volume, re-read every few seconds
     //      (the liquid config hot-reloads).
@@ -503,6 +518,16 @@ namespace VerdantsAscent.Water.Core
             Vector4 wind2 = s_wind2();
             float alpha = s_windAlpha();
             FiresSeaWind.Apply(worldPos, ref wind1, ref wind2, ref alpha);
+            // An exact per-frame memo on every input (ships, floaters, fish and swimmers ask the same points
+            // several times a frame); cleared each frame, main thread only.
+            bool memo = System.Threading.Thread.CurrentThread.ManagedThreadId == VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.s_wetMainThread;
+            WaveKey wk = default;
+            if (memo)
+            {
+                if (Time.frameCount != s_memoFrame) { s_memo.Clear(); s_memoFrame = Time.frameCount; }
+                wk = new WaveKey { X = worldPos.x, Y = worldPos.y, Z = worldPos.z, D = depth, T = waterTime, F = waveFactor, B = waveFactorBig, W1 = wind1, W2 = wind2, A = alpha };
+                if (s_memo.TryGetValue(wk, out __result)) return false;
+            }
             if (alpha == 0f)
                 __result = FiresWaveField.FromWind(worldPos, depth, wind1, waterTime, waveFactor, waveFactorBig);
             else
@@ -510,7 +535,19 @@ namespace VerdantsAscent.Water.Core
                     FiresWaveField.FromWind(worldPos, depth, wind1, waterTime, waveFactor, waveFactorBig),
                     FiresWaveField.FromWind(worldPos, depth, wind2, waterTime, waveFactor, waveFactorBig),
                     alpha);
+            if (memo && s_memo.Count < 4096) s_memo[wk] = __result;
             return false;
         }
+
+        private struct WaveKey : System.IEquatable<WaveKey>
+        {
+            public float X, Y, Z, D, T, F, B, A; public Vector4 W1, W2;
+            public bool Equals(WaveKey o) => X == o.X && Y == o.Y && Z == o.Z && D == o.D && T == o.T && F == o.F && B == o.B && A == o.A
+                && W1.x == o.W1.x && W1.y == o.W1.y && W1.z == o.W1.z && W1.w == o.W1.w && W2.x == o.W2.x && W2.y == o.W2.y && W2.z == o.W2.z && W2.w == o.W2.w;   // exact, not Unity's approximate ==
+            public override bool Equals(object o) => o is WaveKey k && Equals(k);
+            public override int GetHashCode() { unchecked { int h = X.GetHashCode(); h = h * 397 ^ Z.GetHashCode(); h = h * 397 ^ Y.GetHashCode(); h = h * 397 ^ T.GetHashCode(); h = h * 397 ^ D.GetHashCode(); return h; } }
+        }
+        private static readonly System.Collections.Generic.Dictionary<WaveKey, float> s_memo = new System.Collections.Generic.Dictionary<WaveKey, float>(256);
+        private static int s_memoFrame = -1;
     }
 }

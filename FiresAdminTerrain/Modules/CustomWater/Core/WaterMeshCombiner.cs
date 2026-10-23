@@ -33,7 +33,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Distance for blending water edges between disks.
         /// </summary>
-        public const float BlendDistance = 1.5f;
+        public const float BlendDistance = 0.25f;   // small, so the mesh stays inside the ruler circle (1.5 m drew past every disk's edge)
 
         /// <summary>
         /// Padding around bounds for grid generation.
@@ -204,6 +204,24 @@ namespace VerdantsAscent.Water.Core
         public CustomLiquidType CustomLiquidType { get; set; } = CustomLiquidType.Water;
 
         /// <summary>
+        /// Ported from Galaxies 0.1.39: true while this water is iced only for Vedr's winter.
+        /// Seasonal ice is never saved: the anchor stores plain water, so it can't outlast winter or Vedr.
+        /// </summary>
+        public bool SeasonalIce { get; private set; }
+
+        /// <summary>The type the anchor saves: plain water while the ice is only seasonal.</summary>
+        public CustomLiquidType SavedCustomLiquidType => SeasonalIce ? CustomLiquidType.Water : CustomLiquidType;
+
+        /// <summary>Seasonal freeze/thaw (SeasonalWaterFreeze). Freezes only plain water; thaws only its own seasonal ice.</summary>
+        public void SetSeasonalIce(bool frozen)
+        {
+            if (frozen == SeasonalIce) return;
+            if (frozen && CustomLiquidType != CustomLiquidType.Water) return;
+            SeasonalIce = frozen;
+            ApplyCustomLiquidType(frozen ? CustomLiquidType.Ice : CustomLiquidType.Water, false);
+        }
+
+        /// <summary>
         /// Damage handler for hazardous liquids. Null for safe liquids (water, tar, ice).
         /// </summary>
         private LiquidDamageHandler _damageHandler;
@@ -281,8 +299,38 @@ namespace VerdantsAscent.Water.Core
 
         #region Lifecycle
 
+        // The creation site (to trace ZDO-less combiners), captured once in Awake
+        // (every creator names its GameObject before AddComponent) and logged at Debug; the censuses print it.
+        internal string CreatedBy { get; private set; } = "?";
+
+        // Grid cells holding water (depth >= MinWaterDepth) / all cells; 0/0 = no grid built.
+        internal void WetCells(out int wet, out int total)
+        {
+            wet = 0; total = _waterDepths?.Length ?? 0;
+            if (_waterDepths == null) return;
+            foreach (float d in _waterDepths) if (d >= MinWaterDepth) wet++;
+        }
+
         private void Awake()
         {
+            try
+            {
+                var frames = new System.Diagnostics.StackTrace(1, false).GetFrames();
+                var sb = new System.Text.StringBuilder(gameObject.name);
+                int shown = 0;
+                if (frames != null)
+                    foreach (var f in frames)
+                    {
+                        var m = f.GetMethod();
+                        if (m == null || m.DeclaringType == null || m.DeclaringType.Namespace?.StartsWith("UnityEngine") == true) continue;
+                        sb.Append(shown == 0 ? " <- " : " < ").Append(m.DeclaringType.Name).Append('.').Append(m.Name);
+                        if (++shown >= 4) break;
+                    }
+                CreatedBy = sb.ToString();
+                if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresWater] combiner created at ({transform.position.x:F0},{transform.position.y:F1},{transform.position.z:F0}): {CreatedBy}");
+            }
+            catch (System.Exception) { }
+
             // Create mesh
             _waterMesh = new Mesh();
             _waterMesh.name = "WaterCombinedMesh";
@@ -392,20 +440,31 @@ namespace VerdantsAscent.Water.Core
             if (_reseatPending) TickReseat();
         }
 
-        // 0.2.682 ([lead] H10, 10-01: a va_pool pond saved by the server came back DRY after a restart, its anchors present).
+        // A pond saved by the server could come back DRY after a restart, its anchors present.
         // A restored combiner replays the surface/terrain grid of whoever saved it, and only the server saves. A dedicated
         // server samples terrain as min(WorldGenerator height, GetGroundHeight) with no voxel colliders (VoxelWrap), so its
         // grid never sees a carved bed and puts the pond above the ground. A peer with real terrain rebuilds a restored
         // combiner from its disks once, when the bed under every disk is loaded (a terrain ray at the disk centre lands
         // below its surface, the test the pool tool uses before laying water), or after ReseatCapSeconds anyway.
-        // Gelled / settling volumes keep their grid (Round-56: it is authoritative data).
+        // Gelled / settling volumes keep their grid (it is authoritative data).
         private const float ReseatPollSeconds = 0.5f, ReseatCapSeconds = 30f, ReseatBedMargin = 0.3f;
         private const int ReseatProbes = 8;
-        private bool _reseatPending;
+        private bool _reseatPending, _reseatWaitLogged;
+        // Counts for "Reseat waits for the ground", one Info line a minute at most while there is news.
+        private static int s_reseatWaited, s_reseatRebuiltLoaded;
+        private static float s_reseatReportAt = -1f;
+
+        private static void ReportReseat()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (s_reseatReportAt >= 0f && now < s_reseatReportAt) return;
+            s_reseatReportAt = now + 60f;
+            FiresLogger.LogInfo($"[FiresWater] reseat: {s_reseatWaited} restored group(s) past the 30 s cap kept their saved grid waiting for the ground, {s_reseatRebuiltLoaded} checked with the bed loaded (Reseat waits for the ground = ON; totals this session)");
+        }
         private float _reseatSince, _reseatNextPoll;
         private static int s_reseatTerrainMask;
 
-        // 0.2.683: the dedicated server reseats too, against VoxelWorld's density (TryVoxelGround) instead of colliders. Its
+        // The dedicated server reseats too, against VoxelWorld's density (TryVoxelGround) instead of colliders. Its
         // zone data exists only near players, so there it waits, uncapped and polling slowly, until the density under every
         // probed disk is loaded.
         private const float ReseatPollSecondsServer = 2f;
@@ -413,7 +472,7 @@ namespace VerdantsAscent.Water.Core
         private bool ReseatGroundReady(Vector3 p, float maxDepth, int mask)
         {
             if (ZNet.instance != null && ZNet.instance.IsDedicated())
-                return VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleSurfaceY(p.x, p.z, p.y + 2f, p.y - 30f - maxDepth, out _, out bool wall) || wall;
+                return VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleWaterFloorY(p.x, p.z, p.y + 2f, p.y - 30f - maxDepth, out _, out bool wall) || wall;
             return Physics.Raycast(new Vector3(p.x, p.y + 20f, p.z), Vector3.down, out RaycastHit hit, 30f + maxDepth, mask)
                 && hit.point.y <= p.y - ReseatBedMargin;
         }
@@ -439,6 +498,11 @@ namespace VerdantsAscent.Water.Core
             if (_waterDisks.Count == 0) { if (waited >= ReseatCapSeconds) _reseatPending = false; return; }
             // The dedicated server has no colliders to fall back on: it waits for the density, however long that takes.
             float cap = server ? float.PositiveInfinity : ReseatCapSeconds;
+            // Restored groups far from the player could rebuild dry at the 30 s cap with no bed seen,
+            // and the dry grid would go back into the cache. So a client
+            // waits for the bed like the server does, keeping its saved grid until then; never rebuilt against unloaded ground.
+            bool waitForGround = !server;   // always
+            if (waitForGround) cap = float.PositiveInfinity;
             if (s_reseatTerrainMask == 0) s_reseatTerrainMask = LayerMask.GetMask("terrain");
             // At most ReseatProbes disks, spread along the list (an auto river can hold hundreds).
             int stride = Mathf.Max(1, _waterDisks.Count / ReseatProbes), probed = 0, seen = 0;
@@ -447,8 +511,21 @@ namespace VerdantsAscent.Water.Core
                 probed++;
                 if (ReseatGroundReady(_waterDisks[i].Position, _waterDisks[i].MaxDepth, s_reseatTerrainMask)) seen++;
             }
-            if (seen < probed && waited < cap) return;
+            if (seen < probed && waited < cap)
+            {
+                if (waitForGround && waited >= ReseatCapSeconds && !_reseatWaitLogged)
+                {
+                    _reseatWaitLogged = true;
+                    s_reseatWaited++;
+                    FiresLogger.LogDebug($"[FiresWater] reseat waits for the ground at ({transform.position.x:F0},{transform.position.y:F1},{transform.position.z:F0}): bed seen under {seen}/{probed} after {waited:F0} s; saved grid kept (Reseat waits for the ground = ON)");
+                    ReportReseat();
+                }
+                // Past the cap, poll slowly (as the server does): a far group may wait the whole session.
+                if (waitForGround && waited >= ReseatCapSeconds) _reseatNextPoll = now + ReseatPollSecondsServer;
+                return;
+            }
             _reseatPending = false;
+            if (waitForGround) { s_reseatRebuiltLoaded++; ReportReseat(); }
             // Only a grid that is dry where its own disks stand is rebuilt: restored water that already reads wet (hydrology,
             // auto water, anything saved on a peer that saw the same terrain) keeps its grid, so a world load costs nothing.
             int dry = 0;
@@ -557,16 +634,13 @@ namespace VerdantsAscent.Water.Core
                 // Destroy if no disks left
                 if (_waterDisks.Count == 0)
                 {
-                    // 2026-05-25 round-4: use DestroyPermanently() so the
+                    // Use DestroyPermanently() so the
                     // file-based WaterCombinerCache also gets cleared via
-                    // its OnCombinerPermanentlyDeleted hook. Previously this
-                    // branch destroyed the anchor ZDO + GameObject but left
-                    // a stale cache entry behind — on next login the cache
-                    // restoration spawned the water back even though the
-                    // anchor was gone (user complaint: "deleted water
-                    // doesnt properly remove its data from the anchor and
-                    // save, causing it to be restored when we log back in
-                    // sometimes").
+                    // its OnCombinerPermanentlyDeleted hook. Destroying only
+                    // the anchor ZDO + GameObject would leave
+                    // a stale cache entry behind, and on next login the cache
+                    // restoration would spawn the water back even though the
+                    // anchor was gone.
                     DestroyPermanently();
                 }
                 else
@@ -699,6 +773,26 @@ namespace VerdantsAscent.Water.Core
             SaveToAnchor();
         }
 
+        // The cache restore's grid stands (no field-default regeneration 0.1 s later); one line per restore at Debug,
+        // once-per-minute total at Info.
+        private static int s_keptGrids;
+        private static float s_keptReportAt = -1f;
+
+        internal void KeepRestoredGrid()
+        {
+            _needsRegeneration = false;
+            _regenerationTimer = 0f;
+            WetCells(out int w, out int t);
+            s_keptGrids++;
+            FiresLogger.LogDebug($"[FiresWater] restored grid kept at ({transform.position.x:F0},{transform.position.y:F1},{transform.position.z:F0}): {w}/{t} wet cells (Reseat waits for the ground = ON)");
+            float now = Time.realtimeSinceStartup;
+            if (s_keptReportAt < 0f || now >= s_keptReportAt)
+            {
+                s_keptReportAt = now + 60f;
+                FiresLogger.LogInfo($"[FiresWater] restored grids kept (no regeneration on unloaded ground): {s_keptGrids} this session (Reseat waits for the ground = ON)");
+            }
+        }
+
         /// <summary>
         /// Gets the water surface level at a world position.
         /// Returns float.MinValue if no water at position.
@@ -814,7 +908,7 @@ namespace VerdantsAscent.Water.Core
         /// This is the true geometry check - water disks are circular, not rectangular.
         /// Used to prevent false positives from the rectangular bounding box.
         /// </summary>
-        private bool IsWithinAnyDiskRadius(Vector3 worldPos)
+        internal bool IsWithinAnyDiskRadius(Vector3 worldPos)   // internal for SeasonalWaterFreeze.OwnsWater
         {
             for (int i = 0; i < _waterDisks.Count; i++)
             {
@@ -829,7 +923,7 @@ namespace VerdantsAscent.Water.Core
         /// so adjacent disks placed within a sliver of each other (drag-fire,
         /// same-ruler-pass) still merge into one pond. Kept at 0.1m so the
         /// rendered footprint is effectively flush with the ruler radius —
-        /// user has asked repeatedly for the visible mesh to match the
+        /// the visible mesh should match the
         /// ruler's circle, not extend into a square bounding box.
         /// </summary>
         private const float DISK_FOOTPRINT_CULL_MARGIN = 0.1f;
@@ -838,10 +932,7 @@ namespace VerdantsAscent.Water.Core
         /// Strict disk-shape check used by BuildWaterMesh to keep the rendered
         /// mesh inside the ruler's footprint. Without this cull, FillSurfaceGaps's
         /// 3-iteration outward bleed and the rectangular bounding box make small
-        /// circular disks render as squares — user complaint 2026-05-25 (round 5):
-        /// "our custom water still always draws as a square. cant we fix this?
-        /// cant we make it draw as a circular shape like our terrain tools do?
-        /// ive asked many times today for this to be fixed".
+        /// circular disks render as squares instead of circles like the terrain tools.
         ///
         /// Bank extension still works WITHIN the cull boundary (the per-cell
         /// pull-down logic in CalculateSurfaceWithGravity runs on cells inside
@@ -926,14 +1017,14 @@ namespace VerdantsAscent.Water.Core
         /// Checks if two water disks belong on different "layers" (cave vs surface)
         /// and should NOT combine even when their XZ footprints overlap.
         ///
-        /// 2026-05-25 round-10 REWRITE. The old version sampled terrain along the
-        /// straight line between disk centers and blocked the combine if any
-        /// sample's Y fell between the two disk Y values. That correctly
-        /// separated caves from surface ponds — but it ALSO killed every
+        /// A sampler along the
+        /// straight line between disk centers that blocks the combine if any
+        /// sample's Y falls between the two disk Y values correctly
+        /// separates caves from surface ponds, but it ALSO kills every
         /// waterfall (drag ruler up a cliff → cliff terrain between top and
         /// bottom disk Y → "blocked" → separate combiners → no waterfall mesh).
         ///
-        /// New heuristic: a disk is "under a roof" if terrain DIRECTLY ABOVE
+        /// Heuristic: a disk is "under a roof" if terrain DIRECTLY ABOVE
         /// its own XZ rises above its water surface by more than ROOF_CLEARANCE.
         /// If exactly one of the two disks has a roof, they're on different
         /// layers (one cave, one surface) and shouldn't combine. If both have
@@ -944,16 +1035,15 @@ namespace VerdantsAscent.Water.Core
         {
             if (diskA == null || diskB == null) return false;
 
-            // 2026-05-28: tightened the cave/surface heuristic so adjacent
-            // disks placed in the same drag/click pass no longer get split
-            // into separate combiners. The previous version raycast against
-            // terrain+Default+static_solid+piece with a 0.5m clearance, which
-            // flagged any built piece (wood floor, stair, ceiling beam)
+            // A tight cave/surface heuristic so adjacent
+            // disks placed in the same drag/click pass do not get split
+            // into separate combiners. Raycasting against
+            // terrain+Default+static_solid+piece with a 0.5m clearance would
+            // flag any built piece (wood floor, stair, ceiling beam)
             // sitting above the water as a "cave roof". Two disks placed
             // 0.3m apart in Y could disagree on roof status and end up in
             // different combiners — exactly the "multiple disks overlap and
-            // sit at the same spot rather than combining" bug the user
-            // reported with the lake/staircase screenshot.
+            // sit at the same spot rather than combining" bug.
             //
             // Fix:
             //   1. Use a realistic cave clearance (3m) — only block when there
@@ -971,8 +1061,11 @@ namespace VerdantsAscent.Water.Core
 
             float referenceY = Mathf.Max(diskA.Position.y, diskB.Position.y) + ROOF_CLEARANCE;
 
-            bool aHasRoof = terrainAtA > referenceY;
-            bool bHasRoof = terrainAtB > referenceY;
+            // Ground height never sees a sky island, so a pool on
+            // an island and the lake right under it would both read "no roof" and merge into one combiner. A disk with an
+            // island's underside above it is under a roof too.
+            bool aHasRoof = terrainAtA > referenceY || UnderSkyIsland(diskA.Position, ROOF_CLEARANCE);
+            bool bHasRoof = terrainAtB > referenceY || UnderSkyIsland(diskB.Position, ROOF_CLEARANCE);
 
             // Only block when BOTH disks have terrain above them but one
             // is genuinely in a different vertical pocket — i.e. cave vs
@@ -987,6 +1080,10 @@ namespace VerdantsAscent.Water.Core
         /// built pieces (floors, walls, ceilings). Used by the cave/surface
         /// classifier so player builds never split a single water body in two.
         /// </summary>
+        internal static bool UnderSkyIsland(Vector3 worldPos, float clearance)
+            => VerdantsAscent.Terrain.Voxel.FiresSkyIslands.TryBottomAt(worldPos.x, worldPos.z, out float bottom)
+               && bottom > worldPos.y + clearance;
+
         private static float SampleTerrainHeightOnly(Vector3 worldPos)
         {
             if (ZoneSystem.instance != null
@@ -1053,21 +1150,20 @@ namespace VerdantsAscent.Water.Core
 
             // Check for existing overlapping combiner.
             //
-            // 2026-05-25 round-2: also require CustomLiquidType to match.
+            // Also require CustomLiquidType to match.
             // Without the type gate, painting lava over an existing water
             // pond would join the water combiner — and because each combiner
-            // renders with ONE material, the whole pond's shader flipped to
+            // renders with ONE material, the whole pond's shader would flip to
             // lava instead of just the painted footprint. With the gate, a
             // different-typed disk falls through to the "create new combiner"
             // path below and gets its own mesh + material. Visually the new
             // disk renders on top of (or inside) the existing pond, but only
-            // where the ruler outlined it. User complaint 2026-05-25:
-            // "changing the water liquid type applys the new shader and
-            // material to the ENTIRE surface rather than JUST where our
-            // ruler is outlining".
+            // where the ruler outlined it (a liquid type change applies only
+            // where the ruler outlines, not to the
+            // ENTIRE surface).
             foreach (var combiner in s_allCombiners)
             {
-                // Round-56: settling/gelled VOLUME combiners never absorb
+                // Settling/gelled VOLUME combiners never absorb
                 // new disks — their surface grid is authoritative data and
                 // an added disk would trigger the IDW recompute that
                 // clobbers the settled shape. A new disk near a gelled
@@ -1099,10 +1195,10 @@ namespace VerdantsAscent.Water.Core
 
             var newCombiner = go.AddComponent<WaterMeshCombiner>();
             newCombiner.LiquidType = disk.LiquidType;
-            // 2026-05-25: also propagate CustomLiquidType. Without this, a disk
+            // Also propagate CustomLiquidType. Without this, a disk
             // created with CustomLiquidType.Lava (whose vanilla mapping is Water)
-            // lost the Lava info — combiner stayed default Water and SetupMaterial
-            // picked the water material. Same cascade hit Boiling/Freezing/Ice.
+            // would lose the Lava info: combiner stays default Water and SetupMaterial
+            // picks the water material. Same for Boiling/Freezing/Ice.
             newCombiner.CustomLiquidType = disk.CustomLiquidType;
             newCombiner.AddWaterDiskInternal(disk);
 
@@ -1118,13 +1214,13 @@ namespace VerdantsAscent.Water.Core
             // Setup hazard damage handler if needed
             newCombiner.SetupDamageHandler();
 
-            // 2026-05-25 round-9: attach type-specific controllers for NEW
-            // combiners. Without this, only SAVED (restored) combiners got
-            // FrozenWaterController / LavaWaterOverlayController — fresh
-            // placements rendered the raw water mesh with the wrong-type
-            // material and no collider. Bug repro: place a snow disk, see
-            // the underlying water mesh with wave spikes; place an ice
-            // disk, no collider.
+            // Attach type-specific controllers for NEW
+            // combiners. Without this, only SAVED (restored) combiners get
+            // FrozenWaterController / LavaWaterOverlayController, and fresh
+            // placements render the raw water mesh with the wrong-type
+            // material and no collider (a snow disk shows
+            // the underlying water mesh with wave spikes; an ice
+            // disk has no collider).
             //
             // SetupFrozenController is safe to call before the first
             // RegenerateMesh — the controller's Initialize() short-circuits
@@ -1152,7 +1248,23 @@ namespace VerdantsAscent.Water.Core
         /// Gets the combiner at a world position, if any.
         /// </summary>
         public static WaterMeshCombiner GetCombinerAt(Vector3 worldPos)
+            => GetCombinerAt(worldPos, global::VerdantsAscent.Water.FatWaterLevelGate.IndexOn);
+
+        // useIndex = only the combiners FatWaterLevelGate's zone index lists for this point (same order as the full list).
+        internal static WaterMeshCombiner GetCombinerAt(Vector3 worldPos, bool useIndex)
         {
+            if (useIndex)
+            {
+                var near = global::VerdantsAscent.Water.FatWaterLevelGate.CombinersAt(worldPos);
+                for (int i = 0; i < near.Count; i++)
+                {
+                    var combiner = near[i];
+                    if (combiner != null && combiner.ContainsPosition(worldPos) && combiner.GetWaterSurfaceAt(worldPos) > float.MinValue)
+                        return combiner;
+                }
+                return null;
+            }
+
             // Clean up null entries
             s_allCombiners.RemoveAll(c => c == null);
 
@@ -1492,10 +1604,10 @@ namespace VerdantsAscent.Water.Core
             if (AutoWaterGenerator.IsGenerating) return;
             if (AutoWaterPatches.IsCleaningUp) return;
 
-            // 2026-05-25 round-7: snow has no shoreline splash / surface
+            // Snow has no shoreline splash / surface
             // debris / audio — it's a dry visual patch. Skip VFX so the
             // "Snow" tool doesn't drop water splash particles around its
-            // perimeter. User: "no water effects".
+            // perimeter (no water effects).
             if (CustomLiquidType == CustomLiquidType.Snow)
             {
                 if (_ambientVFX != null)
@@ -1566,6 +1678,17 @@ namespace VerdantsAscent.Water.Core
         /// Changes the custom liquid type and updates material/behavior accordingly.
         /// </summary>
         public void SetCustomLiquidType(CustomLiquidType newType)
+        {
+            // Ported from Galaxies 0.1.39: a type someone chose (tool, command) replaces seasonal ice and is saved.
+            if (SeasonalIce)
+            {
+                SeasonalIce = false;
+                if (newType == CustomLiquidType) { SaveToAnchor(); return; }
+            }
+            ApplyCustomLiquidType(newType, true);
+        }
+
+        private void ApplyCustomLiquidType(CustomLiquidType newType, bool save)
         {
             if (CustomLiquidType == newType) return;
 
@@ -1647,15 +1770,15 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            // Save new state
-            SaveToAnchor();
+            // Save new state (seasonal ice is never saved)
+            if (save) SaveToAnchor();
         }
 
         /// <summary>
         /// Sets up the lava water overlay — a thin water-shader mesh ~0.002m
         /// above the lava surface. The water shader's refraction over the
-        /// opaque lava produces the molten-glass look the user wanted for the
-        /// swimmable-lava tool. The 0.002m offset (down from a previous
+        /// opaque lava produces the molten-glass look for the
+        /// swimmable-lava tool. The 0.002m offset (rather than
         /// 0.25f) keeps the overlay co-planar with the lava so there's no
         /// visible edge halo.
         /// </summary>
@@ -1825,7 +1948,12 @@ namespace VerdantsAscent.Water.Core
         {
             _combinedBounds = new Bounds();
             _combinedBounds.SetMinMax(min, max);
+            BoundsVersion++;   // see FatWaterLevelGate
         }
+
+        // Bumped whenever any combiner's bounds are set (mesh build or anchor restore); FatWaterLevelGate's zone index
+        // rebuilds when it changes, so moved or resized water is indexed before the next lookup.
+        internal static int BoundsVersion;
 
         /// <summary>
         /// Restores the mesh from anchor data.
@@ -1916,6 +2044,9 @@ namespace VerdantsAscent.Water.Core
                 _gridOrigin = transform.position - new Vector3(gridWidthWorld * 0.5f, 0, gridHeightWorld * 0.5f);
                 FiresLogger.LogWarning($"[WaterMeshCombiner] RestoreFromAnchorData: No bounds available, estimated gridOrigin: {_gridOrigin}");
             }
+
+            // Vmop: the saved grid may predate a mop; the mask wins.
+            DryMoppedCells();
 
             // Build mesh from restored grid data
             BuildWaterMesh();

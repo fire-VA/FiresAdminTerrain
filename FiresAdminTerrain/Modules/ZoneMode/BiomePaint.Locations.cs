@@ -8,7 +8,7 @@ using VerdantsAscent.Terrain.Voxel;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Location swaps (paint build 2; Fire, 2026-09-27, by popup; Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md, "Location swaps").
+    // Location swaps.
     // A zone's location follows the paint over its centre, by one rule of the zone's OWN location (the world's) and the
     // newest circle there, so a paint, Undo, Redo, Restore and newer paint all settle the same way:
     //  - Protected places never swap (the chunk seeds' list, ZoneModeSwaps.MustStay): the start temple, FAT's progression
@@ -109,6 +109,9 @@ namespace VerdantsAscent.Terrain.Zones
         // zones that waited to be loaded settle as they load.
         private static void SettleLocations()
         {
+            LogSwapRetired();   // paint never removes locations: no swap / swap-back runs any more
+            return;
+#pragma warning disable CS0162
             if (Time.time < s_settleAt) return;
             s_settleAt = Time.time + SettleSeconds;
             var zones = ZoneSystem.instance;
@@ -133,6 +136,7 @@ namespace VerdantsAscent.Terrain.Zones
             else return;
             string line = Finish(zones, tally);
             if (line.Length > 0) FiresLogger.LogInfo("[BiomePaint]" + line);
+#pragma warning restore CS0162
         }
 
         private static void Settle(ZoneSystem zones, Vector2s zone, SwapTally tally, in Circle painted, bool painting)
@@ -378,10 +382,20 @@ namespace VerdantsAscent.Terrain.Zones
             {
                 var other = pair.Value.m_location;
                 if (other == null || (pair.Key.x == zone.x && pair.Key.y == zone.y)) continue;
+                if (s_planExclude != null && s_planExclude.Contains(pair.Key)) continue;   // a plan's removed locations
                 bool alike = LocationName(other) == name
                              || (!string.IsNullOrEmpty(group) && (maxGroup ? other.m_groupMax : other.m_group) == group);
                 if (alike && ZoneModeStartSpots.FlatDistanceSquared(pair.Value.m_position, at) <= reach) return true;
             }
+            if (s_planExtra != null)   // a plan's own picks, not in the world's instances yet
+                foreach (var pair in s_planExtra)
+                {
+                    var other = pair.Value.m_location;
+                    if (other == null || (pair.Key.x == zone.x && pair.Key.y == zone.y)) continue;
+                    bool alike = LocationName(other) == name
+                                 || (!string.IsNullOrEmpty(group) && (maxGroup ? other.m_groupMax : other.m_group) == group);
+                    if (alike && ZoneModeStartSpots.FlatDistanceSquared(pair.Value.m_position, at) <= reach) return true;
+                }
             return false;
         }
 

@@ -6,8 +6,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // A painted blend's creatures spawn on its painted ground and nowhere else (Fire, 2026-09-27 22:5x, by popup: "Inside
-    // the circle"). Vanilla runs a zone's alt-biome spawn lists, and lets their blocks refuse the zone's other creatures,
+    // A painted blend's creatures spawn on its painted ground and nowhere else (inside
+    // the circle). Vanilla runs a zone's alt-biome spawn lists, and lets their blocks refuse the zone's other creatures,
     // for the whole zone from its four corners' sectors: a circle that missed every corner brought nothing, and one over a
     // corner brought its blend to the whole zone. In a zone a circle touches, the heightmap's corner list is set aside
     // while the zone spawns, so vanilla's own lists run with no zone-wide blocks, and each blend's list then runs once: the

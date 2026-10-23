@@ -10,7 +10,7 @@ namespace VerdantsAscent.Terrain.Zones
     // Parking hands every removed object back to vanilla's pools, and those pools never shrink: ZDOPool keeps each ZDO shell
     // on its free stack, and ZDOHelper.Release clears each ZDO's per-type data dictionaries and pushes them onto the static
     // Pool<BinarySearchDictionary<int, T>> stacks with their grown arrays. After a 7.65 M object park that held the mono
-    // heap at 7-8 GB with 37.5 k objects live (2026-09-27, [perf]), and every full GC stopped the world ~0.5 s. The
+    // heap at 7-8 GB with 37.5 k objects live, and every full GC stopped the world ~0.5 s. The
     // dictionaries vanilla sized for the whole old save stay that size too. Run once, right after a park, while the game
     // is still loading: empty the data pools, cap the ZDO pool, trim what was sized for the old save, and collect.
     internal static class ZoneModeParkMemory

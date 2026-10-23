@@ -18,6 +18,23 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly Dictionary<Vector2Int, List<VoxelChunk>> s_columns = new Dictionary<Vector2Int, List<VoxelChunk>>();
 
         public static int ChunkCount => s_chunks.Count;
+
+        // Memory line: chunk array bytes, view mesh bytes and paint-mask texture bytes held right now.
+        internal static void MemoryReport(out long chunkBytes, out int views, out int meshes, out long meshBytes, out int masks, out long maskBytes)
+        {
+            chunkBytes = 0;
+            foreach (var c in s_chunks.Values) if (c != null) chunkBytes += c.HeldBytes();
+            views = 0; meshes = 0; meshBytes = 0;
+            foreach (var v in s_views.Values)
+            {
+                if (v == null) continue;
+                views++;
+                meshBytes += v.MeshBytes(out int n);
+                meshes += n;
+            }
+            masks = s_paintMasks.Count; maskBytes = 0;
+            foreach (var t in s_paintMasks.Values) if (t != null) maskBytes += (long)t.width * t.height * 4L;
+        }
         public static IEnumerable<VoxelChunk> AllChunks => s_chunks.Values;
 
         // What the memory governor budgets against: chunks that actually hold
@@ -33,6 +50,56 @@ namespace VerdantsAscent.Terrain.Voxel
         // raycast-miss defaults, no async-collider races. solidAtTop = the
         // column is solid rock at topY (treat as a full-height wall).
         public static bool TrySampleSurfaceY(float wx, float wz, float topY, float botY,
+            out float surfY, out bool solidAtTop)
+            => SampleSurface(wx, wz, topY, botY, FiresVoxelConfig.ProbeMatchesMesh == null || FiresVoxelConfig.ProbeMatchesMesh.Value, out surfY, out solidAtTop);
+
+        // The water callers (sheets, ponds, the liquid bridge) keep the old single-column read unless
+        // "Water edges use the mesh-matched probe" is on, so the approved water look does not move.
+        public static bool TrySampleWaterFloorY(float wx, float wz, float topY, float botY,
+            out float surfY, out bool solidAtTop)
+            => SampleSurface(wx, wz, topY, botY, FiresVoxelConfig.WaterProbeMatchesMesh != null && FiresVoxelConfig.WaterProbeMatchesMesh.Value, out surfY, out solidAtTop);
+
+        private static float s_deltaWindow;
+        private static int s_deltaLines;
+
+        private static bool SampleSurface(float wx, float wz, float topY, float botY, bool mesh,
+            out float surfY, out bool solidAtTop)
+        {
+            if (!mesh) return SampleSurfaceColumn(wx, wz, topY, botY, out surfY, out solidAtTop);
+            surfY = float.MinValue;
+            solidAtTop = false;
+            var key = new Vector2Int(FloorDiv(Mathf.RoundToInt(wx), 32), FloorDiv(Mathf.RoundToInt(wz), 32));
+            if (!s_columns.TryGetValue(key, out var stack)) return false;
+            bool found = false;
+            int fellBack = 0;
+            for (int i = 0; i < stack.Count; i++)
+            {
+                // A chunk that cannot answer the mesh way (a neighbour cell outside its ring) answers the old way.
+                bool viaMesh = stack[i].SampleColumnSurfaceMesh(wx, wz, topY, botY, out float s, out bool wall);
+                bool ok = viaMesh || stack[i].SampleColumnSurface(wx, wz, topY, botY, out s, out wall);
+                if (ok && !viaMesh) fellBack++;
+                if (ok && s > surfY) { surfY = s; found = true; }
+                if (wall) solidAtTop = true;
+            }
+            if (found && FiresVoxelConfig.ProbeDeltaLog != null && FiresVoxelConfig.ProbeDeltaLog.Value)
+            {
+                float now = (float)(System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency);   // thread-safe: the liquid bridge samples off the main thread
+                if (now - s_deltaWindow > 60f) { s_deltaWindow = now; s_deltaLines = 0; }
+                if (s_deltaLines < 20 && SampleSurfaceColumn(wx, wz, topY, botY, out float old, out _))
+                {
+                    s_deltaLines++;
+                    FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "[FatProbe] ({0:0.0},{1:0.0}) mesh-matched {2:0.000} vs single-column {3:0.000} (Δ {4:+0.000;-0.000;0.000} m); path {5}; keys [Voxel Terrain] Ground probe matches the mesh = {6}, Water edges use the mesh-matched probe = {7}",
+                        wx, wz, surfY, old, surfY - old,
+                        fellBack > 0 ? fellBack + " chunk(s) fell back to single-column (cell outside the ring)" : "mesh",
+                        FiresVoxelConfig.ProbeMatchesMesh != null ? FiresVoxelConfig.ProbeMatchesMesh.Value.ToString() : "unbound",
+                        FiresVoxelConfig.WaterProbeMatchesMesh != null ? FiresVoxelConfig.WaterProbeMatchesMesh.Value.ToString() : "unbound"));
+                }
+            }
+            return found;
+        }
+
+        private static bool SampleSurfaceColumn(float wx, float wz, float topY, float botY,
             out float surfY, out bool solidAtTop)
         {
             surfY = float.MinValue;
@@ -206,6 +273,13 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // (Vfall): save a loaded chunk's anchor on the usual debounce, for a change that is not a density edit
+        // (a fall added to or removed from it).
+        internal static void RequestSave(Vector3Int key)
+        {
+            if (TryGetChunk(key, out var chunk) && chunk != null) MarkSaveDirty(chunk);
+        }
+
         private static void SaveChunk(VoxelChunk chunk)
         {
             var center = chunk.WorldOrigin + new Vector3(16f, 16f, 16f);
@@ -214,7 +288,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (VoxelChunkAnchor.TryGet(chunk.Key, out anchor))
             {
                 var nv = anchor.Nview;
-                if (nv == null || !nv.IsValid()) return;
+                if (nv == null || !nv.IsValid()) { FiresLogger.LogDebug($"[FiresVoxel] NOT shared: chunk {chunk.Key}'s anchor has no valid view"); return; }
                 if (!nv.IsOwner()) nv.ClaimOwnership();
                 zdo = nv.GetZDO();
             }
@@ -244,15 +318,71 @@ namespace VerdantsAscent.Terrain.Voxel
             zdo.Set(VoxelAnchorPrefab.ZDO_VER, VoxelAnchorPrefab.EditsFormatVersion);
             var packed = Utils.Compress(chunk.ExportBrushEdits());
             zdo.Set(VoxelAnchorPrefab.ZDO_EDITS, packed);
+            VerdantsAscent.Water.Tools.ToolFalls.WriteTo(chunk.Key, zdo);   // the chunk's Vfall falls ride its anchor
             if (anchor != null) anchor.MarkSelfWrite();
-            if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value)
-                FiresLogger.LogInfo($"[FiresVoxel] saved chunk {chunk.Key} → anchor ({packed.Length} bytes packed).");
+            // Evidence (at Debug): the edit is now in the shared chunk record that the server and the other
+            // peers read. A brush whose dab shows locally but never reaches this line never left this client.
+            if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] shared chunk {chunk.Key}: {packed.Length} bytes packed, rev {zdo.DataRevision}, owner {(zdo.GetOwner() == ZDOMan.GetSessionID() ? "me" : zdo.GetOwner().ToString())}");
         }
 
         // MOP on GENERATED water — the mop tool works on carve+fill water
         // too: columns are marked dry (persisted as a sparse tail on the
         // anchor blob), then the touched chunks save and remesh exactly like
         // a brush stroke. Returns columns mopped.
+        // The layers around a mop, so a sky island's water (y 600) can be mopped, and a mop up there leaves the
+        // ground's water below alone. A mop below y 224 scans exactly the old ky -2..7.
+        private static void MopLayers(Vector3 center, float radius, out int kyLo, out int kyHi)
+        {
+            kyLo = -2; kyHi = 7;
+            if (center.y - radius > 7 * VoxelChunk.CELLS)
+            {
+                kyLo = Mathf.FloorToInt((center.y - radius) / VoxelChunk.CELLS) - 1;
+                kyHi = Mathf.FloorToInt((center.y + radius) / VoxelChunk.CELLS) + 1;
+            }
+        }
+
+        // Some loaded chunk holds a mop mask (set by a mop or an imported anchor): until then drawn water skips the lookup.
+        internal static volatile bool AnyMops;
+
+        // Vmop: mask (or, restore = true, unmask) every column in the disc, in the layers around the mop. The mask
+        // persists on the chunk anchors (the mop tail of the edit blob), so a regen, reload, rejoin or peer keeps it.
+        // Returns columns changed; wetGen = of those, how many held generated water.
+        public static int MopWater(Vector3 center, float radius, bool restore, out int wetGen)
+        {
+            FatUndo.BeforeVoxelEdit(restore ? "a Vmop restore stroke" : "a Vmop stroke", center, radius, radius);   // one undo step per stroke
+            wetGen = 0;
+            int total = 0;
+            int x0 = Mathf.FloorToInt((center.x - radius) / VoxelChunk.CELLS), x1 = Mathf.FloorToInt((center.x + radius) / VoxelChunk.CELLS);
+            int z0 = Mathf.FloorToInt((center.z - radius) / VoxelChunk.CELLS), z1 = Mathf.FloorToInt((center.z + radius) / VoxelChunk.CELLS);
+            MopLayers(center, radius, out int kyLo, out int kyHi);
+            for (int cz = z0; cz <= z1; cz++)
+                for (int cx = x0; cx <= x1; cx++)
+                    for (int ky = kyLo; ky <= kyHi; ky++)
+                    {
+                        if (!TryGetChunk(new Vector3Int(cx, ky, cz), out var chunk) || chunk == null) continue;
+                        int wet = 0;
+                        int n = restore ? chunk.UnmopColumns(center, radius) : chunk.MopColumns(center, radius, out wet);
+                        if (n <= 0) continue;
+                        total += n;
+                        wetGen += wet;
+                        MarkSaveDirty(chunk);
+                        VoxelMeshPipeline.EnqueueRemesh(chunk);
+                    }
+            return total;
+        }
+
+        // Is the column at (x, z) mopped in the layer holding height y (or the one under it)?
+        internal static bool IsMoppedAt(float x, float y, float z)
+        {
+            if (!AnyMops) return false;
+            int cx = FloorDiv(Mathf.RoundToInt(x), 32), cz = FloorDiv(Mathf.RoundToInt(z), 32);
+            int ky = FloorDiv(Mathf.FloorToInt(y), 32);
+            for (int k = ky - 1; k <= ky; k++)
+                if (TryGetChunk(new Vector3Int(cx, k, cz), out var chunk) && chunk != null && chunk.IsColumnMopped(x, z))
+                    return true;
+            return false;
+        }
+
         public static int MopGeneratedWater(Vector3 center, float radius)
         {
             int total = 0;
@@ -260,9 +390,10 @@ namespace VerdantsAscent.Terrain.Voxel
             int x1 = Mathf.FloorToInt((center.x + radius) / VoxelChunk.CELLS);
             int z0 = Mathf.FloorToInt((center.z - radius) / VoxelChunk.CELLS);
             int z1 = Mathf.FloorToInt((center.z + radius) / VoxelChunk.CELLS);
+            MopLayers(center, radius, out int kyLo, out int kyHi);
             for (int cz = z0; cz <= z1; cz++)
                 for (int cx = x0; cx <= x1; cx++)
-                    for (int ky = -2; ky <= 7; ky++)
+                    for (int ky = kyLo; ky <= kyHi; ky++)
                     {
                         if (!TryGetChunk(new Vector3Int(cx, ky, cz), out var chunk) || chunk == null) continue;
                         int nMopped = chunk.MopGenWater(center, radius);
@@ -401,6 +532,40 @@ namespace VerdantsAscent.Terrain.Voxel
             return chunk;
         }
 
+        // ── Undo snapshots (FatUndo) ────────────────────────────────────────────────────────────────────────────────────
+        /// <summary>
+        /// A chunk's whole brush-edit blob (edit bounds + water-mop tail, as its anchor stores it), with no side effects: a loaded chunk's
+        /// live edits, else its anchor's, else the no-edits blob.
+        /// </summary>
+        internal static byte[] SnapshotEdits(Vector3Int key)
+        {
+            if (s_chunks.TryGetValue(key, out var chunk) && chunk != null && chunk.Kind == ChunkKind.Full) return chunk.ExportBrushEdits();
+            var packed = ReadAnchorEdits(key);
+            return packed != null ? Utils.Decompress(packed) : NoEditsBlob();
+        }
+
+        /// <summary>Lay a kept blob back on its chunk and save it to the anchor (peers restore from it); dry mops re-show their water.</summary>
+        internal static bool RestoreEdits(Vector3Int key, byte[] blob)
+        {
+            if (blob == null) return false;
+            var chunk = EnsureChunkWithEdits(key);
+            if (chunk == null || !chunk.ImportBrushEdits(blob)) return false;
+            MarkSaveDirty(chunk);
+            VoxelMeshPipeline.EnqueueRemesh(chunk);
+            VoxelZoneStreamer.MarkZoneBrushed(chunk.Key);
+            try { VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(ChunkCentre(key), VoxelChunk.CELLS); } catch { }
+            return true;
+        }
+
+        // Every sample unedited (VoxelChunk's EditLoNone / EditHiNone), no mop tail.
+        private static byte[] NoEditsBlob()
+        {
+            int n = VoxelChunk.SampleCount;
+            var blob = new byte[n * 2];
+            for (int i = 0; i < n; i++) { blob[i] = unchecked((byte)(sbyte)-127); blob[n + i] = 127; }
+            return blob;
+        }
+
         private static byte[] ReadAnchorEdits(Vector3Int key)
         {
             var zdo = VoxelAnchorPrefab.FindZdo(key, ChunkCentre(key));
@@ -504,8 +669,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // A saved volume, dropped on a zone as it was. Chunks above what was saved are cleared to air and chunks below
         // it filled with rock, so the saved land meets the target's own ground instead of floating over it or being
-        // buried. Nothing is blended into the zones around it - a step at the border is the point
-        // (Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md).
+        // buried. Nothing is blended into the zones around it - a step at the border is the point.
         internal static string StampZoneVolume(Vector2s zone, sbyte[] volume, int chunkMinY, int chunkCountY,
             float clearToY, float fillFromY, out int touched)
         {
@@ -584,10 +748,20 @@ namespace VerdantsAscent.Terrain.Voxel
             return chunk;
         }
 
+        // > 0 while a V-tool edit runs (VoxelBrushDrag); main thread.
+        internal static int VToolScope;
+
         public static string ApplyBrush(Vector3 center, float radius, float height, VoxelBrushShape shape, VoxelBrushMode mode)
         {
-            if (Zones.ZoneModeRefusals.TerrainEditTouchesClosed(center, radius))
+            // Players can draw their own little floating terrain that merges with the
+            // chunk if it is restored: a V-tool stroke (VToolScope) may reach over a closed zone. Its edits land in the chunk
+            // anchors as anywhere else, stand as the player's own terrain over the closed sea (synced, undoable), stay where they
+            // are when a zone closes, and re-apply onto the land when the zone is opened or restored (the edit bounds compose with
+            // whatever ground a chunk generates, so nothing is doubled or lost). Hoe / IH / WEC terrain ops stay refused there.
+            if (VToolScope <= 0 && Zones.ZoneModeRefusals.TerrainEditTouchesClosed(center, radius))
                 return "Refused: the brush reaches into a closed zone of this one-zone-at-a-time world.";
+            // One undo step per stroke (FatUndo keeps the touched chunks' edit blobs before the first dab).
+            FatUndo.BeforeVoxelEdit($"a V-tool {mode} stroke", center, radius, height);
 
             // Persist-until-edited: a far-impostor tile is a cached function of
             // the analytic ground — an edit here changes that ground, so drop
@@ -713,7 +887,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 string probe = s_chunks.TryGetValue(ck, out var cc)
                     ? $"chunk {ck} exists, density@center={cc.SampleDensityWorld(center)} (>0 solid, <0 air)"
                     : $"NO chunk at {ck} — center is outside the voxel field";
-                FiresLogger.LogWarning($"[FiresVoxel] {verb} changed nothing at ({center.x:F0},{center.y:F0},{center.z:F0}) r={radius:F1} — {probe}");
+                // ~50 a launch, mostly re-applied pads already at their shape, so a no-op on an existing chunk is
+                // Debug; a stamp outside the voxel field (no chunk) is a real miss and stays a Warning.
+                if (cc == null) FiresLogger.LogWarning($"[FiresVoxel] {verb} changed nothing at ({center.x:F0},{center.y:F0},{center.z:F0}) r={radius:F1} — {probe}");
+                else FiresLogger.LogDebug($"[FiresVoxel] {verb} changed nothing at ({center.x:F0},{center.y:F0},{center.z:F0}) r={radius:F1} — {probe}");
             }
             string summary = $"{verb} {shapeTxt} at ({center.x:F0},{center.y:F0},{center.z:F0}) → {touched} chunk(s), {seeded} seeded";
             if (seeded > 0) summary += $" ({seedMs:F0}ms seed)";
@@ -762,8 +939,53 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
 
+        // (fat_surface_probe): every density-0 crossing in the column between yLo and yHi, sampled as
+        // TryFindSurfaceY samples it, as "54.90 up" (solid below, air above: a floor) or "61.20 down" (a ceiling / underside).
+        public static string DescribeColumn(float wx, float wz, float yLo, float yHi)
+        {
+            var colKey = new Vector2Int(FloorDiv(Mathf.FloorToInt(wx), 32), FloorDiv(Mathf.FloorToInt(wz), 32));
+            if (!s_columns.TryGetValue(colKey, out var stack) || stack == null || stack.Count == 0) return "column not loaded";
+            var parts = new List<string>();
+            sbyte prev = 0;
+            bool hasPrev = false;
+            for (int y = Mathf.FloorToInt(yLo); y <= Mathf.CeilToInt(yHi); y++)
+            {
+                sbyte d = SampleColumnDensity(stack, wx, y, wz, out bool ok);
+                if (!ok) { hasPrev = false; continue; }
+                if (hasPrev && (prev > 0) != (d > 0))
+                    parts.Add(((y - 1) + prev / (float)(prev - d)).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + (prev > 0 ? " up" : " down"));
+                prev = d;
+                hasPrev = true;
+            }
+            return parts.Count == 0 ? "none" : string.Join(", ", parts);
+        }
+
+        // (Vskin): is the voxel at a world point solid (density > 0)? false when the column is not loaded.
+        public static bool TryIsSolid(float wx, float wy, float wz, out bool solid)
+        {
+            solid = false;
+            var colKey = new Vector2Int(FloorDiv(Mathf.FloorToInt(wx), 32), FloorDiv(Mathf.FloorToInt(wz), 32));
+            if (!s_columns.TryGetValue(colKey, out var stack) || stack == null || stack.Count == 0) return false;
+            sbyte d = SampleColumnDensity(stack, wx, Mathf.RoundToInt(wy), wz, out bool ok);
+            if (!ok) return false;
+            solid = d > 0;
+            return true;
+        }
+
+        // A client once read solid inside a sinkhole shaft the server had carved, so the chunk that OWNS
+        // the sample (y inside its own 0..CELLS-1 band) answers first. A sample on a chunk border is also the neighbour's
+        // mirrored ring sample, and the first chunk in the stack used to answer even from a ring that had not been re-mirrored
+        // since the owner's edits arrived. Ring samples answer only when no owner is loaded.
         private static sbyte SampleColumnDensity(List<VoxelChunk> stack, float wx, int y, float wz, out bool ok)
         {
+            int ky = FloorDiv(y, VoxelChunk.CELLS);
+            for (int i = 0; i < stack.Count; i++)
+            {
+                var c = stack[i];
+                if (c == null || c.Key.y != ky) continue;
+                var v = c.SampleDensityWorld(new Vector3(wx, y, wz));
+                if (v != sbyte.MinValue) { ok = true; return v; }
+            }
             for (int i = 0; i < stack.Count; i++)
             {
                 var c = stack[i];
@@ -801,7 +1023,22 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_views.TryGetValue(key, out var view))
             {
                 s_views.Remove(key);
-                if (view != null) Object.Destroy(view.gameObject);
+                // Queued, ViewDestroysPerFrame a frame (DrainViewDestroys), not ~16 per zone in one frame. A
+                // queued view of a zone the player just left keeps drawing for a frame or two, far behind them.
+                if (view != null) s_viewDestroyQueue.Enqueue(view.gameObject);
+            }
+        }
+
+        private static readonly Queue<GameObject> s_viewDestroyQueue = new Queue<GameObject>();
+        internal const int ViewDestroysPerFrame = 4;
+        internal static int ViewDestroysQueued => s_viewDestroyQueue.Count;
+
+        internal static void DrainViewDestroys(int max)
+        {
+            for (int n = 0; n < max && s_viewDestroyQueue.Count > 0; n++)
+            {
+                var go = s_viewDestroyQueue.Dequeue();
+                if (go != null) Object.Destroy(go);
             }
         }
 
@@ -850,6 +1087,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var go = new GameObject($"VoxelChunk_{chunk.Key.x}_{chunk.Key.y}_{chunk.Key.z}");
             go.transform.SetParent(VoxelMeshPipeline.Root, worldPositionStays: true);
             view = go.AddComponent<VoxelChunkView>();
+            view.Key = chunk.Key;
             view.Init();
             view.RenderSuppressed = chunk.SuppressRenderUntilSwap;
             s_views[chunk.Key] = view;
@@ -861,7 +1099,9 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void Clear()
         {
             s_chunks.Clear();
+            VoxelChunkAnchor.ClearApplied();
             s_views.Clear();
+            while (s_viewDestroyQueue.Count > 0) { var go = s_viewDestroyQueue.Dequeue(); if (go != null) Object.Destroy(go); }
             s_columns.Clear();
             s_fullChunkCount = 0;
             foreach (var kv in s_paintMasks)
@@ -871,7 +1111,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ------------------------------------------------------------------
-        // W3.3 — terrain paint on the voxel skin. Paint DATA already
+        // Terrain paint on the voxel skin. Paint DATA already
         // round-trips (TerrainComp → ZDO → Heightmap.m_paintMask; planting and
         // clutter read it) — only the render was missing: every chunk shared
         // one material with a permanent 1x1 "no paint" _ClearedMaskTex. Each
@@ -904,7 +1144,10 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_paintMasks.TryGetValue(colKey, out var tex) && tex != null)
                 view.ApplyPaintMask(tex);
             else
+            {
+                view.ApplyPaintMask(VoxelLayerPaint.BlankMask);   // no lava flash on a skyland before its column's mask
                 s_paintDirty.Add(colKey);
+            }
         }
 
         // Drain from the streamer tick. Paint-only ops need NO remesh and no
@@ -925,13 +1168,47 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        private static void RefreshPaintMask(Vector2Int colKey)
-        {
-            if (!s_columns.TryGetValue(colKey, out var stack) || stack.Count == 0) return;
+        // A TIME-SLICED drain. One column is composed row by row (33 rows x 33 texels) across frames
+        // until a Stopwatch passes budgetMs; the texture upload + rebind happen once its last row is done. A column dropped meanwhile is
+        // abandoned; one re-dirtied meanwhile is simply refreshed again later. Called every frame from VoxelPipelineDriver.
+        private static Vector2Int s_sliceKey;
+        private static bool s_sliceActive;
+        private static int s_sliceRow;
+        private static Vector2s s_sliceZone;
+        private static Heightmap s_sliceHm;
+        private static bool s_sliceDry;   // this column has no shore paint within a zone (baked flags)
+        private static Texture2D s_sliceTex;
+        private static readonly System.Diagnostics.Stopwatch s_sliceSw = new System.Diagnostics.Stopwatch();
+        internal static long PaintSliceColumns, PaintSliceFrames;
 
+        public static void DrainPaintDirtyTimed(float budgetMs)
+        {
+            if (!PaintCapable) { s_sliceActive = false; return; }
+            if (!s_sliceActive && s_paintDirty.Count == 0) return;
+            s_sliceSw.Restart();
+            PaintSliceFrames++;
+            while (s_sliceSw.Elapsed.TotalMilliseconds < budgetMs)
+            {
+                if (!s_sliceActive)
+                {
+                    if (s_paintDirty.Count == 0) return;
+                    Vector2Int next = default;
+                    foreach (var k in s_paintDirty) { next = k; break; }
+                    s_paintDirty.Remove(next);
+                    if (!BeginPaintMask(next)) continue;
+                }
+                if (!s_columns.TryGetValue(s_sliceKey, out var st) || st.Count == 0) { s_sliceActive = false; continue; }   // dropped mid-slice
+                ComposePaintRow(s_sliceKey, s_sliceRow);
+                if (++s_sliceRow > 32) { FinishPaintMask(s_sliceKey); s_sliceActive = false; PaintSliceColumns++; }
+            }
+        }
+
+        private static bool BeginPaintMask(Vector2Int colKey)
+        {
+            if (!s_columns.TryGetValue(colKey, out var stack) || stack.Count == 0) return false;
             if (!s_paintMasks.TryGetValue(colKey, out var tex) || tex == null)
             {
-                tex = new Texture2D(33, 33, TextureFormat.RGBA32, mipChain: false)
+                tex = new Texture2D(VoxelLayerPaint.MaskWidth, 33, TextureFormat.RGBA32, mipChain: false)
                 {
                     name = $"VoxelPaint_{colKey.x}_{colKey.y}",
                     filterMode = FilterMode.Bilinear,
@@ -940,16 +1217,30 @@ namespace VerdantsAscent.Terrain.Voxel
                 };
                 s_paintMasks[colKey] = tex;
             }
+            if (s_paintPixels == null) s_paintPixels = new Color[VoxelLayerPaint.MaskWidth * 33];
+            s_sliceKey = colKey; s_sliceTex = tex; s_sliceRow = 0; s_sliceActive = true;
+            s_sliceZone = new Vector2s(short.MinValue, short.MinValue); s_sliceHm = null;
+            s_sliceDry = Patch_Heightmap_WetMask.IsDryForPaint(colKey.x * 32f, colKey.y * 32f, 32f);
+            return true;
+        }
 
-            if (s_paintPixels == null) s_paintPixels = new Color[33 * 33];
+        private static void RefreshPaintMask(Vector2Int colKey)
+        {
+            // the untimed path (unchanged result): every row at once. An in-flight slice shares the pixel buffer, so it is re-queued.
+            if (s_sliceActive) { if (s_sliceKey != colKey) s_paintDirty.Add(s_sliceKey); s_sliceActive = false; }
+            if (!BeginPaintMask(colKey)) return;
+            for (int j = 0; j <= 32; j++) ComposePaintRow(colKey, j);
+            FinishPaintMask(colKey);
+            s_sliceActive = false;
+        }
+
+        private static void ComposePaintRow(Vector2Int colKey, int j)
+        {
             float baseX = colKey.x * 32f, baseZ = colKey.y * 32f;
-            // FindHeightmap scans every live heightmap — 1089 calls per column
-            // was a real hitch during regen bursts. A texel row crosses a zone
-            // boundary at most once: cache the heightmap per zone and resolve
-            // only when the zone id changes (≤4 lookups per column).
-            var curZone = new Vector2s(short.MinValue, short.MinValue);
-            Heightmap curHm = null;
-            for (int j = 0; j <= 32; j++)
+            var curZone = s_sliceZone;
+            Heightmap curHm = s_sliceHm;
+            if (curHm == null) curZone = new Vector2s(short.MinValue, short.MinValue);   // none yet, or destroyed since the last slice
+            {
                 for (int i = 0; i <= 32; i++)
                 {
                     // +ε probe = the GatherColumns border idiom: a sample on a
@@ -969,6 +1260,23 @@ namespace VerdantsAscent.Terrain.Voxel
                         c = curHm.GetPaintMask(mx, my);
                     }
                     else c = Heightmap.m_paintMaskNothing;
+                    // Ashlands must not be all lava with no land: alpha is lava on Ashlands ground. The
+                    // heightmap's mask holds the WORLD's biome's alpha (1 everywhere but Ashlands), so ground turned to Ashlands
+                    // takes the Ashlands lava rule there (VoxelLayerPaint.AshlandsLava), ground turned away from it takes
+                    // vanilla's plain 1, both eased over the circle's edge; a column with no heightmap on real Ashlands gets the
+                    // rule too (the "nothing" fallback's alpha 1 was lava).
+                    bool effAsh;
+                    if (Zones.BiomePaint.Any && Zones.BiomePaint.TryGround(world.x, world.z, out var turnedTo, out var turnedBy))
+                    {
+                        effAsh = turnedTo == Heightmap.Biome.AshLands;
+                        float aTurned = effAsh ? VoxelLayerPaint.AshlandsLava(world.x, world.z) : 1f;
+                        c.a = Mathf.Lerp(c.a, aTurned, VoxelLayerPaint.TurnedWeight(in turnedBy, world.x, world.z));
+                    }
+                    else
+                    {
+                        effAsh = FiresWorldGenBase.BiomeCodeAt(world.x, world.z) == 6;
+                        if (curHm == null && effAsh) c.a = VoxelLayerPaint.AshlandsLava(world.x, world.z);
+                    }
                     // WET-SHORE BAND (near-field). The [FiresWetMask] stamp
                     // blends PaintWet01 into the heightmap PAINT TEXTURE, but
                     // this voxel copy re-composes from the CPU GetPaintMask
@@ -978,15 +1286,25 @@ namespace VerdantsAscent.Terrain.Voxel
                     // vertex, NOT the dead per-column constant → no rectangles),
                     // same recipe as the quilt/stamp: r=max(r,wet); alpha→wet
                     // except Ashlands (alpha=lava); player paint (g/b) wins.
-                    float wet = VoxelZoneStreamer.PaintWet01(world.x, world.z);
+                    float wet = s_sliceDry ? 0f : VoxelZoneStreamer.PaintWet01(world.x, world.z);   // dry column (no ZW_PAINT within a zone) = no band
                     if (wet > 0.03f && c.g <= 0.25f && c.b <= 0.25f)
                     {
                         c.r = Mathf.Max(c.r, wet);
-                        if (FiresWorldGenBase.BiomeCodeAt(world.x, world.z) != 6)
+                        if (!effAsh)   // the ground's own biome, turned or not
                             c.a = Mathf.Lerp(c.a, wet, wet);
                     }
-                    s_paintPixels[j * 33 + i] = c;
+                    s_paintPixels[j * VoxelLayerPaint.MaskWidth + i] = c;
                 }
+            }
+            s_sliceZone = curZone; s_sliceHm = curHm;
+        }
+
+        private static void FinishPaintMask(Vector2Int colKey)
+        {
+            if (!s_columns.TryGetValue(colKey, out var stack) || stack.Count == 0) return;
+            var tex = s_sliceTex;
+            if (tex == null) return;
+            VoxelLayerPaint.FillPalette(s_paintPixels);   // the cave and skyland paint texels beside the ground's
             tex.SetPixels(s_paintPixels);
             tex.Apply(false, false);
 
@@ -994,7 +1312,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // constant per 32m column and the shader wets EVERY vertex below
             // it — beside a pond on flat ground that painted the entire
             // column as wet sand, razor-cut at the column border where the
-            // neighbour's probe found no water (user screenshots: 64m sand
+            // neighbour's probe found no water (64m sand
             // rectangles on Plains, sand-with-foam squares on snowy
             // mountainsides). A per-column constant can never blend; shore
             // sand is the WET MASK's job — world-continuous, real distance

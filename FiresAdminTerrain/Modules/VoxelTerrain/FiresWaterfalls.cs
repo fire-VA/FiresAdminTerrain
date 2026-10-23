@@ -99,6 +99,93 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly List<Vector3> s_dirs = new List<Vector3>(128);
         private static readonly List<float> s_lengths = new List<float>(128);
         private static readonly List<float> s_plunges = new List<float>(128);
+        private static readonly List<float> s_lipY = new List<float>(128);
+        private static readonly List<bool> s_landed = new List<bool>(128);
+        private static readonly List<float> s_offsets = new List<float>(4096);
+
+        // Smoothing along the curtain (columns are ~1 m apart): two passes of a 1-2-1 average.
+        private const int AlongPasses = 2;
+        // A triangle thinner than this (twice its area over its longest edge squared) is a needle: a sliver no wider than
+        // a tenth of its length, the shape that read as ribbons.
+        private const float NeedleRatio = 0.1f;
+
+        // What AppendCurtain last shaped, for the Debug evidence line: the largest column-to-column step of the lip height
+        // and of the fall length before and after smoothing, and the needle triangles left in the rear face.
+        internal struct ShapeReport
+        {
+            internal int Columns, Rows, Needles;
+            internal bool Approach;
+            internal float RawLipSpread, LipSpread, RawLengthSpread, LengthSpread;
+        }
+
+        internal static ShapeReport LastShape;
+
+        // A 1-2-1 average along the columns (ends keep their own weight). shortenOnly: a value may only drop, so a column
+        // the terrain caught is never made longer than where it landed.
+        private static void SmoothAlong(List<float> values, bool shortenOnly)
+        {
+            int n = values.Count;
+            if (n < 3) return;
+            float before = values[0];
+            for (int c = 0; c < n; c++)
+            {
+                float own = values[c];
+                float next = c + 1 < n ? values[c + 1] : own;
+                float mean = (before + 2f * own + next) * 0.25f;
+                before = own;
+                values[c] = shortenOnly ? Mathf.Min(own, mean) : mean;
+            }
+        }
+
+        // Per row, each column's outward offset moves towards its neighbours' mean but never in front of less than its own
+        // terrain clearance.
+        private static void EvenOffsets(int columns, int rows)
+        {
+            if (columns < 3) return;
+            for (int r = 0; r < rows; r++)
+            {
+                float before = s_offsets[r];
+                for (int c = 0; c < columns; c++)
+                {
+                    int i = c * rows + r;
+                    float own = s_offsets[i];
+                    float next = c + 1 < columns ? s_offsets[i + rows] : own;
+                    s_offsets[i] = Mathf.Max(own, (before + 2f * own + next) * 0.25f);
+                    before = own;
+                }
+            }
+        }
+
+        private static float MaxStep(List<float> values)
+        {
+            float step = 0f;
+            for (int c = 1; c < values.Count; c++) step = Mathf.Max(step, Mathf.Abs(values[c] - values[c - 1]));
+            return step;
+        }
+
+        // Needle triangles in the stitched rear grid of the curtain just shaped (s_rear, column-major).
+        private static int CountNeedles(int columns, int rows)
+        {
+            int needles = 0;
+            int baseIndex = s_rear.Count - columns * rows;
+            for (int c = 0; c < columns - 1; c++)
+                for (int k = 0; k < rows - 1; k++)
+                {
+                    Vector3 a = s_rear[baseIndex + c * rows + k], a1 = s_rear[baseIndex + c * rows + k + 1];
+                    Vector3 b = s_rear[baseIndex + (c + 1) * rows + k], b1 = s_rear[baseIndex + (c + 1) * rows + k + 1];
+                    if (IsNeedle(a, b, a1)) needles++;
+                    if (IsNeedle(b, b1, a1)) needles++;
+                }
+            return needles;
+        }
+
+        private static bool IsNeedle(Vector3 p, Vector3 q, Vector3 r)
+        {
+            float longest = Mathf.Max((q - p).sqrMagnitude, Mathf.Max((r - q).sqrMagnitude, (p - r).sqrMagnitude));
+            if (longest < 1e-6f) return false;
+            float twiceArea = Vector3.Cross(q - p, r - p).magnitude;
+            return twiceArea / longest < NeedleRatio;
+        }
 
         internal static Material Material
         {
@@ -121,7 +208,80 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // The mist shader is offered to Core's broker, so other mods (FDT's ghost) draw with the one live copy instead
         // of shipping their own; the falls take theirs from the broker too. The bundle loads once, whoever asks first.
-        internal static void OfferShaders() => FiresShaderBroker.Offer(MistShaderFullName, OfferingMod, LoadMistShader);
+        internal static void OfferShaders()
+        {
+            FiresShaderBroker.Offer(MistShaderFullName, OfferingMod, LoadMistShader);
+            RegisterProbe();
+            FiresRainbow.Init(FiresAdminTerrain.Instance != null ? FiresAdminTerrain.Instance.Config : null);
+        }
+
+        // Another shader from the fireswaterfall bundle (FiresRainbow's Custom/FiresRainbowSky), or null.
+        internal static Shader LoadShader(string name)
+        {
+            var bundle = Bundle;
+            return bundle != null ? bundle.LoadAsset<Shader>(name) : null;
+        }
+
+        // va_falls_probe [radius]: read-only. Every falls mesh near the player - its path, materials, size, the approach-row
+        // vertices it still carries (uv0.y < 0, laid on the river above the lip) and its needle triangles (the ribbons).
+        private static bool s_probeRegistered;
+
+        private static void RegisterProbe()
+        {
+            if (s_probeRegistered) return;
+            s_probeRegistered = true;
+            new Terminal.ConsoleCommand("va_falls_probe", "[radius m] - falls meshes near you: approach-row vertices and needle (ribbon) triangles",
+                args =>
+                {
+                    var player = Player.m_localPlayer;
+                    if (player == null) { args.Context?.AddString("no local player"); return; }
+                    float radius = args.Length > 1 && float.TryParse(args[1], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float r) ? r : 80f;
+                    Vector3 at = player.transform.position;
+                    var uvs = new List<Vector4>();
+                    var tris = new List<int>();
+                    var verts = new List<Vector3>();
+                    int meshes = 0;
+                    foreach (var filter in Object.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None))
+                    {
+                        var mesh = filter != null ? filter.sharedMesh : null;
+                        if (mesh == null || mesh.name != "genwater_falls" || !filter.gameObject.activeInHierarchy) continue;
+                        var renderer = filter.GetComponent<MeshRenderer>();
+                        if (renderer == null || (renderer.bounds.ClosestPoint(at) - at).magnitude > radius) continue;
+                        mesh.GetVertices(verts);
+                        mesh.GetUVs(0, uvs);
+                        mesh.GetTriangles(tris, 0);
+                        int approachVerts = 0;
+                        foreach (var uv in uvs) if (uv.y < 0f) approachVerts++;
+                        int needles = 0;
+                        for (int t = 0; t + 2 < tris.Count; t += 3)
+                        {
+                            Vector3 p = filter.transform.TransformPoint(verts[tris[t]]), q = filter.transform.TransformPoint(verts[tris[t + 1]]),
+                                s = filter.transform.TransformPoint(verts[tris[t + 2]]);
+                            if (IsNeedle(p, q, s)) needles++;
+                        }
+                        var names = new List<string>();
+                        foreach (var material in renderer.sharedMaterials)
+                            names.Add(material == null ? "null" : $"{material.name} ({(material.shader != null ? material.shader.name : "no shader")})");
+                        var mist = filter.transform.Find(FiresWaterfallMist.RootName);
+                        string line = $"[FiresWaterfall] probe: {Path(filter.transform)} at {renderer.bounds.center:F1}, "
+                            + $"{(renderer.bounds.ClosestPoint(at) - at).magnitude:0} m: {verts.Count} vertices, {tris.Count / 3} triangles, "
+                            + $"{approachVerts} approach-row vertices, {needles} needle triangle(s) (thinner than 1:{1f / NeedleRatio:0}); "
+                            + $"materials {string.Join(", ", names)}; mist emitters {(mist != null ? mist.childCount : 0)}";
+                        args.Context?.AddString(line);
+                        FiresLogger.LogInfo(line);
+                        meshes++;
+                    }
+                    args.Context?.AddString($"[FiresWaterfall] probe: {meshes} falls mesh(es) within {radius:0} m");
+                });
+        }
+
+        private static string Path(Transform t)
+        {
+            string path = t.name;
+            for (var p = t.parent; p != null && path.Length < 160; p = p.parent) path = p.name + "/" + path;
+            return path;
+        }
 
         private static Shader LoadMistShader()
         {
@@ -165,7 +325,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_material.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
                 s_addMaterial = new Material(shader) { name = "FiresWaterfallAdd", renderQueue = AddQueue };
                 s_addMaterial.SetFloat("_SrcBlend", (float)BlendMode.One);
-                s_addMaterial.SetFloat("_DstBlend", (float)BlendMode.One);
+                // Waterfalls got far too white with hard geometry when they stacked: the light pass
+                // was pure additive (One One), so N overlapping curtains summed N times their light and clipped to flat white. Screen
+                // (One, OneMinusSrcColor) adds less the brighter the pixel already is and never passes white.
+                s_addMaterial.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcColor);
                 s_materials = new[] { s_material, s_addMaterial };
                 LoadMist();
                 SyncFog();
@@ -227,6 +390,11 @@ namespace VerdantsAscent.Terrain.Voxel
             s_addMaterial.SetFloat("_FiresFogMode", mode);
             if (s_mistMaterial != null) s_mistMaterial.SetFloat("_FiresFogMode", mode);
             if (s_veilMaterial != null) s_veilMaterial.SetFloat("_FiresFogMode", mode);
+            // 'Waterfall Brightness' on the light pass (the shader's _LightScale), and both kept in step on the
+            // before-the-water copies FatSinkFalls makes of these materials (they missed every later fog sync until now).
+            float light = FiresVoxelConfig.WaterfallBrightness != null ? FiresVoxelConfig.WaterfallBrightness.Value : 1f;
+            s_addMaterial.SetFloat("_LightScale", light);
+            FatSinkFalls.SyncUnderRiver(mode, light);
         }
 
         internal static void BeginMesh()
@@ -240,9 +408,26 @@ namespace VerdantsAscent.Terrain.Voxel
         // fall ends where the terrain catches it. The sheet those rows trace is the slab's rear face; its front face,
         // the approach on the river and the rounded sides are one ribbon, the rear another. Returns whether it drew, and
         // leaves the curtain's lip and foot in LastSite.
+        // approach: lay the approach rows on the river upstream of the lip. The voxel sheet's curtains leave them out:
+        // they sat on the stored step level while the sheet there bends over the lip, so two surfaces crossed at
+        // every lip and read as stringy ribbons; the lip sprays mist instead.
+        // Curtains are smoothed and blended together, with no hard seam edges on the ribbon: a caller
+        // whose lip run CONTINUES past this curtain (into the next chunk's curtain) sets OpenStart / OpenEnd before the call: that
+        // end gets no rounded side cap and no edge fade, so two curtains meet as one ribbon. AcrossStart anchors the texture's
+        // across coordinate in the world (the lip run's own distance), so the pattern runs on across the join instead of
+        // restarting. All three are consumed (reset) by the call.
+        internal static bool OpenStart, OpenEnd;
+        internal static float AcrossStart = float.NaN;
+        private const float OpenEdgeFar = 1e4f;
+
         internal static bool AppendCurtain(List<Column> columns, Vector3 outward, float lipOut, float fadeLength, float seed,
-            OutwardProfile profile = null)
+            OutwardProfile profile = null, bool approach = true)
         {
+            if (FatSuperFlat.On) return false;   // No falls at the real world's cliffs on super flat
+            bool openStart = OpenStart, openEnd = OpenEnd;
+            float acrossStart = AcrossStart;
+            OpenStart = OpenEnd = false;
+            AcrossStart = float.NaN;
             int n = columns.Count;
             if (n < 2) return false;
             float longest = 0f;
@@ -250,12 +435,12 @@ namespace VerdantsAscent.Terrain.Voxel
             if (longest <= 0.5f) return false;
 
             s_rows.Clear();
-            s_rows.AddRange(ApproachRows);
+            if (approach) s_rows.AddRange(ApproachRows);
             foreach (float f in UpperRows) if (f < longest) s_rows.Add(f);
             for (float f = UpperRows[UpperRows.Length - 1] + LowerRowStep; f < longest; f += LowerRowStep) s_rows.Add(f);
             s_rows.Add(longest);
             int rows = s_rows.Count;
-            int firstFallRow = ApproachRows.Length;
+            int firstFallRow = approach ? ApproachRows.Length : 0;
 
             s_along.Clear();
             s_along.Add(0f);
@@ -268,21 +453,71 @@ namespace VerdantsAscent.Terrain.Voxel
             float thickness = Mathf.Min(Thickness, Mathf.Max(width, MinThickness));
 
             s_rear.Clear(); s_thick.Clear(); s_fallen.Clear(); s_dirs.Clear(); s_lengths.Clear(); s_plunges.Clear();
+            s_lipY.Clear(); s_landed.Clear(); s_offsets.Clear();
             bool anyLanded = false;
             Vector3 lipSum = Vector3.zero, footSum = Vector3.zero, dirSum = Vector3.zero;
+
+            // The mesh used to split off into thin strips like ribbons or noodles: every column kept its own
+            // lip height, its own length (rows past it all collapsed onto its foot) and its own terrain offset per row, so
+            // next to a longer or further-out neighbour the stitch drew needle triangles - a sawtooth edge and pale facets.
+            // Now the lip height and length are smoothed along the curtain (a length only ever shortens, so no column is
+            // pushed into rock it landed on), every column spreads the whole row schedule over its OWN length, and each
+            // row's offset is evened out along the curtain without pulling any column back towards the terrain.
+            float rawLipSpread = 0f, rawLengthSpread = 0f;
             for (int c = 0; c < n; c++)
             {
                 var column = columns[c];
                 Vector3 dir = column.Outward.sqrMagnitude > 0.01f ? column.Outward : outward;
-                float length = Shape(column, dir, profile, out bool landed);
+                s_dirs.Add(dir);
+                s_lengths.Add(Shape(column, dir, profile, out bool landed));
+                s_landed.Add(landed);
+                s_lipY.Add(column.LipY);
+                if (c > 0)
+                {
+                    rawLipSpread = Mathf.Max(rawLipSpread, Mathf.Abs(column.LipY - columns[c - 1].LipY));
+                    rawLengthSpread = Mathf.Max(rawLengthSpread, Mathf.Abs(s_lengths[c] - s_lengths[c - 1]));
+                }
+            }
+            for (int pass = 0; pass < AlongPasses; pass++)
+            {
+                SmoothAlong(s_lipY, false);
+                SmoothAlong(s_lengths, true);
+            }
+
+            for (int c = 0; c < n; c++)
+            {
+                var column = columns[c];
+                Vector3 dir = s_dirs[c];
+                float length = Mathf.Max(s_lengths[c], 0f);
+                float stretch = length / longest;
+                float lipY = s_lipY[c];
+                float last = 0f;
+                for (int r = 0; r < rows; r++)
+                {
+                    float f = s_rows[r];
+                    if (f < 0f || profile == null) { s_offsets.Add(0f); continue; }
+                    float outAt = profile(column.Base, dir, lipY - f * stretch);
+                    if (outAt < 0f) outAt = last;
+                    s_offsets.Add(outAt);
+                    last = outAt;
+                }
+            }
+            for (int pass = 0; pass < AlongPasses; pass++) EvenOffsets(n, rows);
+
+            for (int c = 0; c < n; c++)
+            {
+                var column = columns[c];
+                Vector3 dir = s_dirs[c];
+                float length = Mathf.Max(s_lengths[c], 0f);
+                float stretch = length / longest;
+                float lipY = s_lipY[c];
+                bool landed = s_landed[c];
                 bool closesOnGround = landed || column.OntoGround;
                 bool plunges = !closesOnGround && fadeLength <= 0f;
                 anyLanded |= landed;
                 dirSum += dir;
-                lipSum += new Vector3(column.Base.x, column.LipY - MistLipSprayDrop, column.Base.z) + dir * (lipOut + MistLipSprayOut);
+                lipSum += new Vector3(column.Base.x, lipY - MistLipSprayDrop, column.Base.z) + dir * (lipOut + MistLipSprayOut);
                 footSum += new Vector3(0f, plunges ? PlungeDepth : 0f, 0f);
-                s_dirs.Add(dir);
-                s_lengths.Add(length);
                 s_plunges.Add(plunges ? 1f : 0f);
                 for (int r = 0; r < rows; r++)
                 {
@@ -292,18 +527,23 @@ namespace VerdantsAscent.Terrain.Voxel
                         float upstream = -f;
                         float back = lipOut - upstream;
                         float lift = ApproachLift + ApproachRise * upstream / ApproachLength;
-                        s_rear.Add(new Vector3(column.Base.x + dir.x * back, column.LipY + lift, column.Base.z + dir.z * back));
+                        s_rear.Add(new Vector3(column.Base.x + dir.x * back, lipY + lift, column.Base.z + dir.z * back));
                         s_thick.Add(0f);
                         s_fallen.Add(f);
                         continue;
                     }
-                    float fall = Mathf.Min(f, length);
-                    float offset = Mathf.Max(lipOut + Curl * (1f - Mathf.Exp(-fall / CurlLength)), s_rowOut[r]);
-                    s_rear.Add(new Vector3(column.Base.x + dir.x * offset, column.LipY - fall, column.Base.z + dir.z * offset));
+                    float fall = f * stretch;
+                    float offset = Mathf.Max(lipOut + Curl * (1f - Mathf.Exp(-fall / CurlLength)), s_offsets[c * rows + r]);
+                    s_rear.Add(new Vector3(column.Base.x + dir.x * offset, lipY - fall, column.Base.z + dir.z * offset));
                     s_thick.Add(SlabThickness(thickness, fall, length, closesOnGround));
                     s_fallen.Add(fall);
                 }
             }
+            LastShape = new ShapeReport
+            {
+                Columns = n, Rows = rows, Approach = approach, RawLipSpread = rawLipSpread, RawLengthSpread = rawLengthSpread,
+                LipSpread = MaxStep(s_lipY), LengthSpread = MaxStep(s_lengths), Needles = CountNeedles(n, rows),
+            };
 
             // A lip the terrain catches at once is not a spillway: the profile lands every column in the first metre, and
             // what would be drawn is a stub of curtain lying in the rock, poking through the ground it was meant to leave.
@@ -328,19 +568,23 @@ namespace VerdantsAscent.Terrain.Voxel
             float sideArc = Mathf.PI * thickness * 0.5f;
             Vector3 leftSide = SideDirection(columns[0].Base - columns[1].Base, s_dirs[0]);
             Vector3 rightSide = SideDirection(columns[n - 1].Base - columns[n - 2].Base, s_dirs[n - 1]);
-            var curtain = new CurtainPart { Rows = rows, Width = width, FadeLength = fadeLength, Seed = seed };
+            var curtain = new CurtainPart { Rows = rows, Width = width, FadeLength = fadeLength, Seed = seed, OpenStart = openStart, OpenEnd = openEnd };
             bool inward = WindsInward(columns);
+            // The front's across coordinate starts at the world anchor when one is given (a continuing run), else after the cap.
+            float front = float.IsNaN(acrossStart) ? sideArc : acrossStart;
 
             int ribbon = s_verts.Count;
-            for (int k = 0; k < SideSegments; k++)
-                AppendSide(curtain, 0, leftSide, Mathf.PI * (1f - (float)k / SideSegments), sideArc * k / SideSegments);
-            for (int c = 0; c < n; c++) AppendFront(curtain, c, sideArc + s_along[c]);
-            for (int k = 1; k <= SideSegments; k++)
-                AppendSide(curtain, n - 1, rightSide, Mathf.PI * k / SideSegments, sideArc + width + sideArc * k / SideSegments);
-            Stitch(ribbon, n + 2 * SideSegments, rows, inward);
+            if (!openStart)
+                for (int k = 0; k < SideSegments; k++)
+                    AppendSide(curtain, 0, leftSide, Mathf.PI * (1f - (float)k / SideSegments), front - sideArc + sideArc * k / SideSegments);
+            for (int c = 0; c < n; c++) AppendFront(curtain, c, front + s_along[c]);
+            if (!openEnd)
+                for (int k = 1; k <= SideSegments; k++)
+                    AppendSide(curtain, n - 1, rightSide, Mathf.PI * k / SideSegments, front + width + sideArc * k / SideSegments);
+            Stitch(ribbon, n + (openStart ? 0 : SideSegments) + (openEnd ? 0 : SideSegments), rows, inward);
 
             int rear = s_verts.Count;
-            for (int c = n - 1; c >= 0; c--) AppendRear(curtain, c, firstFallRow, 2f * sideArc + width + (width - s_along[c]));
+            for (int c = n - 1; c >= 0; c--) AppendRear(curtain, c, firstFallRow, front + sideArc + width + (width - s_along[c]));
             Stitch(rear, n, rows - firstFallRow, inward);
             return true;
         }
@@ -361,6 +605,7 @@ namespace VerdantsAscent.Terrain.Voxel
             internal float Width;
             internal float FadeLength;
             internal float Seed;
+            internal bool OpenStart, OpenEnd;   // The run continues past that end (no cap, no fade)
         }
 
         private static float SlabThickness(float thickness, float fall, float length, bool closesOnGround)
@@ -383,7 +628,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void AppendFront(in CurtainPart curtain, int c, float across)
         {
-            float openEdge = Mathf.Min(s_along[c], curtain.Width - s_along[c]);
+            float openEdge = Mathf.Min(curtain.OpenStart ? OpenEdgeFar : s_along[c], curtain.OpenEnd ? OpenEdgeFar : curtain.Width - s_along[c]);
             Vector3 dir = s_dirs[c];
             for (int r = 0; r < curtain.Rows; r++)
             {
@@ -415,7 +660,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // The rear face, seen only from behind the fall, starts at the lip where it lies on the front.
         private static void AppendRear(in CurtainPart curtain, int c, int firstRow, float across)
         {
-            float openEdge = Mathf.Min(s_along[c], curtain.Width - s_along[c]);
+            float openEdge = Mathf.Min(curtain.OpenStart ? OpenEdgeFar : s_along[c], curtain.OpenEnd ? OpenEdgeFar : curtain.Width - s_along[c]);
             Vector3 normal = -s_dirs[c];
             for (int r = firstRow; r < curtain.Rows; r++)
             {
@@ -520,7 +765,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return s_verts.Count;
         }
 
-        // The rush of a fall is the jack-o-turnip's fire loop pitched far up: the user's in-game recipe
+        // The rush of a fall is the jack-o-turnip's fire loop pitched far up, from an in-game recipe
         // (spawn_object piece_jackoturnip f=ZSFX,minPitch,15 f=ZSFX,maxPitch,16), without the piece around it.
         private const string SoundPrefab = "piece_jackoturnip";
         private const string SoundObject = "sfx_fire_loop";

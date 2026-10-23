@@ -7,11 +7,11 @@ using UnityEngine.UI;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The Chunk Generator's two windows (Tools\CHUNK_GENERATOR.md): the ore hopper lists the recipes this player has
+    // The Chunk Generator's two windows: the ore hopper lists the recipes this player has
     // learned (hidden until learned) and switches the machine to one; the door shows the fuels the current recipe burns
     // that the player carries, and a click opens an amount step, so fuels can be mixed. Both are vanilla's own panels,
     // borrowed at runtime (ZoneModeChunkGeneratorWindows); if one cannot be borrowed the player gets a centre message
-    // and the log says what was missing. This file holds what both share, the way Tools\FIRES_CLICKABLE_UI_RECIPE.md
+    // and the log says what was missing. This file holds what both share, as the shared clickable-UI recipe
     // sets out: a canvas of its own at the game's GUI scale, input blocked, registered with ModUiRegistry, the cursor
     // forced in OnGUI and the crosshair kept out of the way.
     internal static class ZoneModeChunkGeneratorMenu
@@ -150,8 +150,8 @@ namespace VerdantsAscent.Terrain.Zones
                 CrosshairRaycast.Reassert(s_crosshairRaycasts);
                 SetCrosshairHidden(true);
                 ZoneModeChunkGeneratorWindows.Tick();
-                if (Input.GetKeyDown(KeyCode.Escape)) s_escape?.Invoke();
-                else if ((Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) && s_enter != null) s_enter();
+                if (VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.Escape)) s_escape?.Invoke();
+                else if ((VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.Return) || VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.KeypadEnter)) && s_enter != null) s_enter();
             }
 
             private void OnGUI()

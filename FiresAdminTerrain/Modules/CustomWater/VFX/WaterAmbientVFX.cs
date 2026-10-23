@@ -14,7 +14,7 @@ namespace VerdantsAscent.Water.Core
     /// - Re-created on combiner restore/regeneration
     /// 
     /// FIVE EFFECT TYPES:
-    /// 1. SHORELINE SPLASH - particle mist at water/terrain boundary edges (NOT spawned since 0.2.688: Fire, standing water)
+    /// 1. SHORELINE SPLASH - particle mist at water/terrain boundary edges (NOT spawned: unwanted on standing water)
     /// 2. SHORELINE FOAM - subtle white particle line along banks
     /// 3. WATERFALL SPRAY - mist VFX at cliff cells (>2m drop)
     /// 4. SURFACE DEBRIS - floating leaves/foam bits drifting on the water surface
@@ -103,8 +103,7 @@ namespace VerdantsAscent.Water.Core
             // Detect features from combiner grid data
             var cliffData = _combiner.GetCliffCellData();
 
-            // 1. Shoreline splash: REMOVED 0.2.688 (Fire 10-01, on the HR4 homestead pond: "Our standing water doesn't need
-            // these drip fx … these ones at the edge of the pond we should remove from our water placement"). Combiners are
+            // 1. Shoreline splash: REMOVED (standing water doesn't need drip fx at the pond's edge). Combiners are
             // FAT's standing water (pools, ponds, painted disks); flowing water is the generated sheet, which never had
             // this. Waterfall spray (cliff cells) and the surface specks stay. DetectShorelineEdges/SpawnShorelineSplash are
             // kept, unused, for an opt-in later.

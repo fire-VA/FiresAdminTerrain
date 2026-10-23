@@ -75,6 +75,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const string VanillaHammer = "Hammer";
         private const string ForgePrefab = "forge";
         private const string WorkbenchPrefab = "piece_workbench";
+        private const int ChunkHammerStationLevel = 1;   // the workbench level the Chunk Hammer needs
         private const int ForgeLevel = 1;
 
         private static readonly int[] Boss = { 6, 3 };
@@ -292,7 +293,10 @@ namespace VerdantsAscent.Terrain.Zones
                 {
                     var cost = new Piece.Requirement[vanilla.m_resources.Length];
                     for (int i = 0; i < cost.Length; i++) cost[i] = Copy(vanilla.m_resources[i]);
-                    if (Put(db, hammer, vanilla.m_craftingStation, vanilla.m_minStationLevel, cost, vanilla.m_repairStation)) added++;
+                    // The Chunk Hammer is a tool, built at the WORKBENCH (level 1, like every early tool).
+                    // It used to copy the vanilla Hammer's station, and the vanilla Hammer is hand-crafted (no station): a recipe with
+                    // no station is listed at EVERY bench, the Jeweler and FRC's stations included. The cost is still the Hammer's.
+                    if (workbench != null && Put(db, hammer, workbench, ChunkHammerStationLevel, cost, workbench)) added++;
                 }
             }
             if (forge != null && Drop(ZoneModePrefabs.ChaosHammerPrefab) is ItemDrop chaos)
@@ -326,6 +330,13 @@ namespace VerdantsAscent.Terrain.Zones
         private static bool Put(ObjectDB db, ItemDrop item, CraftingStation station, int stationLevel, Piece.Requirement[] cost,
             CraftingStation repairStation = null)
         {
+            // Every chunk recipe names its station where it is built. A null here is a bug at that call site: it is
+            // refused and logged, never quietly given a bench (a station-less recipe would show at every bench).
+            if (station == null)
+            {
+                FiresLogger.LogWarning($"[FiresZones] recipe for {item.name} has no crafting station; not added (fix its Put call in ZoneModeSeeds.Register).");
+                return false;
+            }
             string name = "Recipe_" + item.name;
             if (!s_recipes.TryGetValue(name, out var recipe) || recipe == null)
             {
@@ -380,7 +391,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         // Chunk recipes appear only in zone-mode worlds, and the Chunk Hammer's only after its owner has held one: the
         // first comes from a chest in a cave beneath the starting land. The Chaos Hammer carries every admin terrain
-        // tool, so it is an admin's recipe in any world and nobody else's (Fire, 2026-09-27).
+        // tool, so it is an admin's recipe in any world and nobody else's.
         [HarmonyPatch(typeof(Player), nameof(Player.HaveRequirements), new[] { typeof(Recipe), typeof(bool), typeof(int), typeof(int) })]
         private static class Player_HaveRequirements_ChunkRecipes
         {

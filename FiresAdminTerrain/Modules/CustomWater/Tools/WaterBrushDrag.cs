@@ -50,8 +50,7 @@ namespace VerdantsAscent.Water.Tools
         private const int MAX_DABS_PER_FRAME = 16;
 
         // Reuse the terrain brush's resistance defaults so the feel
-        // matches. User explicitly liked the round-40 resistance bump
-        // and asked for waterfall to feel the same.
+        // matches.
         private const float LAZY_POINTER_RADIUS = 0.5f;
         private const float LAZY_POINTER_FACTOR = 0.75f;
         private const float MAX_BRUSH_JUMP_PER_FRAME_RATIO = 0.5f;
@@ -154,7 +153,7 @@ namespace VerdantsAscent.Water.Tools
             if (player == null) return;
             if (!IsOurBrushToolSelected(player)) return;
 
-            if (!Input.GetMouseButton(0))
+            if (!VerdantsAscent.Terrain.FatInput.PrimaryHeld)
             {
                 if (_strokeActive) _strokeActive = false;
                 return;
@@ -167,7 +166,7 @@ namespace VerdantsAscent.Water.Tools
 
             // Prefer the IH ruler position over our own raycast so the
             // water brush stays exactly where the user sees the ring
-            // (same round-40 ruler-stays-locked behavior the terrain
+            // (the same ruler-stays-locked behavior the terrain
             // brush uses).
             Vector3 rawCursor;
             if (!InfinityHammerRulerProbe.TryGetRulerPosition(out rawCursor))
@@ -223,10 +222,12 @@ namespace VerdantsAscent.Water.Tools
             float spacing = _radius * spacingRatio;
             if (spacing < 0.01f) return;
 
-            // Round-63 — same draw-speed throttle as the terrain pump
+            // Same draw-speed throttle as the terrain pump
             // (shared TileBrushModes.DrawSpeed, `va_brush_drawspeed`).
+            // Per second, not per frame (see TileBrushDrag).
             _dabBudget = Mathf.Min(
-                _dabBudget + VerdantsAscent.Terrain.Persistence.TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME,
+                _dabBudget + VerdantsAscent.Terrain.Persistence.TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME
+                    * VerdantsAscent.Terrain.Persistence.TileBrushDrag.DRAW_SPEED_REFERENCE_FPS * Time.deltaTime,
                 MAX_DABS_PER_FRAME);
 
             while (_dabBudget >= 1f)
@@ -248,7 +249,7 @@ namespace VerdantsAscent.Water.Tools
             }
         }
 
-        // Round-63 — fractional dab allowance for the draw-speed throttle.
+        // Fractional dab allowance for the draw-speed throttle.
         private float _dabBudget;
 
         private void DispatchAt(Vector3 cursor)
@@ -272,9 +273,9 @@ namespace VerdantsAscent.Water.Tools
                     // Waterfall: each dab sits a constant distance above
                     // the local terrain. Surface FOLLOWS the slope so the
                     // water reads as flowing down the cliff face at
-                    // uniform thickness. Round-68: physics probe against
+                    // uniform thickness. Physics probe against
                     // real colliders — GetGroundHeight is heightmap-blind
-                    // and put dabs meters under custom cliffs.
+                    // and would put dabs meters under custom cliffs.
                     if (TryProbeGroundBelow(cursor, out float terrainY))
                         placeCenter = new Vector3(cursor.x, terrainY + WATERFALL_OFFSET, cursor.z);
                     else
@@ -296,7 +297,7 @@ namespace VerdantsAscent.Water.Tools
             }
         }
 
-        // Round-68 — ground probe against REAL colliders for waterfall
+        // Ground probe against REAL colliders for waterfall
         // dabs (and the waterfall command's first dab). The dab point
         // comes from a crosshair raycast, so it already sits ON the
         // visible surface — probe a short window around it to normalize

@@ -56,7 +56,7 @@ namespace VerdantsAscent.Water.Core
 
             float distanceToWater = waterSurfaceY - characterPos.y;
 
-            // Phase F: TerrainCaveDetector removed (legacy cave system out
+            // No TerrainCaveDetector (the legacy cave system is out
             // of FAT scope). Players in caves no longer get a fast-path
             // skip on the water-detection raycast; they fall through to
             // the standard distance check below.
@@ -153,7 +153,7 @@ namespace VerdantsAscent.Water.Core
                 }
             }
 
-            // Round-84 — FiresLiquidWater vanilla-LiquidVolume pours (springs +
+            // FiresLiquidWater vanilla-LiquidVolume pours (springs +
             // water volumes). These aren't combiners or legacy water, so add
             // their surface here — this is what makes swimming trigger at the
             // top of our custom liquid mesh.
@@ -350,7 +350,7 @@ namespace VerdantsAscent.Water.Core
         #region Underwater Env / Buoyancy Integration
 
         /// <summary>
-        /// Round-85 — feed FiresLiquidWater pours into the GLOBAL water-level
+        /// Feed FiresLiquidWater pours into the GLOBAL water-level
         /// query. FiresUnderwaterEnv reads Floating.GetWaterLevel(eye) for its
         /// fog + submersion ramp (_FiresPlayerSubmerged) and the underwater env
         /// switch; buoyancy uses it too. So diving under a custom pool now fogs
@@ -520,7 +520,7 @@ namespace VerdantsAscent.Water.Core
                 return false; // Skip WearNTear.Remove entirely
             }
 
-            // Phase F: legacy TerrainCombinerAnchor type removed. The new
+            // No legacy TerrainCombinerAnchor type. The
             // tile-anchor system uses TileAnchor which has its own ZDO key
             // checked below. No need for a typed lookup here.
 
@@ -595,8 +595,9 @@ namespace VerdantsAscent.Water.Core
             {
                 // Initialize RPC handlers for real-time operations
                 WaterOperationRPC.Initialize();
-                global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // 0.2.689: va_ground_probe
-                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // 0.2.699: wavematch_test server step
+                global::VerdantsAscent.Water.Tools.WaterCleanupCommand.EnsureRpcs();   // va_water_cleanup_spread runs on the server
+                global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // va_ground_probe
+                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // wavematch_test server step
                 WaterPersistence.Initialize();
 
                 // Initialize file-based water cache (mirrors DirtFloorCombinerCache)
@@ -652,8 +653,9 @@ namespace VerdantsAscent.Water.Core
             try
             {
                 WaterOperationRPC.Initialize();
-                global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // 0.2.689: va_ground_probe
-                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // 0.2.699: wavematch_test server step
+                global::VerdantsAscent.Water.Tools.WaterCleanupCommand.EnsureRpcs();   // va_water_cleanup_spread runs on the server
+                global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // va_ground_probe
+                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // wavematch_test server step
                 WaterPersistence.Initialize();
             }
             catch (System.Exception ex)
@@ -829,6 +831,7 @@ namespace VerdantsAscent.Water.Core
         private static void Game_Update_Postfix_Water()
         {
             WaterCombinerCache.Update();
+            VerdantsAscent.Water.Core.SeasonalWaterFreeze.Tick();   // Vedr winter freezes/thaws FAT custom water (2 s throttle inside)
         }
 
         #endregion

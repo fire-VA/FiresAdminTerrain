@@ -42,6 +42,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static void ServerTick()
         {
+            FatUndergroundLocations.ServerTick();   // the delayed surface checks over underground locations
             if (Time.time < s_nextTick) return;
             s_nextTick = Time.time + TickSeconds;
             if (ZNet.instance == null || !ZNet.instance.IsServer() || ZDOMan.instance == null || ZNetScene.instance == null) return;

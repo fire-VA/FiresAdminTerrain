@@ -331,6 +331,9 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Checks if this disk overlaps with another disk (including blend distance).
         /// </summary>
+        // XZ only ON PURPOSE: two disks on a cliff top and at its foot overlap here and merge into one combiner, which is how
+        // a dragged pour draws its waterfall. Water that must NOT merge (a cave pond under a meadow pond, a sky island's pool
+        // over the lake below) is split by WaterMeshCombiner.IsTerrainBlockingBetweenDisks (island-aware).
         public bool OverlapsWith(WaterDisk other, float blendDistance = 0f)
         {
             if (other == null) return false;

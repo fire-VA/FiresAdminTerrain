@@ -28,8 +28,17 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (!VoxelOnlyMode.Active) return;
                 // Ghost = world-gen preview with no live heightmaps/voxels to
                 // level; only the real Full build gets a pad.
-                if (mode != ZoneSystem.SpawnMode.Full) return;
+                // Ghost too - a dedicated server generates zones as Ghost and never Full-spawns them later.
+                if (mode != ZoneSystem.SpawnMode.Full && !(mode == ZoneSystem.SpawnMode.Ghost && VerdantsAscent.Terrain.Zones.FatLocationAccelerator.LevelingOn)) return;   // 0.2.841b: new worlds only
                 if (location == null || location.m_snapToWater) return;
+                // Skylands used to reshape/recarve themselves on approach: a location on a skyland is
+                // levelled by the skyland's own shape (its site pad, flat before anything is carved), so it gets no GROUND
+                // pad. Registered at the island's height, that pad lifted the ground columns round it to ~215 m on spawn:
+                // the near voxels changed under the island's edge, and the far view never had them.
+                if (FiresSkyIslands.IsOnIslandExact(pos)) return;
+                // An underground location's floor is levelled by its own dome (FatUndergroundLocations); a ground pad
+                // at its depth would level the SURFACE columns down to it.
+                if (FatUndergroundLocations.IsUnderground(pos)) return;
 
                 string name = !string.IsNullOrEmpty(location.m_name)
                     ? location.m_name : location.m_prefabName;
@@ -39,6 +48,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     radius = ComputePadRadius(location);
                     s_padRadius[name] = radius;
+                }
+                // Relax the terrain delta and just level the area the location is placed on: a site the
+                // accelerator accepted over the location's own terrain delta gets a pad over its whole footprint.
+                if (VerdantsAscent.Terrain.Zones.FatLocationAccelerator.TryLevelSite(pos, out var site))
+                {
+                    radius = Mathf.Max(radius, site.Radius);
+                    float skirt = Mathf.Clamp(radius * 0.5f, 6f, 20f);   // FiresLocationPads.Register's apron
+                    FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "[LocationLevel] {0} at ({1:0},{2:0},{3:0}): footprint r {4:0.0}, delta before max {5:0.0} m -> levelled, skirt {6:0.0} m",
+                        location.m_prefabName, pos.x, pos.y, pos.z, radius, site.Delta, skirt));
                 }
                 if (radius <= 0f) return;   // no leveling intent — natural ground
 

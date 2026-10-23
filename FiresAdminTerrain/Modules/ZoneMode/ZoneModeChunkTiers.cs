@@ -3,8 +3,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The recipes of the one Chunk Generator (Tools\CHUNK_GENERATOR.md), in progression order: the plain Chunk Seed,
-    // which only ever brings a zone back as the world made it (Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md), and one seed per
+    // The recipes of the one Chunk Generator, in progression order: the plain Chunk Seed,
+    // which only ever brings a zone back as the world made it, and one seed per
     // biome, which raises its biome over any closed zone beside open land. A full load of fuel makes two plain seeds or
     // one biome seed. The plain recipe burns any biome's materials; a biome recipe burns its own biome's and every later
     // biome's, and is learned when the previous boss falls. The tier also names the old per-biome generator prefab its
@@ -73,8 +73,8 @@ namespace VerdantsAscent.Terrain.Zones
         private const float SampleOffset = 24f;
         private const int PlainLevel = -1;
 
-        // The item lists are the user-approved recipe draft (Tools\FAT_ZONE_MODE_PLAN.md), with every ID taken from
-        // the 1.0 data in Tools\ZONE_MODE_BIOME_DATA.md. No item is in two lists.
+        // The item lists are the user-approved recipe draft, with every ID taken from
+        // the Valheim 1.0 data. No item is in two lists.
         internal static readonly ChunkTier[] All =
         {
             ChunkTier.Plain(PlainLevel, new[] { Cost("Stone", 20), Cost("Wood", 10) }),

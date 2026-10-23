@@ -9,8 +9,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // The height middle ground for a swapped chunk (Fire, 2026-09-27 14:4x and 20:5x; Tools\FAT_CHUNK_BLUEPRINTS_PLAN.md,
-    // "Height middle ground"). A zone raised with other land moves up or down AS A WHOLE, once, when it rises:
+    // The height middle ground for a swapped chunk. A zone raised with other land moves up or down AS A WHOLE, once, when it rises:
     //  - its land's edge median meets its open neighbours' edge median, sampled just either side of each edge it shares
     //    with an open zone; no blending, the cliffs stay;
     //  - never so low that ground dry in its source goes under the water line;
@@ -20,9 +19,9 @@ namespace VerdantsAscent.Terrain.Zones
     // The lift is stored with the zone's source (ZoneModeRegistry, section 4) and never changes after (a neighbour
     // opening later does not move it). Swapped zones saved before this carry none.
     //
-    // A lifted zone keeps its water (Fire, 15:00): its source's sea-covered ground shows FAT's own water at the lifted
+    // A lifted zone keeps its water: its source's sea-covered ground shows FAT's own water at the lifted
     // sea level (ZoneModeGate.TryLiftedSea, read by GenWaterField), and a narrow bank rises just over that water along
-    // the zone's edges so it sits up there like a raised pond (Fire, 20:5x); an edge it shares with a neighbour that
+    // the zone's edges so it sits up there like a raised pond; an edge it shares with a neighbour that
     // continues its land at the same lift has no bank, so the water runs on. Plants and creatures judge their altitude
     // against the lifted sea, so the chunk grows and spawns as its source did (the ground probe keeps the land's biome
     // there, FiresWorldGenBase.IsGenWetAt), creature AI takes it for water, its ocean depth is its source's, and a

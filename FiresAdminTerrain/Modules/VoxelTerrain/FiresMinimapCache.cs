@@ -116,12 +116,25 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // For fast server hops: on a client of a dedicated server the World has no file name, so
+        // GetSaveDirectory is the bare worlds_local folder, ONE cache shared by every server world this client joins. With FAD
+        // hops between a chunk-by-chunk world and a full world, B loaded A's chunk map (954's keep-while-unsynced made it visible;
+        // before, every join redrew). Each server world now gets its own folder, keyed by name and uid.
+        internal static string CacheDirectory(World world)
+        {
+            string dir = world.GetSaveDirectory(FileHelpers.FileSource.Local);
+            if (!IsDedicatedClient() || !string.IsNullOrEmpty(world.m_worldName)) return dir;
+            string name = world.m_name ?? "world";
+            foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+            return Path.Combine(dir, $"server_{name}_{world.m_uid:x}");
+        }
+
         // Mirrors Minimap.Start's own path setup, which a dedicated client skips.
         private static void EnsurePaths(Minimap map, World world)
         {
             if (!string.IsNullOrEmpty(SaveDirectory(map))) return;
 
-            string dir = world.GetSaveDirectory(FileHelpers.FileSource.Local);
+            string dir = CacheDirectory(world);
             if (FileHelpers.LocalStorageSupport == LocalStorageSupport.Supported) Directory.CreateDirectory(dir);
             SaveDirectory(map) = dir;
             MaskPath(map) = CompletePath(dir, "cacheMinimapMask");
@@ -150,6 +163,21 @@ namespace VerdantsAscent.Terrain.Voxel
             string stamped = File.Exists(sidecar) ? File.ReadAllText(sidecar).Trim() : null;
             string current = TerrainIdentity();
             if (stamped == current) return;
+            // On a dedicated client this check runs at LOAD, before the
+            // server's zone registry has synced, so MapIdentity() is still null and "current" lacks the "|zones:..." part the stamp
+            // got at SAVE time (after the sync). The two never matched on a zones world, and every join deleted the cache and
+            // redrew (~5-6 s). While the zone part is unknown, compare the generator part only and never delete on that
+            // partial view; a real generator change still redraws, and the save after the sync re-stamps the full identity.
+            if (stamped != null && IsDedicatedClient() && Zones.ZoneModeRegistry.MapIdentity() == null)
+            {
+                int bar = stamped.IndexOf('|');
+                string stampedGenerator = bar >= 0 ? stamped.Substring(0, bar) : stamped;
+                if (stampedGenerator == GeneratorIdentity())
+                {
+                    FiresLogger.LogInfo($"[FiresMinimap] zone state not synced yet; generator part matches ({stampedGenerator}) — keeping the cached minimap.");
+                    return;
+                }
+            }
 
             // Unstamped (drawn before this build) or drawn over different terrain.
             foreach (var path in new[] { MaskPath(map), BiomePath(map), HeightPath(map), meta, sidecar })

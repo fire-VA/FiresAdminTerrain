@@ -33,7 +33,7 @@ namespace VerdantsAscent.Terrain.BcImport
         // The layout every chunked world on this machine actually uses: the file sits INSIDE the world folder
         // and keeps the world-name prefix - `worlds_local\CratersAshlands\CratersAshlands.BetterContinents`.
         // Probing only the bare in-folder name missed it, which is why a converted-to-chunked BC world reported
-        // "nothing to convert" while its 147 MB of map data sat right there (2026-09-24).
+        // "nothing to convert" while its 147 MB of map data sat right there.
         private const string BesideWorldExtension = ".BetterContinents";
         private const string BesideWorldMetaExtension = ".fwl.BetterContinents";
         private const string KeptByPortUpgradeExtension = ".BetterContinents.pre10";

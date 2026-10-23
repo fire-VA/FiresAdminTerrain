@@ -7,10 +7,10 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // ── Nothing grows or stands under FAT water but stumps, logs and rocks (0.2.686) ─────────────────────────────────────
-    // Fire 10-01: "Our custom water should prevent things like trees and locations from spawning in it, only stumps logs
-    // and rocks for vegetation should be able to sit under the water"; and, watching the tests, "a few small beech trees
-    // and maybe some saplings in the water". One rule, by component first and name second, for three users:
+    // ── Nothing grows or stands under FAT water but stumps, logs and rocks ─────────────────────────────────────
+    // Our custom water keeps trees and locations from spawning in it; only stumps, logs
+    // and rocks for vegetation may sit under the water, plus a few small beech trees
+    // and maybe some saplings. One rule, by component first and name second, for three users:
     //   * generation: ZoneSystem.PlaceVegetation refuses a refused kind whose spot is under FAT water (Filter, spliced in
     //     right after vanilla's per-spot InsideClearArea test, so the spot is skipped exactly as a clear area skips it);
     //   * locations: WorldGenerator.GetTerrainDelta, vanilla's location suitability test, reports an impossible delta for
@@ -59,7 +59,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return false;
         }
 
-        // True for the kinds Fire allows under water (rocks, logs, stumps, water plants): step 4 lists them apart.
+        // True for the kinds allowed under water (rocks, logs, stumps, water plants): step 4 lists them apart.
         internal static bool IsAllowedUnderWater(GameObject go)
         {
             if (go == null || IsRefusedInstance(go)) return false;
@@ -219,22 +219,33 @@ namespace VerdantsAscent.Terrain.Voxel
                     + $"({s_locRefusedTotal} refused this session).");
         }
 
-        private static bool AreaWet(Vector3 c, float r)
+        private static bool AreaWet(Vector3 c, float r) => AreaWetCore(c, r, true);
+
+        // The location accelerator is multithreaded: the same refusal for a worker
+        // thread. Generated water only (GenWaterField: on Fires worlds the frozen generator field); tool water is
+        // player-made, never present while a world's locations are generated, and its combiners are Unity objects
+        // (Time, EnvMan), so it is left out. No tallies: the caller counts its own refusals.
+        internal static bool RefusesSite(Vector3 center, float radius)
+            => FiresVegWaterEcology.Enabled && radius > 0f && GenWaterField.Ready && AreaWetCore(center, radius, false);
+
+        private static bool AreaWetCore(Vector3 c, float r, bool toolWater)
         {
-            if (WetAt(c.x, c.z)) return true;
+            if (WetAt(c.x, c.z, toolWater)) return true;
             for (int k = 0; k < 8; k++)
             {
                 float a = k * (Mathf.PI / 4f);
                 float dx = Mathf.Cos(a), dz = Mathf.Sin(a);
-                if (WetAt(c.x + dx * r, c.z + dz * r) || WetAt(c.x + dx * r * 0.5f, c.z + dz * r * 0.5f)) return true;
+                if (WetAt(c.x + dx * r, c.z + dz * r, toolWater) || WetAt(c.x + dx * r * 0.5f, c.z + dz * r * 0.5f, toolWater)) return true;
             }
             return false;
         }
 
-        private static bool WetAt(float x, float z)
+        private static bool WetAt(float x, float z, bool toolWater)
         {
             float ground = WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(x, z) : 0f;
-            return UnderFatWater(new Vector3(x, ground, z), LocationDepth, out _);
+            if (toolWater) return UnderFatWater(new Vector3(x, ground, z), LocationDepth, out _);
+            return GenWaterField.TryWaterSurfaceSmooth(x, z, out float lvl, out float dep)
+                && dep > 0f && lvl > SeaSheetGate && lvl > ground + LocationDepth;
         }
     }
 }

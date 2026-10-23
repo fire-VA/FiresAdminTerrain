@@ -18,6 +18,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal ProfileGenerator? Generator;
         internal ProfileTerrain? Terrain;
         internal bool? SkyIslands, Hydrology, Caves;
+        internal bool? SkyIslandWater;   // False = the islands are born dry (New World's "Auto-place water on sky islands" off)
     }
 
     // Copies a world under a new name and a new world id and never touches the original. The copy is told how to be
@@ -61,7 +62,7 @@ namespace VerdantsAscent.Terrain.Voxel
             s_registered = true;
             new Terminal.ConsoleCommand(CommandName,
                 "Main menu: copy a world under a new name, leaving the original untouched. Usage: " + CommandName
-                + " <world> <new name> [chunks] [vanilla|fires] [heightmap|voxelwrap|voxelonly] [sky=on|off] [rivers=on|off] [caves=on|off]. "
+                + " <world> <new name> [chunks] [vanilla|fires] [heightmap|voxelwrap|voxelonly] [sky=on|off] [skywater=on|off] [rivers=on|off] [caves=on|off]. "
                 + "'chunks' makes the copy one zone at a time: what the world has explored is set aside zone by zone and returns "
                 + "as it was when each zone is opened.",
                 args =>
@@ -69,7 +70,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (args.Length < 3)
                     {
                         args.Context.AddString("Usage: " + CommandName + " <world> <new name> [chunks] [vanilla|fires] [heightmap|voxelwrap|voxelonly] "
-                            + "[sky=on|off] [rivers=on|off] [caves=on|off]");
+                            + "[sky=on|off] [skywater=on|off] [rivers=on|off] [caves=on|off]");
                         return;
                     }
                     if (!TryParseOptions(args.Args, out var options, out string problem))
@@ -116,9 +117,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 bool? value = eq > 0 ? ParseSwitch(word.Substring(eq + 1)) : null;
                 string key = eq > 0 ? word.Substring(0, eq) : word;
                 if (value.HasValue && key == "sky") { options.SkyIslands = value; continue; }
+                if (value.HasValue && key == "skywater") { options.SkyIslandWater = value; continue; }
                 if (value.HasValue && key == "rivers") { options.Hydrology = value; continue; }
                 if (value.HasValue && key == "caves") { options.Caves = value; continue; }
-                problem = $"'{words[i]}' is not an option. Options: chunks, vanilla, fires, heightmap, voxelwrap, voxelonly, sky=on|off, rivers=on|off, caves=on|off.";
+                problem = $"'{words[i]}' is not an option. Options: chunks, vanilla, fires, heightmap, voxelwrap, voxelonly, sky=on|off, skywater=on|off, rivers=on|off, caves=on|off.";
                 return false;
             }
 
@@ -231,7 +233,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 carried = CarryRecords(source, cloneName, profile);
                 // BC's file is named after the SAVE ("<save name>.BetterContinents"), and a renamed world's save name is not
                 // the name inside it: CratersAshlands.BetterContinents holds 'CratersAshlands', so looking it up by the inner
-                // name found nothing and the clone silently lost its whole BC map (2026-09-29, -firesclone CratersBCWrap).
+                // name found nothing and the clone silently lost its whole BC map.
                 string bcName = BcImport.BcSaveLocator.TryLocate(saveName, out _) ? saveName : source.m_name;
                 if (!BcImport.BcConvert.TryCarryTerrainToClone(bcName, cloneName, out string terrain))
                     FiresLogger.LogError($"[FiresWorldGen] {terrain}");
@@ -534,7 +536,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (profile.Generator != ProfileGenerator.Vanilla)
                 foreach (string from in SeedCaches(source.m_name, source.m_seed))
                 {
-                    File.Copy(from, Path.Combine(FiresWorldRecords.Folder, clonePrefix + Path.GetFileName(from).Substring(sourcePrefix.Length)), true);
+                    File.Copy(from, Path.Combine(FiresWorldRecords.WorldFolder(cloneName), clonePrefix + Path.GetFileName(from).Substring(sourcePrefix.Length)), true);
                     carried++;
                 }
             return carried;
@@ -554,7 +556,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // every world with that seed, so a leftover one under the clone's name is simply overwritten.
         private static IEnumerable<string> SeedCaches(string worldName, int seed)
         {
-            string folder = FiresWorldRecords.Folder;
+            string folder = FiresWorldRecords.WorldFolder(worldName);
             if (!Directory.Exists(folder)) yield break;
             string prefix = FiresWorldRecords.FilePrefix + FiresWorldRecords.SafeName(worldName) + "_";
             foreach (string path in Directory.GetFiles(folder, prefix + "*_r*.bin"))
@@ -579,6 +581,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (options.Generator.HasValue) profile.Generator = options.Generator.Value;
             if (options.Terrain.HasValue) profile.Terrain = options.Terrain.Value;
             if (options.SkyIslands.HasValue) profile.SkyIslands = options.SkyIslands;
+            if (options.SkyIslandWater.HasValue) profile.SkyIslandWater = options.SkyIslandWater;
             if (options.Hydrology.HasValue) profile.Hydrology = options.Hydrology;
             if (options.Caves.HasValue) profile.Caves = options.Caves;
             profile.Source = FiresWorldProfile.CloneSourcePrefix + sourceName;
@@ -587,7 +590,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // ── Launch argument: -firesclone <world> <new name> [options…] ──────────────
         // The same clone as the console command, run once at the main menu, after which the game quits: the rig makes a
-        // converted test world with one unattended client launch (2026-09-29, the voxel-wrapped BC world). The words after
+        // converted test world with one unattended client launch (for example a voxel-wrapped BC world). The words after
         // the argument, up to the next one starting with '-', are the console command's own words.
         private const string LaunchArgument = "-firesclone";
         private const int LaunchSettleFrames = 30;

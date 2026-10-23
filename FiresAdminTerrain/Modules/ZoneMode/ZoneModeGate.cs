@@ -280,7 +280,7 @@ namespace VerdantsAscent.Terrain.Zones
         // answer from the source, where that water is open sea.
         internal static bool IsLiftedSeaAt(float wx, float wy) => TryLiftedSea(wx, wy, out _, out _);
 
-        // The water a lifted zone keeps (Fire, 15:00): where its source's ground lies under the sea, the zone shows water
+        // The water a lifted zone keeps: where its source's ground lies under the sea, the zone shows water
         // at the lifted sea level over its raised ground. Banks along its edges stand clear of it.
         internal static bool TryLiftedSea(float wx, float wy, out float level, out float floor)
         {

@@ -124,9 +124,30 @@ namespace VerdantsAscent.Terrain.Biome
             FiresLogger.LogInfo("[BiomeFilePersistence] Initialized biome persistence system");
         }
 
-        // A local world's painted biomes: <worlds_local>\<world>.biomedata, beside its save.
+        // A local world's painted biomes: inside its own save folder (<worlds_local>\<world>\<world>.biomedata) when the world
+        // is a 1.0 folder world, so worlds_local holds one folder per world; beside the save for an old
+        // single-file world. A loose copy left by an older build moves into the folder (the newer one wins).
         internal static string LocalPathFor(string worldName)
-            => Path.Combine(SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local), worldName + FILE_EXTENSION);
+            => InWorldFolder(SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local), worldName);
+
+        private static string InWorldFolder(string root, string worldName)
+        {
+            string loose = Path.Combine(root, worldName + FILE_EXTENSION);
+            string folder = Path.Combine(root, worldName);
+            if (!Directory.Exists(folder)) return loose;
+            string inside = Path.Combine(folder, worldName + FILE_EXTENSION);
+            try
+            {
+                if (File.Exists(loose) && (!File.Exists(inside) || File.GetLastWriteTimeUtc(loose) > File.GetLastWriteTimeUtc(inside)))
+                {
+                    if (File.Exists(inside)) File.Delete(inside);
+                    File.Move(loose, inside);
+                    FiresLogger.LogInfo($"[BiomeFilePersistence] moved {worldName}{FILE_EXTENSION} into the world's folder.");
+                }
+            }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[BiomeFilePersistence] could not move {worldName}{FILE_EXTENSION}: {ex.Message}"); }
+            return inside;
+        }
 
         /// <summary>
         /// Gets the biome data file path for the current world.
@@ -149,7 +170,7 @@ namespace VerdantsAscent.Terrain.Biome
                             string worldFolder = SaveSystem.GetWorldsSaveRootPath(world.m_fileSource);
                             if (!string.IsNullOrEmpty(worldFolder) && !string.IsNullOrEmpty(worldName))
                             {
-                                return Path.Combine(worldFolder, worldName + FILE_EXTENSION);
+                                return InWorldFolder(worldFolder, worldName);
                             }
                         }
                     }
@@ -160,7 +181,7 @@ namespace VerdantsAscent.Terrain.Biome
             // Last resort: BepInEx config path
             if (worldName != "unknown")
             {
-                string fallbackPath = Path.Combine(BepInEx.Paths.ConfigPath, "BiomeData", worldName + FILE_EXTENSION);
+                string fallbackPath = Path.Combine(global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "BiomeData"), worldName + FILE_EXTENSION);   // Out of config
                 string dir = Path.GetDirectoryName(fallbackPath);
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 return fallbackPath;

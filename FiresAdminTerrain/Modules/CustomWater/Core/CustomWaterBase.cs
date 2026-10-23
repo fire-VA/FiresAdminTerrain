@@ -517,7 +517,7 @@ namespace VerdantsAscent.Water.Core
 
         protected float SampleTerrainHeight(Vector3 worldPos)
         {
-            // Phase F: legacy DirtFloorZoneRegistry path removed. Sample
+            // The legacy DirtFloorZoneRegistry path is gone. Sample
             // the new tile-anchor system instead.
             if (VerdantsAscent.Terrain.Persistence.TileAnchorRegistry
                     .TrySampleHeightAtWorld(worldPos, out float tileH))

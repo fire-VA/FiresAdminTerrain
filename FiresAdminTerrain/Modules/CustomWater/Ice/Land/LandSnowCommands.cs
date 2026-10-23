@@ -71,7 +71,7 @@ namespace VerdantsAscent.Water.Tools
 
             position.y += heightOffset;
 
-            // 2026-05-26 round-26 §2.2: spawn via dedicated VALandSnow
+            // Spawn via dedicated VALandSnow
             // anchor (NOT ice1) so persistence lives on a clean ZDO with
             // the `va_landsnow_*` keyspace, not shared with anything else.
             var ctrl = VerdantsAscent.Water.Core.LandSnowAnchor.SpawnNew(position);

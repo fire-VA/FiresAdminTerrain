@@ -38,7 +38,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetRawWaterCell(float wx, float wz, out float level, out float depth)
         {
             level = 0f; depth = 0f;
-            var ws = _waterS; var gs = _gridS;
+            var ws = WaterF; var gs = _gridS;   // Packed view
             if (ws == null || gs == null) return false;
             int n = _res; float half = _half; float cell = (2f * half) / (n - 1);
             int gx = Mathf.Clamp(Mathf.RoundToInt((wx + half) / cell), 0, n - 1);
@@ -52,7 +52,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // RIVER BED-CARVE at (wx,wz): how far the deliberate water plan incised the ground BELOW the analytic
         // FiresTerrain3D surface — 0 everywhere except along river/water beds. The voxel gen subtracts this so a
         // real channel exists in the terrain the plan's water sits in (containment: banks stand above the level).
-        // ═══ SIGNED, AND THAT IS THE WHOLE POINT (2026-08-15) — renamed from RiverCarveAt ═══════════════
+        // ═══ SIGNED, AND THAT IS THE WHOLE POINT — renamed from RiverCarveAt ═══════════════
         // (analytic surface) − _gridS. POSITIVE where the gen cut the ground down (river beds, lake bowls),
         // NEGATIVE where it built the ground up (the ±1.75 m surface detail's up-half, river BANKS, berms,
         // depression fill). Subtracting it from SurfaceElev reproduces _gridS EXACTLY, which is the point:
@@ -72,7 +72,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // FiresTerrain3D.Density's `carve` input, where a negative value correctly RAISES the surface and the
         // cave guarantees follow it) and FiresFarTerrain's backdrop. Nothing treats it as non-negative.
         //
-        // ⚠ 2026-08-09 REGRESSION FIX: the analytic macro surface is computed HERE, internally, NOT taken from the
+        // ⚠ REGRESSION FIX: the analytic macro surface is computed HERE, internally, NOT taken from the
         // caller. The old signature took `surfaceHere` "which VoxelChunk already has as _genGround[col], no recompute"
         // — but the perf §1 "bake-first" change re-sourced _genGround from the INCISED _gridS bake (StreamGroundBiomeJob
         // useBake=1), so the caller was passing the incised grid → carve = _gridS − _gridS ≈ 0 → rivers stopped cutting
@@ -131,7 +131,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // === HOW MANY TIMES A SECOND IS THIS CALLED? ====================================================
-        // ([clutter] asked, 2026-09-07: they have us at 0.0556 us/call and 0.000 bytes/call from qbench, so
+        // (Measured at 0.0556 us/call and 0.000 bytes/call by qbench, so
         // calls/s was the only missing factor in "is TryGetWaterSurfaceSmooth worth chasing".)
         // WARNING - SCOPE: this counts EVERY caller: the 8 render-side sites across 5 systems, the ~24
         // internal uses in this file, and the apply path. The ms/s it yields is an UPPER BOUND on any one
@@ -170,7 +170,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetWaterSurfaceGen(float wx, float wz, out float level, out float depth)
         {
             level = 0f; depth = 0f;
-            var s = _surfS; var g = _gridS;
+            var s = SurfF; var g = _gridS;   // Packed view
             if (s == null || g == null) return false;
             float half = _half;
 
@@ -190,7 +190,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             // WET LEVEL AT FULL 2m RES. The world moved to a 2m grid exactly
             // so water could be RIGHT — and the 8m reconciled surface then
-            // block-MAXED the wet level anyway (user-diagnosed as the wrong
+            // block-MAXED the wet level anyway (the wrong
             // play). On a steep stream one 8m block is a flat plate 2m+ above
             // the next: the giant staircase. On a bowl rim the block holding
             // both the flat cap and an inflow's higher cells took the inflow's
@@ -198,7 +198,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // REAL field; dry corners extend flat from the wettest corner so
             // the sheet still tucks into banks. The 8m envelope below serves
             // ONLY dry shore margins (paint rise, skirt feather, CUT holes).
-            var wf = _waterS;
+            var wf = WaterF;   // Packed view
             if (wf != null)
             {
                 float w00 = wf[i] * UNPACK, w10 = wf[i + 1] * UNPACK;
@@ -217,27 +217,27 @@ namespace VerdantsAscent.Terrain.Voxel
                     level = v00 * (1f - fx) * (1f - fz) + v10 * fx * (1f - fz)
                           + v01 * (1f - fx) * fz + v11 * fx * fz;
                     // LIVE per-family relief (v106: river vs still sliders; sea untouched).
-                    // (2026-08-12) RELIEF TAPERS OUT AT THE TIDAL MARGIN. Bank relief is freeboard under the
+                    //  RELIEF TAPERS OUT AT THE TIDAL MARGIN. Bank relief is freeboard under the
                     // BANKS — but a river at its mouth has no banks left, it is level with the sea. Subtracting
                     // the full 0.84 near the shoreline pushed the surface BELOW sea, where the sheet builder
                     // (rightly) refuses to draw inland water — chopping the last reach into 0.2-0.4m slivers at
-                    // surf≈30.0 with a floating cut edge (user screenshots at X≈-1800..-1830). Clamping the
+                    // surf≈30.0 with a floating cut edge (seen at X≈-1800..-1830). Clamping the
                     // dropped level so water that was above the sea STAYS above it keeps the ribbon continuous
                     // all the way to the shoreline, where the terrain falls below SEA and the ocean takes over.
-                    // ⭐ RELIEF MAY NEVER EXCEED THE WATER'S OWN DEPTH. (user, 2026-09-02, `waterat` on a lake
+                    // ⭐ RELIEF MAY NEVER EXCEED THE WATER'S OWN DEPTH. (`waterat` on a lake
                     // shore: "class LAKE genGround 54.0 surfaceSmooth 53.2 (depth 0.1)" — the lake drawn
                     // 0.8 m UNDER ITS OWN BED.) Relief means "the surface sits this far below its banks", and
                     // as an unconditional subtraction it contradicts the beds the generator actually cut:
                     // a still body's edge cells are held at level − SHELF (0.25 m) by the containment pass
                     // while StillRelief takes 0.84 m off them, so THE SHORELINE RING OF EVERY LAKE AND POND
-                    // RENDERS DRY — which is the sand-coloured "bank" around still water in his screenshots.
+                    // RENDERS DRY — which is the sand-coloured "bank" seen around still water.
                     // The rivers had the identical contradiction against their 0.35 m wetted core, fixed on
                     // the terrain side by cutting the core to 1.20 m; this is the same law where the two
                     // numbers actually meet, and it covers every family at once.
                     // Full relief still applies wherever there IS depth for it — this only refuses to draw
                     // water below the ground it lies on, which was never a look, only an error.
                     // ⭐ THE SOLVED LEVEL *IS* THE SURFACE — RELIEF IS NOT SUBTRACTED AGAIN HERE.
-                    // (user, 2026-09-02: "at the default .84 rivers sit WAY TOO LOW in their carves", and a
+                    // (At the default .84 rivers sat WAY TOO LOW in their carves, and a
                     // berm still drawn between river and still water with the slider raised to −0.5.)
                     // Bank relief is applied ONCE, at GENERATION: RiverLevels solves every ribbon against
                     // `min(bankL,bankR) − RELIEF` (0.84 m), so the stored level ALREADY sits that far under
@@ -258,10 +258,10 @@ namespace VerdantsAscent.Terrain.Voxel
                             level = dropped < SEA + 0.05f ? SEA + 0.05f : dropped;
                         }
                     }
-                    // (v106c, user: "when the level drops the mesh size should NOT") COVERAGE is decided by
+                    // (v106c: when the level drops, the mesh size must NOT) COVERAGE is decided by
                     // the UNDROPPED data (the wet-corner test above); relief moves HEIGHT ONLY. The old
                     // dry-out here shrank the footprint as the slider dropped — the sheet edge RETREATED
-                    // from the banks (jagged floating edges short of shore, user screenshot) instead of
+                    // from the banks (jagged floating edges short of shore) instead of
                     // tucking under them. Where the dropped surface dips below the shore ground the TERRAIN
                     // CLIPS the sheet — buried edge, exactly right. Depth floors at 0.05 so the node still
                     // emits; swim/physics see the level under their feet there and correctly ignore it.
@@ -284,7 +284,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 // EDGE HEAL: a bilinear touching a suppressed cell used to
                 // return "no water", which pulled the store/sheet up to a
-                // full 8m short of banks and pond walls (user screenshots:
+                // full 8m short of banks and pond walls (the
                 // sheet ending mid-bowl). Fall back to the NEAREST live cell
                 // so coverage runs flush to the last wet cell.
                 int nxi = sfx < 0.5f ? sxi : sxi + 1;
@@ -310,14 +310,14 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ═══ IS THIS WATER IN A CANYON? — DERIVED AT RUNTIME, ON PURPOSE ══════════════════════════════════
-        // (User, 2026-08-20: "a river flowing through a canyon should read as canyon river, not river
-        // (flowing)" — so they can tell from inside the world whether the reaches that look wrong are the
+        // (A river flowing through a canyon reads as canyon river, not river
+        // (flowing), so in game it can be told whether the reaches that look wrong are the
         // canyon ones.)
         // ⚠ IT IS NOT READ FROM `LastIncisionClass`, AND THAT IS DELIBERATE. That array is produced by
         // ClassifyChannelIncision DURING GENERATION and is NOT baked into the artifact, so on a RESTORED world
         // — which is every normal launch — it is null. A label that only worked on the one launch that
         // generated the world would be worse than no label: it would read "River" in exactly the sessions the
-        // user is inspecting. This asks the TERRAIN instead, which the artifact does carry.
+        // player is inspecting. This asks the TERRAIN instead, which the artifact does carry.
         // The test is the same one the `riverfield` C. CANYON vs OPEN census uses, so the in-world label and
         // the offline measurement always agree about what a canyon is: a wall standing WALL_M above the water
         // within RING_M of it. Sampled on a ring rather than a filled block — this runs per HUD frame.
@@ -328,8 +328,8 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!TryGetWaterSurfaceSmoothReal(wx, wz, out float lvl, out _)) return false;
 
             // ═══ A CANYON HAS TWO WALLS. ONE IS A HILLSIDE. ══════════════════════════════════════════════
-            // (user, 2026-08-31, on a map full of pins in flat lake country: "clearly something is wrong
-            // because these areas marked as canyons are anything but".)
+            // (A map full of canyon pins in flat lake country: those areas
+            // were anything but canyons.)
             // ⛔ THIS USED TO RETURN TRUE ON *ANY* OF 32 SAMPLES — 8 spokes x radii 4..16. So a single steep
             // bank on ONE side, which is what most rivers in rolling terrain have, satisfied it. That is a
             // riverbank against a hill, not a canyon, and it is why the survey pinned lowland lake country
@@ -410,7 +410,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // coherence pass, which only tunes the visual chop). Physics reads this
         // so buoyancy bobs with the visual rolling swell. Zero = still / dry.
         // ── WHICH WAY IS DOWNHILL, MEASURED OVER A DISTANCE WHERE THE DROP IS REAL ──────────────────────
-        // The user's framing, and it is the right one: a reach that runs y 114 → y 100 is unambiguously
+        // The right framing: a reach that runs y 114 → y 100 is unambiguously
         // flowing downhill and we already know which way that is — the water surface itself says so.
         //
         // Nothing here needs the river plan, its polyline ordering, or any bed gradient. It reads the SAME
@@ -562,7 +562,7 @@ namespace VerdantsAscent.Terrain.Voxel
         //  resident field the water-sheet builder samples per vertex → four
         //  shader channels + a real mesh-Y deform.
         //
-        //  CHANNEL CONTRACT (COORDINATION.md 2026-08-09, LOCKED to UV3 —
+        //  CHANNEL CONTRACT (LOCKED to UV3 —
         //  supersedes the doc's stale UV2 table):
         //    UV3.x = surface HEIGHT perturbation (m, signed)  → also deforms vert Y
         //    UV3.y = AERATION 0..1 (entrained-air / whitewater)
@@ -586,7 +586,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // ═══════════════════════════════════════════════════════════════════
         private static Dictionary<int, uint> _obst;   // cell(gz*n+gx) → packed {pert,aer,vort,lock}; absent = calm
         // ═══ COARSE REJECT MASK FOR THE DISTURBANCE FIELD ════════════════════════════════════════════════
-        // (2026-09-04, measured: `TryGetObstacleDisturbance` is 0.1344 us/call against 0.0066 for
+        // (Measured: `TryGetObstacleDisturbance` is 0.1344 us/call against 0.0066 for
         // WaterClassAt and 0.0197 for TryGetGenGround — 61 % of the modelled per-corner cost of the water
         // sheet's corner pass, which is `apply.water`'s biggest remaining component at 111–345 ms/s.)
         // The reason is not that the lookup is slow, it is that it ALMOST ALWAYS MISSES: the field is a
@@ -696,7 +696,7 @@ namespace VerdantsAscent.Terrain.Voxel
             float pert, float aer, float vort, float lok)
         {
             // === THE DISCARDED BOOL IS SAFE HERE, AND ITS SAFETY IS FRAGILE. READ THIS BEFORE ADDING ===
-            // === A BRANCH ON PRESENCE. (2026-09-07, [clutter]'s taxonomy after the `fb` bug.) =========
+            // === A BRANCH ON PRESENCE. (After the `fb` bug.) =========
             // Nothing below asks whether the key EXISTED: accumulate-then-store gives the identical
             // result for a miss (zeroed struct) and for a real all-zero entry, so the distinction is not
             // needed and the bool is genuinely irrelevant - not merely "recovered elsewhere".
@@ -709,7 +709,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // (Contrast :907-910, which read the same dictionary and DO test the flag. Both forms are
             // correct for what they do; do not "tidy" one into the other.)
             acc.TryGetValue(idx, out var d);
-            // ⚠ HEIGHTS SUPERPOSE BUT ARE CAPPED (2026-08-18, user: the filled channel "still pretty lumpy").
+            // ⚠ HEIGHTS SUPERPOSE BUT ARE CAPPED (the filled channel was still lumpy).
             // `pert` is added to VERTEX Y in VoxelChunkView — it is real geometry, not a shader tint — and
             // this sum had no bound. A single feature is PILLOW_H 0.30 m / WAVE_H 0.35 m, but the bake stamps
             // 9,522 mid-stream obstacles + 1,306 waterfall bases + 247,654 collar cells into 323,260 cells, so
@@ -733,7 +733,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // back to the bed gradient where the surface is flat. gx,gz in [1,n-2].
         private static void CellFlow(int gx, int gz, out float fx, out float fz, out float depth)
         {
-            int n = _res; var w = _waterS; var g = _gridS;
+            int n = _res; var w = WaterF; var g = _gridS;   // Packed view
             int i = gz * n + gx;
             depth = (w[i] - g[i]) * UNPACK; fx = 0f; fz = 0f;
             float lxm = w[i - 1] * UNPACK, lxp = w[i + 1] * UNPACK, lzm = w[i - n] * UNPACK, lzp = w[i + n] * UNPACK;
@@ -752,7 +752,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void BakeObstacleDisturbance()
         {
             _obst = null; _obstTile = null; _obstTileN = 0;
-            var g = _gridS; var w = _waterS; var rm = _riverMask;
+            var g = _gridS; var w = WaterF; var rm = RiverF;   // Packed views
             int n = _res;
             if (g == null || w == null || rm == null || n < 8) return;
             float half = _half; float cell = (2f * half) / (n - 1);
@@ -762,7 +762,7 @@ namespace VerdantsAscent.Terrain.Voxel
             const float WAKE_LEN = 10f, EDDYOFF = 2.5f, EDDYSIG = 1.6f;
             const float EDDY_VORT = 0.9f, EDDYLINE_AER = 0.55f, EDDY_DIP = 0.12f;
             const float WAVE_H = 0.35f, WAVE_HALFW = 3f, WAVE_TRAIN = 2.5f, WAVE_CREST_AER = 0.7f;
-            const float COLLAR_AER = 0.28f, COLLAR_LIFT = 0.04f;   // thin BANK ACCENT only — kept under the shader's smoothstep(0.5,0.9) foam gate so a narrow river's all-bank-adjacent cells don't wash milky (shaders 2026-08-09); real rapids/eddyline/backwash still foam from their own higher UV3.y
+            const float COLLAR_AER = 0.28f, COLLAR_LIFT = 0.04f;   // thin BANK ACCENT only — kept under the shader's smoothstep(0.5,0.9) foam gate so a narrow river's all-bank-adjacent cells don't wash milky; real rapids/eddyline/backwash still foam from their own higher UV3.y
             const float BACK_AER = 1f, BACK_DIP = 0.25f;
             const int RWIN = 9;   // kernel window radius (cells) — covers the wake/wave train
 
@@ -901,7 +901,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                         // Scaled by flow strength sn: a slow reach barely swirls, a fast one swirls
                                         // hard. Rapids features MUST key off real current — an unscaled full-strength
                                         // vortex on a near-still obstacle is what the shader renders as the ugly
-                                        // concentric smear (user: inland flow "looks really bad, needs tuning").
+                                        // concentric smear (inland flow looked bad).
                                         float shear = Mathf.Exp(-((latA - EDDYOFF) * (latA - EDDYOFF)) / (2f * EDDYSIG * EDDYSIG));
                                         StampDist(acc, ci, 0f, EDDYLINE_AER * shear * decay * sn,
                                                   Mathf.Sign(lat) * EDDY_VORT * shear * decay * sn, 0f);
@@ -927,7 +927,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             if (acc.Count > 0)
             {
-                // ⚠ BLUR THE HEIGHT TERM BEFORE PACKING (2026-08-18, same user report: "still pretty lumpy").
+                // ⚠ BLUR THE HEIGHT TERM BEFORE PACKING (the filled channel was still lumpy).
                 // Every feature above is stamped per 2 m CELL with a hard footprint test (`u < Lp`,
                 // `latA < PILLOW_W + …`), so a pillow's edge is a cliff between a stamped cell and its
                 // unstamped neighbour — at the 1 m sheet nodes that reads as a step, not a swell. The cap
@@ -980,7 +980,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return !Zones.ZoneModeGate.SamplerSeesClosed(ref wx, ref wz) && (SeasonalFrozenAtReal(wx, wz) || LiftedSeaFrozenAt(tx, tz));
         }
 
-        // A lifted chunk's sea freezes like a lake (Fire, 2026-09-27, [seasons]' popup): the same depth contour as
+        // A lifted chunk's sea freezes like a lake: the same depth contour as
         // SeasonalFrozenAtReal, read at the chunk itself, so its own biome decides the winter. A dry cell beside that sea
         // is the sheet's buried skirt and freezes with it.
         private static bool LiftedSeaFrozenAt(float wx, float wz)

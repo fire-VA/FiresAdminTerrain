@@ -9,7 +9,7 @@ namespace VerdantsAscent.Terrain.Zones
 {
     // The world's starter Chunk Generator (the machine itself is ZoneModeChunkGenerator). The server places it beside
     // the StartTemple once that zone's ground is built, on natural ground (ZoneModeStartGround: never a path, a field, a
-    // paved road or among builds), or on a converted map where the player stands (Tools\FAT_START_ITEMS.md). It cannot
+    // paved road or among builds), or on a converted map where the player stands. It cannot
     // be damaged, worn or removed, and the server puts it back within a minute if it is ever missing.
     internal static class ZoneModeChunkMachines
     {
@@ -144,10 +144,10 @@ namespace VerdantsAscent.Terrain.Zones
                 + $"({position.x:0},{position.y:0},{position.z:0}) in zone ({zone.x},{zone.y}), {where}.");
         }
 
-        // ── Converted maps (Fire, 2026-09-27, Tools\FAT_START_ITEMS.md) ─────────────────────────────
+        // ── Converted maps ─────────────────────────────
         // The start is the player's own town, so the starter goes where the player really stands: when two or more of
-        // the player's smelters stand within StartAreaReach zones of the start (Fire's popup 20:5x: "Search 1-2 zones
-        // out", parked zones included), the one nearest the spawn becomes the starter (the generator is a restyled
+        // the player's smelters stand within StartAreaReach zones of the start (1-2 zones
+        // out, parked zones included), the one nearest the spawn becomes the starter (the generator is a restyled
         // smelter, so it fits the spot); beside a lone smelter otherwise; else on the nearest spot a player can stand at
         // the spawn's height, build floors included, off the StartTemple itself. Only when none of those exists does the
         // fresh-world rule apply. When the nearest smelter stands in a parked zone, that zone opens as part of the start
@@ -228,10 +228,10 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // The player's smelters in the open zones within StartAreaReach of the start, at any height, nearest the spawn
-        // first (Fire, 2026-09-27: "scanning the entire spawned chunks"). A converted town's carry no creator, so any
+        // first. A converted town's carry no creator, so any
         // placed smelter piece counts (ZoneModeBuilds.IsPlaced). Any placed piece whose prefab is named for a smelter
-        // counts: vanilla's own, and a modded or decorative one (SanctuaryAshlands, 2026-09-27: the exact "smelter" search
-        // found neither of its two). The log names each, live or parked, and every other smelting station there (any
+        // counts: vanilla's own, and a modded or decorative one (an exact "smelter" search
+        // missed converted towns' smelters). The log names each, live or parked, and every other smelting station there (any
         // piece whose prefab carries a Smelter: kilns, blast furnaces, refineries, windmills, spinning wheels, modded
         // furnaces), which never becomes the starter.
         private static List<ZDO> StartAreaSmelters(Vector3 temple, Vector3 spawn)

@@ -78,7 +78,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // Server, once the save's objects are loaded and before anything is parked: a world with no guards yet gets them
         // from what stands in it now, parked zones included, and keeps them. On a converted world an owner-less placed piece
         // counts too: its town may have no creators (SanctuaryAshlands had none in its whole start area) and water must still
-        // keep off it (Fire, 2026-09-27). Owner-less pieces inside a placed location are left to that location's guard: on
+        // keep off it. Owner-less pieces inside a placed location are left to that location's guard: on
         // CratersAshlands every placed piece was 952,954, most of them ruins and decor the map spreads everywhere.
         internal static void OnWorldLoaded()
         {
@@ -246,14 +246,15 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!File.Exists(path)) return;
             try
             {
-                using (var reader = new BinaryReader(File.OpenRead(path)))
+                using (var reader = new BinaryReader(new MemoryStream(ReadShared(path))))
                 {
                     if (reader.ReadUInt32() != FileMagic || reader.ReadByte() != FileFormat) throw new InvalidDataException("not a water guard file");
                     long uid = reader.ReadInt64();
                     if (uid != world.m_uid)
                     {
+                        // Expected after a world by this name is recreated or cloned (the clone gets a new uid): freeze again.
                         File.Delete(path);
-                        FiresLogger.LogWarning($"[FiresVoxel] deleted {Path.GetFileName(path)}: it was frozen for a deleted world that had this name.");
+                        FiresLogger.LogInfo($"[FiresVoxel] deleted {Path.GetFileName(path)}: it was frozen for another world that had this name (a recreate or a clone); it is frozen again from this world.");
                         return;
                     }
                     if (reader.ReadInt32() != Res) throw new InvalidDataException("frozen on another hydrology grid");
@@ -267,6 +268,34 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 Reset();
                 FiresLogger.LogWarning($"[FiresVoxel] {Path.GetFileName(path)} is unreadable ({ex.Message}); it is frozen again from the world.");
+            }
+        }
+
+        // A read once failed with "being used by another process" on a dedicated server at world init. FAT's own writer is atomic
+        // (Core AtomicFile: temp + replace) and runs only later, at world load; the handle that blocked the read was outside
+        // FAT. So the read shares every access (a scanner, a copy or a replace in flight does not refuse it) and retries a
+        // few times before the file is given up and frozen again.
+        private const int ReadTries = 5;
+        private const int ReadRetryMs = 200;
+
+        private static byte[] ReadShared(string path)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    using (var copy = new MemoryStream())
+                    {
+                        stream.CopyTo(copy);
+                        if (attempt > 1) FiresLogger.LogDebug($"[FiresVoxel] {Path.GetFileName(path)} read on try {attempt} (it was held open elsewhere).");
+                        return copy.ToArray();
+                    }
+                }
+                catch (IOException) when (attempt < ReadTries && File.Exists(path))
+                {
+                    System.Threading.Thread.Sleep(ReadRetryMs);
+                }
             }
         }
 

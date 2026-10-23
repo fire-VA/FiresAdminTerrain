@@ -7,8 +7,8 @@ using System.IO;
 namespace VerdantsAscent.Terrain.Zones
 {
     // D6c: a world's park as ONE file. Each zone's bytes (exactly the zone file ZoneModePark.WriteZone makes) are a frame
-    // appended to zones.pack, and zones.index says which frame holds each zone's slot. Creating Va's 54,319 zone files took
-    // 44.6 s (2026-09-27) and a cold scan of such a folder 10.5 s at a server's start (R9a); one sequential file and one
+    // appended to zones.pack, and zones.index says which frame holds each zone's slot. Creating a converted world's 54,319 zone files took
+    // 44.6 s and a cold scan of such a folder 10.5 s at a server's start; one sequential file and one
     // index read cost neither.
     //
     // A frame is never rewritten: a move between slots is an index change, and bytes no zone needs any more stay behind as

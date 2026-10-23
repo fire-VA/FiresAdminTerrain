@@ -63,7 +63,7 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // A server with no graphics device draws nothing: its minimap, grass and distant LOD are never seen, so a refresh
-        // leaves them alone there ([perf], 23:1x: a 2048 x 2048 minimap upload on the dedi during every zone open).
+        // leaves them alone there (a 2048 x 2048 minimap upload on the dedi during every zone open).
         private const string HeadlessNote = "no minimap, grass or distant LOD on a server without graphics";
         private static bool Headless => SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
 
@@ -90,9 +90,34 @@ namespace VerdantsAscent.Terrain.Zones
             host.StartCoroutine(RebuildRoutine(new List<Vector2s>(opened), onDone));
         }
 
+        // A closed chunk used to keep showing its low LOD version instead of nothing
+        // until opened: the builder keeps up to 16 FINISHED builds and hands one back to any heightmap of the same
+        // centre and size, so the distant LOD re-requested below got its pre-change heights back. Every zone change empties
+        // that list first, so each heightmap, the distant LOD included, is built from the ground as it is now.
+        private static readonly AccessTools.FieldRef<HeightmapBuilder, List<HeightmapBuilder.HMBuildData>> ReadyBuildsRef =
+            AccessTools.FieldRefAccess<HeightmapBuilder, List<HeightmapBuilder.HMBuildData>>("m_ready");
+        private static readonly AccessTools.FieldRef<HeightmapBuilder, object> BuilderLockRef =
+            AccessTools.FieldRefAccess<HeightmapBuilder, object>("m_lock");
+
+        private static int ForgetFinishedBuilds()
+        {
+            var builder = HeightmapBuilder.instance;
+            if (builder == null) return 0;
+            var ready = ReadyBuildsRef(builder);
+            var gate = BuilderLockRef(builder);
+            if (ready == null || gate == null) return 0;
+            lock (gate)
+            {
+                int n = ready.Count;
+                ready.Clear();
+                return n;
+            }
+        }
+
         private static IEnumerator RebuildRoutine(List<Vector2s> opened, Action onDone)
         {
             var clock = Stopwatch.StartNew();
+            ForgetFinishedBuilds();
             var affected = AffectedZones(opened);
             var heightmaps = new List<Heightmap>();
             foreach (var heightmap in Heightmap.GetAllHeightmaps())

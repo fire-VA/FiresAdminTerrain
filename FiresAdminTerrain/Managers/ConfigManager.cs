@@ -6,7 +6,7 @@ namespace VerdantsAscent.Managers
     // Slim ConfigManager for FiresAdminTerrain — exposes only the configs
     // that CustomTerrain and CustomWater actually consume.
     //
-    // ORGANIZATION (2026-06-01): sections + entry keys carry zero-padded
+    // ORGANIZATION: sections + entry keys carry zero-padded
     // numeric prefixes ("01 - General", "01 VerboseLogging") so both the
     // generated .cfg and the in-game ConfigurationManager UI list them in
     // intent order rather than alphabetically. Field declarations below are
@@ -87,7 +87,7 @@ namespace VerdantsAscent.Managers
                     new AcceptableValueList<string>(BuildPresetOptions())));
 
             configPresetSaveName = config.Bind(
-                "00 - Presets", "02 SaveAsName", "MyLook",
+                "00 - Presets", "02 SaveAsName", "",   // No pre-fill; an empty name saves as "MyLook"
                 "Name to save the CURRENT settings under when you tick '03 SavePreset' below.");
 
             configPresetSaveNow = config.Bind(

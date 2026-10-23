@@ -27,6 +27,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var player = Player.m_localPlayer;
             if (player == null || !VoxelOnlyMode.Active) { s_hasLast = false; return; }
             if (player.IsTeleporting()) { s_hasLast = false; return; }
+            if (FatNoClip.Skips(player, "the cave pop-out guard")) { s_hasLast = false; return; }
 
             if (s_bodyOwner != player)
             {

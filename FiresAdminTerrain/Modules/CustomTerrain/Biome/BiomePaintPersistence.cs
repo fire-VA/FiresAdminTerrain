@@ -297,8 +297,8 @@ namespace VerdantsAscent.Terrain.Biome
 
             int affectedVertices = 0;
 
-            // Phase F (2026-05-25): legacy DirtFloorMeshCombiner branch
-            // removed. Custom-tile biome paint flows through TileBrush.BrushBiome
+            // The legacy DirtFloorMeshCombiner branch is
+            // gone. Custom-tile biome paint flows through TileBrush.BrushBiome
             // → TileAnchor's per-vertex biome grid, NOT through this method.
             // This file now only handles the VANILLA HEIGHTMAP path; the
             // tile-side handler is in TileBrush.cs.
@@ -390,8 +390,8 @@ namespace VerdantsAscent.Terrain.Biome
 
             int removed = 0;
 
-            // Phase F (2026-05-25): legacy DirtFloorMeshCombiner branch
-            // removed. Custom-tile biome reset is handled by RegionScrubber
+            // The legacy DirtFloorMeshCombiner branch is
+            // gone. Custom-tile biome reset is handled by RegionScrubber
             // (TileBiome scope) → TileAnchor.ClearData; this method now
             // only handles the VANILLA HEIGHTMAP reset path.
 
@@ -528,7 +528,7 @@ namespace VerdantsAscent.Terrain.Biome
                 float radiusSq = radius * radius;
                 bool anyChanged = false;
 
-                // ── LAVA ALPHA-OFFSET (round-21) ─────────────────────────
+                // ── LAVA ALPHA-OFFSET ─────────────────────────
                 // Vanilla Heightmap.GetHeightOffset for AshLands does:
                 //   lerp(GroundMaterialOffset.Ashlands=0.1m,
                 //        GroundMaterialOffset.Lava=0.8m, alpha)
@@ -640,11 +640,11 @@ namespace VerdantsAscent.Terrain.Biome
         }
 
         /// <summary>
-        /// Public 2026-05-26 round-24: OVERWRITE the vanilla heightmap paint
+        /// OVERWRITE the vanilla heightmap paint
         /// mask with an arbitrary color inside the brush radius. Used by the
         /// `va_brush_paint` console command when the cursor is over vanilla
-        /// terrain (no custom tile) — previously the brush only ever wrote
-        /// to custom tiles, so painting over a vanilla paved road left the
+        /// terrain (no custom tile); without it the brush would only write
+        /// to custom tiles, so painting over a vanilla paved road would leave the
         /// cobblestones intact and the new paint invisible.
         ///
         /// This is a UNCONDITIONAL OVERWRITE — the prior paint mask value at

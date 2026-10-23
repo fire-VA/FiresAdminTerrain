@@ -23,6 +23,9 @@ namespace VerdantsAscent.Terrain.Voxel
             internal float Drop;
             internal float FadeLength;
             internal bool Dissolves;
+            // A short step inside a river (rapids get mist like the bottom of our
+            // waterfalls): no curtain is hung there, only the Rapids spray rising off the step at Lip.
+            internal bool Rapids;
         }
 
         private sealed class Recipe
@@ -46,7 +49,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static readonly Recipe Lip = new Recipe
         {
-            Name = "MistLip", MinDrop = 6f, LifeMin = 2f, LifeMax = 3.5f, SpeedMin = 0.6f, SpeedMax = 1.4f,
+            // 2 m (was 6): every curtain that is drawn at all (FiresWaterfalls.MinFallLength) sprays at its lip, so the top of a
+            // fall reads as white water the way its foot does.
+            Name = "MistLip", MinDrop = 2f, LifeMin = 2f, LifeMax = 3.5f, SpeedMin = 0.6f, SpeedMax = 1.4f,
             SizeMin = 2.5f, SizeMax = 4.5f, Gravity = 0.35f, RatePerMetre = 1.5f, RateMin = 0f, RateMax = 18f,
             BoxExtraWidth = 1f, BoxHeight = 0.4f, BoxDepth = 0.4f, RandomDirection = 0.3f, DownMin = -2f, DownMax = -0.8f,
             DriftMin = 0f, DriftMax = 0.3f, PeakAlphaSmallDrop = 0.28f, PeakAlpha = 0.28f, GrowStart = 0.6f, GrowMid = 1.36f, GrowEnd = 2.5f,
@@ -66,6 +71,15 @@ namespace VerdantsAscent.Terrain.Voxel
             SizeMin = 5f, SizeMax = 10f, RatePerMetre = 0.6f, RatePerDrop = 0.08f, RateMin = 1.5f, RateMax = 10f,
             BoxExtraWidth = 3f, BoxHeight = 2f, BoxDepth = 4f, RandomDirection = 0.5f, RiseMin = 1.25f, RiseMax = 2f,
             DriftMin = 0.4f, DriftMax = 1.2f, PeakAlphaSmallDrop = 0.3f, PeakAlpha = 0.3f, GrowStart = 0.7f, GrowMid = 1.3f, GrowEnd = 2.2f,
+        };
+
+        // Spray off a rapid: low, churning puffs over the step, smaller and thinner than a fall's churn.
+        private static readonly Recipe RapidsSpray = new Recipe
+        {
+            Name = "MistRapids", MinDrop = 0f, LifeMin = 1.5f, LifeMax = 3f, SpeedMin = 0.4f, SpeedMax = 1.2f,
+            SizeMin = 1.5f, SizeMax = 3f, Gravity = 0.05f, RatePerMetre = 1.2f, RateMin = 2f, RateMax = 14f,
+            BoxExtraWidth = 0.5f, BoxHeight = 0.3f, BoxDepth = 1.2f, RandomDirection = 0.6f, RiseMin = 4f, RiseMax = 12f,
+            DriftMin = 0.1f, DriftMax = 0.5f, PeakAlphaSmallDrop = 0.35f, PeakAlpha = 0.45f, GrowStart = 0.5f, GrowMid = 1f, GrowEnd = 1.6f,
         };
 
         private static readonly Recipe Dissolve = new Recipe
@@ -174,8 +188,16 @@ namespace VerdantsAscent.Terrain.Voxel
             group.Systems.Clear();
             group.Signature = signature;
             Vector3 centre = Vector3.zero;
+            int rapids = 0;
             foreach (var site in sites)
             {
+                if (site.Rapids)
+                {
+                    Raise(group, RapidsSpray, mist, site, site.Lip);
+                    centre += site.Lip;
+                    rapids++;
+                    continue;
+                }
                 Raise(group, Lip, mist, site, site.Lip);
                 if (site.Dissolves)
                 {
@@ -191,7 +213,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 centre += site.Foot;
             }
             group.Centre = sites.Count > 0 ? centre / sites.Count : falls.position;
-            FiresLogger.LogVerbose($"[FiresWaterfall] mist raised {group.Systems.Count} emitter(s) at {sites.Count} fall(s) under '{falls.name}'.");
+            FiresLogger.LogDebug($"[FiresWaterfall] mist raised {group.Systems.Count} emitter(s) at {sites.Count - rapids} fall(s) + {rapids} rapid(s) under '{falls.name}' at {falls.position}.");
             UpdateGroup(group, Utils.GetMainCamera());
         }
 
@@ -342,7 +364,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     hash = hash * 31 + Mathf.RoundToInt(site.Foot.z * SignatureGrid);
                     hash = hash * 31 + Mathf.RoundToInt(site.Lip.y * SignatureGrid);
                     hash = hash * 31 + Mathf.RoundToInt(site.Width * SignatureGrid);
-                    hash = hash * 31 + (site.Dissolves ? 1 : 0);
+                    hash = hash * 31 + (site.Dissolves ? 1 : 0) + (site.Rapids ? 2 : 0);
                 }
                 return hash;
             }

@@ -3,7 +3,7 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Lifecycle
 {
-    // Round-57 — tints the Infinity Hammer ruler ring per tool family:
+    // Tints the Infinity Hammer ruler ring per tool family:
     //   GREEN for our terrain tools, BLUE for our water/liquid tools,
     //   untouched (vanilla white) for everything else.
     //

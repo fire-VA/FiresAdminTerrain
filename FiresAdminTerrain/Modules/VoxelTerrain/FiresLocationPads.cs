@@ -87,6 +87,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // feather t) wins, so unions read as one clean plateau. Returns false
         // where no SurfaceLevel/SeabedLevel pad reaches — the caller keeps its
         // natural height untouched.
+        private const float MaxPadRise = 40f;
+
         internal static bool TrySample(float wx, float wz, float natural, out float y)
         {
             y = natural;
@@ -99,6 +101,9 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var p = list[i];
                 if (p.Mode == LocationPadMode.SphereCavity) continue; // surface untouched
+                // A pad far above the ground here (a skyland location's, registered at the island's height)
+                // never lifts the ground; a real pad sits within a few metres of its natural ground.
+                if (p.Y - natural > MaxPadRise) continue;
                 float dx = wx - p.Cx, dz = wz - p.Cz;
                 float d = Mathf.Sqrt(dx * dx + dz * dz);
                 if (d >= p.ROuter) continue;

@@ -13,8 +13,7 @@ using UnityEngine.Rendering;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // `generator_test`, the Chunk Generator's F5 test (Tools\FIRES_F5_TESTS.md; steps in Tools\CHUNK_GENERATOR.md, "F5
-    // test"). On the tester's client it places a generator in front of the player and checks it end to end: the prefab and
+    // `generator_test`, the Chunk Generator's F5 test. On the tester's client it places a generator in front of the player and checks it end to end: the prefab and
     // its bound dressing, the rune halo keeping its runes through a hammer highlight, the plain recipe's colour cycle, both
     // windows, the test bot (client B) adding fuel and reading the machine back, a fill past capacity, burning, a batch,
     // and a recipe switch with its refund. Everything it spawns is removed at the end, also after a throw; each object also
@@ -71,7 +70,7 @@ namespace VerdantsAscent.Terrain.Zones
         private const float BatchWaitSeconds = 8f;
         private const float RecipeWaitSeconds = 4f;
         private const float DropRadius = 4f;
-        // A SHOT line asks FDT's watcher for a screenshot of this moment (Tools\FIRES_TEST_SCREENSHOTS.md); the test holds
+        // A SHOT line asks FDT's watcher for a screenshot of this moment; the test holds
         // still long enough for the capture to land.
         private const string ShotWord = "SHOT";
         private const float ShotHoldSeconds = 1f;
@@ -183,7 +182,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_records.Clear();
             s_machine = null;
             s_botUid = 0;
-            // Hashing the 9 MB DLL on the main thread stalled the first run 100 ms (R3 LoginDiag); FAT hashes it once off the
+            // Hashing the 9 MB DLL on the main thread stalled the first run 100 ms; FAT hashes it once off the
             // main thread at load, and BEGIN waits a moment for it.
             float started = Time.realtimeSinceStartup;
             while (FatDllHash.Value == FatDllHash.Pending && Time.realtimeSinceStartup < started + HashWaitSeconds) yield return null;
@@ -339,7 +338,7 @@ namespace VerdantsAscent.Terrain.Zones
             else step.Pass($"at ({at.x:0},{at.z:0}), id {Id(nview.GetZDO().m_uid)}, on {Recipe().RecipeName}");
         }
 
-        // The white-disk regression (FAT 0.2.595): a hammer highlight rewrites every renderer's property block on the
+        // The white-disk regression: a hammer highlight rewrites every renderer's property block on the
         // piece, so the runes must live in the halo's material, never in a block.
         private static IEnumerator Look(Step step)
         {

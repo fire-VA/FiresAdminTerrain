@@ -8,7 +8,7 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // A vanilla Cultivator, hidden MinDistance to MaxDistance from the spawn (Fire, 2026-09-27, Tools\FAT_START_ITEMS.md):
+    // A vanilla Cultivator, hidden MinDistance to MaxDistance from the spawn:
     // in a cave pocket under the start where one is roomy enough (a shallow one reads as "just under the surface"),
     // otherwise above ground among the most trees, rocks and brush. Hugin points the way once the first Chunk Hammer is
     // found (ZoneModeStartPins), and the chest is pinned on the map of whoever opens it. One per world: it cannot be
@@ -319,9 +319,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static string MarkerPath()
         {
-            string world = ZNet.World?.m_name ?? "world";
-            string safe = string.Concat(world.Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + "_cultivator.txt");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_cultivator.txt");
         }
 
         internal static void Reset()

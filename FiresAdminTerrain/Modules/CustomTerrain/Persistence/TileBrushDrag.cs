@@ -25,10 +25,10 @@ namespace VerdantsAscent.Terrain.Persistence
     // there's exactly one in the world. DontDestroyOnLoad via the plugin root.
     public sealed class TileBrushDrag : MonoBehaviour
     {
-        // ── 2026-05-26 round-31 BLENDER PORT (Phase B-1 + B-3) ─────────
+        // ── BLENDER PORT (dab pump + lazy pointer) ─────────
         //
         // Rewrites the legacy 10 Hz tick model into Blender's constant-arc-
-        // length dab pump (see Docs/PLAN_BlenderSculptIntegration.md §3).
+        // length dab pump.
         //
         // B-1 model: per-frame, walk the cursor segment in fixed `radius *
         // DAB_SPACING_RATIO` steps and emit one dab per step with REMAINDER
@@ -59,12 +59,13 @@ namespace VerdantsAscent.Terrain.Persistence
         /// hundreds. 16 is plenty for normal sculpting.
         /// </summary>
         private const int MAX_DABS_PER_FRAME = 16;
+        internal const float DRAW_SPEED_REFERENCE_FPS = 60f;   // DrawSpeed x 16 dabs a frame at 60 fps = the per-second rate
 
         /// <summary>
         /// Lazy-pointer dead zone in WORLD METERS. Cursor must move more
         /// than this from the current brush position before the brush
-        /// follows. Round-40 bump 0.25 → 0.5: user reported "everything
-        /// runs so smooth that its actually hard to control" — larger
+        /// follows. 0.5 rather than 0.25: at 0.25 the brush felt too
+        /// smooth to control — a larger
         /// dead zone means the brush ignores micro-jitter, only commits
         /// to a new position when the cursor genuinely moves.
         /// </summary>
@@ -121,7 +122,7 @@ namespace VerdantsAscent.Terrain.Persistence
         private static float _falloff = 1f;    // Raise/Lower
         private static Color32 _color;         // Paint
         private static float _lastBrushTime = -100f;
-        // Round-30: when the last brush was a `*_island` variant, drag
+        // When the last brush was a `*_island` variant, drag
         // re-dispatch needs to propagate the flag so peers tag tiles as
         // floating-island during the drag, not just on the initial click.
         private static bool _islandMode;
@@ -135,11 +136,11 @@ namespace VerdantsAscent.Terrain.Persistence
         // Called by TileBrushCommands.Cmd_* on every console-driven brush
         // dispatch. Snapshots the parameters so drag can re-fire the same op.
         //
-        // 2026-05-25 revert: removed the drag-session height lock that was
-        // making subsequent clicks ignore the new ruler height. The lock
+        // No drag-session height lock: one
+        // made subsequent clicks ignore the new ruler height. The lock
         // required Update() to detect mouse-release; when the polling missed
         // a release the lock stuck and Floor stopped respecting Page Up/Down.
-        // Reverting to "always capture latest height" — IH doesn't continuous
+        // So "always capture latest height" — IH doesn't continuous
         // -fire commands by default, so each fresh click captures its own
         // height naturally.
         public static void RecordLastBrush(string commandName, float radius, float height, float falloff, Color32 color)
@@ -159,7 +160,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 case "va_brush_clear":         _kind = BrushKind.Clear;  _islandMode = false; break;
                 case "va_brush_delete":        _kind = BrushKind.Delete; _islandMode = false; break;
                 case "va_brush_smooth":        _kind = BrushKind.Smooth; _islandMode = false; break;
-                // Round-37 — Grab + Noise (Blender ports).
+                // Grab + Noise (Blender ports).
                 case "va_brush_grab":          _kind = BrushKind.Grab;   _islandMode = false; break;
                 case "va_brush_noise":         _kind = BrushKind.Noise;  _islandMode = false; break;
                 // Round-30 island variants — same kinds, flag enabled.
@@ -205,7 +206,7 @@ namespace VerdantsAscent.Terrain.Persistence
 
             // Use Unity's Input class — works regardless of ZInput state and
             // doesn't interfere with vanilla click handling.
-            if (!Input.GetMouseButton(0))
+            if (!VerdantsAscent.Terrain.FatInput.PrimaryHeld)
             {
                 // Mouse released — end stroke. Reset all stroke-scoped
                 // state so the NEXT stroke starts fresh (no carry-over
@@ -224,7 +225,7 @@ namespace VerdantsAscent.Terrain.Persistence
             // Also covers the pointer sitting over any UI element.
             if (!FiresCore.Input.FiresPlaceGate.ReadyToAct()) return;
 
-            // Round-40 — prefer Infinity Hammer's ruler position when its
+            // Prefer Infinity Hammer's ruler position when its
             // ruler is currently active. IH does its own raycast for the
             // visible ruler circle; using THAT position as our brush
             // center means the brush stays exactly where the user sees
@@ -264,7 +265,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 _brushPos = rawCursor;
                 _lastDabPos = rawCursor;
                 _strokeActive = true;
-                // Round-37: Grab needs the cursor's Y at stroke start as
+                // Grab needs the cursor's Y at stroke start as
                 // the anchor for cumulative drag-delta. Each subsequent
                 // dab uses (currentCursor.Y - _grabAnchorCursorY) as the
                 // grab delta. Reset on every fresh LMB-down.
@@ -330,13 +331,15 @@ namespace VerdantsAscent.Terrain.Persistence
             float spacing = _radius * DAB_SPACING_RATIO;
             if (spacing < 0.01f) return;
 
-            // Round-63 — draw-speed throttle. The dab budget accrues
+            // Draw-speed throttle. The dab budget accrues
             // `DrawSpeed × MAX_DABS_PER_FRAME` per frame (capped) and
             // each dab spends 1. At DrawSpeed=1 this is the old
             // 16-dabs-per-frame behavior; at 0.25 the brush deposits a
-            // quarter as fast, letting the user paint precisely.
+            // quarter as fast, for precise painting.
+            // The budget used to grow PER FRAME (the same bug class as the V-tools had), so the
+            // brush drew twice as fast at 120 fps as at 60. It now grows per SECOND, at the old 60 fps rate.
             _dabBudget = Mathf.Min(
-                _dabBudget + TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME,
+                _dabBudget + TileBrushModes.DrawSpeed * MAX_DABS_PER_FRAME * DRAW_SPEED_REFERENCE_FPS * Time.deltaTime,
                 MAX_DABS_PER_FRAME);
 
             while (_dabBudget >= 1f)
@@ -359,13 +362,13 @@ namespace VerdantsAscent.Terrain.Persistence
             }
         }
 
-        // Round-63 — fractional dab allowance for the draw-speed throttle.
+        // Fractional dab allowance for the draw-speed throttle.
         private float _dabBudget;
 
         // Dispatch the cached brush kind at a specific world position.
         // Used by both the per-frame final dispatch and the dab pump.
         //
-        // 2026-05-26 round-32: honors `TileBrushModes` global toggles:
+        // Honors `TileBrushModes` global toggles:
         //   * `HeightLock = Locked` — replaces the per-dab cursor.y with
         //     the first-click `_height` so dragging off a cliff keeps the
         //     brush at the original ruler plane (RPG-maker behavior).
@@ -466,7 +469,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 case "Lower Terrain (Floating Island)":
                 // Round-31 B-2 — dedicated Smooth brush
                 case "Smooth Terrain":
-                // Round-37 — Grab + Noise (Blender ports)
+                // Grab + Noise (Blender ports)
                 case "Grab Terrain":
                 case "Noise Terrain":
                     return true;

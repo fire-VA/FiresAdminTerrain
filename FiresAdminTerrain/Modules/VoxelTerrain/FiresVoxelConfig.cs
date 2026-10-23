@@ -24,7 +24,9 @@ namespace VerdantsAscent.Terrain.Voxel
     //   FullVoxel   — the complete swap: every near zone wraps with generated
     //                 caves, river beds and hydrology water, and the Fires
     //                 world generator runs (still name-gated to Fires* worlds).
-    public enum FiresTerrainMode { Off, PlacedOnly, ZoneReplace, FullVoxel }
+    // PlacedOnly removed (it converted exactly what ZoneReplace does; its extra, sky-island zones, needs
+    // FullVoxel). The other values keep their numbers. A config still set to PlacedOnly falls back to Off, logged once at Info.
+    public enum FiresTerrainMode { Off = 0, ZoneReplace = 2, FullVoxel = 3 }
 
     // W4 base-generation gate. Auto = worlds named "Fires*" use the Fires
     // generator, everything else stays vanilla (deterministic on every peer
@@ -38,15 +40,18 @@ namespace VerdantsAscent.Terrain.Voxel
     // Plan: Tools/FIRES_VOXEL_TERRAIN_PLAN.md
     public static class FiresVoxelConfig
     {
-        private const string S = "VoxelTerrain (P0 prototype)";
-        private const string SW = "VoxelTerrain World";
+        private const string S = "Voxel Terrain";   // Formerly "VoxelTerrain (P0 prototype)"; values carried over
+        internal const string OldS = "VoxelTerrain (P0 prototype)";
+        private const string SW = "Voxel Terrain - World";   // Formerly "VoxelTerrain World"
 
         public static ConfigEntry<bool> Enabled;
         public static ConfigEntry<bool> ShowToolsInBuildMenu;
+        public static ConfigEntry<float> CarveDrawSpeed, FillDrawSpeed, ShapeDrawSpeed, WaterDrawSpeed, LevelDrawSpeed, MopDrawSpeed, DabStepDepth;
         public static ConfigEntry<bool> LogTimings;
+        public static ConfigEntry<bool> ProbeMatchesMesh, WaterProbeMatchesMesh, ProbeDeltaLog, SwimFollowsDrawnWater, WaterOnlyChunks;   // Proven fixes are always on and their keys are gone (zone gate, floater skip, reseat, spawn gate restart)
         public static ConfigEntry<int> MaxLoadedChunks;
 
-        // Stage W master switch — DESIGNED IN FROM THE START (user directive):
+        // Stage W master switch — DESIGNED IN FROM THE START:
         // the whole-world voxel wrap must always be a config choice, and
         // Terrain Mode defaults to Off. The admin BRUSH tools work in every mode
         // (they are sparse, additive and independent of the streamer).
@@ -73,9 +78,8 @@ namespace VerdantsAscent.Terrain.Voxel
             && (CustomGeneration == null || CustomGeneration.Value)
             && Mode != FiresTerrainMode.Off;
         public static bool WrapsAllTerrain => Mode == FiresTerrainMode.FullVoxel;      // auto-wrap near zones
-        public static bool WrapsBrushedZones => Mode == FiresTerrainMode.ZoneReplace
-                                             || Mode == FiresTerrainMode.PlacedOnly;   // wrap voxel-brushed zones
-        public static bool WrapsIslandZones => Mode == FiresTerrainMode.PlacedOnly;    // wrap sky-island zones
+        public static bool WrapsBrushedZones => Mode == FiresTerrainMode.ZoneReplace;   // wrap voxel-brushed zones
+        public static bool WrapsIslandZones => false;   // Was PlacedOnly (removed); FullVoxel wraps every near zone anyway
         public static bool GeneratesTerrain => Mode == FiresTerrainMode.FullVoxel;     // Fires worldgen active
         // Generated features exist only in FullVoxel; a zone converted in any
         // other mode is exactly the vanilla ground plus brush edits.
@@ -118,6 +122,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> WaterMinChannelDepth;
         public static ConfigEntry<bool> WaterfallMist;
         public static ConfigEntry<float> WaterfallMistRange;
+        public static ConfigEntry<float> WaterfallBrightness;
         private const float DefaultWaterfallMistRange = 200f;
         public static bool WaterfallMistOn => WaterfallMist == null || WaterfallMist.Value;
         public static float WaterfallMistRangeMetres => WaterfallMistRange != null ? WaterfallMistRange.Value : DefaultWaterfallMistRange;
@@ -175,7 +180,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> ChunkCacheSizeMB;
         public static ConfigEntry<float> WrapHeadlessCap;
         public static ConfigEntry<bool> ServerBuildsCollision;
-        // A dedicated server meshes voxel colliders: always in VoxelOnly, and in VoxelWrap unless switched off (Fire, 2026-09-29).
+        // A dedicated server meshes voxel colliders: always in VoxelOnly, and in VoxelWrap unless switched off.
         internal static bool ServerCollides => WorldKind == VoxelWorldMode.VoxelOnly || ServerBuildsCollision == null || ServerBuildsCollision.Value;
         public static ConfigEntry<float> WrapKeepRadius;
         public static ConfigEntry<float> VegetationDensityScale;
@@ -245,11 +250,36 @@ namespace VerdantsAscent.Terrain.Voxel
             _bound = true;
 
             Enabled = cfg.Bind(S, "Enabled", true,
-                "Voxel carve/fill tools (P0 prototype — runtime only, NOT persisted yet; relog clears carves).");
+                "Voxel terrain tools and voxel ground (carve, fill, level, paint). Edits are saved with the world and synced to every player.");
             ShowToolsInBuildMenu = cfg.Bind(S, "Show tools in build menu", true,
                 "List the Fires terrain/water tools on the hammer. They are admin-only regardless; "
                 + "turn this off for a vanilla-looking build menu without giving up admin rights.");
-            const string PERF = "VoxelTerrain Performance";
+            // Carving must be much slower (one click used to carve a massive tunnel), with its carve
+            // speed configurable (draw speed), same with fill and level. Dabs per second while the button is held, per
+            // tool family, and how deep one dab may reach past the ground at the cursor.
+            const string TOOLS = "Voxel Terrain - Tools";   // Formerly "VoxelTerrain Tools"
+            CarveDrawSpeed = cfg.Bind(TOOLS, "Carve draw speed", 3f,
+                new ConfigDescription("Carve and restore: dabs per second while the mouse button is held (one click = one dab).",
+                    new AcceptableValueRange<float>(0.5f, 30f)));
+            FillDrawSpeed = cfg.Bind(TOOLS, "Fill draw speed", 3f,
+                new ConfigDescription("Fill: dabs per second while the mouse button is held (one click = one dab).",
+                    new AcceptableValueRange<float>(0.5f, 30f)));
+            ShapeDrawSpeed = cfg.Bind(TOOLS, "Shape draw speed", 3f,
+                new ConfigDescription("Cube and sphere stamps: dabs per second while the mouse button is held.",
+                    new AcceptableValueRange<float>(0.5f, 30f)));
+            WaterDrawSpeed = cfg.Bind(TOOLS, "Water tool draw speed", 4f,
+                new ConfigDescription("River and pour: dabs per second while the mouse button is held.",
+                    new AcceptableValueRange<float>(0.5f, 30f)));
+            LevelDrawSpeed = cfg.Bind(TOOLS, "Level draw speed", 3f,
+                new ConfigDescription("Vlevel: dabs per second while the mouse button is held (one click = one dab).",
+                    new AcceptableValueRange<float>(0.5f, 30f)));
+            MopDrawSpeed = cfg.Bind(TOOLS, "Mop draw speed", 4f,
+                new ConfigDescription("Vmop (remove water, LeftAlt = restore): dabs per second while the mouse button is held.",
+                    new AcceptableValueRange<float>(0.5f, 30f)));
+            DabStepDepth = cfg.Bind(TOOLS, "Dab step depth", 1f,
+                new ConfigDescription("Carve and fill: how far (m) one dab reaches past the ground at the cursor. Smaller = slower, "
+                    + "finer digging; the brush size still sets the width.", new AcceptableValueRange<float>(0.25f, 32f)));
+            const string PERF = "Voxel Terrain - Performance";   // Formerly "VoxelTerrain Performance"
             // UNDER MEASUREMENT — the first reading (load 12.53ms vs generate
             // 5.31ms) was contaminated: the timed region included an
             // File.SetLastAccessTimeUtc LRU touch, i.e. a filesystem metadata
@@ -271,6 +301,8 @@ namespace VerdantsAscent.Terrain.Voxel
             WrapHeadlessCap = cfg.Bind(PERF, "Voxel wrap radius (headless)", 160f,
                 new ConfigDescription("How far (metres) around each PEER a dedicated server voxelises. Headless wraps every loaded zone rather than one player radius, so this cap is what actually bounds server load. THE biggest lever: a 64m zone is ~16 chunks and each must be generated, meshed and APPLIED before the zone can swap. At the old 256 (a 9x9 envelope) the dedi measured zones=44 chunks=654 with swapped=0 pendingSwap=44 — not one zone ever finished, all stuck in the apply queue. Vanilla keeps 3x3 zones active (~96m) plus a distant ring. Clients use 'Wrap Radius' instead.",
                     new AcceptableValueRange<float>(96f, 512f)));
+            DediTextureTrim.Bind(cfg, PERF);   // RAM trim (default off)
+            FatNativeTrace.Bind(cfg, PERF);    // Native crash hunt (default off)
             ServerBuildsCollision = cfg.Bind(PERF, "Server builds voxel collision", true,
                 new ConfigDescription("Dedicated server in World Terrain Mode VoxelWrap: mesh voxel COLLIDERS (no renderers) for the zones "
                     + "around each peer and hide vanilla's heightmap collider there, so what the server simulates (creatures, drops, "
@@ -367,9 +399,25 @@ namespace VerdantsAscent.Terrain.Voxel
 
             LogTimings = cfg.Bind(S, "Log timings", false,
                 "Log per-chunk seed/mesh/bake/apply milliseconds (measurement runs only — thousands of lines per session, and the logging itself costs frames).");
+            // The ground probe read 0.18 m above the collider at a pad rim.
+            ProbeMatchesMesh = cfg.Bind(S, "Ground probe matches the mesh", false,   // New behaviour ships OFF (team rule)
+                "ON: FAT's ground height probe (placements, tools, tests) reads the same surface the terrain mesh and collider show (the Surface Nets vertices around the point). OFF (default): the old single-column read, which can sit up to ~0.2 m above the collider beside steps, slopes and pad edges.");
+            WaterProbeMatchesMesh = cfg.Bind(S, "Water edges use the mesh-matched probe", false,
+                "OFF (default): water sheets, ponds and the liquid bridge keep the old single-column floor read, so the approved water look does not move. ON: they use the mesh-matched probe too (shorelines can shift by up to ~0.2 m at steep banks); turn on only after a golden-shot check.");
+            SwimFollowsDrawnWater = cfg.Bind(S, "Swim level follows the drawn water", false,
+                "OFF (default): swimming and floating in generated rivers/lakes read the stored water columns (the old way), which can sit below the drawn water surface: by the sheet's smoothing, and by a whole reach step on a sloped river. ON: inside the water sheet they read the same smoothed heights the sheet is drawn from, so you swim AT the surface you see; at the sheet's edge the old rule stays. fat_swim_probe <x> <z> shows both levels at a point. Turn on only after a golden swim-line check.");
+            WaterOnlyChunks = cfg.Bind(S, "Water-only chunks draw their sheet", false,
+                "OFF (default): a 32 m terrain layer with no ground in it is not built, so where a lake is deeper than its layer (bed below it) nothing draws the water there (square dry holes in big deep lakes). ON: the layer holding a column's generated water level is built anyway (meshing empty, about 80 KB) so its water sheet draws. Applies to zones built after the change (re-enter the area). Debug line per chunk.");
+            ProbeDeltaLog = cfg.Bind(S, "Ground probe delta log", false,
+                "Debug: log old vs mesh-matched probe heights (one line per spot, at most 20 per minute) to measure the difference. Measurement runs only.");
             MaxLoadedChunks = cfg.Bind(S, "Max loaded chunks", 2048,
                 new ConfigDescription("Safety cap on live voxel chunks (32m cubes, ~83KB each). A capped-out brush would skip chunks and leave holes, so brushes warn loudly when the cap bites.",
                     new AcceptableValueRange<int>(16, 8192)));
+            // The four keys of the renamed section keep their values
+            FatConfigRetire.Move(cfg, OldS, "Enabled", Enabled);
+            FatConfigRetire.Move(cfg, OldS, "Show tools in build menu", ShowToolsInBuildMenu);
+            FatConfigRetire.Move(cfg, OldS, "Log timings", LogTimings);
+            FatConfigRetire.Move(cfg, OldS, "Max loaded chunks", MaxLoadedChunks);
 
             OceanGap = cfg.Bind(SW, "Ashlands and Deep North ocean gap", BcImport.FiresOceanGap.Auto,
                 "The Ocean ring 1.0 carves between the main landmass and Ashlands (south) and Deep North (north), "
@@ -383,13 +431,19 @@ namespace VerdantsAscent.Terrain.Voxel
                 + "Works alongside ExpandWorldData rather than against it: this only ever writes 'no gap', so if "
                 + "either mod removes it, it is gone, and neither unpatches the other.");
 
+            // A config written before PlacedOnly was removed still says so; BepInEx then keeps the default (Off).
+            bool wasPlacedOnly = false;
+            try
+            {
+                if (System.IO.File.Exists(cfg.ConfigFilePath))
+                    foreach (var line in System.IO.File.ReadAllLines(cfg.ConfigFilePath))
+                        if (line.Trim().Replace(" ", "") == "TerrainMode=PlacedOnly") { wasPlacedOnly = true; break; }
+            }
+            catch { }
             TerrainMode = cfg.Bind(SW, "Terrain Mode", FiresTerrainMode.Off,
                 "THE top-level switch for how much of the world becomes voxel — set this and ignore the " +
                 "lower-level toggles.\n" +
                 "• Off — dormant. Terrain stays 100% vanilla; only the admin voxel BRUSH tools work. Safe on any world.\n" +
-                "• PlacedOnly — vanilla terrain untouched; a zone converts to voxel only where a pickaxe dig or voxel brush " +
-                "edited it or a sky island floats over it. Sky islands are only generated in FullVoxel, so " +
-                "this currently converts exactly what ZoneReplace does.\n" +
                 "• ZoneReplace — vanilla until you dig with a pickaxe or use a voxel carve/fill tool in a zone; that zone " +
                 "converts to voxel ground identical to the vanilla ground plus your edits, so you can dig " +
                 "tunnels, caves and overhangs. Hoe and cultivator edits never convert a zone.\n" +
@@ -398,6 +452,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 "'Fires*'). This is the whole-world terrain replacement.\n" +
                 "Generated caves, river beds and hydrology water only exist in FullVoxel; the other modes keep " +
                 "vanilla's terrain and just convert voxel where you edit.");
+            if (wasPlacedOnly)
+            {
+                TerrainMode.Value = FiresTerrainMode.Off;
+                FiresLogger.LogInfo("[FiresVoxel] config: Terrain Mode 'PlacedOnly' was removed in 0.2.865 (it did the same as ZoneReplace); this config now reads Off. Set ZoneReplace to keep the old behaviour.");
+            }
             CustomGeneration = cfg.Bind(SW, "Fires Custom Generation", true,
                 "MASTER SWITCH for all whole-world terrain replacement. ON = the World Terrain Mode + World " +
                 "Generation settings below apply (voxel wrap/only + Fires worldgen). OFF = terrain runs 100% " +
@@ -484,6 +543,9 @@ namespace VerdantsAscent.Terrain.Voxel
             WaterfallMistRange = cfg.Bind(SW, "Waterfall Mist Range", DefaultWaterfallMistRange,
                 new ConfigDescription("Waterfall mist runs only within this many metres of the camera. Applies at once.",
                     new AcceptableValueRange<float>(50f, 600f)));
+            WaterfallBrightness = cfg.Bind(SW, "Waterfall Brightness", 0.85f,
+                new ConfigDescription("Brightness of the light falling water gives off (1 = full). Lower keeps stacked or overlapping falls from reading as solid white. Applies at once.",
+                    new AcceptableValueRange<float>(0f, 2f)));
             SkyIslands = cfg.Bind(SW, "Sky Islands", true,
                 "Rare floating islands, 200-300m above the local terrain: flat-ish carved top, pointed ridged underside. Pure voxel additions — the map, spawns and vanilla systems never see them. FullVoxel only. Applied when the world loads; existing chunk caches self-invalidate.");
             SkyIslandRarity = cfg.Bind(SW, "Sky Island Rarity", 0.30f,
@@ -492,7 +554,7 @@ namespace VerdantsAscent.Terrain.Voxel
             VegWaterEcology = cfg.Bind(SW, "Vegetation Water Ecology", true,
                 "Vegetation placement measures altitude against the LOCAL generated water surface instead of sea level. The whole vanilla shoreline ecology ports to rivers, lakes and swamps: trees keep their distance, vass and waterlilies stand in the shallows, swamp trees wade. Only affects zones generated after the change.");
             FaithfulBakeWater = cfg.Bind(SW, "Faithful Bake Water", false,
-                "TEST (Fire 10-01, gated until proven): a FAITHFUL studio bake (such as ATomTest) also builds the smooth water surface from its own baked water, so its rivers and lakes are stored, swum, carved to their channel depth and grown on like any generated world's. Off = the bake's inland water stays unqueryable (only the sea). Read when the world loads; set it the same on the server and every client.");
+                "Experimental: a FAITHFUL studio bake (such as ATomTest) also builds the smooth water surface from its own baked water, so its rivers and lakes are stored, swum, carved to their channel depth and grown on like any generated world's. Off = the bake's inland water stays unqueryable (only the sea). Read when the world loads; set it the same on the server and every client.");
             VegTreeWaterClearance = cfg.Bind(SW, "Vegetation Tree Water Clearance", 1f,
                 new ConfigDescription("Extra metres of min-altitude added to tree prefabs, above the local water surface, so trees rarely stand at the very edge of a bank. 0 = vanilla bands only.",
                     new AcceptableValueRange<float>(0f, 5f)));
@@ -608,9 +670,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 "paths resolve against config/FiresRPGmaker/Debug/Cache; needed on server AND all clients.");
             HydrologyEnabled = cfg.Bind(SW, "Hydrology Enabled", true,
                 "W2 — bake world hydrology at login (flow accumulation over the world heightfield) and CARVE " +
-                "river beds into wrapped voxel terrain (FullVoxel only). Deterministic from the world seed.");
+                "river beds into voxel terrain (any Terrain Mode but Off: rivers convert only the zones they run through). Deterministic from the world seed.");
             HydrologyPlaceWater = cfg.Bind(SW, "Hydrology Place Water", true,
-                "Auto-place water in wrapped zones (FullVoxel only): bank-following SPRING pours at river " +
+                "Auto-place water along carved rivers (any Terrain Mode but Off): bank-following SPRING pours at river " +
                 "headwaters and settling water volumes on ponds. Idempotent (skips where a pour already exists).");
             RiverThreshold = cfg.Bind(SW, "River Threshold", 90f,
                 new ConfigDescription("Catchment (hydrology CELLS, 400m each) required before a river carves. Lower = more/denser streams. 260 only qualified the handful of valleys vanilla had already cut, which is why a converted world got no new rivers.",

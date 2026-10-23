@@ -186,12 +186,16 @@ namespace VerdantsAscent.Terrain.Zones
                 bool hardRims = (done & FiresSkyIslands.DressRolledRims) == 0;
                 bool bareGround = (done & FiresSkyIslands.DressGround) == 0 && FiresSkyIslands.SkylandCarriesGround(index);
                 bool wrongNames = (done & FiresSkyIslands.DressNames) == 0 && biome == Heightmap.Biome.AshLands;
-                if ((done & FiresSkyIslands.DressAll) != 0 && (record.Biome != biome || laidOutBlind || hardRims || bareGround || wrongNames))
+                // Dressing laid before every item went on the
+                // voxels' density surface (belly roots and rocks on the analytic underside, vines on the unrounded rim) goes once.
+                bool offSurface = (done & FiresSkyIslands.DressSurface) == 0;
+                if ((done & FiresSkyIslands.DressAll) != 0 && (record.Biome != biome || laidOutBlind || hardRims || bareGround || wrongNames || offSurface))
                 {
                     cleared += ClearDressing(index);
                     done &= FiresSkyIslands.DressLocation;
                 }
-                done |= FiresSkyIslands.DressSiteLayout | FiresSkyIslands.DressRolledRims | FiresSkyIslands.DressGround | FiresSkyIslands.DressNames;
+                done |= FiresSkyIslands.DressSiteLayout | FiresSkyIslands.DressRolledRims | FiresSkyIslands.DressGround | FiresSkyIslands.DressNames
+                    | FiresSkyIslands.DressSurface;
                 if (!holdsSite) done |= FiresSkyIslands.DressLocation;
                 int missing = FiresSkyIslands.DressAll & ~done;
                 if (missing != 0)
@@ -264,13 +268,28 @@ namespace VerdantsAscent.Terrain.Zones
             return null;
         }
 
-        // Every object this skyland's dressing placed, in any biome, including the stumps of felled trees.
+        // Dressing is removed only where the skyland code PLACED it, never by sweeping an area (a sapling a
+        // player grew into a Beech on the island, or anything built there, must stay). Every dressing object
+        // carries DressTag = island id + 1. Dressing from before the tag is recognised by recomputing where the previous
+        // rule (the uncarved top) put it: the same prefab within LegacyMatchMetres of such a spot. Dressing laid by even older
+        // rules matches neither and stays; it is counted as "left" so it shows.
+        internal static readonly int DressTag = "fires_skyland_dress".GetStableHashCode();
+        private const float LegacyMatchMetres = 0.15f;
+
+        // The automatic re-dress when the dressing RULES change (biome, layout, rims, surface …) clears what the skyland code
+        // placed on this island: objects carrying its DressTag (= island id + 1), and nothing else (the
+        // standing rule: remove only what we recorded placing, never by prefab or radius): an object of a dressing prefab with no
+        // tag (a player's tree or rock, or dressing from before tagging existed) is left in place and counted in a Debug line.
+        // The admin re-dress uses ClearPlacedDressing.
         private static int ClearDressing(int index)
         {
             var sectors = ZoneModeChunkMachines.ObjectsBySector(ZDOMan.instance);
             if (sectors == null) return 0;
             if (s_dressingPrefabs.Count == 0)
                 foreach (var name in FiresSkyIslands.AllDressingPrefabs()) s_dressingPrefabs.Add(name.GetStableHashCode());
+            uint id = FiresSkyIslands.IslandId(index);
+            long want = (long)id + 1L;
+            int untagged = 0;
             FiresSkyIslands.SkylandZones(index, s_dressingZones, FiresSkyIslands.DressingOverhang);
             s_doomed.Clear();
             foreach (var zone in s_dressingZones)
@@ -278,8 +297,62 @@ namespace VerdantsAscent.Terrain.Zones
                 var sector = ZoneSystem.SectorToIndex(zone).Sector;
                 if (sector < 0 || sector >= sectors.Length || sectors[sector] == null) continue;
                 foreach (var zdo in sectors[sector])
-                    if (s_dressingPrefabs.Contains(zdo.GetPrefab()) && FiresSkyIslands.InSkylandDressing(index, zdo.GetPosition()))
-                        s_doomed.Add(zdo);
+                {
+                    long tag = zdo.GetLong(DressTag, 0L);
+                    if (tag == want) { s_doomed.Add(zdo); continue; }
+                    if (tag == 0L && s_dressingPrefabs.Contains(zdo.GetPrefab()) && FiresSkyIslands.InSkylandDressing(index, zdo.GetPosition()))
+                        untagged++;
+                }
+            }
+            long self = ZDOMan.GetSessionID();
+            foreach (var zdo in s_doomed)
+            {
+                zdo.SetOwner(self);
+                ZDOMan.instance.DestroyZDO(zdo);
+            }
+            if (untagged > 0)
+                FiresLogger.LogDebug($"[FiresZones] skyland {id:x8} re-dress: {s_doomed.Count} tagged dressing object(s) removed; "
+                    + $"{untagged} untagged dressing-prefab object(s) left in place (not recorded as placed by the skyland code).");
+            return s_doomed.Count;
+        }
+
+        private static int ClearPlacedDressing(int index, uint id, out int tagged, out int legacy, out int left)
+        {
+            tagged = legacy = left = 0;
+            var sectors = ZoneModeChunkMachines.ObjectsBySector(ZDOMan.instance);
+            if (sectors == null) return 0;
+            if (s_dressingPrefabs.Count == 0)
+                foreach (var name in FiresSkyIslands.AllDressingPrefabs()) s_dressingPrefabs.Add(name.GetStableHashCode());
+            // Where the previous rule placed this island's dressing (prefab hash -> spots).
+            s_legacySpots.Clear();
+            FiresSkyIslands.CollectLegacySkylandDressing(index, s_pos, s_rot, s_name, s_scale);
+            for (int i = 0; i < s_pos.Count; i++)
+            {
+                int hash = s_name[i].GetStableHashCode();
+                if (!s_legacySpots.TryGetValue(hash, out var spots)) s_legacySpots[hash] = spots = new List<Vector3>();
+                spots.Add(s_pos[i]);
+            }
+            long want = (long)id + 1L;
+            FiresSkyIslands.SkylandZones(index, s_dressingZones, FiresSkyIslands.DressingOverhang);
+            s_doomed.Clear();
+            foreach (var zone in s_dressingZones)
+            {
+                var sector = ZoneSystem.SectorToIndex(zone).Sector;
+                if (sector < 0 || sector >= sectors.Length || sectors[sector] == null) continue;
+                foreach (var zdo in sectors[sector])
+                {
+                    long tag = zdo.GetLong(DressTag, 0L);
+                    if (tag == want) { s_doomed.Add(zdo); tagged++; continue; }
+                    if (tag != 0L || !s_dressingPrefabs.Contains(zdo.GetPrefab())) continue;
+                    Vector3 at = zdo.GetPosition();
+                    if (!FiresSkyIslands.InSkylandDressing(index, at)) continue;
+                    bool match = false;
+                    if (s_legacySpots.TryGetValue(zdo.GetPrefab(), out var spots))
+                        foreach (var s in spots)
+                            if ((s - at).sqrMagnitude <= LegacyMatchMetres * LegacyMatchMetres) { match = true; break; }
+                    if (match) { s_doomed.Add(zdo); legacy++; }
+                    else left++;
+                }
             }
             long self = ZDOMan.GetSessionID();
             foreach (var zdo in s_doomed)
@@ -290,11 +363,48 @@ namespace VerdantsAscent.Terrain.Zones
             return s_doomed.Count;
         }
 
+        private static readonly Dictionary<int, List<Vector3>> s_legacySpots = new Dictionary<int, List<Vector3>>();
+
+        // fires_islands_redress (server side): every zone skyland within the radius loses the dressing its code placed and is
+        // dressed again on the carved top; its location and record flags are kept.
+        internal static List<string> Redress(Vector3 center, float radius)
+        {
+            var lines = new List<string>();
+            if (!ZoneModeRegistry.ModeActive) { lines.Add("[Islands] Re-dress works on zone-mode skylands only (this world is not in zone mode)."); return lines; }
+            EnsureDressedLoaded();
+            var ids = new List<uint>();
+            var indices = new List<int>();
+            FiresSkyIslands.SkylandsNear(center, radius, ids, indices);
+            int islands = 0, removedTagged = 0, removedLegacy = 0, kept = 0, placed = 0;
+            for (int i = 0; i < ids.Count; i++)
+            {
+                uint id = ids[i];
+                int index = indices[i];
+                s_dressed.TryGetValue(id, out var record);
+                if ((record.Layers & FiresSkyIslands.DressAll) == 0) continue;   // never dressed yet: the normal pass dresses it
+                ClearPlacedDressing(index, id, out int tagged, out int legacy, out int left);
+                int laid = Dress(index, FiresSkyIslands.DressAll, id);
+                removedTagged += tagged; removedLegacy += legacy; kept += left; placed += laid;
+                islands++;
+                FiresLogger.LogDebug($"[FiresSkyIslands] re-dressed skyland {id} ({FiresSkyIslands.SkylandBiome(index)}): removed {tagged} tagged + {legacy} "
+                    + $"untagged at their old spots, left {left} other object(s) of dressing kinds, placed {laid} on the voxels' surface");
+            }
+            lines.Add(islands == 0
+                ? $"[Islands] No dressed zone skyland within {radius:0} m."
+                : $"[Islands] Re-dressed {islands} skyland(s): removed {removedTagged} tagged + {removedLegacy} untagged dressing object(s) "
+                  + $"at the spots the skyland code placed them, placed {placed} on the voxels' surface; left {kept} other object(s) of dressing "
+                  + "kinds (placed by players, or by much older rules) untouched.");
+            FiresLogger.LogInfo(lines[lines.Count - 1]);
+            return lines;
+        }
+
         private static readonly HashSet<int> s_dressingPrefabs = new HashSet<int>();
         private static readonly List<Vector2s> s_dressingZones = new List<Vector2s>();
         private static readonly List<ZDO> s_doomed = new List<ZDO>();
 
-        private static int Dress(int index, int layers)
+        private static int Dress(int index, int layers) => Dress(index, layers, FiresSkyIslands.IslandId(index));
+
+        private static int Dress(int index, int layers, uint id)
         {
             FiresSkyIslands.CollectSkylandDressing(index, layers, s_pos, s_rot, s_name, s_scale);
             int placed = 0;
@@ -308,6 +418,7 @@ namespace VerdantsAscent.Terrain.Zones
                     continue;
                 }
                 if (s_scale[i] != Vector3.one) zdo.Set(ZDOVars.s_scaleHash, s_scale[i]);
+                zdo.Set(DressTag, (long)id + 1L);   // what the skyland code placed, so a later clear takes only this
                 placed++;
             }
             return placed;
@@ -315,9 +426,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static string DressedPath()
         {
-            string world = ZNet.World?.m_name ?? "world";
-            string safe = string.Concat(world.Split(Path.GetInvalidFileNameChars()));
-            return Path.Combine(Utils.GetSaveDataPath(FileHelpers.FileSource.Local), "FiresWorldGen", "firesgen_" + safe + "_skylands.txt");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_skylands.txt");
         }
 
         private static void EnsureDressedLoaded()
@@ -363,7 +472,7 @@ namespace VerdantsAscent.Terrain.Zones
         {
             EnsureDressedLoaded();
             s_dressed[id] = new DressRecord(FiresSkyIslands.DressAll | FiresSkyIslands.DressSiteLayout | FiresSkyIslands.DressLocation
-                | FiresSkyIslands.DressRolledRims | FiresSkyIslands.DressGround | FiresSkyIslands.DressNames, biome);
+                | FiresSkyIslands.DressRolledRims | FiresSkyIslands.DressGround | FiresSkyIslands.DressNames | FiresSkyIslands.DressSurface, biome);
             s_sitesPending.Remove(id);
             SaveDressed();
         }
@@ -377,7 +486,9 @@ namespace VerdantsAscent.Terrain.Zones
                 s_headless = SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null;
                 s_headlessKnown = true;
             }
-            if (s_headless || Time.time < s_nextClientTick) return;
+            if (s_headless) return;
+            if (s_heldDressing.Count > 0) ReleaseSwappedDressing();   // every frame, so held dressing never lags its ground
+            if (Time.time < s_nextClientTick) return;
             s_nextClientTick = Time.time + ClientTickSeconds;
             if (!FiresSkyIslands.Enabled) { if (s_visuals.Count > 0) ClearVisuals(); return; }
             var cam = Utils.GetMainCamera();
@@ -411,13 +522,107 @@ namespace VerdantsAscent.Terrain.Zones
             foreach (uint id in s_dropIds) { Destroy(s_visuals[id]); s_visuals.Remove(id); }
         }
 
+        // Skylands looked like they reshaped on first arrival, and veg and grass must not draw
+        // before the terrain is final: a far piece stays up until its zone SWAPS (its voxel chunks, held hidden until then,
+        // all draw from that frame), not from the moment the zone starts wrapping: the gap where neither was drawn, and the island
+        // building up chunk by chunk over a hidden far piece, were the "reshape". OnZoneSwapped flips it in the swap's own frame.
         private static void ShowFarPieces(List<FarPiece> pieces)
         {
             foreach (var piece in pieces)
             {
-                bool voxelTerritory = VoxelZoneStreamer.IsZoneKnown(piece.Zone);
-                if (piece.View.activeSelf == voxelTerritory) piece.View.SetActive(!voxelTerritory);
+                bool voxelShown = VoxelZoneStreamer.IsZoneSolid(piece.Zone);
+                if (piece.View.activeSelf == voxelShown) piece.View.SetActive(!voxelShown);
             }
+        }
+
+        // The swap of a zone on this client (VoxelZoneStreamer.TrySwap): its far pieces go and its held dressing shows, in the
+        // same frame its voxel chunks start drawing.
+        internal static void OnZoneSwapped(Vector2s zone)
+        {
+            foreach (var kv in s_visuals)
+            {
+                HideFarPiecesIn(kv.Value.FarPieces, zone);
+                HideFarPiecesIn(kv.Value.FarWater, zone);
+            }
+            ReleaseDressing(zone);
+        }
+
+        private static void HideFarPiecesIn(List<FarPiece> pieces, Vector2s zone)
+        {
+            foreach (var piece in pieces)
+                if (piece.Zone.x == zone.x && piece.Zone.y == zone.y && piece.View.activeSelf) piece.View.SetActive(false);
+        }
+
+        // ── Dressing waits for its ground ──────────────────────────────────────────────────────────────
+        // A skyland's trees, rocks, roots and vines (DressTag) are networked objects: a client creates them when their zone's
+        // objects load, which was before the zone's voxel island was drawn, so they stood in the air or beside a far piece's
+        // coarser coast. One created while its zone has not swapped keeps its renderers off until the swap (OnZoneSwapped),
+        // and is re-checked every client tick in case the swap came by another path.
+        private sealed class HeldDressing
+        {
+            internal GameObject Go;
+            internal Vector2s Zone;
+            internal List<Renderer> Off;
+        }
+
+        private static readonly List<HeldDressing> s_heldDressing = new List<HeldDressing>();
+        private static readonly List<Renderer> s_rendererScratch = new List<Renderer>();
+        private static int s_dressingHeld, s_dressingReleased;
+
+        [HarmonyPatch(typeof(ZNetScene), "CreateObject")]
+        private static class ZNetScene_CreateObject
+        {
+            private static void Postfix(ZDO zdo, GameObject __result) => HoldDressing(zdo, __result);
+        }
+
+        private static void HoldDressing(ZDO zdo, GameObject go)
+        {
+            if (go == null || zdo == null || !ZoneModeRegistry.ModeActive || !FiresSkyIslands.Enabled) return;
+            if (zdo.GetLong(DressTag, 0L) == 0L || SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null) return;
+            var zone = ZoneSystem.GetZone(go.transform.position);
+            if (VoxelZoneStreamer.IsZoneSolid(zone)) return;
+            go.GetComponentsInChildren(true, s_rendererScratch);
+            var off = new List<Renderer>(s_rendererScratch.Count);
+            foreach (var r in s_rendererScratch)
+            {
+                if (r == null || !r.enabled) continue;
+                r.enabled = false;
+                off.Add(r);
+            }
+            s_heldDressing.Add(new HeldDressing { Go = go, Zone = zone, Off = off });
+            s_dressingHeld++;
+        }
+
+        private static void ReleaseDressing(Vector2s zone)
+        {
+            for (int i = s_heldDressing.Count - 1; i >= 0; i--)
+            {
+                var held = s_heldDressing[i];
+                if (held.Go != null && (held.Zone.x != zone.x || held.Zone.y != zone.y)) continue;
+                Release(held);
+                s_heldDressing.RemoveAt(i);
+            }
+        }
+
+        // Every client tick: dressing whose zone swapped by any path shows; destroyed objects drop out.
+        private static void ReleaseSwappedDressing()
+        {
+            for (int i = s_heldDressing.Count - 1; i >= 0; i--)
+            {
+                var held = s_heldDressing[i];
+                if (held.Go != null && !VoxelZoneStreamer.IsZoneSolid(held.Zone)) continue;
+                Release(held);
+                s_heldDressing.RemoveAt(i);
+            }
+        }
+
+        private static void Release(HeldDressing held)
+        {
+            if (held.Go == null) return;
+            foreach (var r in held.Off) if (r != null) r.enabled = true;
+            if (++s_dressingReleased % 200 == 1)
+                FiresLogger.LogDebug($"[FiresZones] skyland dressing shown with its ground: {s_dressingReleased} of {s_dressingHeld} held "
+                    + $"object(s) released so far, {s_heldDressing.Count - 1} still waiting for their zone's swap.");
         }
 
         // The water sheet's material is bound by the near system some time after load, so the far water waits for it
@@ -525,6 +730,10 @@ namespace VerdantsAscent.Terrain.Zones
             FiresSkyIslands.BuildSkylandFarMesh(index, whole, FatSeasons.BiomeColour(visual.Biome));
             SplitFarMeshByZone(whole, farName, visual.FarPieces);
             Object.Destroy(whole);
+            // The shared terrain material's blank mask has alpha 1, which is lava on Ashlands ground; a far Ashlands
+            // skyland wears a bare mask instead (its voxels do the same through VoxelLayerPaint's palette).
+            if (visual.Biome == Heightmap.Biome.AshLands)
+                foreach (var piece in visual.FarPieces) VoxelLayerPaint.BindBare(piece.View.GetComponent<MeshRenderer>());
             FiresLogger.LogVerbose($"[FiresZones] skyland {islandId:x8}: far view built as {visual.FarPieces.Count} zone piece(s).");
 
             var material = FiresWaterfalls.Material;

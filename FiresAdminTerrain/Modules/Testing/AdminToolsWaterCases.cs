@@ -7,7 +7,7 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // admintools_test's water, ice and snow cases, as [visual]'s Tools\WATER_TOOLS_REFERENCE.md lays them out: each tool's
+    // admintools_test's water, ice and snow cases, as the water tools reference lays them out: each tool's
     // Infinity Hammer console line (FAT's Docs\infinity_tools.yaml, `<area>` = `from=<x>,<z>,<y> circle=<r>`), read back
     // with the call that tool's water answers to, and settled by polling to a cap rather than a fixed wait.
     internal static class AdminToolsWaterCases
@@ -17,7 +17,7 @@ namespace VerdantsAscent.Terrain.Testing
         private const float Radius = 2.5f;
         private const float WaterHeight = 1f;
         private const float WaterfallAbove = 0.5f;
-        // |surface - brush| per [visual]: 0.15 m of wave on one peer; 0.3 m between two peers' waves.
+        // |surface - brush|: 0.15 m of wave on one peer; 0.3 m between two peers' waves.
         internal const float SurfaceTolerance = 0.3f;
         private const float PresentAboveGround = 0.1f;
         private const float LandIceAbove = 0.1f;
@@ -116,6 +116,182 @@ namespace VerdantsAscent.Terrain.Testing
                 Check = (c, b, a) => float.IsNaN(a[0]) ? "no land snow at the centre"
                     : a[0] - c.y >= SnowMinAbove && a[0] - c.y <= SnowMaxAbove ? null : $"the snow's surface is {a[0] - c.y:+0.00;-0.00} m over the ground",
             };
+            foreach (var vtool in VToolCases()) yield return vtool;
+        }
+
+        // ── The Chaos Hammer's own water tools ─────────────────────────────────────────
+        // Driven through the calls the V-tools make (WaterShapingTools, VoxelWorld.MopWater, ToolFalls), like the voxel
+        // family drives ApplyBrush; the "tools" family proves the real click path. Sized for the island's 7 m cells. The
+        // place's persist_unload step re-reads every one of them after an unload, on this peer, the server and the bot.
+        private const float VPoolRadius = 2f, VRiverRadius = 1.2f, VRiverHalf = 2.2f, VRiverDrop = 1f;
+        private const float VPourAbove = 1f, VBowlDepth = 2f, VBowlRadius = 2.5f, VBowlMinDepth = 1f;
+        private const float VMopRadius = 3f, VPitRadius = 1.5f, VPitDepth = 5f, VFallBrush = 1f;
+        private const float VWaitForWater = 3f, VWaitForColliders = 2f, VPoolSettleSeconds = 20f;
+        private const float VPondRadius = 3.5f, VPondBelow = 0.5f, VPondOver = 1f, VPondTolerance = 0.05f;
+
+        private static IEnumerable<ToolCase> VToolCases()
+        {
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vpour", Points = WaterPoints, SettleSeconds = DiskSettleSeconds,
+                Apply = c => VTool(() => VerdantsAscent.Water.Tools.WaterShapingTools.PourDab(c + Vector3.up * VPourAbove, VPoolRadius)),
+                Check = (c, b, a) => AdminToolsCases.Expect(a[0], c.y + VPourAbove, "the pour's surface"),
+            };
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vpool", Points = PoolPoints, SettleSeconds = VPoolSettleSeconds,
+                Apply = c => VTool(() => VerdantsAscent.Water.Tools.WaterShapingTools.PoolClick(c, VPoolRadius)),
+                Check = (c, b, a) => AdminToolsCases.Expect(a[0], c.y, "the pool's surface")
+                    ?? (a[1] <= c.y - VBowlMinDepth ? null : $"the pool's bed reads {a[1]:0.00}, not carved under the surface {c.y:0.00}"),
+            };
+            // Carve and then fill a depression with water: a bowl cut first, then Vpool + LeftAlt fills it to its rim.
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vpool_fill", Points = PoolPoints, SettleSeconds = DiskSettleSeconds,
+                Apply = c => VToolSteps(
+                    () => VerdantsAscent.Terrain.Voxel.VoxelWorld.ApplyBrush(c + Vector3.down * (VBowlDepth * 0.5f), VBowlRadius, VBowlDepth,
+                        VerdantsAscent.Terrain.Voxel.VoxelBrushShape.Cylinder, VerdantsAscent.Terrain.Voxel.VoxelBrushMode.Carve),
+                    () => FiresLogger.LogDebug(VerdantsAscent.Water.Tools.WaterShapingTools.FillBowl(c + Vector3.down * VBowlDepth, VPoolRadius))),
+                Check = (c, b, a) => float.IsNaN(a[0]) ? "no water in the carved bowl"
+                    : a[0] > c.y + AdminToolsCases.HeightTolerance ? $"the water ({a[0]:0.00}) stands over the bowl's rim ({c.y:0.00})"
+                    : a[0] - a[1] >= VBowlMinDepth ? null : $"the bowl is filled only {a[0] - a[1]:0.00} m deep (water {a[0]:0.00}, bed {a[1]:0.00})",
+            };
+            // Vpond (a flat circle of a radius at an adjustable fill height draws a water mesh in a depression): a bowl
+            // cut first, then a circle wider than the bowl at VPondBelow under the ground: the surface reads that height within
+            // VPondTolerance (a disc at height H gives a water surface of H +-0.05; the harness holds the server and the
+            // bot to the same reading).
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vpond", Points = PoolPoints, SettleSeconds = DiskSettleSeconds,
+                Apply = c => VToolSteps(
+                    () => VerdantsAscent.Terrain.Voxel.VoxelWorld.ApplyBrush(c + Vector3.down * (VBowlDepth * 0.5f), VBowlRadius, VBowlDepth,
+                        VerdantsAscent.Terrain.Voxel.VoxelBrushShape.Cylinder, VerdantsAscent.Terrain.Voxel.VoxelBrushMode.Carve),
+                    () => FiresLogger.LogDebug(VerdantsAscent.Water.Tools.PondTool.Fill(c, c.y - VPondBelow, VPondRadius))),
+                Check = (c, b, a) => float.IsNaN(a[0]) ? $"no water in the bowl (wanted a surface at {c.y - VPondBelow:0.00})"
+                    : Mathf.Abs(a[0] - (c.y - VPondBelow)) > VPondTolerance ? $"the pond's surface reads {a[0]:0.00}, not the circle's height {c.y - VPondBelow:0.00} (+-{VPondTolerance:0.00})"
+                    : a[0] - a[1] >= VBowlMinDepth - VPondBelow ? null : $"the pond is only {a[0] - a[1]:0.00} m deep (water {a[0]:0.00}, bed {a[1]:0.00})",
+            };
+            // The same bowl with the circle set over the ground: the rim lies under the height all round, so nothing may be laid.
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vpond_spill", Points = PoolPoints, SettleSeconds = DiskSettleSeconds,
+                Apply = c => VToolSteps(
+                    () => VerdantsAscent.Terrain.Voxel.VoxelWorld.ApplyBrush(c + Vector3.down * (VBowlDepth * 0.5f), VBowlRadius, VBowlDepth,
+                        VerdantsAscent.Terrain.Voxel.VoxelBrushShape.Cylinder, VerdantsAscent.Terrain.Voxel.VoxelBrushMode.Carve),
+                    () => FiresLogger.LogDebug(VerdantsAscent.Water.Tools.PondTool.Fill(c, c.y + VPondOver, VPondRadius))),
+                Check = (c, b, a) => float.IsNaN(a[0]) ? null : $"water was laid at {a[0]:0.00} although the circle at {c.y + VPondOver:0.00} spills over the rim",
+            };
+            // Click one water source, then a second, and a river carves itself between them.
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vriver", Points = RiverPoints, SettleSeconds = VPoolSettleSeconds,
+                Apply = c => VTool(() =>
+                {
+                    VerdantsAscent.Water.Tools.WaterShapingTools.PoolClick(c + Vector3.left * VRiverHalf, VRiverRadius);
+                    VerdantsAscent.Water.Tools.WaterShapingTools.PoolClick(c + Vector3.right * VRiverHalf + Vector3.down * VRiverDrop, VRiverRadius);
+                }),
+                Check = (c, b, a) =>
+                {
+                    if (float.IsNaN(a[0]) || float.IsNaN(a[1]) || float.IsNaN(a[2]))
+                        return $"the river is broken: water at A {Show(a[0])}, midway {Show(a[1])}, B {Show(a[2])}";
+                    if (a[0] < a[1] - SurfaceTolerance || a[1] < a[2] - SurfaceTolerance)
+                        return $"the river does not fall from A to B ({a[0]:0.00} -> {a[1]:0.00} -> {a[2]:0.00})";
+                    if (a[0] - a[2] < VRiverDrop * 0.5f) return $"A ({a[0]:0.00}) is not above B ({a[2]:0.00}): no flow A -> B";
+                    return a[3] <= a[1] - VBowlMinDepth * 0.5f ? null : $"no bed carved midway (ground {a[3]:0.00}, water {a[1]:0.00})";
+                },
+            };
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vmop", Points = WaterPoints, SettleSeconds = DiskSettleSeconds,
+                Apply = c => VToolWaitThen(
+                    () => VerdantsAscent.Water.Tools.WaterShapingTools.PourDab(c + Vector3.up * VPourAbove, VPoolRadius),
+                    () => Mop(c, false)),
+                Check = (c, b, a) => float.IsNaN(a[0]) ? null : $"water still stands at the centre ({a[0]:0.00}) after the mop",
+            };
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vmop_restore", Points = WaterPoints, SettleSeconds = DiskSettleSeconds,
+                Apply = c => VToolWaitThen(
+                    () => VerdantsAscent.Water.Tools.WaterShapingTools.PourDab(c + Vector3.up * VPourAbove, VPoolRadius),
+                    () => { Mop(c, false); Mop(c, true); }),
+                Check = (c, b, a) => AdminToolsCases.Expect(a[0], c.y + VPourAbove, "the pour's surface after mop + restore"),
+            };
+            yield return new ToolCase
+            {
+                Family = WaterFamily, Name = "vfall", Points = FallPoints, SettleSeconds = VPoolSettleSeconds,
+                Apply = c => VFall(c),
+                Check = (c, b, a) => a[0] < 1f ? $"no fall at the lip (FallsNear {Show(a[0])})"
+                    : float.IsNaN(a[1]) ? "no pool where the fall lands" : null,
+            };
+        }
+
+        private static List<ProbePoint> PoolPoints(Vector3 c) => new List<ProbePoint>
+        {
+            new ProbePoint(ProbeKind.WaterSurface, c),
+            new ProbePoint(ProbeKind.VoxelSurface, c + Vector3.down * VBowlDepth),
+        };
+
+        private static List<ProbePoint> RiverPoints(Vector3 c) => new List<ProbePoint>
+        {
+            new ProbePoint(ProbeKind.WaterSurface, c + Vector3.left * VRiverHalf),
+            new ProbePoint(ProbeKind.WaterSurface, c + Vector3.down * (VRiverDrop * 0.5f)),
+            new ProbePoint(ProbeKind.WaterSurface, c + Vector3.right * VRiverHalf + Vector3.down * VRiverDrop),
+            new ProbePoint(ProbeKind.VoxelSurface, c + Vector3.down * VBowlDepth),
+        };
+
+        private static List<ProbePoint> FallPoints(Vector3 c) => new List<ProbePoint>
+        {
+            new ProbePoint(ProbeKind.FallsNear, c),
+            new ProbePoint(ProbeKind.WaterSurface, c + Vector3.right * VPitRadius + Vector3.down * VPitDepth),
+        };
+
+        private static string Show(float value) => float.IsNaN(value) ? "none" : value.ToString("0.00", CultureInfo.InvariantCulture);
+
+        private static void Mop(Vector3 c, bool restore)
+        {
+            VerdantsAscent.Terrain.Voxel.VoxelWorld.MopWater(c, VMopRadius, restore, out _);
+            WaterMeshCombiner.RefreshMopsIn(c, VMopRadius);
+        }
+
+        // Every V-tool case runs with no PgUp/PgDn offset and no pool chain left over from a player or another case.
+        private static IEnumerator VTool(Action action) => VToolSteps(action);
+
+        private static IEnumerator VToolSteps(params Action[] actions)
+        {
+            float offset = VerdantsAscent.Water.Tools.WaterShapingTools.LevelOffset;
+            VerdantsAscent.Water.Tools.WaterShapingTools.LevelOffset = 0f;
+            VerdantsAscent.Water.Tools.WaterShapingTools.ClearAnchor();
+            try
+            {
+                foreach (var action in actions) action();
+            }
+            finally
+            {
+                VerdantsAscent.Water.Tools.WaterShapingTools.ClearAnchor();
+                VerdantsAscent.Water.Tools.WaterShapingTools.LevelOffset = offset;
+            }
+            yield break;
+        }
+
+        // The first action's water has to exist (it is laid through the server) before the second can act on it.
+        private static IEnumerator VToolWaitThen(Action first, Action then)
+        {
+            var one = VToolSteps(first);
+            while (one.MoveNext()) yield return one.Current;
+            yield return new WaitForSecondsRealtime(VWaitForWater);
+            var two = VToolSteps(then);
+            while (two.MoveNext()) yield return two.Current;
+        }
+
+        // A pit beside the cell's centre, then a Vfall click just short of its edge looking across it.
+        private static IEnumerator VFall(Vector3 c)
+        {
+            VerdantsAscent.Terrain.Voxel.VoxelWorld.ApplyBrush(c + Vector3.right * VPitRadius + Vector3.down * (VPitDepth * 0.5f),
+                VPitRadius, VPitDepth, VerdantsAscent.Terrain.Voxel.VoxelBrushShape.Cylinder, VerdantsAscent.Terrain.Voxel.VoxelBrushMode.Carve);
+            yield return new WaitForSecondsRealtime(VWaitForColliders);   // the landing ray needs the pit's colliders
+            var place = VToolSteps(() => FiresLogger.LogDebug(
+                VerdantsAscent.Water.Tools.ToolFalls.Place(c + Vector3.left * VPitRadius, Vector3.right, VFallBrush)));
+            while (place.MoveNext()) yield return place.Current;
         }
 
         private static ToolCase Disk(string name, string command, CustomLiquidType type) => new ToolCase

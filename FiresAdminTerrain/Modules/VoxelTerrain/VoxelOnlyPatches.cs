@@ -5,7 +5,7 @@ using VerdantsAscent.Terrain.Utilities;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
-    // W3-A1 — VANILLA TERRAIN NEVER EXISTS. In VoxelOnly mode on a Fires
+    // VANILLA TERRAIN NEVER EXISTS. In VoxelOnly mode on a Fires
     // world, near-zone Heightmaps keep building their DATA (biomes, vegetation
     // masks, minimap, paint — all fed by our generator anyway) but their
     // render mesh and collider are never built. Voxels are the only physical
@@ -192,7 +192,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (!VoxelOnlyMode.Active) return true;
             if (!VoxelOnlyMode.IsDistantLod(__instance)) return false;   // near: never renders
-            // Distant: OURS (user mandate — we own distance). Vanilla's
+            // Distant: OURS (we own distance). Vanilla's
             // TerrainLod never builds while the Fires low-LOD is on; the
             // material-variant swamp (capture lottery, _ISDISTANTLOD_ON
             // keyword coverage in the shader port) made vanilla's horizon
@@ -256,15 +256,30 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (FiresVoxelConfig.Enabled == null || !FiresVoxelConfig.Enabled.Value) return true;
             if (__instance == null || __instance.IsDead()) return true;
+            // Noclip flight (Server Devcommands) goes anywhere, under the ground too: no rescue of any kind, vanilla's included.
+            if (FatNoClip.IsOn(__instance))
+            {
+                if (__instance == Player.m_localPlayer && Embedded(__instance.transform.position) && Time.time >= s_nextEmbeddedNote)
+                {
+                    s_nextEmbeddedNote = Time.time + 30f;
+                    var q = __instance.transform.position;
+                    FiresLogger.LogDebug($"[FiresVoxel] noclip: the local player is INSIDE solid voxel at ({q.x:0.0}, {q.y:0.0}, {q.z:0.0}); not lifted while noclip is on (0.2.910)");
+                }
+            }
+            if (FatNoClip.Skips(__instance, "the under-world rescue"))
+            {
+                TimerRef(__instance) = 0f;
+                return false;
+            }
             if (TimerRef(__instance) + dt <= 5f && !__instance.IsPlayer()) return true;
 
             var zs = ZoneSystem.instance;
             if (zs == null) return true;
             var p = __instance.transform.position;
 
-            // 0.2.697 (Fire 10-01, after a sea-cliff climb kept snapping him 61 m up to the cliff top: "vanilla should not be
-            // running "below the ground" rescue on our voxel terrain, or our caves, or our sky islands for that matter
-            // because it would pull us up to them too"). Vanilla lifts any body below GetGroundHeight - 1 to that height,
+            // A sea-cliff climb kept snapping the player 61 m up to the cliff top: vanilla's "below the ground"
+            // rescue must not run on voxel terrain, caves or sky islands, because it pulls the player up onto them.
+            // Vanilla lifts any body below GetGroundHeight - 1 to that height,
             // and on voxel ground GetGroundHeight is the TOP of the column: a cliff or overhang above a swimmer, the roof
             // over a cave, a sky island over the ground. On voxel ground vanilla's rescue never runs; the only net left is
             // voxel-native (VoidRescue): a body far below the world with nothing under it goes onto the LOWEST floor of
@@ -272,6 +287,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (VoxelOnlyMode.Active || VoxelZoneStreamer.IsZoneSolid(ZoneSystem.GetZone(p)))
             {
                 TimerRef(__instance) = 0f;   // vanilla's timer contract (NPCs re-check every 5 s)
+                if (__instance.IsPlayer() && LiftIfEmbedded(__instance, p)) return false;
                 VoidRescue(__instance, p);
                 return false;
             }
@@ -289,9 +305,9 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;                     // true void on vanilla terrain — vanilla safety net
         }
 
-        // Fire 10-01: "we will replace it with our own safety that only pulls someone up to the lowest layer if they happen
-        // to fall through the world" - "or, whatever layer they were trying to teleport to if they fall through on
-        // teleport". It fires ONLY when nothing solid is under the body (a down ray on the solid layers, checked first, so
+        // Our own safety instead: it only pulls someone up to the lowest layer if they happen
+        // to fall through the world, or to the layer they were teleporting to if they fall through on
+        // a teleport. It fires ONLY when nothing solid is under the body (a down ray on the solid layers, checked first, so
         // a normal frame costs one ray) AND the body is below the LOWEST voxel floor of its column (the first solid→air
         // crossing scanned up from ScanBottom). It lands on that lowest floor - never a cave ceiling, an overhang, a cliff
         // top or a sky island above - except within TeleportMemory s of a teleport that targeted this spot, where it
@@ -299,6 +315,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float ScanBottom = -300f, ColumnTop = 1200f, ScanStep = 20f, RescueLift = 0.5f, BelowFloor = 1f;
         private const float TeleportMemory = 10f, TeleportReach = 16f, TeleportWindow = 40f;
         private static readonly int s_solidMask = LayerMask.GetMask("Default", "static_solid", "Default_small", "piece", "terrain", "vehicle");
+        private static readonly AccessTools.FieldRef<Character, float> MaxAirAltitudeRef =
+            AccessTools.FieldRefAccess<Character, float>("m_maxAirAltitude");
+        private const float FallingSpeed = 5f;
         private static bool s_rescueLogged;
         private static readonly System.Collections.Generic.Dictionary<int, (Vector3 to, float at)> s_teleports =
             new System.Collections.Generic.Dictionary<int, (Vector3 to, float at)>();
@@ -311,8 +330,82 @@ namespace VerdantsAscent.Terrain.Voxel
             s_teleports[c.GetInstanceID()] = (to, Time.time);
         }
 
+        // Seekers from a dungeon interior landed on the overworld, so: a creature inside an interior
+        // (vanilla's band, y > 3000) that drops with nothing under it within InteriorDrop goes back to the last interior
+        // floor it stood on, never to the world floor 5000 m below. Creatures only: players leave interiors by door
+        // teleports, which this must not undo.
+        private const float InteriorDrop = 30f;
+        private const int InteriorMemoryCap = 1024;
+        private static readonly System.Collections.Generic.Dictionary<int, Vector3> s_interiorFloor =
+            new System.Collections.Generic.Dictionary<int, Vector3>();
+        private static bool s_interiorRescueLogged;
+
+        private static bool InteriorRescue(Character c, Vector3 p)
+        {
+            if (c.IsPlayer() || c.IsTamed()) return false;
+            int id = c.GetInstanceID();
+            bool remembered = s_interiorFloor.TryGetValue(id, out var floor);
+            if (Character.InInterior(p))
+            {
+                if (c.IsOnGround())
+                {
+                    if (!remembered && s_interiorFloor.Count >= InteriorMemoryCap) s_interiorFloor.Clear();
+                    s_interiorFloor[id] = p;
+                    return true;
+                }
+                if (!remembered || Physics.Raycast(p + Vector3.up * 0.5f, Vector3.down, InteriorDrop, s_solidMask, QueryTriggerInteraction.Ignore))
+                    return true;
+            }
+            // Below the band: only a body still FALLING goes back. One that stands there arrived by a door teleport (a
+            // companion following its player out) and stays; tamed creatures are never pulled back at all.
+            else if (!remembered || c.IsOnGround() || (c.GetComponent<Rigidbody>()?.linearVelocity.y ?? 0f) > -FallingSpeed)
+            {
+                s_interiorFloor.Remove(id);
+                return false;
+            }
+            s_interiorFloor.Remove(id);
+            var to = floor + Vector3.up * RescueLift;
+            c.transform.position = to;
+            var body = c.GetComponent<Rigidbody>();
+            if (body != null) { body.position = to; body.linearVelocity = Vector3.zero; }
+            MaxAirAltitudeRef(c) = to.y;
+            if (!s_interiorRescueLogged)
+            {
+                s_interiorRescueLogged = true;
+                FiresLogger.LogInfo($"[FiresVoxel] interior rescue: {c.m_name} dropped out of an interior at ({p.x:0}, {p.y:0}, {p.z:0}); "
+                    + $"put back on its last interior floor ({floor.x:0}, {floor.y:0}, {floor.z:0}). First of this session.");
+            }
+            return true;
+        }
+
+        // A player had fallen through the ground on load. VoidRescue only acts when NOTHING solid is
+        // under a body, so a player EMBEDDED in solid voxel (rock above and below) was never lifted. A player whose chest and knees are
+        // both inside solid voxel goes up to the first spot with 2 m of air over a solid floor (at most 200 m up).
+        private static float s_nextEmbeddedNote;
+        private static bool Embedded(Vector3 p)
+            => VoxelWorld.TryIsSolid(p.x, p.y + 1.1f, p.z, out bool chest) && chest && VoxelWorld.TryIsSolid(p.x, p.y + 0.4f, p.z, out bool knee) && knee;
+
+        private static bool LiftIfEmbedded(Character c, Vector3 p)
+        {
+            if (!Embedded(p)) return false;
+            for (float y = p.y + 0.5f; y < p.y + 200f; y += 0.5f)
+            {
+                if (!VoxelWorld.TryIsSolid(p.x, y, p.z, out bool s0) || s0) continue;
+                if (!VoxelWorld.TryIsSolid(p.x, y + 1f, p.z, out bool s1) || s1) continue;
+                if (!VoxelWorld.TryIsSolid(p.x, y + 1.9f, p.z, out bool s2) || s2) continue;
+                if (!VoxelWorld.TryIsSolid(p.x, y - 0.5f, p.z, out bool fl) || !fl) continue;
+                var to = new Vector3(p.x, y + 0.1f, p.z);
+                c.transform.position = to;
+                var rb = c.GetComponent<Rigidbody>(); if (rb != null) rb.linearVelocity = Vector3.zero;
+                FiresLogger.LogDebug($"[FiresVoxel] {c.m_name} was inside solid voxel at ({p.x:0.0}, {p.y:0.0}, {p.z:0.0}): lifted {to.y - p.y:0.0} m to the first open floor (0.2.910)");
+                return true;
+            }
+            return false;
+        }
+
         private static void VoidRescue(Character c, Vector3 p)
         {
+            if (InteriorRescue(c, p)) return;
             if (Physics.Raycast(p + Vector3.up * 0.5f, Vector3.down, 3000f, s_solidMask, QueryTriggerInteraction.Ignore)) return;
             float lowest = float.NaN;
             for (float lo = ScanBottom; lo < ColumnTop && float.IsNaN(lowest); lo += ScanStep)
@@ -335,6 +428,7 @@ namespace VerdantsAscent.Terrain.Voxel
             c.transform.position = to;
             var body = c.GetComponent<Rigidbody>();
             if (body != null) { body.position = to; body.linearVelocity = Vector3.zero; }
+            MaxAirAltitudeRef(c) = to.y;   // the lift is not a fall
             if (!s_rescueLogged)
             {
                 s_rescueLogged = true;
@@ -361,20 +455,59 @@ namespace VerdantsAscent.Terrain.Voxel
     [HarmonyPatch(typeof(StaticPhysics), nameof(StaticPhysics.SUpdate))]
     internal static class Patch_StaticPhysics_WaitForVoxelGround
     {
+        // This prefix measured 7.47 ms/s at 7.5k calls/s: a split timer before any change
+        // (measure first). Once a minute, Debug: µs per call for each check and how the calls ended.
+        private static long s_tCave, s_tSky, s_tZone, s_calls, s_cave, s_sky, s_waiting;
+        private static float s_nextReport;
+        private static readonly double TicksToMicros = 1e6 / System.Diagnostics.Stopwatch.Frequency;
+
         private static bool Prefix(StaticPhysics __instance)
         {
-            if (VoxelCaveContent.IsCaveContent(__instance)) return false;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool result = Decide(__instance, t0);
+            s_calls++;
+            Report();
+            return result;
+        }
+
+        private static bool Decide(StaticPhysics __instance, long t0)
+        {
+            bool cave = VoxelCaveContent.IsCaveContent(__instance);
+            long t1 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tCave += t1 - t0;
+            if (cave) { s_cave++; return false; }
             // A prop dressed onto a skyland never falls or pushes up at all. Vanilla measures the ground it should sit on
             // with ZoneSystem.GetGroundHeight (GetSolidHeight only when m_checkSolids, which these rocks do not set), and
             // that is the heightmap 150 m below: every rock and stone dropped out of the sky once its area loaded. It
             // keeps the height the dressing placed it at, and so does anything under a skyland the server has announced
             // but whose island set has not reached this client yet.
             Vector3 position = __instance.transform.position;
-            if (FiresSkyIslands.IsOnZoneSkyland(position) || Zones.ZoneModeSkylands.RisingAt(position)) return false;
+            bool sky = FiresSkyIslands.IsOnZoneSkyland(position) || Zones.ZoneModeSkylands.RisingAt(position);
+            long t2 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tSky += t2 - t1;
+            if (sky) { s_sky++; return false; }
             if (!FiresWorldGenBase.Active) return true;
             // Solid AND settled for 3s — bounce reports persisted with the
             // bare solid gate; the settle window outlasts collider bake races.
-            return VoxelZoneStreamer.IsZoneSolidFor(ZoneSystem.GetZone(__instance.transform.position), 3f);
+            bool solid = VoxelZoneStreamer.IsZoneSolidFor(ZoneSystem.GetZone(position), 3f);
+            s_tZone += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
+            if (!solid) s_waiting++;
+            return solid;
+        }
+
+        private static void Report()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < s_nextReport) return;
+            bool first = s_nextReport == 0f;
+            s_nextReport = now + 60f;
+            if (!first && s_calls > 0)
+            {
+                double per = TicksToMicros / s_calls;
+                FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "[FatStaticPhysics] {0} call(s)/min: cave check {1:0.00} µs, skyland check {2:0.00} µs, zone-solid check {3:0.00} µs per call; " +
+                    "{4} held as cave content, {5} held on a skyland, {6} waiting for solid ground, the rest released",
+                    s_calls, s_tCave * per, s_tSky * per, s_tZone * per, s_cave, s_sky, s_waiting));
+            }
+            s_tCave = s_tSky = s_tZone = s_calls = s_cave = s_sky = s_waiting = 0;
         }
     }
 
@@ -382,6 +515,7 @@ namespace VerdantsAscent.Terrain.Voxel
     internal static class Patch_ZNetScene_IsAreaReady_VoxelOnly
     {
         private static float s_gateSince = -1f;
+        private const float GateWarnAfter = 60f;   // progress lines are Debug below this (the FAIL-OPEN at 45 s stays a Warning)
         private static float s_nextDiag;
         // The exact point a spawn/teleport is waiting on — served to the
         // streamer as its pre-spawn wrap center. Ground truth from the gate
@@ -392,24 +526,96 @@ namespace VerdantsAscent.Terrain.Voxel
         private static Vector3 s_pendingPoint;
         private static float s_pendingAt = -1f;
 
+        // Cold first spawns take 43-57 s against the 45 s fail-open: log-only phase timer. Once a second
+        // while the gate holds, the 3x3 area's blockers (DescribeArea) are put in the FIRST phase that applies, in pipeline
+        // order: not wrapped yet, generate pending (queued / re-prepped / stranded), no view (mesh not applied), no collider.
+        // One Debug line on release or fail-open: seconds spent in each phase.
+        private static readonly float[] s_phaseSec = new float[6];
+        private static readonly string[] s_phaseName = { "unwrapped", "generate queued", "generate not queued", "no view (mesh)", "no collider", "other" };
+        private static float s_lastSample = -1f, s_unwrappedZoneSec;
+        private static readonly System.Text.RegularExpressions.Regex s_genRx = new System.Text.RegularExpressions.Regex(@"gen=(\d+) q=(\d+) noView=(\d+) noCol=(\d+)/");
+
+        private static void SamplePhase(Vector3 point)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (s_lastSample >= 0f && now - s_lastSample < 1f) return;
+            float dt = s_lastSample < 0f ? 0f : now - s_lastSample;
+            s_lastSample = now;
+            string a = VoxelZoneStreamer.DescribeArea(point);
+            int phase = 5;
+            // Count zones per state too (any-zone-wins hid that one of 9 was the holdout)
+            int unw = 0; for (int i = a.IndexOf("UNWRAPPED"); i >= 0; i = a.IndexOf("UNWRAPPED", i + 1)) unw++;
+            s_unwrappedZoneSec += unw * dt;
+            if (unw > 0) phase = 0;
+            else
+            {
+                int gen = 0, q = 0, view = 0, col = 0;
+                foreach (System.Text.RegularExpressions.Match m in s_genRx.Matches(a))
+                {
+                    gen += int.Parse(m.Groups[1].Value); q += int.Parse(m.Groups[2].Value);
+                    view += int.Parse(m.Groups[3].Value); col += int.Parse(m.Groups[4].Value);
+                }
+                if (q > 0) phase = 1; else if (gen > 0) phase = 2; else if (view > 0) phase = 3; else if (col > 0) phase = 4;
+            }
+            s_phaseSec[phase] += dt;
+        }
+
+        private static void ReportPhases(string how)
+        {
+            if (s_lastSample < 0f) return;
+            var sb = new System.Text.StringBuilder("[FiresVoxel] spawn gate phases (" + how + "): ");
+            for (int i = 0; i < s_phaseSec.Length; i++)
+            {
+                if (s_phaseSec[i] < 0.05f) continue;
+                sb.Append(s_phaseName[i]).Append(' ').Append(s_phaseSec[i].ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(" s; ");
+                s_phaseSec[i] = 0f;
+            }
+            s_lastSample = -1f;
+            sb.Append("(unwrapped zone-seconds over the 3x3: ").Append(s_unwrappedZoneSec.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).Append(')');
+            s_unwrappedZoneSec = 0f;
+            FiresLogger.LogDebug(sb.ToString());
+        }
+
         internal static Vector3 PendingSpawnArea(float maxAge)
             => s_pendingAt >= 0f && Time.realtimeSinceStartup - s_pendingAt <= maxAge
                ? s_pendingPoint : Vector3.zero;
 
         private static void Postfix(Vector3 point, ref bool __result)
         {
-            if (!__result || !(VoxelOnlyMode.Active || FiresSkyIslands.IsOnZoneSkyland(point))) return;
-            if (VoxelZoneStreamer.AreaSolid(point))
+            // VoxelOnly and skylands; also any world whose voxel terrain this CLIENT builds (VoxelWrap /
+            // converted worlds): their login dropped the player at heightmap height under the voxel ground.
+            bool voxelHere = VoxelOnlyMode.Active || FiresSkyIslands.IsOnZoneSkyland(point)
+                || (VoxelZoneStreamer.IsVoxelWorldActive && ZNet.instance != null && !ZNet.instance.IsDedicated());
+            if (!__result || !voxelHere) return;
+            if (VoxelZoneStreamer.SpawnAreaReady(point))
             {
                 if (s_gateSince >= 0f)
-                    FiresLogger.LogInfo($"[FiresVoxel] spawn gate released — area solid after " +
+                {
+                    FiresLogger.LogDebug($"[FiresVoxel] spawn gate released — area solid after " +
                               $"{Time.realtimeSinceStartup - s_gateSince:F1}s.");
+                    ReportPhases("released");
+                }
                 s_gateSince = -1f;
                 s_pendingAt = -1f;
                 VoxelMeshPipeline.SpawnGateBoost = false;
                 return;
             }
 
+            // A login episode once never released or failed open because vanilla stopped asking,
+            // so the pad teleport inherited its 58 s and failed open at once. [Voxel Terrain] "Spawn gate restarts per spawn"
+            // (default OFF). ON: a point more than 64 m from the held one, or 2 s with no ask, starts a NEW episode.
+            if (s_gateSince >= 0f)   // always on
+            {
+                float now0 = Time.realtimeSinceStartup;
+                bool moved = (point - s_pendingPoint).sqrMagnitude > 64f * 64f;
+                bool idle = s_pendingAt >= 0f && now0 - s_pendingAt > 2f;
+                if (moved || idle)
+                {
+                    FiresLogger.LogInfo($"[FiresVoxel] spawn gate: previous episode at {s_pendingPoint:F0} ended unreleased after {now0 - s_gateSince:F1}s ({(moved ? "new point " + point.ToString("F0") : "not asked for " + (now0 - s_pendingAt).ToString("F1") + "s")}); new episode (Spawn gate restarts per spawn = ON)");
+                    ReportPhases("abandoned");
+                    s_gateSince = -1f;
+                }
+            }
             s_pendingPoint = point;
             s_pendingAt = Time.realtimeSinceStartup;
             // Vanilla's spawn flow is supposed to point the reference position
@@ -434,15 +640,20 @@ namespace VerdantsAscent.Terrain.Voxel
             VoxelMeshPipeline.SpawnGateBoost = true;
 
             float held = Time.realtimeSinceStartup - s_gateSince;
+            SamplePhase(point);
             if (held > 5f && Time.realtimeSinceStartup >= s_nextDiag)
             {
                 s_nextDiag = Time.realtimeSinceStartup + 10f;
-                FiresLogger.LogWarning($"[FiresVoxel] spawn gate holding {held:F0}s: {VoxelZoneStreamer.DescribeArea(point)}");
+                // Progress at Debug, a Warning only past
+                // GateWarnAfter s, a real stall.
+                string gateLine = $"[FiresVoxel] spawn gate holding {held:F0}s: {VoxelZoneStreamer.DescribeArea(point)}";
+                if (held > GateWarnAfter) FiresLogger.LogWarning(gateLine); else FiresLogger.LogDebug(gateLine);
             }
             if (held > 45f)
             {
                 FiresLogger.LogWarning($"[FiresVoxel] VoxelOnly spawn gate FAIL-OPEN after 45s — releasing anyway. " +
                                  $"Blockers: {VoxelZoneStreamer.DescribeArea(point)}");
+                ReportPhases("FAIL-OPEN");
                 // Fresh timer for any LATER gating episode — the stale timer
                 // made every subsequent check fail-open instantly (the second
                 // FAIL-OPEN line every login).
@@ -482,7 +693,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // method at default priority, so this reports the POST-swap truth (the
     // old Awake-time log fired before any swap could land and cried vanilla
     // even when the swap was about to apply).
-    // A built piece with water (a hot tub) enables its own WaterVolume and can come first ([perf] R41: "zone water surface:
+    // A built piece with water (a hot tub) enables its own WaterVolume and can come first (seen as "zone water surface:
     // material='water_hottub'"), so zone water and piece water are logged apart, each naming its object.
     [HarmonyPatch(typeof(WaterVolume), "OnEnable")]
     internal static class Patch_WaterVolume_OnEnable_MaterialLog
@@ -505,7 +716,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
     }
 
-    // W3-A4 — far terrain wears OUR material. Distant-LOD heightmaps already
+    // Far terrain wears OUR material. Distant-LOD heightmaps already
     // render our heights (they build from the generator), but in vanilla's
     // distant material — a visible look-break at the voxel frontier. Swap
     // them onto the same captured terrain material the voxel chunks use, so
@@ -547,7 +758,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // Every voxel world, whatever its generator and terrain kind: vanilla's top-down ray that lands on voxel ground
         // hits a chunk collider with no Heightmap, so it answers no biome and no heightmap (and callers read no lava).
         // The zone's own heightmap answers them, the generator's biome where none is loaded; the height stays the ray's.
-        // 0.2.674 → 0.2.675 (R46, CoopStream base pond, 10-01): the answer was gated on the ray landing within 0.5 m
+        // The answer used to be gated on the ray landing within 0.5 m
         // of a sampled voxel surface. At a tool-carved pond in a zone converted by ZoneReplace that sample missed, the biome
         // stayed None, and every biome-gated spawn and clutter rule refused the pond ("biome None", 0 fish). Vanilla leaves
         // the biome None only when its ray missed or hit something without a Heightmap, and the zone's (or the generator's)
@@ -555,7 +766,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void Postfix(ref Vector3 p, ref Heightmap.Biome biome, ref Heightmap.BiomeArea biomeArea, ref Heightmap hmap)
         {
             if (hmap != null || biome != Heightmap.Biome.None) return;
-            var zoneMap = Heightmap.FindHeightmap(p);
+            var zoneMap = VoxelZoneStreamer.ZoneHeightmap(p);   // per-zone cache (was 30.8 % of FindHeightmap)
             if (zoneMap != null)
             {
                 hmap = zoneMap;

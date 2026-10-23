@@ -102,18 +102,18 @@ namespace VerdantsAscent.Terrain.Voxel
                 args => Apply(args, VoxelBrushMode.Restore), isCheat: true);
 
             new Terminal.ConsoleCommand("va_voxel_cube",
-                "[va_voxel_cube] Stamp a voxel CUBE at the 3D gizmo (Ctrl+Scroll = size, hold LeftAlt = carve, drag to paint).",
+                "[va_voxel_cube] Stamp a voxel CUBE at the 3D gizmo (Scroll = size, hold LeftAlt = carve, drag to paint).",
                 args => ApplyGizmo(args, VoxelBrushShape.Cube), isCheat: true);
 
             new Terminal.ConsoleCommand("va_voxel_sphere",
-                "[va_voxel_sphere] Stamp a voxel SPHERE at the 3D gizmo (Ctrl+Scroll = size, hold LeftAlt = carve, drag to paint — dragged spheres make smooth tubes).",
+                "[va_voxel_sphere] Stamp a voxel SPHERE at the 3D gizmo (Scroll = size, hold LeftAlt = carve, drag to paint — dragged spheres make smooth tubes).",
                 args => ApplyGizmo(args, VoxelBrushShape.Sphere), isCheat: true);
 
             // Water survey — walk a radius around the player, classify every
             // generated water body by size/shape, and report each one's level
             // range and how it sits against its banks. This is the tool for
             // giving per-body feedback ("that pond is 0.4m proud on its east
-            // bank") instead of eyeballing screenshots.
+            // bank").
             new Terminal.ConsoleCommand("va_water_scan",
                 "[va_water_scan radius=256 step=2] Survey generated water near you: streams, rivers, ponds and lakes, each with its level range, depth, and worst stand-above-bank. Use it to check leveling per body.",
                 args =>
@@ -235,9 +235,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 isCheat: true);
 
             // FEATURE TOUR — one command to pin every kind of generated
-            // terrain feature on the map for polishing (user: "a way to mark
-            // rivers, brooks, streams and all our other special features so I
-            // can find them all and inspect them"). Rivers/streams/still-water
+            // terrain feature on the map for polishing (rivers, brooks, streams and
+            // all other special features, so each can be found and inspected). Rivers/streams/still-water
             // ride the water-class grid; swampland is the biome DISTRICT;
             // volcanos/sky islands have their own snapshots.
             new Terminal.ConsoleCommand("va_features",
@@ -435,7 +434,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 center.y = snapY;
             }
 
-            // FLAT RULER tools draw flattened cylinders (user spec): no height
+            // FLAT RULER tools draw flattened cylinders: no height
             // → a 2m-thick disc at the aim point. Height set via PgUp/PgDn →
             // cylinder spanning FROM the aim point TO the ruler ring (PgUp =
             // pillar to the ring, PgDn = shaft down to it). 3D spheres/cubes
@@ -477,7 +476,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 return;
             }
 
-            var mode = Input.GetKey(KeyCode.LeftAlt) ? VoxelBrushMode.Carve : VoxelBrushMode.Fill;
+            var mode = VerdantsAscent.Terrain.FatInput.AltHeld ? VoxelBrushMode.Carve : VoxelBrushMode.Fill;
             try
             {
                 string summary = VoxelWorld.ApplyBrush(center, VoxelBrushDrag.EffectiveGizmoRadius(), 0f, shape, mode);
@@ -500,9 +499,13 @@ namespace VerdantsAscent.Terrain.Voxel
             Register();
             VoxelSeamAudit.Register();
             WaterCensus.Register();
+            FatZdoNear.Register();   // read-only ZDO census by prefab + radius (who created each copy)
+            Zones.FatLocationDedupe.Register();   // thin locations generated twice (dry run unless 'apply')
             VoxelGenLiquid.Register();
             VoxelBrushDrag.EnsureAttached();
             VoxelCaveEnv.EnsureAttached();
+            VerdantsAscent.Water.Core.InlandLakeProbe.EnsureAttached();
+            VerdantsAscent.Water.Core.InlandSteam.EnsureAttached();
         }
     }
 }

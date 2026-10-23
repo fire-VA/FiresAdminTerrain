@@ -9,12 +9,12 @@ namespace VerdantsAscent.Terrain.Voxel
     //
     // The cache was local-only: no RPC, no sync. Every client regenerated every chunk it walked through, and a
     // dedicated server - which has no client to build one for it - never had a cache at all. Measured on
-    // BlueHillsTrueVox 2026-09-26, a first traverse left 22 zones showing vanilla heightmap, longest 38 s,
+    // a first traverse of a test world left 22 zones showing vanilla heightmap, longest 38 s,
     // pendingGen=17 queued=68, while the voxel mesher fell behind a running player.
     //
     // WHY THE WHOLE CACHE GOES BEFORE SPAWN, not streamed while moving. Streaming ahead of the player has the
     // same failure as generating ahead of the player: whatever the pipeline, a sprint or a teleport outruns it
-    // and you stand on terrain that is not there. Fire's call, and it is the right one - a transfer is also far
+    // and you stand on terrain that is not there. A transfer is also far
     // cheaper than the alternative it replaces, since generating this world's grid took 8m34s.
     //
     // WHAT MAKES THAT AFFORDABLE is content addressing, copied from BetterContinents: the client sends the

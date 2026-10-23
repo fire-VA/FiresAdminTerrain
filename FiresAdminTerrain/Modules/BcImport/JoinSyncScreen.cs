@@ -3,8 +3,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.BcImport
 {
-    // What the join sync is doing, on the loading screen (Fire, 2026-09-28: "make sure that the send before join is
-    // accompanied by an on-screen message explaining that it is loading the cache"). Vanilla's loading tip shows only once
+    // What the join sync is doing, on the loading screen (the send before join comes with an on-screen message
+    // saying it is loading the cache). Vanilla's loading tip shows only once
     // the game waits for the spawn, after the sync, so this is a line of its own on Hud.m_loadingScreen: a copy of the tip's
     // text object, so it looks like the game's own. Every change of what it says is logged ("[BcImport] on-screen: ...");
     // a headless peer logs the same lines and draws nothing. Main thread only.

@@ -7,8 +7,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // ── `clutterfloat_test <x> <z> [radius=20]`: is the grass on the ground? (0.2.690; Fire 10-01, HR5: "The clutter grasses
-    // don't retarget the leveled terrain after it's leveled; they just float") ─────────────────────────────────────────────
+    // ── `clutterfloat_test <x> <z> [radius=20]`: is the grass on the ground? (clutter grass must retarget leveled
+    // terrain, not float) ─────────────────────────────────────────────
     // Read-only, on-demand F5 contract test (without arguments the step SKIPs). Every vanilla grass instance
     // (InstanceRenderer) within radius of the point gets a down ray on the terrain layer, the one clutter itself is placed
     // on (ClutterSystem.m_placeRayMask; the voxel colliders are on it too). An instance more than FloatTolerance above the
@@ -78,12 +78,12 @@ namespace VerdantsAscent.Terrain.Testing
                 string detail = Measure(x, z, radius, out bool ok, out _, out _);
                 if (ok) pass++; else fail++;
                 Say($"{Tag} 1/1 floating {(ok ? "PASS" : "FAIL")} - {detail}");
-                // 0.2.694: at the tester's eye, looking toward the point (grass is not drawn 15 m up, where this used to look from).
+                // At the tester's eye, looking toward the point (grass is not drawn 15 m up, where this used to look from).
                 Vector3 eye = Player.m_localPlayer.transform.position + Vector3.up * LiveEyeHeight;
                 float yaw = Mathf.Atan2(x - eye.x, z - eye.z) * Mathf.Rad2Deg;
                 Say($"{Tag} SHOT " + "{pose " + string.Format(CultureInfo.InvariantCulture, "{0:0.0},{1:0.0},{2:0.0},{3:0},{4:0}", eye.x, eye.y, eye.z, yaw, LiveCameraPitch)
                     + "} the grass over the edited ground, from the tester's eye");
-                // 0.2.695 ([lead]: both HR5d SHOTs were "skipped (its moment passed while another shot was paced)"): FDT paces shots
+                // FDT paces shots
                 // 6 s apart, and this END and the next test's SHOT came within that. Hold until the shot has surely been taken.
                 yield return new WaitForSecondsRealtime(ShotHoldSeconds);
             }
@@ -94,7 +94,7 @@ namespace VerdantsAscent.Terrain.Testing
             }
         }
 
-        // ── live: Fire's case, reproduced (0.2.693; [lead]: "level a patch live with grass on screen, then check it") ─────
+        // ── live: level a patch live with grass on screen, then check it ─────
         // 1 level    the ground at (x, z) by a terrain ray; `va_voxel_level x z size size (ground - depth) 4 0` in this console
         //            (the real V-tool brush, admin; skirt 0 so the pad is exactly size x size); PASS when it answers.
         // 0 approach the tester stands LiveStandOff m west of the spot facing it (a teleport when farther), until grass is drawn there.
@@ -125,11 +125,11 @@ namespace VerdantsAscent.Terrain.Testing
                 int mask = LayerMask.GetMask("terrain");
                 var centre = new Vector3(x, 0f, z);
 
-                // 0 approach (0.2.694, [lead]: an automated round's tester spawns ~80 m away, past clutter range): stand
+                // 0 approach (an automated tester may spawn ~80 m away, past clutter range): stand
                 // LiveStandOff m north of the spot, facing it, and wait until the grass there is drawn. Test setup only (a
                 // teleport, like the drills' own placement): what is measured is the grass, not the walk.
                 var me = Player.m_localPlayer;
-                // 0.2.695: WEST of the spot, out of the SHOT camera's line (it looks in from the north).
+                // WEST of the spot, out of the SHOT camera's line (it looks in from the north).
                 Vector3 stand = new Vector3(x - LiveStandOff, 0f, z);
                 float standY = Physics.Raycast(stand + Vector3.up * 500f, Vector3.down, out RaycastHit hs, 1000f, mask) ? hs.point.y
                     : WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(stand.x, stand.z) : me.transform.position.y;
@@ -197,20 +197,20 @@ namespace VerdantsAscent.Terrain.Testing
                         : string.Format(inv, "levelled after {0:0.0} s, grass reset after {1:0.0} s ({2} column/zone(s) queued, {3} flush(es)), then {4:0} s to re-roll", levelledAt - waitStart, flushAt - waitStart, queued, flushes, LiveSettleSeconds));
 
                 // 3 floating (and bare): the pad AND a LiveRing-wide band of untouched ground round it, so the bare check
-                // compares the cut with the ground beside it (0.2.694, [lead]: GRASSb's "0 m² untouched").
+                // compares the cut with the ground beside it (not "0 m² untouched").
                 string detail = Measure(x, z, half + LiveRing, out bool ok, out _, out _);
                 Step(4, "floating", ok, detail);
-                // 0.2.694 ([lead]: the 15 m-up SHOT showed no grass, clutter is not drawn that high): at eye height on the
+                // At eye height (clutter is not drawn 15 m up) on the
                 // new level, LiveCameraBack m back from the pad's north edge, looking north at the cut step, so the grass on
                 // both levels is in frame. `pose x,y,z,yaw,pitch` (FDT FiresTestShots): yaw 0 faces +z.
-                // 0.2.695 ([lead]: the pose sat at the pad centre): LiveCameraBack m OUTSIDE the pad's north cut edge, at eye
+                // Then LiveCameraBack m OUTSIDE (not at the pad centre) the pad's north cut edge, at eye
                 // height on that untouched ground, looking south into the cut (yaw 180), so the step and the grass on both
                 // levels are in frame.
                 float camZ = z + half + LiveCameraBack;
                 float camGround = Physics.Raycast(new Vector3(x, 500f, camZ), Vector3.down, out RaycastHit hc, 1000f, mask) ? hc.point.y : before;
                 Say($"{Tag} SHOT " + "{pose " + string.Format(inv, "{0:0.0},{1:0.0},{2:0.0},180,{3:0}", x, camGround + LiveEyeHeight, camZ, LiveCameraPitchIn)
                     + "} the grass on the pad just levelled, from eye height outside the cut edge, looking in");
-                // 0.2.695 ([lead]: both HR5d SHOTs were "skipped (its moment passed while another shot was paced)"): FDT paces shots
+                // FDT paces shots
                 // 6 s apart, and this END and the next test's SHOT came within that. Hold until the shot has surely been taken.
                 yield return new WaitForSecondsRealtime(ShotHoldSeconds);
             }
@@ -272,8 +272,8 @@ namespace VerdantsAscent.Terrain.Testing
                     : Enumerable.Empty<string>());
                 var worst = new List<(float lift, Vector3 p, string name, string why)>();
                 var byName = new Dictionary<string, int>();
-                int onVoxel = 0, rayOnVoxel = 0, rayOnVanilla = 0;   // 0.2.696: the ray count split by what it landed on ([release])
-                // 0.2.691 ([lead]: "the test is probably blind to the exact fault"): in a zone swapped to voxel ground the
+                int onVoxel = 0, rayOnVoxel = 0, rayOnVanilla = 0;   // The ray count split by what it landed on
+                // In a zone swapped to voxel ground the
                 // ground is the voxel DENSITY surface under the instance (what the player stands on), not whatever collider
                 // happens to be under it; grass resting on a stray collider at the original height reads as floating now.
                 int onEdited = 0;
@@ -281,7 +281,7 @@ namespace VerdantsAscent.Terrain.Testing
                 {
                     total++;
                     float ground;
-                    // 0.2.693: a ray that lands on a VOXEL collider is the ground (the collider mesh sits ~0.35 m off the
+                    // A ray that lands on a VOXEL collider is the ground (the collider mesh sits ~0.35 m off the
                     // density crossing, GRASSa's false 58); the density surface judges only grass standing on something else.
                     bool rayHit = Physics.Raycast(p + Vector3.up * RayAbove, Vector3.down, out RaycastHit hit, RayLength, mask);
                     bool onVoxelCollider = rayHit && hit.collider.GetComponent<global::VerdantsAscent.Terrain.Voxel.VoxelChunkView>() != null;
@@ -291,7 +291,7 @@ namespace VerdantsAscent.Terrain.Testing
                     { ground = vy; onVoxel++; }
                     else if (rayHit) { ground = hit.point.y; rayOnVanilla++; }
                     else { noGround++; return; }
-                    // 0.2.694 ([lead]: the bare check had no baseline): edited = ground off the generated height by more than EditedTolerance.
+                    // The bare check's baseline: edited = ground off the generated height by more than EditedTolerance.
                     if (IsEdited(p.x, p.z, ground)) onEdited++;
                     float lift = p.y - ground;
                     if (lift <= FloatTolerance) return;
@@ -327,7 +327,7 @@ namespace VerdantsAscent.Terrain.Testing
                 string list = string.Join(" | ", worst.OrderByDescending(w => w.lift).Take(ListWorst)
                     .Select(w => string.Format(CultureInfo.InvariantCulture, "{0} {1:0.00} m up at ({2:0.0}, {3:0.0}, {4:0.0}): {5}", w.name, w.lift, w.p.x, w.p.y, w.p.z, w.why)));
                 string kinds = string.Join(", ", byName.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} x{kv.Value}"));
-                // 0.2.693 ([lead], Fire: "no more grass over edited terrain at all"): the BARE ratio. Grass per m² on voxel-
+                // No grass over edited terrain at all: the BARE ratio. Grass per m² on voxel-
                 // edited ground (a VAVoxel edit anchor's chunk) against the rest of the circle, from a 2 m grid of the
                 // circle's ground. Where the two differ by more than BareRatio, the edited ground is bare: FAIL.
                 int editedCells = 0, plainCells = 0;

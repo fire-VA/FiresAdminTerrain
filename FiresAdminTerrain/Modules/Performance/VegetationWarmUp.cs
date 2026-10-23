@@ -8,9 +8,9 @@ using Object = UnityEngine.Object;
 
 namespace VerdantsAscent.Terrain.Performance
 {
-    // [perf] R32 / R33, 2026-09-28: a dedicated server's FIRST instance of a vegetation prefab costs up to half a second,
+    // A dedicated server's FIRST instance of a vegetation prefab costs up to half a second,
     // mostly blocked on disk (Beech1: 480 / 446 ms; Rock_4 98 ms), and it lands in the frame of whichever player first
-    // walks or teleports into a zone that grows it: a stall for everyone and a jump in the world clock (R33 boat_test).
+    // walks or teleports into a zone that grows it: a stall for everyone and a jump in the world clock.
     // After the world loads, the server makes one instance of each vegetation prefab, far below the world and without a
     // network object (ZNetView.m_forceDisableInit, as vanilla does for its placement ghosts and item previews), and lets
     // it go at the end of the frame, one prefab a frame, so those costs are paid before anyone plays.
@@ -18,7 +18,7 @@ namespace VerdantsAscent.Terrain.Performance
     // PickableItem) all return early on a ZNetView without a ZDO. The object is destroyed before its first Start.
     internal static class VegetationWarmUp
     {
-        // Expand World Data rewrites the vegetation list after ZoneSystem.Start (R33: 164 entries at Start, 257 by the
+        // Expand World Data rewrites the vegetation list after ZoneSystem.Start (e.g. 164 entries at Start, 257 by the
         // first zone), so the list is read after this.
         private const float StartDelaySeconds = 10f;
         private const float BelowWorldY = -5000f;

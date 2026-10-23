@@ -57,7 +57,7 @@ namespace VerdantsAscent.Water.Core
 
         #region ZDO Keys (LEGACY — kept for ZdoHasLandIceData migration check)
 
-        // 2026-05-26 round-26 plan §1.2: persistence moved to LandIceAnchor
+        // Persistence moved to LandIceAnchor
         // with new `va_landice_*` keys. These legacy keys remain only for
         // detecting orphan ice1 ZDOs from pre-migration saves so a cleanup
         // pass can skip them. The controller no longer reads/writes these.
@@ -72,7 +72,7 @@ namespace VerdantsAscent.Water.Core
         private static int s_instanceCounter = 0;
         private bool _initialized = false;
 
-        // 2026-05-26 round-26 plan §1.2 — persistence anchor.
+        // Persistence anchor.
         // Bound by LandIceAnchor.SpawnNew at placement time, or by
         // LandIceAnchor.Awake when the world reloads a persisted VALandIce.
         private LandIceAnchor _anchor;
@@ -369,8 +369,8 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// LEGACY check for the pre-migration ice1-clone ZDOs. Round-26 §1.2
-        /// moved persistence to `va_landice_*` keys on a dedicated VALandIce
+        /// LEGACY check for the pre-migration ice1-clone ZDOs. Persistence
+        /// lives in `va_landice_*` keys on a dedicated VALandIce
         /// prefab; this static survives only so cleanup passes can identify
         /// stale ice1-clone ZDOs that still carry the old `va_land_ice` flag.
         /// </summary>
@@ -383,7 +383,7 @@ namespace VerdantsAscent.Water.Core
 
         #region Lifecycle
 
-        // Round-26 §1.2: no auto-restore here. LandIceAnchor.Start drives
+        // No auto-restore here. LandIceAnchor.Start drives
         // the restore via RestoreFromAnchor (below), so the controller
         // only acts as a behaviour + mesh container.
         private void Start() { /* anchor-driven */ }
@@ -1423,7 +1423,7 @@ namespace VerdantsAscent.Water.Core
             return footprints;
         }
 
-        // Round-26 §1.2: anchor-routed save. Packs the controller's
+        // Anchor-routed save. Packs the controller's
         // current state and hands it to LandIceAnchor.WriteData, which
         // owns the ZDO writes (new `va_landice_*` key namespace).
         private void SaveToZDO()

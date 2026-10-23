@@ -18,13 +18,14 @@ namespace VerdantsAscent.Terrain.Voxel
     // relief bigger than that shelf renders the surface UNDER its own bed.
     public static partial class FiresWorldGenBase
     {
+        // Its results are CACHED (FiresSurfaceCache.cs) - raise SurfaceCacheVersion there whenever this changes what it produces.
         private static void BuildReconciledSurface(float[] g, float[] w, int n)
         {
             _surfS = null; _surfN = 0;
             if (g == null || w == null) return;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             float cellM = (2f * _half) / (n - 1);
-            // ⚠⚠ THE WATER SURFACE IS RECONCILED AT FULL RESOLUTION (2026-08-17). This was
+            // ⚠⚠ THE WATER SURFACE IS RECONCILED AT FULL RESOLUTION. This was
             //     stride = RoundToInt(SURF_TARGET_CELL_M(8) / cellM), i.e. an 8 m lattice while the terrain the
             //     sheet has to clip into is 2 m at n=10501 — a 4x mismatch AT THE SHORELINE. That is the reported
             //     bug: "we have a ton of rivers and streams with meshes ending short of the banks". MEASURED at
@@ -48,7 +49,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // it were a spill level — every dip under the smoothed value
             // became a PHANTOM pond that exists in no water field, which the
             // basin walk (real water only) could never roll, classify,
-            // freeze, flatten or excavate. User-diagnosed: walk capHi 51m vs
+            // freeze, flatten or excavate. Diagnosed: walk capHi 51m vs
             // visible "lakes" at y138 — two different waters. Now: a block is
             // wet only if it CONTAINS real water (any w > g), its level is
             // the max wet level, and dry regions get NO surface (cut below).
@@ -57,8 +58,8 @@ namespace VerdantsAscent.Terrain.Voxel
             var dgDryLo = new float[n2 * n2];// block MIN ground over DRY subcells ONLY — the low BANK a floating edge hangs over
             var dw = new float[n2 * n2];
             var wetD = new bool[n2 * n2];
-            // ⚠ EVERY PASS IN THIS FUNCTION IS PARALLEL, AND BIT-EXACT (2026-08-18, user: "why is it a single
-            // thread op"). Measured before: `reconciled water surface … in 68.1s` — 68 of the ~90 s a cached
+            // ⚠ EVERY PASS IN THIS FUNCTION IS PARALLEL, AND BIT-EXACT (there is no reason for it to be
+            // single-threaded). Measured before: `reconciled water surface … in 68.1s` — 68 of the ~90 s a cached
             // world takes to LOAD, single-threaded over 110,271,001 cells while ErodeHydraulic next door had
             // been running on all cores since GEN 144. There was no ordering constraint, only history.
             // Safe because every pass is a pure GATHER with DISJOINT WRITES: the separable windows ping-pong
@@ -116,6 +117,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     a[row + x] = m;
                 }
             });
+            dg = null;   // RAM: this method peaked at ~4.4 GB of full-res temporaries; each is dropped after its last read
             System.Threading.Tasks.Parallel.For(0, n2, x =>
             {
                 for (int y = 0; y < n2; y++)
@@ -186,6 +188,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 });
             }
+            dgDryLo = null; gov = null;   // Both folded into rimGov above
             System.Threading.Tasks.Parallel.For(0, n2, y =>
             { int row = y * n2; for (int x = 0; x < n2; x++) { int i = row + x; a[i] = Mathf.Min(dw[i], rimGov[i] - freeboard); } });
 
@@ -223,6 +226,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 });
             }
+            b = null;   // Smoothing scratch, done
             System.Threading.Tasks.Parallel.For(0, n2, y =>
             { int row = y * n2; for (int x = 0; x < n2; x++) { int i = row + x; if (a[i] > rimGov[i] - freeboard) a[i] = rimGov[i] - freeboard; } });
 
@@ -241,6 +245,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // Dry-region reach: real water within 2 cells (~16m) keeps its
             // shore margin (paint rise, skirt, mouth feather all read the
             // level slightly ABOVE the waterline); beyond that, NO surface.
+            rimGov = null;
             var wetN = new bool[n2 * n2];
             System.Threading.Tasks.Parallel.For(0, n2, y =>
             {
@@ -294,6 +299,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 rowDry[y] = rd; rowOwned[y] = ro;
             });
+            a = null; wetN = null;   // Last read in the pass above
             for (int y = 0; y < n2; y++) { nDry += rowDry[y]; nOwned += rowOwned[y]; }
             _surfS = s; _surfN = n2; _surfCell = cell2;
             FiresLogger.LogInfo($"[FiresWorldGen] reconciled water surface: {n2}x{n2} @ {cell2:0.#}m (stride {stride} from {n}) " +
@@ -356,7 +362,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // floaters the ±gov window missed. ADDITIVE tag only — surface geometry is unchanged
                     // (the mesh still bends down); the renderer swaps material for these cells.
                     // A raised MARSH that drops to a lower neighbour is spilling over its OUTLET into the
-                    // river below — the same waterfall/spillway category (user, 2026-07-30). Tag it too, at a
+                    // river below — the same waterfall/spillway category. Tag it too, at a
                     // gentler threshold, so a contained marsh's drainage lip reads as a small spillway, not a
                     // floating sheet edge.
                     bool inMarsh = bm != null && bm[Mathf.Min(n - 1, y * stride) * n + Mathf.Min(n - 1, x * stride)] == 2;
@@ -381,7 +387,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         case WC_HOTSPRING: cHot++; break;
                         case WC_WATERFALL: cWfall++; break;
                     }
-                    // (2026-08-16, user) WATER BY ALTITUDE — is there ANY mountain water? A priority flood can
+                    //  WATER BY ALTITUDE — is there ANY mountain water? A priority flood can
                     // only find hollows that already exist, and noise mountains have very few near their tops,
                     // so high drainage is thin BY CONSTRUCTION — which is why alpine tarns have to be EXCAVATED
                     // (SeedMountainTarns) rather than discovered. That makes "did it work" un-answerable by
@@ -397,10 +403,10 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 }
             }
-            // ═══ THE MAP SHOWS THE WATER THAT IS ACTUALLY THERE (2026-08-11, user: "the map overlay shows this
-            // lake extends to where this river is, but it doesn't in reality … the ACTUAL water level in game
-            // for ponds and lakes is correct, and I KNOW it's correct because the game puts the SAND at the
-            // banks in the correct spot"). The class grid is built from the reconciled surface, which is baked
+            // ═══ THE MAP SHOWS THE WATER THAT IS ACTUALLY THERE (the map overlay showed a
+            // lake extending to where a river was, which was not so in game; the ACTUAL water level in game
+            // for ponds and lakes is correct, as the game puts the SAND at the
+            // banks in the correct spot). The class grid is built from the reconciled surface, which is baked
             // WITHOUT the live bank relief — but every render/physics/sand query ends with
             // `level -= ReliefFor(...)`, so the water the player sees sits ~0.84 m LOWER and covers LESS ground
             // than this grid claims. That gap is the phantom shoreline on the map (and the reason the sand ring
@@ -416,11 +422,12 @@ namespace VerdantsAscent.Terrain.Voxel
             // water bug, and the pass that checked it cost a full-res 16×-oversampled scan for 2 cells — so it
             // is not kept. The genuine level error is that _surfS carries no bank relief (see the audit).
 
-            // (2026-08-11, user) STAMP THE RECORDED CASCADE SPANS AS WATERFALL/RAPIDS. These cells carry NO
+            //  STAMP THE RECORDED CASCADE SPANS AS WATERFALL/RAPIDS. These cells carry NO
             // water (the sheet is deliberately hidden over a drop), so the wet-cell classifier above can never
             // see them — yet they are exactly where the falls are. Stamping them WC_WATERFALL turns each
             // deleted span into placement data for the FX pass, and makes "a fall belongs here" distinguishable
             // from "the river is broken here". Class-only: no water, no mesh, geometry untouched.
+            dgLo = null;   // RAM: last read above; the GC may reuse it for what follows
             int cascadeStamped = 0;
             lock (s_cascadeSpans)
                 foreach (var span in s_cascadeSpans)
@@ -447,7 +454,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // ONE CLASS PER CONTIGUOUS BODY. Two seeded bowls can merge into
             // one visual lake while the walk classified them separately — one
             // rolled FROZEN, one didn't, and the sheet rendered half ice /
-            // half liquid with no blend (user screenshot). Flood contiguous
+            // half liquid with no blend. Flood contiguous
             // still-water cells and rewrite each region to its majority class.
             {
                 bool Still(byte c) => c == WC_LAKE || c == WC_POND || c == WC_SWAMP
@@ -592,7 +599,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 var db = new byte[n2 * n2];
                 for (int i = 0; i < n2 * n2; i++)
                     db[i] = (byte)Mathf.Clamp(Mathf.RoundToInt(sd[i] * 4f), 0, 255);
-                _shoreD = db; _shoreL = sl; _shoreC = sc;
+                // RAM: only the distance is ever read (the wet paint's 18 m early exit); the nearest-wet level and class
+                // grids (~315 MB at 2 m) are no longer kept. TryGetShoreCorners then answers 0 / WC_NONE for them (no caller reads those outs).
+                _shoreD = db; _shoreL = null; _shoreC = null;
             }
             FiresMinimapRivers.OnWaterFieldReady();   // map may have generated first
         }
@@ -600,11 +609,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // LIVE bank relief (metres): inland water RENDERS this far below its contained level so the banks
         // stand PROUD of the sheet. Applied at the surface queries below (mesh + swim + depth all read them),
         // NOT baked into the world — a slider changes it and a water re-mesh shows it instantly. Sea unaffected.
-        // (v106, user) SPLIT PER FAMILY for live tuning: rivers get their own knob; ponds/lakes/springs/tarns
-        // (everything that sits flat) share the STILL knob. The user dials both in-game, reads the numbers
+        //  SPLIT PER FAMILY for live tuning: rivers get their own knob; ponds/lakes/springs/tarns
+        // (everything that sits flat) share the STILL knob. Both are dialled in-game, the numbers
         // that look right, and those get BAKED into the gen constants — no more regen-guess iteration.
-        // (2026-08-11, user: "the studio doesn't know where the ACTUAL water level lies in game, and the actual
-        // level for ponds and lakes IS correct — the game puts the SAND at the banks in the right spot")
+        // (The studio did not know where the ACTUAL water level lies in game, and the actual
+        // level for ponds and lakes IS correct: the game puts the SAND at the banks in the right spot.)
         // These default to the SHIPPED slider value, not 0. Both surface queries end with
         // `level -= ReliefFor(...)`, so this offset IS the final in-game water level: the sand/wet band
         // (VoxelChunk._genWater ← TryGetWaterSurfaceGen) and the rendered sheet both go through it, which is
@@ -625,12 +634,12 @@ namespace VerdantsAscent.Terrain.Voxel
             return (c == WC_RIVER || c == WC_STREAM || c == WC_WATERFALL) ? RiverRelief : StillRelief;
         }
 
-        // MARSH SHEET (user, 2026-07-30): the ONE flat water level of the swamp basin this cell belongs to —
+        // MARSH SHEET: the ONE flat water level of the swamp basin this cell belongs to —
         // returned regardless of whether the cell's OWN ground is above or below it. Islands/mounds/banks
         // stand ABOVE the sheet; the voxel view stores this on EVERY marsh column (not just wet ones) so the
         // water renders as a single continuous flat plane with the terrain poking up through it.
         //
-        // 2026-08-09 CONSOLIDATION (user: "renderers obey the plan"): read the PLAN's marsh body — ONE flat constant
+        // CONSOLIDATION (renderers obey the plan): read the PLAN's marsh body — ONE flat constant
         // `Level` over the exact body footprint — NOT `biome==2 && raw _waterS`. The old form returned `_waterS`
         // per-cell: on a marsh-body footprint cell that IS the flat L (Conform wrote it), but on swamp-BIOME land
         // OUTSIDE any placed marsh body `_waterS == ground`, so it painted a terrain-following FAKE sheet at ground
@@ -672,7 +681,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // connected ribbon by construction — a dry mask cell with wet
                         // channel within 3 cells stays RIVER, so the sheet spans the
                         // pinch (its level = the reconciled flat extension) instead of
-                        // showing bare bed mid-run (user's proof-view callout).
+                        // showing bare bed mid-run.
                         for (int dz = -3; dz <= 3 && v == WC_NONE; dz++)
                         {
                             int zz = z + dz; if (zz < 0 || zz >= n) continue;
@@ -706,7 +715,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             if (c == WC_STREAM || c == WC_WATERFALL) v = c;
                         }
                         else if (wv <= SEA + 0.01f) v = WC_OCEAN;                       // sea-level water — the tidal plane owns it
-                        // ═══ SWAMP IS LABELLED FROM THE PLAN, NOT FROM THE BIOME (2026-08-13) ════════════
+                        // ═══ SWAMP IS LABELLED FROM THE PLAN, NOT FROM THE BIOME ════════════
                         // This was `biomes[i] == 2 && wv > SEA + 0.2f → WC_SWAMP`, with a comment claiming it
                         // matched TryGetMarshSheet. It no longer does: that function was fixed to require real
                         // footprint membership (_plan.TryGetBodyAt + Kind == Marsh) and this rule was left
@@ -727,7 +736,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             });
             // STRAY-DROPLET CULL — the walk can keep 2-3 cell puddles; rendered they
-            // read as random specks of water on dry land (user's proof-view callout).
+            // read as random specks of water on dry land.
             // Flood-fill still-water components; smaller than 12 cells (≈48m²) → NONE.
             // Rivers/streams/marsh/ocean are never culled.
             {
@@ -765,7 +774,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── THE sheet-node builder — ONE function for the GAME VIEW and the STUDIO
-        // (user: the studio must be 1:1 with the game — shared code, not mirrored
+        // (the studio must be 1:1 with the game — shared code, not mirrored
         // code, so drift is impossible). World-anchored 1m nodes over [origin ..
         // origin+cells] with a SHEET_NODE_HALO ring:
         //   • wetness from the LABEL (the carvers' authority), level from the smooth
@@ -780,13 +789,13 @@ namespace VerdantsAscent.Terrain.Voxel
         [System.ThreadStatic] private static byte[] s_shDist, s_shTerm, s_shBur;
         [System.ThreadStatic] private static float[] s_shH0;
 
-        public const int SHEET_NODE_HALO = 11;   // 2026-08-18: was 6. The halo bounds how far the sheet may EXTEND past its last wet node (renderer reads -2..C+2, so usable rings = NH-2). 6 allowed 4 rings — not wide enough on shallow shores (user, repeatedly: the mesh must extend until it clips terrain). 11 allows 8 passes + the outer ring = 9 cells of extension, identical across chunk borders.
+        public const int SHEET_NODE_HALO = 11;   // The halo bounds how far the sheet may EXTEND past its last wet node (renderer reads -2..C+2, so usable rings = NH-2). 6 allowed 4 rings — not wide enough on shallow shores (the mesh must extend until it clips terrain). 11 allows 8 passes + the outer ring = 9 cells of extension, identical across chunk borders.
         // Drape-ring counters (studio audit only — sheetedge reads them; the game never does).
         public static long DrapeWritten, DrapeRefused;
         // ═══ THE SHEET ASKS THE MESHED TERRAIN "AM I CLIPPING?", NOT THE ANALYTIC GRID ═══════════════════
-        // (2026-08-19, user: "extending it without a guard makes it lay out correct but poke through terrain,
-        // not extending it and using your logic it ends before terrain … fix the broken logic for 'is this
-        // mesh clipping terrain'".)
+        // (Extending without a guard laid the sheet out correctly but poked through terrain;
+        // not extending ended it before terrain. This fixes the logic for "is this
+        // mesh clipping terrain".)
         // Every version of that test in this file compared the level against `SampleFinalMeters` — a bilinear
         // read of the packed 2 m grid, i.e. the ANALYTIC surface. The terrain the player sees is SurfaceNets
         // over the voxel density, and WorldGeneratorBridge.GetGroundY says outright why those differ: "the
@@ -804,12 +813,12 @@ namespace VerdantsAscent.Terrain.Voxel
         // unmeshed column is never worse than it was.
         public static System.Func<float, float, float> MeshedGroundProbe;
         // ═══ WAS THIS SHEET BUILT FROM COMPLETE MESHED GROUND? ═══════════════════════════════════════════
-        // (2026-09-03, for the per-chunk sheet cache.) The sheet is a pure function of the water field, the
+        // (For the per-chunk sheet cache.) The sheet is a pure function of the water field, the
         // edit overlay and the MESHED GROUND it clips against — and the last of those is not stable while
         // the world is streaming: `MeshedGroundProbe` returns NaN wherever the neighbour is not meshed yet,
         // and ClipGroundAt silently falls back to analytic terrain. A sheet built in that state can differ
         // at its clipped edge from one built once the neighbour arrived, so CACHING IT WOULD BE THE STALE
-        // WATER EDGE this project spent 2026-09-02 chasing.
+        // WATER EDGE that took a long time to chase down.
         // This flag makes the difference observable instead of assumed: a build that never needed the
         // fallback saw complete meshed ground and is safe to cache; a build that fell back even once is
         // provisional and the view refuses to keep it. Cheap, and it fails CLOSED — the fallback path is
@@ -887,7 +896,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
         // ═══ WHERE DOES THE SHEET BUILD ACTUALLY SPEND ITS TIME? ═════════════════════════════════════
-        // ([engine/lod] hypothesis, 2026-09-03: both hot halves of apply.water share ONE primitive —
+        // (Hypothesis: both hot halves of apply.water share ONE primitive —
         // per-point worldgen field queries — and if that is right the fix shape is a per-sheet WINDOW
         // FETCH, not micro-tuning either loop.) QUERY = the per-node fill, which asks the field for a
         // surface and a class at every node. RELAX = everything after it: the dilation passes, the skirt
@@ -906,7 +915,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly bool s_sheetBox =
             System.Environment.GetEnvironmentVariable("FIRES_SHEET_BOX") != "0";
         // ═══ IS THE MESHED PROBE EQUIVALENT TO THE GEN GRID? MEASURE, DO NOT ASSUME ══════════════════════
-        // (user, 2026-09-07: "verify that equivalence". `.probe` is 113.6 ms/s — HALF of .nodes.relax, which
+        // (Verify that equivalence: `.probe` is 113.6 ms/s — HALF of .nodes.relax, which
         // is 95 % of .nodes, which is 69 % of apply.water. It is the largest identifiable cost inside the
         // game's largest cost, and it is a VOXEL RAYCAST where TryGetGenGround is a 0.02 us bilinear read.)
         // The hypothesis is that the voxel mesh reproduces _gridS, so the raycast is answering a question an
@@ -956,8 +965,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float ClipGroundAt(float wx, float wz) => ClipGroundAt(wx, wz, out _);
 
         // ═══ WHERE DID THE PROBE HAVE NO GROUND? FOOTPRINT OR HALO? ══════════════════════════════════════
-        // (user, 2026-09-07: "instrument which refusals had a fallback inside the footprint".)
-        // The node cache is now suppressed almost entirely by my own store guard — 6,573 UNSTAMPED misses
+        // (Instrument which refusals had a fallback inside the footprint.)
+        // The node cache is now suppressed almost entirely by the store guard — 6,573 UNSTAMPED misses
         // against 319 KEY-CHANGED — and every suppressed entry is a full rebuild, which is where the
         // 113 ms/s of raycasts live. The guard refuses to store a sheet if ClipGroundAt fell back ANYWHERE,
         // and the sheet's node grid reaches SHEET_NODE_HALO (11) cells beyond the chunk in every direction.
@@ -978,7 +987,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     fellBack = false;
                     // sampled equivalence check — 1-in-64, only where the probe answered.
-                    // MEASURED 2026-09-07 and the substitution is REFUTED: 99.14 % agree within 0.05 m but
+                    // MEASURED, and the substitution is REFUTED: 99.14 % agree within 0.05 m but
                     // 0.60 % deviate past 0.50 m, max 49.4 m — caves, where the raycast finds the topmost
                     // solid and the analytic grid knows nothing of the void. Kept because it is nearly free
                     // and it is the standing evidence for why the raycast is not replaceable.
@@ -1013,7 +1022,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // level, never lift it. JOIN is the bilateral cut — neighbours further apart in height than this are
         // a different surface (a pond beside a river, a waterfall lip) and must not be averaged together.
         public const int SHEET_SMOOTH_PASSES = 10;
-        public const float SHEET_SMOOTH_JOIN = 3.0f;   // 2026-08-19: was 1.25 — which SKIPPED the 1-2 m steps inside a river channel (the vertical faces the user kept photographing) because the bilateral cut treated them as "a different surface". A river surface is ONE surface: its steps are the defect, not a feature. 3.0 smooths them and still refuses a real waterfall (measured lips are 20-90 m).
+        public const float SHEET_SMOOTH_JOIN = 3.0f;   // Was 1.25, which SKIPPED the 1-2 m steps inside a river channel (visible vertical faces) because the bilateral cut treated them as "a different surface". A river surface is ONE surface: its steps are the defect, not a feature. 3.0 smooths them and still refuses a real waterfall (measured lips are 20-90 m).
         // How far SUBMERGED fill may travel from the field's own wet set (cells). Burial is unbounded and
         // terminal; this bounds only the case with no bank to bury into, which is what floats.
         public const int SHEET_SUBMERGED_REACH = 3;
@@ -1041,8 +1050,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // perpendicular bank sample that lands on the wall. `FIRES_CANYON_FLOOR=0` restores the old shared
         // river rule. Default ON. Judge on riverfield's C. CANYON vs OPEN census.
         // ═══ ExcavateCanyons IS OFF, AND THE RENDER IS WHY ═══════════════════════════════════════════════
-        // (2026-08-22, user: "we have built so many studio tools to allow you to visualize the water
-        // generation and you just guess and get it wrong over and over". He was right — five text hypotheses
+        // (Five text hypotheses
         // for the residual uphill rises were all refuted, and ONE render answered it.)
         // `watermesh <seed> <n> out.png 1400 <x> <z> 250` paints the incision class ORANGE and the float audit
         // MAGENTA. Aimed at this pass's own sites (printed by the INCISION SITES line in ClassifyChannelIncision)
@@ -1058,15 +1066,15 @@ namespace VerdantsAscent.Terrain.Voxel
         //     river wet cells                           174,905 -> 175,223  (MORE water, not less)
         //     exposed mesh edges                        0 / 159 -> 0 / 159  (unchanged)
         // And rendered at the same site with the pass off, the craters are gone and the reach is a continuous
-        // channel with water running its length — which is the thing the user asked for ("canyons need to
+        // channel with water running its length — which is the goal ("canyons need to
         // carve out a bit wider to allow for an actual river to run through the bottom of them").
         // ⚠ THE PASS IS KEPT, NOT DELETED, AND THE INTENT IS STILL WANTED. The canyons the player actually
         // stands in are cut by the CARVE's incision bound (see the note at `boundLo` in InciseRivers), not by
         // this; this pass is the hook for doing them DELIBERATELY. The rework it needs is a cross-section
         // ORIENTED ACROSS THE FLOW instead of a disc — then a classified chain becomes a slot rather than a
         // string of pits. `FIRES_CANYON_EXCAVATE=1` turns it back on to work on that.
-        // ⚠ A/B SWITCH for the canyon FLOOR SECTION (bowl | flat shelf | cliff) added 2026-08-31 at the
-        // user's spec. `FIRES_CANYON_SHELF=0` turns it off so a before/after comes out of ONE binary with
+        // ⚠ A/B SWITCH for the canyon FLOOR SECTION (bowl | flat shelf | cliff).
+        // `FIRES_CANYON_SHELF=0` turns it off so a before/after comes out of ONE binary with
         // the shelf as the only variable. Default ON. Fires only where the thalweg's natural ground stands
         // CANYON_SLOT_M above the water, and only ever LOWERS, so no river that already works can move.
         internal static readonly bool s_canyonShelf =
@@ -1114,7 +1122,7 @@ namespace VerdantsAscent.Terrain.Voxel
             Environment.GetEnvironmentVariable("FIRES_RIVER_FOOTPRINT") != "0";
 
         // ═══ THE CONNECTED SHORE FLOOD IS WRITTEN, MEASURED, AND DELIBERATELY OFF ════════════════════════════
-        // (2026-08-19.) Giving rivers ExpandFootprint's rule — grow into any connected cell whose ground lies
+        // Giving rivers ExpandFootprint's rule — grow into any connected cell whose ground lies
         // below the level — is the right end state and the code below implements it. A/B'd out of one binary at
         // n=10501 on seed 126369233 with `riverfield gen`, it added 95,208 cells (river wet 299,385 → 394,696,
         // +31.8 %) and it MEASURED WORSE on the two things that matter most:
@@ -1142,8 +1150,8 @@ namespace VerdantsAscent.Terrain.Voxel
             bool fbInside = false, fbReach = false, fbBeyond = false;   // where a fallback happened — see the footprint/halo note
             long _tq = System.Diagnostics.Stopwatch.GetTimestamp();   // phase split: field QUERIES vs RELAX passes
             int NH = SHEET_NODE_HALO, NW = cells + 2 * NH + 1;
-            // ⚠ SAY WHICH SHEET CODE IS RUNNING, ONCE PER PROCESS. 2026-08-18: an entire night was spent
-            // unable to answer "are your changes even in the build?" from the one artifact the user can
+            // ⚠ SAY WHICH SHEET CODE IS RUNNING, ONCE PER PROCESS. Without it there is no way to
+            // answer "are the changes even in the build?" from the one artifact a player can
             // produce — Player.log. Water changes are silent code paths, so a stale DLL, a stale chunk-mesh
             // cache and a working fix are INDISTINGUISHABLE on screen. This line makes them distinguishable:
             // grep SHEET BUILD. If it is missing, this build predates the stamp; if the numbers are not what
@@ -1172,7 +1180,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     bool ok;
                     if (plan != null)
                     {
-                        // ═══ (v106b) ONE RENDER SOURCE — THE 2m FIELD — FOR EVERYTHING ═══ (user, after the
+                        // ═══ (v106b) ONE RENDER SOURCE — THE 2m FIELD — FOR EVERYTHING ═══ (after the
                         // floating-pond proof): the vegetation grounds on the DATA, the sand/bed paints from
                         // the DATA, the lily pads and labels read the DATA — and only the STILL-BODY SHEET
                         // was still answering from the PLAN lookup. Two consequences, both fatal: (a) the
@@ -1185,10 +1193,10 @@ namespace VerdantsAscent.Terrain.Voxel
                         // below buries the edges; sea-owned marsh cells sit ≤ SEA in the field and the
                         // `> SEA` gate excludes them. The PLAN is GEN-ONLY now (placement + conform);
                         // render == data == physics == veg, and BOTH relief sliders work on everything.
-                        // THE RIVER ENDS AT THE WATERLINE (2026-08-12, user: "why the fuck do I have a river mesh
-                        // extending so far into the ocean … it should end right here at the sand line from the
-                        // ocean and just dive its mesh into the ground and end"). REVERTS the estuary exception
-                        // I added in GEN_VERSION 119, which let CHANNEL cells keep drawing below sea so the
+                        // THE RIVER ENDS AT THE WATERLINE (a river mesh must not extend
+                        // far into the ocean; it ends at the sand line from the
+                        // ocean and dives its mesh into the ground). REVERTS the estuary exception
+                        // from GEN_VERSION 119, which let CHANNEL cells keep drawing below sea so the
                         // ribbon could "blend into" the ocean. It did the opposite: the mouth profile descends
                         // to ESTUARY_FLOOR (SEA−6), so once drawn it trailed a ribbon out across the sea floor
                         // and ramped up coastal banks at y≈28 — under the 30 m waterline, through the ocean.
@@ -1196,11 +1204,11 @@ namespace VerdantsAscent.Terrain.Voxel
                         // river sheet stops at the shoreline and its last quad dives into the bed. The defect
                         // that exception was chasing (a dry carved trench at the coast) was never a render
                         // problem — it was the carve going dry, and that is fixed (dry core channel cells: 0).
-                        // ═══ THE OCEAN OWNS EVERY COLUMN IT CAN EVER REACH — TIDE INCLUDED (2026-08-13) ═══
-                        // (user, with a screenshot of a dozen river ribbons standing as slabs out over open
-                        // water: "our logic to cull the mesh when the sea owns the space is flawed because it
-                        // doesn't take into account the actual tides"; "we have one river just floating out
-                        // over the ocean".) `sl > SEA` compares against the CONSTANT 30, but the ocean surface
+                        // ═══ THE OCEAN OWNS EVERY COLUMN IT CAN EVER REACH — TIDE INCLUDED ═══
+                        // (A dozen river ribbons stood as slabs out over open
+                        // water: the mesh cull for sea-owned space did not
+                        // take the actual tides into account, and one river floated out
+                        // over the ocean.) `sl > SEA` compares against the CONSTANT 30, but the ocean surface
                         // is SEA + TideY and TideY runs to −5 at spring low (FiresEnv). So a mouth ribbon
                         // sitting at, say, 30.1 passed this gate, and the moment the tide receded it was left
                         // standing up to FIVE METRES above the sea — a floating plank, visible from a long way
@@ -1213,7 +1221,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // inland sheet there is wrong. Gating on the bed also delivers what was asked for
                         // earlier — "it should end right here at the sand line and just dive its mesh into the
                         // ground and end" — because the bed reaches SEA exactly at the high-tide shoreline.
-                        // ⚠ THE OCEAN CAN ONLY OWN A COLUMN IT CAN REACH (2026-08-18, sheetedge at n=10501: 80 m
+                        // ⚠ THE OCEAN CAN ONLY OWN A COLUMN IT CAN REACH (sheetedge at n=10501: 80 m
                         // free-standing water faces at (6916..6944, 5792..5800) — water standing at 110 m over ground at
                         // EXACTLY 30.00). The bed test above says "the sea can occupy any column whose bed lies at or
                         // below high tide", and it is right at a coast — but ExcavateCanyons clamps every slot floor at
@@ -1223,7 +1231,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // connected to it, and a surface standing more than a tidal range above the sea is, by the
                         // field's own leveling, NOT connected (were it connected the level would BE ~SEA). So a
                         // sub-tide bed only hands the column to the ocean when the water on it is also within reach of
-                        // the sea. Coastal mouth ribbons (30.0–30.5 over a 29.x bed — the 08-13 floating-plank case)
+                        // the sea. Coastal mouth ribbons (30.0–30.5 over a 29.x bed — the floating-plank case)
                         // stay gated; inland standing water over a dug floor draws. The field is not touched.
                         ok = TryGetWaterSurfaceSmoothReal(wx, wz, out sl, out sd) && sl > SEA && ((sl - sd) > SEA || sl > SEA + 1f);
                         if (ok)
@@ -1251,8 +1259,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             // PLAN WORLDS: keep the plan's exact LEVELS (no relax — it averaged levels
             // and lifted steep ribbon reaches above their banks, sweep-proven), but DO
-            // run a PER-NODE skirt so the sheet never ends short of the shore (user:
-            // "the river mesh ends short of the terrain"). Per-node = shared corners
+            // run a PER-NODE skirt so the sheet never ends short of the shore (the
+            // river mesh ended short of the terrain). Per-node = shared corners
             // stay identical across quads AND across the game/studio (no per-quad
             // invented corner → no facets, no cracks). GROUND-GATED: a dry node only
             // takes water where the terrain there stands at/above that level — a bank
@@ -1263,10 +1271,10 @@ namespace VerdantsAscent.Terrain.Voxel
             SheetQueryTicks += System.Diagnostics.Stopwatch.GetTimestamp() - _tq; _tq = System.Diagnostics.Stopwatch.GetTimestamp();
             if (plan != null)
             {
-                // ⚠ 8 PASSES + the outer ring = up to 9 cells of travel to reach the bank (2026-08-18, user:
-                // "make the sheet stop ending so easily, make it extend its mesh PAST the dry cells" — and,
-                // when 4 cells still ended short on shallow sand shelves: "YOU JUST DONT BUILD THE MESH WIDE
-                // ENOUGH"). The pass count is bounded by the halo, not by taste: VoxelChunkView reads nodes
+                // ⚠ 8 PASSES + the outer ring = up to 9 cells of travel to reach the bank (the
+                // sheet must not end so easily; it extends its mesh PAST the dry cells, and
+                // 4 cells still ended short on shallow sand shelves, so the mesh is built wide
+                // enough). The pass count is bounded by the halo, not by taste: VoxelChunkView reads nodes
                 // from −2 to C+2, each pass propagates one cell inward from the frame edge, so the outermost
                 // node the renderer uses is only guaranteed identical between neighbouring chunks for
                 // ≤ SHEET_NODE_HALO−2 total rings (passes + the drape ring). Exceeding that makes a node's
@@ -1274,9 +1282,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 // therefore means raising the HALO (6 → 11 today, frame 45² → 55² ≈ 1.5× nodes), never just
                 // the loop count.
                 // ═══ THE SHEET IS SIMPLY WIDER, IN EVERY DIRECTION, AT THE LEVEL IT ALREADY HAS ═══
-                // (2026-08-18, user, after I kept adding conditions: "we already have the proper LEVELS for the
-                // mesh, we just EXTEND THEM UNTIL THEY CLIP TERRAIN … LET THEM EXTEND UP TO 4 CELLS in ANY
-                // DIRECTION TO CLIP … THEY JUST NEED TO BE WIDER MESHES".)
+                // (The proper LEVELS for the
+                // mesh already exist; they are EXTENDED UNTIL THEY CLIP TERRAIN, up to 4 cells in any
+                // direction: they just need to be wider meshes.)
                 // Nothing is gated. Not on ground height, not on wet/dry, not on body identity, not on a
                 // far wall, not on a terminal ring. Four unconditional dilations of the wet set, each node
                 // taking the LOWEST wet neighbour's level so a descending ribbon never rides up. Where the
@@ -1294,8 +1302,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // Submerged fill is capped on this; burial is not (a bank must always be reachable), and a
                 // buried node is terminal so nothing propagates past it.
                 // ═══ POOLED, NOT ALLOCATED PER CALL ══════════════════════════════════════════════════════
-                // ([engine/lod], 2026-09-03, measured: `apply.water` is the apply pass's TOP ALLOCATOR at
-                // 0.8–1.7 MB/s steady, and — after they split `apply.water.probe` out — its top COST too,
+                // (Measured: `apply.water` is the apply pass's TOP ALLOCATOR at
+                // 0.8–1.7 MB/s steady, and — with `apply.water.probe` split out — its top COST too,
                 // 373–403 ms/s streaming with the ground probe only 3–43 of it. The bulk is here.)
                 // These four scratch buffers were `new`-ed on every call. At SHEET_NODE_HALO = 11 that is
                 // NW = cells + 23, so three byte[NW²] plus a float[NW²] — order 20 KB per sheet build, all
@@ -1322,11 +1330,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 System.Array.Clear(bur, 0, NN);   // read as "0 unless set" by the CELL test — must start zeroed
                 for (int i = 0; i < NW * NW; i++) dist[i] = H[i] > 0f ? (byte)0 : (byte)255;
                 // ═══ THE MESHED-GROUND PROBE IS MEMOISED PER CALL ════════════════════════════════════════
-                // ⚠ I TRIED THIS ON 09-03, MEASURED IT SLOWER (0.421 vs 0.391 ms/call), AND REVERTED IT.
+                // ⚠ A FIRST BENCH MEASURED THIS SLOWER (0.421 vs 0.391 ms/call) AND IT WAS REVERTED.
                 // That measurement was INVALID and this is the correction. `riverfield` runs with
                 // MeshedGroundProbe == null, so ClipGroundAt always took its cheap ANALYTIC fallback — the
                 // bench was A/B-ing a memo against a thing that costs nothing, and of course the bookkeeping
-                // lost. In game the probe is a VOXEL RAYCAST: the user's 09-07 log puts `apply.water.probe`
+                // lost. In game the probe is a VOXEL RAYCAST: a game log puts `apply.water.probe`
                 // at 24-42 ms/s synchronous and 100-137 ms/s once deferral made it succeed more often.
                 // ⭐ ClipGroundAt is called per candidate node per dilation pass, and the ground under a node
                 // is a pure function of its position — identical on all 8 passes. So a node visited across
@@ -1340,7 +1348,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     for (int i = 0; i < NN; i++) GM[i] = float.NaN;
                 }
                 // ═══ THE DILATION ONLY SCANS WHERE WATER CAN REACH ═══════════════════════════════════════
-                // ([engine/lod] measured apply.water as the apply pass's top cost; my own split then put 88 %
+                // (apply.water measured as the apply pass's top cost; a split then put 88 %
                 // of BuildSheetNodes in these relax passes and only 12 % in field queries, which killed the
                 // window-fetch idea and pointed here instead.)
                 // The pass below skips a cell in its first line unless the cell is DRY AND has a wet
@@ -1384,9 +1392,9 @@ namespace VerdantsAscent.Terrain.Voxel
                                     int nj = ni + dx + NW * dz;
                                     float nv = Sc[nj];
                                     // ⚠ A TERMINAL NEIGHBOUR IS A DEAD END — it already intersects terrain, and the
-                                    // sheet must not step over a containment bank to keep going (2026-08-19, user:
-                                    // "our extend 9 cells needs to NOT extend once it actually intersects terrain,
-                                    // because now it will extend out past the containment bank"). Skipping it as a
+                                    // sheet must not step over a containment bank to keep going (the
+                                    // 9-cell extension must NOT extend once it actually intersects terrain,
+                                    // or it extends out past the containment bank). Skipping it as a
                                     // SOURCE is what makes the reach stop AT the bank instead of counting 9 cells
                                     // regardless: growth dies on the first buried ring in every direction, so the
                                     // 9 is a CEILING for how far a shore may be chased, never a distance the sheet
@@ -1400,15 +1408,15 @@ namespace VerdantsAscent.Terrain.Voxel
                                 }
                             if (cnt == 0) continue;
                             float wx = originX + (nx - NH), wz = originZ + (nz - NH);
-                            // (v98) BODY SHORES take a DEEPER gate: the planner's footprint flood is
+                            //  BODY SHORES take a DEEPER gate: the planner's footprint flood is
                             // 4-connected and the overlap referee can notch it, so rare aliased shore
                             // pockets sit just UNDER the level outside the footprint — the sheet stopped
-                            // short of the bank there (user screenshots). A body may extend over a shallow
+                            // short of the bank there. A body may extend over a shallow
                             // under-level shelf (≤0.9m — the pond covering its own missed shore pocket);
                             // rivers keep the strict 0.1m gate (their dry margins are bermed, and a loose
                             // gate there is the historical ride-up-the-bank float). Body identity (F=1)
                             // propagates so multi-pass extension stays scoped to bodies.
-                            // (v100) POCKET-ONLY: the deep tolerance alone laid overhanging TONGUES on
+                            //  POCKET-ONLY: the deep tolerance alone laid overhanging TONGUES on
                             // shores that slope down AWAY from the body (floating shards on the grass,
                             // seed 724107467). A pocket by definition has a far WALL — the deep gate now
                             // also requires a DRY 8-neighbour whose ground stands at/above the level.
@@ -1422,7 +1430,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 if (float.IsNaN(gHere))
                                 {
                                     s_shG[ni] = gHere = ClipGroundAt(wx, wz, out bool fb);
-                                    // === 2026-09-07: THIS `if (fb)` WAS MISSING. It voided BOTH the ======
+                                    // === THIS `if (fb)` WAS MISSING. It voided BOTH the ======
                                     // === instrument AND the guard below. Do not remove it again. ========
                                     // Without it the classification ran on every memo MISS - the first touch
                                     // of every node - not on every FALLBACK. Every build touches its own
@@ -1463,10 +1471,10 @@ namespace VerdantsAscent.Terrain.Voxel
                             }
                             else gHere = ClipGroundAt(wx, wz);   // MESHED terrain, not the analytic grid
                             // ═══ THE EDGE OF THE SHEET SITS UNDER TERRAIN, ALWAYS ═══════════════════════════
-                            // (2026-08-18, user, after four rounds of me over-thinking this: "its really not
-                            // super complicated the edge of the mesh should sit UNDER terrain always, this
-                            // prevents us from ever seeing the edges, so sheets extend until their edge is
-                            // clipped into terrain".)
+                            // (The rule is simple: the edge of the mesh always sits UNDER
+                            // terrain, which
+                            // prevents ever seeing the edges, so sheets extend until their edge is
+                            // clipped into terrain.)
                             // The old gate had it exactly inverted: `gHere >= lo - 0.1f` extends ONLY onto ground
                             // that is ALREADY at/above the level — the case that is already buried and needs no
                             // help — and REFUSES the one case that matters, a neighbour whose ground lies BELOW
@@ -1481,16 +1489,16 @@ namespace VerdantsAscent.Terrain.Voxel
                             // bounds the growth. Submerged nodes keep travelling outward until they reach one.
                             // `terminal` is why this cannot float: over open descending ground the passes simply
                             // run out (4 rings) instead of marching, and that residue is COUNTED below rather
-                            // than hidden — those are the reaches whose level must come DOWN, the user's other
-                            // instruction ("if it cannot intersect terrain on one edge, drop the cross section"),
+                            // than hidden — those are the reaches whose level must come DOWN, the other
+                            // rule ("if it cannot intersect terrain on one edge, drop the cross section"),
                             // which belongs in the gen-side level solve, not here.
-                            // ⚠⚠ UNCONDITIONAL WAS WRONG — IT FLOATS (2026-08-18, user screenshot: the sheet
+                            // ⚠⚠ UNCONDITIONAL WAS WRONG — IT FLOATS (the sheet
                             // standing as a slab above the grass with a hard vertical face).
                             // "Extend 9 cells in any direction" has no stop over OPEN LOW GROUND: beside a
                             // channel where the land stays below the water level there is never a bank to bury
                             // into, so the dilation marches the full reach at the water's level and hangs in the
                             // air. That is the v100 tongue failure, re-created by removing the gate.
-                            // The user's actual rule is the one to encode — "the edge of the mesh should sit
+                            // The actual rule is the one to encode — "the edge of the mesh should sit
                             // UNDER terrain always" — which means the two cases are NOT the same:
                             //   • BURIAL (ground at/above the level): always allowed, at any distance. This is
                             //     the edge tucking into a bank, it is invisible, and it is the goal. It is also
@@ -1505,7 +1513,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // sheet INTERSECTS TERRAIN here. That is the goal state: include the node so the seam
                             // is hidden under the bank, then STOP — `term` below makes it a dead end.
                             // ═══ "ARE BOTH EDGES OF THIS CELL UNDER TERRAIN? THEN CLIP IT." ══════════════════
-                            // (2026-08-19, the user's own statement of the rule, and it is the right one.)
+                            // (The rule, as stated in the design, and it is the right one.)
                             // A rendered quad spans TWO nodes. It only becomes invisible when terrain covers
                             // BOTH of its corners — cover one and you still see the half that is above ground.
                             // Testing a single node was the error: the sheet stopped at the FIRST node whose
@@ -1521,9 +1529,9 @@ namespace VerdantsAscent.Terrain.Voxel
                             // is what stops the sheet marching across open low ground as a slab in mid-air.
                             byte myDist = nearest == 255 ? (byte)255 : (byte)(nearest + 1);
                             bool ext = buried || myDist <= SHEET_SUBMERGED_REACH;
-                            // ⚠ RIVERS DELIBERATELY DO NOT GET THE DEEP-TOLERANCE BRIDGE — MEASURED, 2026-08-18.
+                            // ⚠ RIVERS DELIBERATELY DO NOT GET THE DEEP-TOLERANCE BRIDGE — MEASURED.
                             // GEN_VERSION 143 briefly gave rivers a 0.35 m far-wall bridge on the theory that the
-                            // user's "sheet ends short of the bank" screenshots were slightly-under-level shore
+                            // "sheet ends short of the bank" reports were slightly-under-level shore
                             // notches stopping the skirt. `sheetedge` (the rendered-sheet audit that theory had
                             // never been checked against) A/B'd the gate at n=10501 over 400 channel chunks:
                             // the bridge extended the sheet by TWO nodes world-wide and visible river lips went
@@ -1543,7 +1551,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 // above the level it carries, so the terrain already hides this ring and there is
                                 // nothing beyond it worth drawing. Marking it here is what makes the sheet stop AT
                                 // the containment bank instead of stepping over it and carrying on for the
-                                // remaining rings — the defect the user hit once the reach went to 9 cells.
+                                // remaining rings — the defect seen once the reach went to 9 cells.
                                 bur[ni] = buried ? (byte)1 : (byte)0;
                                 // BOTH corners under terrain ⇒ this whole cell is invisible ⇒ clip: stop here.
                                 // One corner buried is NOT enough — that quad is still half-visible, and stopping
@@ -1553,9 +1561,9 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                 }
                 // ⚠ THE DRAPE RING — THE SHEET NOW ENDS *INSIDE* THE GROUND, NEVER IN MID-AIR
-                // (2026-08-18, user, pointing at a rendered edge: "the yellow water meshes should
-                // extend and clip through the magenta terrain mesh … thats the whole issue im having
-                // is the grid stops, it doesnt clip"). The ground-gated skirt above is the BURIAL
+                // (The water meshes should
+                // extend and clip through the terrain mesh; the issue was that
+                // the grid stopped and did not clip.) The ground-gated skirt above is the BURIAL
                 // half — it may only extend where the bank stands at/above the level, so wherever the
                 // shore ground sits BELOW the sheet (sheetedge, n=10501: 155 free river edges, drop
                 // p50 2.1 m with a p90 47 m canyon-lip tail) the sheet used to stop with a free-
@@ -1586,9 +1594,9 @@ namespace VerdantsAscent.Terrain.Voxel
                             }
                         if (lo == float.MaxValue) continue;
                         float g = SampleFinalMetersReal(originX + (nx - NH), originZ + (nz - NH));
-                        // ⚠ A SHORE, NOT A FALL (2026-08-18, user: "the entire water logic is built on leveling from
-                        // the lower of the two banks, there physically shouldn't be a bank dropped out from under it
-                        // unless we have a river that is flowing in that direction and it's flowing downhill"). The
+                        // ⚠ A SHORE, NOT A FALL (the water logic levels from
+                        // the lower of the two banks, so no bank should drop out from under it
+                        // unless a river is flowing in that direction, downhill). The
                         // corrected sheetedge dump at n=10501 bears that out: with the tide gate fixed, every remaining
                         // free edge is either a sea-level shore step (≤ 2 m: pocket shelves, estuary beds) or a
                         // WATERFALL LIP — a river at 52.7 m dropping into a tide-owned pool at 30.1, a lake at 76 m
@@ -1605,13 +1613,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         H[ni] = v; D[ni] = Mathf.Max(0.1f, D[ni]); DrapeWritten++;
                     }
                 // ═══ SMOOTH BACK FROM THE LOWER BANK — DOWNHILL ONLY ════════════════════════════════════
-                // (2026-08-18, user, once the channel finally filled: "it just needs to smooth so its not so
-                // lumpy … IT SHOULD SMOOTH BACK FROM THE LOWER BANK HEIGHT RIGHT?" — yes, and that is the
+                // (Once the channel filled: it needs to smooth so it is not so
+                // lumpy, smoothing back from the lower bank height — and that is the
                 // existing law: SetBankDerivedLevels sets each node to min(bankL,bankR) − RELIEF.)
                 // The planned branch has carried NO relax at all, and the note above says why: an earlier
                 // average "lifted steep ribbon reaches above their banks, sweep-proven". That failure is not
                 // smoothing per se — it is smoothing that may RAISE. So this one cannot:
-                //   • every node is clamped to its OWN pre-smoothing level (H0), which IS its lower-bank
+                //   • every node is clamped to its OWN pre-smoothing level, which IS its lower-bank
                 //     level. The filter may settle a lump DOWN toward the bank; it can never lift water over
                 //     one. The 2026 sweep regression is unreachable by construction, not by tuning.
                 //   • BILATERAL: a neighbour only contributes if it is within SHEET_SMOOTH_JOIN of this node.
@@ -1666,7 +1674,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 return NW;
             }
             // ═══ THE PLANLESS PATH GETS THE SAME DILATION — THIS IS THE ONE THAT ACTUALLY SHIPS ═══════════
-            // (2026-08-18. The user reported the sheet ending short ~50 times; five successive rewrites of the
+            // (The sheet was reported ending short many times; five successive rewrites of the
             // skirt above changed NOTHING on screen, and this is why.)
             // EVERY dilation, skirt and drape written above lives inside `if (plan != null)` and returns at
             // the line above. But `_plan` is a GEN-TIME object: `RestoreFromArtifact` — the path EVERY
@@ -1700,7 +1708,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             // (Cross-section spine-max flatten REVERTED — it lifted edge nodes to the
             // spine and the skirt then draped that level onto banks and mid-river rocks:
-            // the riding-up-the-banks regression in the user's screenshots. The level
+            // the riding-up-the-banks regression. The level
             // bar between banks is the GEN's job (ContainRiverWaterBelowBanks), not a
             // render-side lift.)
             for (int p = 1; p <= 3; p++)
@@ -1742,7 +1750,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         float ext = 0f;
                         // Interior hole-bridge ONLY = surrounded by ONE surface (levels
                         // agree) — keeps the sheet solid inside its own body. The old
-                        // ground-gated bank-tuck extension is GONE (user contract: the
+                        // ground-gated bank-tuck extension is GONE (design contract: the
                         // mesh is the plan's exact shape; conformance buries the edges
                         // in terrain — the mesh never reaches for the bank itself).
                         if (cnt >= 5 && hiN - loN <= 1.0f) ext = sum / cnt;

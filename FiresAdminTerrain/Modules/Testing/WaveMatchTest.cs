@@ -7,8 +7,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // ── `wavematch_test [radius=40]`: does the body float on the wave that is drawn? (0.2.698; Fire 10-01: "our swim
-    // trigger/float trigger doesn't actually match the waves") ─────────────────────────────────────────────────────────────
+    // ── `wavematch_test [radius=40]`: does the body float on the wave that is drawn? (the swim
+    // and float triggers must match the drawn waves) ─────────────────────────────────────────────────────────────
     // Read-only, on-demand F5 contract test. On a Points x Points grid within radius of the tester, at every point inside a
     // SEA WaterVolume (global wind, surface at the sea plane): the PHYSICS surface (WaterVolume.GetWaterSurface, what
     // swimming, Floating and boats use) against the SHADER's (the FiresWater height: the volume's plane + CalcWave with
@@ -81,13 +81,21 @@ namespace VerdantsAscent.Terrain.Testing
                         if (v == null || Mathf.Abs(v.transform.position.y - ZoneSystem.c_WaterLevel) > 1f) { outside++; continue; }
                         if (!global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.TrySampleFts(p.x, p.z, out float rr)) { outside++; continue; }
                         float phys = v.GetWaterSurface(p);
-                        // The shader's height ([visual], FiresWater BuildOutput): CalcWave(R, waveFactor 1) x _WaveAmplitude, with NO
+                        // The shader's height (FiresWater BuildOutput): CalcWave(R, waveFactor 1) x _WaveAmplitude, with NO
                         // Deep North fade on the swell (waveFactorBig 1); tide/river and whirl offsets are reported apart.
                         float amp = global::VerdantsAscent.Water.Core.FiresWaveAmplitudeMatch.AmplitudeOf(v);
-                        float shader = v.transform.position.y + SurfaceOffset(v) + (rr == 0f ? 0f : v.CalcWave(p, rr, time, 1f, 1f) * amp);
+                        // No tide here (the shader adds Galaxies' raw SurfaceOffset, but its physics takes it x
+                        // TideRiverField.TideInfluence: -4.85 vs -0.49 at the shore); the shared shift is reported apart.
+                        float shader = v.transform.position.y + SurfaceOffset(v) +(rr == 0f ? 0f : v.CalcWave(p, rr, time, 1f, 1f) * amp);
                         float vd = VanillaDepth(v, p);
                         rows.Add((p, phys, shader, vd, rr));
                     }
+                // The WAVE is judged; a shift shared by every point (the tide, Galaxies' to match) is taken out and named.
+                var deltas = rows.Select(w => w.phys - w.shader).OrderBy(d => d).ToList();
+                float shift = deltas.Count > 0 ? deltas[deltas.Count / 2] : 0f;
+                rows = rows.Select(w => (w.p, w.phys - shift, w.shader, w.vanillaDepth, w.r)).ToList();
+                Say(string.Format(inv, "{0} tide shift {1:0.000} m taken out (physics minus drawn, median); Galaxies tide {2:0.000} m (_FiresTideOffset {3:0.000})",
+                    Tag, shift, global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.Tide(), Shader.GetGlobalFloat("_FiresTideOffset")));
                 var worst = rows.OrderByDescending(w => Mathf.Abs(w.phys - w.shader)).ToList();
                 float max = worst.Count > 0 ? Mathf.Abs(worst[0].phys - worst[0].shader) : 0f;
                 bool ok = rows.Count >= MinPoints && max <= Tolerance;
@@ -98,7 +106,7 @@ namespace VerdantsAscent.Terrain.Testing
                 Say($"{Tag} 1/2 wavematch {(ok ? "PASS" : "FAIL")} - " + string.Format(inv,
                     "{0} sea point(s) compared ({1} outside a sea volume or the shore field), worst Δ {2:0.000} m (tolerance {3:0.00}, needs {4}+ points); worst: {5}",
                     rows.Count, outside, max, Tolerance, MinPoints, rows.Count > 0 ? list : "none"));
-                // 2 server (0.2.699, [lead]: server-owned floaters near coasts must match too): the DEDICATED SERVER's depth
+                // 2 server (server-owned floaters near coasts must match too): the DEDICATED SERVER's depth
                 // factor at the same points (its WaterVolume.Depth, FAT's own evaluation of the shore field there) against the
                 // client's drawn R. A depth gap dR moves the surface by at most dR x the full-strength wave there, which is
                 // what is judged (same tolerance).
@@ -130,6 +138,12 @@ namespace VerdantsAscent.Terrain.Testing
                         float smax = sw.Count > 0 ? sw[0].height : 0f;
                         bool sok = sw.Count >= MinPoints && smax <= Tolerance;
                         if (sok) pass++; else fail++;
+                        // Both sides (e.g. a 0.151 m gap with client R 0 vs server 0.18-0.23) evaluate the same field
+                        // from the same ground, so a gap is the tide each side bakes it with; name both.
+                        Say(string.Format(inv, "{0} tides: client {1:0.000} m, server {2} (the shore field's depth is sea + tide - ground on each side)",
+                            Tag, global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.Tide(),
+                            float.IsNaN(global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.LastServerTide) ? "not sent (older FAT)"
+                                : global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.LastServerTide.ToString("0.000", inv) + " m"));
                         string slist = string.Join(" | ", sw.Take(ListWorst).Select(w => string.Format(inv,
                             "({0:0},{1:0}) client R {2:0.000} vs server {3:0.000} → {4:0.000} m", w.p.x, w.p.z, w.client, w.srv, w.height)));
                         Say($"{Tag} 2/2 server {(sok ? "PASS" : "FAIL")} - " + string.Format(inv,

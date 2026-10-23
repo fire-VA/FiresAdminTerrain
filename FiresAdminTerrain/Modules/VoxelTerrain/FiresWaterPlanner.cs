@@ -11,7 +11,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // it suggests where nature would put water; the planner DECIDES, and once a
     // level is written into the plan it is constant forever.
     //
-    // Order of decisions (user contract): highest to lowest. Mountain tarns and
+    // Order of decisions (design contract): highest to lowest. Mountain tarns and
     // high lakes first, then downslope, marshes from their own suitability, then
     // the connections that run every body's outflow down to the next body or the
     // sea. Terrain conformance and rendering happen ELSEWHERE, from the plan.
@@ -28,12 +28,12 @@ namespace VerdantsAscent.Terrain.Voxel
         // dips don't. BODY_MIN_CELLS backstops it on size.
         private const float BASIN_MIN_DEPTH = 2.5f;   // a depression must hold ≥ this to be real water, not surface noise
         private const float LEVEL_UNDER_SPILL = 0.85f; // a body's level sits this far under its spill lip.
-                                                       // (v105) 0.35 → 0.85: BODY BANK RELIEF — the user measured a persistent
+                                                       //  0.35 → 0.85: BODY BANK RELIEF — there was a persistent
                                                        // ~0.5m step at every body↔river junction, iteration after iteration:
                                                        // rivers ride relief+drop under their banks while bodies sat at
                                                        // spill−0.35 — every seam lump/break inherited that offset. All still
                                                        // water drops the same 0.5 so bodies meet the river convention.
-        // ═══ THESE ARE AREAS, NOT CELL COUNTS (v135) ══════════════════════════════════════════════════════
+        // ═══ THESE ARE AREAS, NOT CELL COUNTS ══════════════════════════════════════════════════════
         // Every size gate here was authored against the game's FULL-RESOLUTION grid — n=10501 across a 21 km
         // world, i.e. 2 m cells and 4 m² each — and the old comments said so outright: "≈1600 m²", "≈3.2 km²",
         // "≈0.24 km²", "256 m² at 2 m". They were still stored as raw CELL COUNTS, and resolution is
@@ -58,9 +58,9 @@ namespace VerdantsAscent.Terrain.Voxel
 
         /// Cells covering `areaM2` at the current cell size. At least 1, so no gate silently becomes "anything".
         private static int CellsFor(float areaM2, float cellA) => System.Math.Max(1, (int)(areaM2 / System.Math.Max(1e-6f, cellA) + 0.5f));
-        // ── THE MARSH MODEL (user, verbatim): "a LARGE SHALLOW LAKE with MANY ROLLING ISLANDS" ───────────
+        // ── THE MARSH MODEL: "a LARGE SHALLOW LAKE with MANY ROLLING ISLANDS" ───────────
         // 0.35 → 0.70. The level is the height that submerges this share of the region, so 0.35 flooded only
-        // the lowest THIRD — i.e. scattered puddles sitting in the dips, which is the exact model the user
+        // the lowest THIRD — i.e. scattered puddles sitting in the dips, which is the exact model that was
         // rejected. A large shallow lake with islands is the INVERSE: most of the basin is under one flat
         // sheet and only the mounds stand out of it. 0.70 floods most and leaves the top ~30% emergent as
         // the islands. The shallow part is already handled downstream (the marsh bed shaper cuts 0.5-1.8m of
@@ -70,7 +70,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float MARSH_BUDGET_AREA_M2 = 240_000f; // was 60,000 cells ≈ 0.24 km² — absolute footprint allowance (see the budget note)
         private const int   MARSH_LEVEL_TRIES = 8;       // an overflowing marsh settles to a lower level instead of dying
         private const float MARSH_LEVEL_STEP = 0.75f;    // ...8 x 0.75 = 6m of range, vs the old 3 x 0.5 = 1.5m
-        // ── A MARSH TOLERATES INCLUSIONS; A LAKE DOES NOT (2026-08-13) ────────────────────────────────────
+        // ── A MARSH TOLERATES INCLUSIONS; A LAKE DOES NOT ────────────────────────────────────
         // The overlap referee drops a candidate whole unless 60% of its cells are unowned. That is the right
         // rule for a DISCRETE body — a lake half-eaten by another lake is a bad lake. A marsh is not discrete:
         // it is a broad wet district that legitimately contains ponds and abuts lakes, and it floods flat
@@ -90,14 +90,14 @@ namespace VerdantsAscent.Terrain.Voxel
         // A tributary has ARRIVED once it is this close to a still body; nodes beyond that are the trace
         // following a contour around the shore, not a river approaching it. Roughly one trunk channel width.
         private const float SHORE_ARRIVE_M = 12f;
-        // Two runs landing within this of each other on one body are the SAME mouth (user: "one inlet and one
-        // outlet when a river meets a stillbody within 10m"). The later one is trimmed to join at that mouth.
+        // Two runs landing within this of each other on one body are the SAME mouth (one inlet and one
+        // outlet when a river meets a still body within 10 m). The later one is trimmed to join at that mouth.
         private const float INLET_MERGE_M = 10f;
         private static int s_sinkSea, s_sinkJoin, s_sinkNone;   // (TRACE) how each run's destination actually resolved: reached the sea / joined another river / had none and was dropped
         private static int s_emergentPonds;   // (TRACE) ponds the rivers MADE for themselves - a run entered a bodyless basin, so the basin became a pond and the run continues over its spill
         private static int s_endsLanded;   // (TRACE) runs whose final node was landed ON the receiving body's footprint instead of stopping short of it
         private static int s_shoreTrimmed, s_inletMerged, s_tracesReversed, s_endsReconnected;
-        // ── WHY THERE IS NO "MERGE THE FRAGMENTS" PASS HERE (measured 2026-08-13, seed 220092304 @ n=10501) ──
+        // ── WHY THERE IS NO "MERGE THE FRAGMENTS" PASS HERE (measured on seed 220092304 @ n=10501) ──
         // The obvious theory — the noise-gated swamp biome shatters one basin into crumbs, so merge them — is
         // WRONG, and the census (MARSH REGION CENSUS, logged below) is what proves it. Sizes run
         // p50 48 · p75 304 · p90 1,024 · p99 13,136 · max 37,632 cells, and 31 regions ALREADY clear the 2500
@@ -193,7 +193,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var stamp = new int[n * n]; int stampId = 0;    // ExpandFootprint scratch
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            // ── WATER DIAGNOSTICS (nail down the swamp/lake/pond issue — user, 2026-08-09) ──
+            // ── WATER DIAGNOSTICS (for the swamp/lake/pond counts) ──
             // Every place a candidate can die gets a named counter, so the [FiresWaterPlan] summary shows the FUNNEL:
             // how many basins/marsh-regions were found, and exactly which gate culled the ones that didn't survive.
             // A world with lake=0 pond=0 then reads its cause straight off the log (no lowland flat basins? all lost
@@ -211,13 +211,13 @@ namespace VerdantsAscent.Terrain.Voxel
             // hold most of the cells, then the bar itself (or the model) is wrong and bridging is a waste.
             var marshSizes = new List<int>(1024);
             int placedLake = 0, placedPond = 0, placedTarn = 0, placedMarsh = 0, placedSeaMarsh = 0, overlapDrop = 0, oceanOwned = 0;
-            // Swamp-biome EXTENT — the root the user suspects. Fraction of land that FiresBiome3D calls swamp (code 2);
+            // Swamp-biome EXTENT — the suspected root. Fraction of land that FiresBiome3D calls swamp (code 2);
             // an over-broad swamp biome both spreads marshes AND steals the lake/pond classification downstream.
             int swampBiomeCells = 0, landCells = 0;
             if (biomes != null)
                 for (int i = 0; i < n * n; i++) { if (g[i] > SEA + 0.2f) { landCells++; if (biomes[i] == 2) swampBiomeCells++; } }
             // ── 1) MARSH CANDIDATES from swamp biome (their own suitability) ─────
-            // ⚠ THIS SCAN NOW RUNS BEFORE THE LAKE SCAN, AND ONLY TO ANSWER ONE QUESTION EARLY (v133): which
+            // ⚠ THIS SCAN NOW RUNS BEFORE THE LAKE SCAN, AND ONLY TO ANSWER ONE QUESTION EARLY: which
             // wetland ground can the marsh funnel actually place a body on? The lake funnel below yields that
             // ground and NOTHING ELSE, so a wetland basin the marsh funnel cannot take stays a lake instead of
             // becoming a hole in the world. Nothing else moved: the two scans share no state but `stamp`
@@ -252,7 +252,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     marshRegions++;   // a connected swamp-biome region (any size) — the marsh candidate pool
                     marshSizes.Add(comp.Count);
                     if (comp.Count < marshMinCells) { marshTooSmall++; continue; }
-                    // ═══ THE LEVEL IS SPILL-BOUNDED, LIKE EVERY OTHER BODY (2026-08-13) ══════════════════
+                    // ═══ THE LEVEL IS SPILL-BOUNDED, LIKE EVERY OTHER BODY ══════════════════
                     // This used to be a pure height PERCENTILE of the biome patch — a number with no relation
                     // to any lip, so the flood that follows had nothing to stop it and simply ran until it hit
                     // a cell budget (55% of qualifying regions overflowed and were discarded). Every other body
@@ -269,7 +269,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     //            rather than one flat sheet with nothing standing out of it.
                     heights.Sort();
                     float pctLevel = heights[(int)(heights.Count * MARSH_SUBMERGE_PCT)] - 0.5f;
-                    // THE LIP COMES FROM THE FILL TABLE, NOT FROM THE REGION'S EDGE. Measured 2026-08-13: using
+                    // THE LIP COMES FROM THE FILL TABLE, NOT FROM THE REGION'S EDGE. Measured: using
                     // the region's own lowest boundary cell as a spill lip rejected ALL 31 qualifying regions.
                     // A swamp-biome region is NOT a basin — its boundary is wherever the biome gate stopped,
                     // which is frequently DOWNHILL of the region's floor, so "lowest boundary cell" is arbitrary
@@ -293,7 +293,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     float level = System.Math.Min(pctLevel, fillLevel);
                     // ...and it must actually FLOOD. A level that leaves the region essentially dry would place
-                    // a marsh the map paints and the game does not have — the exact failure the user named.
+                    // a marsh the map paints and the game does not have — the exact failure that was seen.
                     int under = 0;
                     for (int k = 0; k < heights.Count; k++) if (heights[k] < level) under++;
                     if (under < heights.Count * 0.25f) { marshBroken++; brkNoFlood++; continue; }
@@ -304,8 +304,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (heights[k] >= level - 2.5f && heights[k] <= level + 1.5f) inBand++;
                     if (inBand < heights.Count * 0.30f) { marshBroken++; brkNotLevel++; continue; }   // broken ground → stays dry swampy land
                     // ═══ THE TIDE BAND IS FORBIDDEN — NO TWO SHEETS MAY MEET NEAR SEA LEVEL ══════════════
-                    // (user 2026-08-13: "we need very specific and clean logic for swamps/marshes close to
-                    // sea level to keep meshes from conflicting".) High tide is EXACTLY Y30 — FiresEnv's
+                    // (Swamps/marshes close to sea level need very specific and clean logic
+                    // to keep meshes from conflicting.) High tide is EXACTLY Y30 — FiresEnv's
                     // TideHighOffsetM is 0, so the ocean never rises above SEA; it only recedes (−2 neap,
                     // −5 spring). The failure mode is an inland marsh sheet sitting a few centimetres either
                     // side of the ocean plane: two coplanar surfaces, both drawn, fighting. So the band around
@@ -322,7 +322,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // a leak past budget lowers the level (smaller marsh beats a leak).
                     List<int> cells = null; bool overflow = true;
                     float mlvl = level;
-                    // ── THE FOOTPRINT BUDGET IS ABSOLUTE, NOT A MULTIPLE OF THE SEED (2026-08-13) ─────────
+                    // ── THE FOOTPRINT BUDGET IS ABSOLUTE, NOT A MULTIPLE OF THE SEED ─────────
                     // Was min(comp.Count*3 + 2000, BODY_MAX_CELLS). Two things wrong with keying the budget
                     // to the swamp patch: (a) the footprint is explicitly NOT the biome region — the comment
                     // above says water ignores the biome line and floods whatever sits under the level — so
@@ -350,7 +350,12 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (mlvl <= SEA + 0.6f) break;
                     }
                     if (sea) { stampId++; cells = ExpandFootprint(comp, SEA + 1.5f, g, n, stamp, stampId, budget, out overflow); }
-                    if (overflow && !sea) { marshOverflow++; continue; }
+                    // Terraced sea floor + 50 m walls showed across a bay: a SEA marsh's overflowed
+                    // flood was kept. ExpandFootprint is a depth-first flood that stops at its budget, so a cut-off flood is a set
+                    // of grid COLUMNS; that striped mask (0101 by column) combed the sea floor in Conform, and the lakes that later
+                    // filled the free stripes between its columns came out 1-3 cells wide and walled up by BuryMeshEdges. An
+                    // overflowed flood is refused for both kinds now.
+                    if (overflow) { marshOverflow++; continue; }
                     if (cells == null || cells.Count < marshMinCells / 2) { marshTooSmall++; continue; }
                     if (sea) candSeaMarsh++; else candMarsh++;
                     // conformance reshapes the interior; include the near-level band above
@@ -375,7 +380,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 var comp = new List<int>(4096);
                 for (int i0 = 0; i0 < n * n; i0++)
                 {
-                    // ═══ WETLAND GROUND A MARSH WILL ACTUALLY TAKE IS NOT AVAILABLE TO A LAKE (v133) ════════
+                    // ═══ WETLAND GROUND A MARSH WILL ACTUALLY TAKE IS NOT AVAILABLE TO A LAKE ════════
                     // A wetland basin is brim-full IN THE FILL TABLE like any other, because a priority flood
                     // has no evaporation term; only the classifier knows the basin cannot hold that much
                     // water. Without this gate the lake funnel gets there first, and since marshes decide LAST
@@ -427,9 +432,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (overflow || level <= SEA + 0.6f) continue;
                     if (cells.Count < bodyMinCells) continue;
                     lakeBasinsFound++;   // a real depression past the size floor — now run the lake-basin laws
-                    // ═══ (v104) A BASIN MUST BE ABLE TO HOLD A LAKE (user: "there's no world where that
-                    // mountain peak would have a depression with water in it"). The real massif terrain
-                    // (v102) is full of ridge POCKETS — noise crevices between crests that pass the depth
+                    // ═══ A BASIN MUST BE ABLE TO HOLD A LAKE (no mountain peak
+                    // holds a depression with water in it). The real massif terrain
+                    //  is full of ridge POCKETS — noise crevices between crests that pass the depth
                     // test but are steep rock funnels, not lake basins. Two laws close them out:
                     //   (a) FLOOR TEST — a real lake floor is NEAR-FLAT (deposition flattens it): the mean
                     //       grade over the deep floor must be gentle, else it's mountainside;
@@ -451,7 +456,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // cut against sandbox relief, and ours is gentler now that no river carve
                         // trenches it. A real lake floor can roll; only a hillside cannot hold water.
                         if (meanGrade > 0.30f) { rejSteep++; continue; }
-                        // (c) HIGH STILL WATER IS NOT SCAVENGED FROM THE FILL AT ALL (user, emphatic — and
+                        // (c) HIGH STILL WATER IS NOT SCAVENGED FROM THE FILL AT ALL (the
                         //     the admin-terrain mod PROVED the right way): mountain water comes from
                         //     SeedMountainTarns — deliberate rare cirque sites that verify a NATURAL hollow
                         //     (floor below the lowest rim) and EXCAVATE their own parabolic basin, filling
@@ -472,9 +477,9 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             // ── 3) DECIDE, highest to lowest — first decision wins the ground ────
-            // ═══ MARSHES DECIDE LAST — THEY MAY NEVER TAKE GROUND FROM A DISCRETE BODY (2026-08-13) ══════
-            // (user: "i cannot afford for you to break the other working water logic while trying to fix
-            // marshes and swamps".) `owner` is SHARED by every body kind, so anything that makes marshes claim
+            // ═══ MARSHES DECIDE LAST — THEY MAY NEVER TAKE GROUND FROM A DISCRETE BODY ══════
+            // (Marsh and swamp work must not break the other working water logic.)
+            // `owner` is SHARED by every body kind, so anything that makes marshes claim
             // more ground silently takes it from lakes/ponds/tarns — measured: widening the marsh footprint
             // budget trimmed lakes into swiss cheese and took lowland float from 46 to 907. Ordering purely by
             // level let a high marsh outrank a lake beneath it. Marshes are broad, shallow, low-lying districts
@@ -497,12 +502,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 // A marsh keeps its ground around inclusions (see MARSH_FREE_FRAC); discrete bodies still
                 // demand 60% exclusivity. The mask build below already skips owned cells, so a surviving
                 // ═══ THE OCEAN OWNS SEA LEVEL. A POND THERE DOES NOT EXIST. ══════════════════════════════
-                // (user, 2026-09, standing on a coast with the overlay reading "Pond · surf Y30.4" beside the
-                // tidal sea: "for some reason were drawing ponds and other still water bodies at sea level,
-                // where the ocean should own all logic and ponds should never exist".)
+                // (Seen on a coast with the overlay reading "Pond · surf Y30.4" beside the
+                // tidal sea: ponds and other still water bodies were drawn at sea level,
+                // where the ocean should own all logic and ponds should never exist.)
                 // A still body within the tide band is not a body — it is a patch of sea that the basin scan
                 // mistook for an inland depression, and emitting it puts a SECOND sheet at the coast that
-                // fights the tidal plane (the hard sheet corner in the screenshot). The tide runs SEA-5 to
+                // fights the tidal plane (a hard sheet corner). The tide runs SEA-5 to
                 // SEA, so anything whose surface would sit at or barely above SEA is tidal ground: refused
                 // here, before a footprint or a carve ever exists, and the ocean plane simply covers it.
                 // Sea marshes are exempt — coastal-at-sea-level is their entire definition.
@@ -551,7 +556,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
 
-            // (Investigation note, 2026-08-11 — the diagnostic itself is removed, it allocated a full n² array
+            // (Investigation note — the diagnostic itself is removed, it allocated a full n² array
             // on every gen.) A body is only detected by the connection loop below when a traced poly NODE lands
             // inside its FOOTPRINT. Measured at n=10501: only ~26 of 562 bodies had a node inside; ~36 had a
             // trace pass within 10-120m and register as nothing; the rest had no trace near them at all and
@@ -568,16 +573,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 float WK = 0.042f, WP = 0.36f;
                 float WMIN = 2f, WMAX = 20f;
                 // statics so the summary below can report them from outside this block
-                // ONE INLET PER LANDING (user: "a body of water should be limited to one inlet and one outlet
-                // when a river meets a stillbody within 10m"). Records, per body, the shore points already
+                // ONE INLET PER LANDING (a body of water is limited to one inlet and one outlet
+                // where a river meets a still body within 10 m). Records, per body, the shore points already
                 // taken by an arriving run; a later run landing within INLET_MERGE_M of one of them is a
                 // duplicate mouth on the same spot, and duplicates are what build the knot.
                 var inlets = new Dictionary<int, List<(float x, float z)>>();
                 var depTried = new bool[n * n];   // basins that failed emergent-pond creation — never re-flooded
                 // ═══ EVERY RUN MUST START SOMEWHERE AND END SOMEWHERE ════════════════════════════════════
-                // (user, 2026-08-22: "ideally we make sure all runs start somewhere and end somewhere, if
-                // they have no spring, pond, lake, or another river to start from or run into they should not
-                // exist".)
+                // (All runs start somewhere and end somewhere: a run with no spring, pond, lake, or
+                // another river to start from or run into should not
+                // exist.)
                 // The destination is not actually unknown — it was known and thrown away. TraceRivers only
                 // ACCEPTS a mouth where `intoSea || intoBody`, so every trace in `polys` provably drains into
                 // real water; but it marks the mouth as the cell whose DOWNSTREAM NEIGHBOUR is that water, so
@@ -616,7 +621,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int count = rawPoly.Length / 4;
                     if (count < 2) continue;
                     // ═══ WALK THE TRACE IN FLOW ORDER — IT ARRIVES MOUTH-FIRST ═══════════════════════════
-                    // (2026-08-19.) THE defect this whole file's river levels rest on, and it is an ordering
+                    // THE defect this whole file's river levels rest on, and it is an ordering
                     // one. `TraceRivers` collects MOUTHS and then walks UPSTREAM appending as it goes, so a
                     // trace array is ordered mouth → source. FiresWorldGenBase's own ROUTE VALIDATION knows
                     // this — it computes `srcAtStart = area[0] <= area[last]` and its loop is commented "walk
@@ -665,8 +670,8 @@ namespace VerdantsAscent.Terrain.Voxel
                             int gi = gz * n + gx;
                             bodyHere = owner[gi] - 1;
                             // ═══ THE SOURCE OF EVERY AQUEDUCT: FLOW IS ROUTED ON THE FILLED SURFACE ══════
-                            // (user, 2026-09-01: "fixing the source means runs should never even be proposed
-                            // in areas they shouldnt be, were trying to mimic real world water here".)
+                            // (Fixing the source means runs are never even proposed
+                            // in areas they shouldn't be; this mimics real-world water.)
                             // Drainage analysis fills every depression to its spill so flow always has a path
                             // to the sea — standard hydrology, and correct: real water DOES cross a basin,
                             // AS A LAKE. Where the planner placed a body in that basin, this walk already
@@ -682,9 +687,9 @@ namespace VerdantsAscent.Terrain.Voxel
                                 if (fill[gi] <= SEA + 0.75f) { inDep = true; depFill = fill[gi]; }   // tidal — the sea's
                                 else
                                 {
-                                    // ═══ THE RIVER MAKES ITS POND (2026-09-02) ═══════════════════════════
+                                    // ═══ THE RIVER MAKES ITS POND ═══════════════════════════
                                     // GEN 188 terminated runs here and spring-culled their continuations —
-                                    // half of real hydrology, and the user's waterat proved the cost: dry
+                                    // half of real hydrology, and `waterat` proved the cost: dry
                                     // corridors mid-run and past lake outlets, with the buried tail of the
                                     // dead run at the stretch's edge. A basin that RECEIVES a river fills to
                                     // its spill and the river CONTINUES: create the pond (footprint = the
@@ -716,14 +721,14 @@ namespace VerdantsAscent.Terrain.Voxel
                                        : inDep ? (depFill <= SEA + 0.75f ? WaterConnection.OCEAN : WaterConnection.BASIN)
                                        : WaterConnection.OCEAN;
                             // A TIDAL basin IS the sea: the run ends into the ocean, properly, at the coast
-                            // (this is the coastal channel mess in the user's screenshots — routes were
+                            // (this is the coastal channel mess that was seen — routes were
                             // crossing tide flats the ocean owns). An INLAND bodyless basin is a terminal
                             // sink: the run pours in and ENDS — a fall into the valley is a descending step
                             // and is wanted; carrying the water across on walls is not. The continuation of
                             // the trace past the basin gets NO inherited source (fromBody resets to SPRING):
                             // it must justify itself as a spring head or be culled like any other.
                             // ═══ A TRACE STOPS ONE CELL SHORT OF THE WATER IT DRAINS INTO ═══════════════
-                            // (2026-08-19, user: "they should not be stopping at nodes outside the body".)
+                            // (A run must not stop at nodes outside the body.)
                             // TraceRivers marks a MOUTH as the cell whose DOWNSTREAM NEIGHBOUR is sea or a
                             // body — so the mouth node itself is ADJACENT to the receiving water, never
                             // inside it. Walking in flow order the trace therefore runs out one cell short,
@@ -765,8 +770,8 @@ namespace VerdantsAscent.Terrain.Voxel
                             // into a hard promise: `lEnd = OceanLevel(plan)`. A run that ends inland at 300 m
                             // is then given SEA as its destination and descends toward it monotonically —
                             // fabricating a plunge to water it never meets. Ask the three real questions
-                            // instead (user: "if they have no spring, pond, lake, or another river to start
-                            // from or run into they should not exist"):
+                            // instead (a run with no spring, pond, lake, or another river to start
+                            // from or run into should not exist):
                             //   1. did it REACH the sea?  — its mouth ground is at or under the ocean surface.
                             //   2. did it land beside a BODY? — the owner search above already answered that.
                             //   3. does it join another RIVER? — its mouth sits on a cell owned by a different
@@ -797,13 +802,13 @@ namespace VerdantsAscent.Terrain.Voxel
                             }
                             }
                             // ═══ A RIVER MEETS A LAKE HEAD-ON, IT DOES NOT RUN ROUND THE RIM ═════════════
-                            // (2026-08-16, user: "rivers should approach a stillbody at a sharp angle to
-                            // prevent running a river along side the edge of a lake".) A run is cut where its
+                            // (Rivers approach a still body at a sharp angle, so no river
+                            // runs along the edge of a lake.) A run is cut where its
                             // nodes first land INSIDE the footprint, so a trace that grazes the shore and
                             // continues along it keeps every one of those shore-parallel nodes — and they get
                             // rasterized, carved and bermed as channel. On a render that is the cyan thread
                             // seen wrapping a pond's rim, and where several runs do it at once it is the knot
-                            // the user pointed at.
+                            // that was seen.
                             // Physically, a tributary joins still water at its SHORE: once the channel is
                             // within a channel-width or so of the body it has arrived, and anything beyond
                             // that is the trace following a contour, not a river. So the run is truncated at
@@ -872,7 +877,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 else mouths.Add((lx, lz));
                             }
                             // ═══ A RUN ENDS AT THE WATER, NOT TWELVE METRES SHORT OF IT ══════════════════
-                            // (user, 2026-08-22: "the last node shouldnt fucking sit 12m out tho".)
+                            // (The last node must not sit 12 m out.)
                             // The shore-parallel trim above cuts the run at the FIRST node that comes WITHIN
                             // SHORE_ARRIVE_M of the body. That is the right cut for killing the rim-hugging
                             // tail and the wrong ENDING: the node it cuts at can be the full 12 m out, so a
@@ -920,8 +925,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
 
-            // ── CONNECT INFLOWS AT THEIR SPILL BASIN (user: "find the spot it would spill over, carve a bank,
-            // connect the river"). The outlet guarantee already spills every BODY out at its saddle; this is the
+            // ── CONNECT INFLOWS AT THEIR SPILL BASIN (find the spot it would spill over, carve a bank,
+            // connect the river). The outlet guarantee already spills every BODY out at its saddle; this is the
             // mirror for the INFLOW side. Traces reach a body's basin but stop in the shore band the lowered
             // footprint (Level = spill − 0.85) leaves dry — zero connection ends land in a footprint, ~690 land
             // in a basin. The FILL TABLE is the spill map: it is exactly flat (= the spill) across a body's whole
@@ -1080,7 +1085,7 @@ namespace VerdantsAscent.Terrain.Voxel
                       $"candidates marsh {candMarsh} sea-marsh {candSeaMarsh}. " +
                       $"PLACED (overlap referee dropped {overlapDrop}; {oceanOwned} refused as TIDAL - level <= SEA+0.75, the ocean owns them; {s_emergentPonds} EMERGENT - made by their own rivers at bodyless basins): lake {placedLake} pond {placedPond} tarn {placedTarn} marsh {placedMarsh} sea-marsh {placedSeaMarsh}. " +
                       $"[If placedLake+placedPond==0 the cause is now explicit: no depressions found, all culled by a gate above, or all lost to overlap/marsh.]");
-            // ── WHERE DID THE WETLAND GROUND ACTUALLY GO? (v133) ──────────────────────────────────────────
+            // ── WHERE DID THE WETLAND GROUND ACTUALLY GO? ──────────────────────────────────────────
             // ⚠ THIS IS THE INSTRUMENT THAT CATCHES THE FAILURE THE v132 WETLAND PASS SHIPPED. Taking a basin
             // away from the lake funnel is only correct if something else then places water on it. If it
             // becomes neither marsh nor anything else, the pass has not made the water shallow — it has
@@ -1134,12 +1139,12 @@ namespace VerdantsAscent.Terrain.Voxel
         // catchment, LEVELS from the plan's constants with terrain-descent-weighted
         // monotone interpolation (steep stretches drop fast, flats stay near-level).
         /// ═══ SITE THE CANYONS — THIS IS THE "PLACED WITH PURPOSE" STEP ══════════════════════════════════
-        /// (user: "canyons are meant to be placed with purpose, carved with purpose, laid out with purpose,
-        /// we should KNOW EXACTLY where every canyon is"; and "canyons MUST always descend and be placed in a
-        /// way that their outlet can meet a still water or the ocean cleanly".)
+        /// (Canyons are placed with purpose, carved with purpose and laid out with purpose, and
+        /// we KNOW EXACTLY where every canyon is; canyons ALWAYS descend and are placed so
+        /// their outlet can meet a still water or the ocean cleanly.)
         ///
         /// A canyon is a SPAN of an existing run — never new geometry, never a re-route. That is what makes
-        /// this safe to add to a water system the user says is otherwise working: siting cannot move a river,
+        /// this safe to add to a water system that otherwise works: siting cannot move a river,
         /// cannot touch a pond, and cannot change where anything drains. It only marks which stretch of an
         /// already-planned run is a canyon, so the carve can shape that stretch differently.
         ///
@@ -1156,8 +1161,8 @@ namespace VerdantsAscent.Terrain.Voxel
         ///      name.
         /// Short spans are dropped: a canyon is a landform, not three cells of steep bank.
         /// ═══ A TRIBUTARY MEETS THE TRUNK AT THE TRUNK'S HEIGHT — RESOLVED AT PLAN TIME ══════════════════
-        /// (user, 2026-09: "WE PLACE STILLWATER FIRST WE SHOULD BE ABLE TO DRAW THE FUCKING CONNECTIONS AT
-        /// THE CORRECT HEIGHTS NOT FUCKING RE PASS TO FIX THEM LATER".)
+        /// (Still water is placed first, so the connections are drawn at
+        /// the correct heights instead of being re-passed to fix them later.)
         /// River→body mouths land exactly on the body constant. River→river mouths did NOT: CONFLUENCE has
         /// no body, so EmitConnection fell through to a GROUND-derived guess for lEnd, and the tributary
         /// arrived above or below the trunk it joins. The field's min-write then stamped the wrong level
@@ -1167,11 +1172,11 @@ namespace VerdantsAscent.Terrain.Voxel
         /// up here, once, before anything consumes the plan. The tributary is then re-floored at it and its
         /// tail lands ON it: the same law every body mouth already obeys.
         /// ═══ A ROUTE THAT LEAVES THE GROUND IS NOT A RIVER. IT IS NOT DRAWN. ════════════════════════════
-        /// (user, 2026-09-01, standing beside a walled channel carrying water across a valley: "if the start
+        /// (Seen beside a walled channel carrying water across a valley: if the start
         /// point and the end point cannot be at the proper levels because the river wants to run across a
-        /// valley than that river had no business even being drawn there in the first place … obviously
-        /// rivers should never be running perpendicular to the fucking valleys".)
-        /// He is right, and the aqueduct was made by two CORRECT rules colliding over an INVALID route:
+        /// valley, that river has no business being drawn there in the first place; rivers
+        /// never run perpendicular to the valleys.)
+        /// The aqueduct was made by two CORRECT rules colliding over an INVALID route:
         /// the junction law floors the surface at the destination body's level, and where the trace crossed
         /// ground far BELOW that level, the berm dutifully built walls to carry the water over the valley —
         /// a Roman aqueduct, photographed. The old code resolved the same collision the other way (drop the
@@ -1285,14 +1290,14 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         /// ═══ A RIVER THAT ENTERS A BASIN FILLS IT AND CONTINUES — THE POND MAKES ITSELF ═════════════════
-        /// (user, 2026-09-02, standing in a dry river corridor with `waterat` reading `class NONE(dry),
+        /// (Seen in a dry river corridor with `waterat` reading `class NONE(dry),
         /// surfaceSmooth none` mid-run and `surfaceSmooth 51.2 (depth 0.1)` under ground 53.2 at its edge —
         /// the buried tail of a run that POURED INTO A DIP AND STOPPED.)
         /// GEN 188's basin rule was half of real hydrology: water entering a bodyless depression does end
         /// there — but only until the basin FILLS TO ITS SPILL, and then it continues. Terminating the run
         /// and spring-culling its continuation modelled an endorheic sink; most of these dips are not sinks,
         /// they are pond sites the overlap referee or the size floor happened to refuse. The result was
-        /// exactly what the user photographed: a carved valley whose river dies at a dip, a dry corridor
+        /// exactly what was seen in game: a carved valley whose river dies at a dip, a dry corridor
         /// beyond it, and dry stretches just past lake outlets (the run left the lake and died at the first
         /// hollow).
         /// So the river now MAKES its pond: entry into a bodyless non-tidal depression creates a real
@@ -1368,7 +1373,7 @@ namespace VerdantsAscent.Terrain.Voxel
             const float PROBE_M    = 20f;   // how far across the flow to look for that wall
             const float MIN_LEN_M  = 60f;   // shorter than this is a gorge-let, not a canyon worth naming
             const float GAP_M      = 90f;   // a knickpoint POOL this long or shorter is interior, not an end
-            const float SHELF_M    = 2.0f;  // walkable land each side of the water (user: "a meter or two")
+            const float SHELF_M    = 2.0f;  // walkable land each side of the water (a metre or two)
             int sited = 0, refusedShort = 0, refusedFlat = 0, refusedEnd = 0, merged = 0;
 
             float GroundAt(float wx, float wz)
@@ -1382,9 +1387,9 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 int nn = c.NodeCount;
                 if (nn < 3) continue;
-                // ⚠ A CONFLUENCE AND A CANYON LAKE ARE BOTH DESTINATIONS. (user: "this is exactly why i said
-                // canyons need their own special logic, we cannot just blanket cover all rivers with one
-                // logic"; and "a canyon can always end in a canyon lake or pond, thats fine".) This rule was
+                // ⚠ A CONFLUENCE AND A CANYON LAKE ARE BOTH DESTINATIONS. (Canyons need their own
+                // special logic, not one blanket rule for all rivers, and
+                // a canyon may always end in a canyon lake or pond.) This rule was
                 // `ToBody >= 0 || == OCEAN`, borrowed wholesale from how a RUN is validated, and it refused
                 // 41,455 runs — exactly the confluence count. A tributary that joins a trunk still reaches
                 // still water, through the trunk; and a canyon may simply terminate in its OWN pool. Only a
@@ -1423,8 +1428,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (spans.Count == 0) continue;
 
                 // ── 2. A POOL DOES NOT END A CANYON — MERGE ACROSS IT ────────────────────────────────────
-                // (researched 2026-08-31: a canyon is graded reaches SEPARATED BY KNICKPOINTS, and below each
-                // knickpoint a hydraulic jump drills a pothole that becomes a PLUNGE POOL — the user's
+                // (Research: a canyon is graded reaches SEPARATED BY KNICKPOINTS, and below each
+                // knickpoint a hydraulic jump drills a pothole that becomes a PLUNGE POOL — the
                 // "grottos, nice pools of water".) At such a pool the water widens, the walls step back, and
                 // the two-flank test lapses for a few nodes. Treating that as the END of a canyon splits ONE
                 // canyon into fragments and then rejects each as too short — measured, 1,728 refusals, which
@@ -1453,8 +1458,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (len < MIN_LEN_M) { refusedShort++; continue; }
 
                     float inY = c.Nodes[a * 4 + 3], outY = c.Nodes[b * 4 + 3];
-                    // ⚠ IT MUST NOT CLIMB. IT DOES NOT HAVE TO DESCEND. (user: "a canyon doesnt NEED to
-                    // descend, it can just never have water CLIMBING from inlet to outlet".) Requiring a
+                    // ⚠ IT MUST NOT CLIMB. IT DOES NOT HAVE TO DESCEND. (A canyon need not
+                    // descend; it must never have water CLIMBING from inlet to outlet.) Requiring a
                     // strict drop refused 658 spans that were simply FLAT — a low-gradient reach, or the
                     // pool between two knickpoints, both of which are canyon floor and not defects. Interior
                     // steps DOWN are knickpoints and are wanted; the only thing refused is a canyon whose
@@ -1501,10 +1506,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 return g[gz * n + gx];
             }
 
-            // DEPTH IS SET BY WIDTH (user): the surface sits SurfDepth(width) below the
+            // DEPTH IS SET BY WIDTH: the surface sits SurfDepth(width) below the
             // terrain it runs through — a narrow stream hugs the ground and runs shallow;
             // a wide river sits deep and carves. It descends ONLY (never uphill) but as
-            // STEEPLY as the terrain drops (user: water flows steeply downhill), and never
+            // STEEPLY as the terrain drops (water flows steeply downhill), and never
             // below its downstream destination. A spring starts a channel-depth down; an
             // ocean outfall ends below spring-low tide. (The conformance BED carve is
             // width-scaled too, so the whole channel gets deeper with width, not just the
@@ -1513,13 +1518,13 @@ namespace VerdantsAscent.Terrain.Voxel
             float SurfDepth(float w) => Mathf.Lerp(0.6f, 3f, Mathf.InverseLerp(WMIN, WMAX, w));
 
             // The surface HUGS the terrain (sits SurfDepth below it), so on a steep drop it
-            // stays a thin sliver in the channel and NEVER floats — user: "thin slivers of
+            // stays a thin sliver in the channel and NEVER floats ("thin slivers of
             // water are better than floating mesh… VFX shows the rapids/waterfall." So the
             // profile is NOT smoothed toward a gentle ramp (that floats over the drop); it
             // tracks the real ground, descend-only, and steep reaches are left for VFX.
             float wStart = WidthAt(0), wEnd = WidthAt(count - 1);
             float lStart = fromBody >= 0 ? plan.Bodies[fromBody].Level : GroundAt(i0) - SurfDepth(wStart);
-            // ═══ THE SEA'S LEVEL IS LOOKED UP, NOT HARD-CODED (2026-08-13) ═══════════════════════════════
+            // ═══ THE SEA'S LEVEL IS LOOKED UP, NOT HARD-CODED ═══════════════════════════════
             // Was ESTUARY_FLOOR (SEA−6). That constant conflated two different things: the water SURFACE and
             // the estuary BED. Ending the SURFACE six metres under the sea dragged the whole approach profile
             // down with it (the profile is monotone to lEnd), which is what pushed the ribbon out across the

@@ -3,7 +3,7 @@ namespace VerdantsAscent.Terrain.Voxel
     // ============================================================================
     //  WATER RULES — the single authority for every water-shape number.
     // ============================================================================
-    //  Doctrine (user): water is defined per (water TYPE x BIOME). There is NO
+    //  Doctrine: water is defined per (water TYPE x BIOME). There is NO
     //  generic wet/dry pass tuned across all water at once — that is exactly what
     //  makes "fix one type, break another". Each type owns its own numbers here,
     //  so a change to (say) highland-mountain rivers moves ONLY high/steep river
@@ -19,7 +19,7 @@ namespace VerdantsAscent.Terrain.Voxel
     //     already computed at the thalweg (alt = g - SEA, slope = local relief).
     //     "Lowland" vs "highland/mountain" river is a SMOOTH blend on alt/slope,
     //     never a hard band — a band edge would step the channel and re-create the
-    //     bank seam the user hates.
+    //     bank seam to avoid.
     //
     //  Rule: coincidental EQUAL literals across types get SEPARATE fields here, so
     //  tuning one never drags another with it.
@@ -33,7 +33,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static class WaterRules
         {
             // ── Biome BODY style — how a still-water body is BUILT per biome ─────
-            // (user doctrine): excavation depths, berm crest height, and the shore
+            // (design rule): excavation depths, berm crest height, and the shore
             // paint's reach/rise/weight + beach readiness. Indexed by biome code.
             // Read by the lake/pond/tarn seeders and the basin-normalize berm.
             public struct FWaterStyle
@@ -78,7 +78,7 @@ namespace VerdantsAscent.Terrain.Voxel
             public static TarnRule Tarn = new TarnRule
             {
                 LatticeStep = 420f, KeepChance = 0.5f, MinRadius = 6f, RadiusRange = 12f,
-                CirqueGate = 1.0f, LevelDrop = 0.85f, BaseDepth = 1.2f,   // (v105) LevelDrop 0.35→0.85: tarns join the unified body bank relief (−0.5, user-measured junction offset)
+                CirqueGate = 1.0f, LevelDrop = 0.85f, BaseDepth = 1.2f,   //  LevelDrop 0.35→0.85: tarns join the unified body bank relief (−0.5, measured junction offset)
             };
 
             // ── LAKE / POND (lowland basins) ────────────────────────────────────
@@ -177,7 +177,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 public float SteepNarrow, SteepWide;            // (Phase 2) width→ChannelShape bank slope (m/m): brook = tight slot, trunk = broad canyon
                 public float ValleyShaveMin, ValleyShaveMax;    // (Phase 2) width→max metres the valley pass may shave off one cell; THE canyon-depth budget
                 public float IncisionBudgetMin, IncisionBudgetMax; // (Phase 2) width→how far below its own ground a reach may cut (m); replaces the flat +12
-                // ── VALLEY FALLOFF, DECOUPLED FROM CHANNEL WIDTH (2026-08-13) ──────────────────────────────
+                // ── VALLEY FALLOFF, DECOUPLED FROM CHANNEL WIDTH ──────────────────────────────
                 // UE's water bodies keep the landscape-blend distance as its OWN parameter (Falloff / Curve
                 // Remap Width), separate from the water width, precisely because the two are not the same
                 // quantity: the water is as wide as the discharge makes it, the VALLEY around it is as wide as
@@ -194,8 +194,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             public static RiverProfile RiverProc = new RiverProfile
             {
-                // ── CHANNEL SIZE (2026-08-11, user spec: "rivers can be 10-20m wide in our world, streams will
-                // be 10 and under … rivers should never be super shallow") ──────────────────────────────────
+                // ── CHANNEL SIZE (rivers can be 10-20 m wide in our world, streams
+                // 10 and under; rivers are never super shallow) ──────────────────────────────────
                 // Calibrated against USGS regional curves (Michigan: W_ft = 8.19·DA_mi²^0.44) and then
                 // DELIBERATELY exaggerated, because the honest number is unflattering: this world is 21×21 km,
                 // so its biggest realistic catchment (~30-50 km²) would build a 7-9 m creek, not a river. We
@@ -208,14 +208,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 // (Rosgen's boundary is 12; >25 is "wide and shallow"), so ours were specced as slot canyons.
                 // The remap endpoints now put a 2 m brook at 0.6 m and a 20 m river at ~2.9 m → w/d ≈ 3-7 at
                 // the THALWEG (max depth, not mean), which is deeper than nature but honest about why: the
-                // user's hard requirement is that a river never reads as a shallow smear, and a thalweg that
+                // hard requirement is that a river never reads as a shallow smear, and a thalweg that
                 // deep also guarantees the sheet always sits well inside its carve.
-                // ═══ …EXCEPT IT DID NOT, AND 0.6/2.9 IS WHY (2026-08-19) ═════════════════════════════════
-                // (user: "if the rivers carve deep enough then we can afford to lay the mesh at a steeper
-                // angle where we need to by dropping it down into the carve further to avoid exposing the
-                // edge of the meshes"; "as long as the river channel is deep enough we can smooth our ribbon
-                // as needed without exposing the edges"; "rivers at 1.6 m deep probably aren't enough to
-                // handle steeper descents".)
+                // ═══ …EXCEPT IT DID NOT, AND 0.6/2.9 IS WHY ═════════════════════════════════
+                // (If the rivers carve deep enough, the mesh can be laid at a steeper
+                // angle where needed by dropping it further into the carve, to avoid exposing the
+                // edge of the meshes; with a deep enough channel the ribbon can be smoothed
+                // as needed without exposing the edges; rivers 1.6 m deep are probably not enough to
+                // handle steeper descents.)
                 // The claim above — "a thalweg that deep guarantees the sheet always sits well inside its
                 // carve" — is the one thing this depth budget does NOT buy. MEASURED with `riverfield` on
                 // seed 126369233 at n=10501: water depth p50 1.61 m, p90 3.14 m. There is no room in that to
@@ -237,7 +237,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // (≈12° — a broad floodplain you walk out onto). Valley extent moves roughly 0.5x-2x versus
                 // the old flat 0.45, so this is a bounded reshaping, not a new excavation budget.
                 InclineNarrow = 0.75f, InclineWide = 0.22f,
-                // ── PHASE 2 (2026-08-15): THE WALL CUT IS BUDGETED BY DISCHARGE ────────────────────────────
+                // ── PHASE 2: THE WALL CUT IS BUDGETED BY DISCHARGE ────────────────────────────
                 // Both of these were effectively CONSTANTS, which is why a 2 m brook sawed through a ridge
                 // exactly as readily as a 20 m trunk (docs/GORGES_AND_CAVES.md Phase 2).
                 //
@@ -245,13 +245,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 // DEAD: it saturates at 20 m elevation while SEA is 30, so every land cell in the world took
                 // the 4.4 endpoint. It was also read per-CELL, so one hydraulic cross-section could take
                 // different wall angles on its two banks — the same inconsistency the incision bound was
-                // fixed for in 2026-08-13 ("a cross-section is ONE hydraulic object"). Now read at the seed,
+                // fixed for ("a cross-section is ONE hydraulic object"). Now read at the seed,
                 // off width, like depth/level/bound: a brook cuts a TIGHT SLOT (steep walls, little material
                 // moved), a trunk opens a BROADER canyon. m/m, so 5.0 ~ 79 deg and 3.2 ~ 73 deg.
                 SteepNarrow = 5.0f, SteepWide = 3.2f,
                 // IncisionBudget replaces the flat `+12f` in boundLo. Same idea, on the depth axis: how far
                 // below its own natural ground a reach may cut. The trunk endpoint is left at 12 so the big
-                // rivers that the 12 was chosen for (2026-08-11, "let it dig deeper than 4m - give it 12m")
+                // rivers that the 12 was chosen for ("let it dig deeper than 4 m: 12 m")
                 // are bit-identical; only small channels tighten.
                 // ⚠ This one CAN dry a reach — boundLo holding the bed up inside the wetted width is exactly
                 // the documented dry-break mechanism (s_boundHits / s_dryCore, [FiresWaterDiag] CARVE

@@ -29,41 +29,68 @@ namespace VerdantsAscent.Terrain
                 WaterDebugCommands.Register();
                 WaterDumpCommand.Register();
                 ZoneModeCommands.Register();
+                ZoneModeCloseable.Register();
                 VoxelBrushCommands.OnTerminalInit();
                 VoxelBrushDrag.RegisterPressCommand();   // va_voxel_press: the test bot's virtual LMB on a V-tool
-                VoxelBrushDrag.RegisterLevelCommand();   // va_voxel_level: a flat pad for a drill (FDT obstacle_field)
+                VoxelBrushDrag.RegisterLevelCommand(); VerdantsAscent.Terrain.Voxel.FatSeamSuspects.Register(); VerdantsAscent.Terrain.Voxel.FatSeamSuspects.RegisterRewrap();   // fat_seam_suspect; fat_rewrap_area   // va_voxel_level: a flat pad for a drill
+                VoxelBrushDrag.RegisterRampCommand();    // va_voxel_ramp: a tilted plane for a test
                 SiteScanCommand.Register();              // va_site_scan: rank base spots near spawn (read-only)
                 HomesteadScanCommand.Register();         // va_homestead_scan: homestead test-base sites (read-only)
-                FatGroundProbe.RegisterCommand();            // va_ground_probe: what the SERVER stands on at a spot (0.2.689)
+                FatGroundProbe.RegisterCommand();            // va_ground_probe: what the SERVER stands on at a spot
+                FatGroundProbe.RegisterSurfaceProbe();
+                global::VerdantsAscent.Water.FatWaterLevelGate.RegisterCommand();
+                global::VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.RegisterSwimProbe();   // fat_swim_probe   // fat_waterlevel_ab (the zone gate A/B)       // fat_surface_probe: every voxel surface crossing in a column
+                FiresCaveBiome.RegisterProbe();              // fat_biome_probe: every biome reader at a point
+                VerdantsAscent.Performance.ClutterGroundProbe.RegisterProbe();   // fat_clutter_probe: grass by layer
+                FatUndergroundLocations.RegisterDump();      // fat_location_dump: underground placements by type
+                FatSinkFalls.RegisterDump();                 // fat_sinkfall_dump: waterfall sinkholes near the camera
+                FiresFarWater.RegisterCommand();             // fat_farwater on|off: far-tile A/B
+                VerdantsAscent.Terrain.Utilities.WhatRendersProbe.Register();   // fat_what_renders: who draws here
+                VerdantsAscent.Terrain.Utilities.WhatRendersProbe.RegisterHide();   // fat_hide: switch suspects off
+                FatWorldSize.RegisterProbe();                // fat_worldsize_probe: the world's size and a ray to its edge
+                FatWaterLine.Register();                     // fat_water_line: generated vs stored water across a river
+                Zones.ZoneModeChunkSpawner.RegisterAimProbe();   // fat_hammer_aim: the Chunk Hammer's target zone
                 global::VerdantsAscent.Water.Core.FishCheckCommand.Register();   // va_fish_check / va_fish_spawn: inland fish proof (admin)
                 FiresSkyIslands.RegisterCommands();
                 FiresWorldClone.RegisterCommands();
                 FiresWorldCloudArchive.RegisterCommands();
+                global::VerdantsAscent.Terrain.Zones.ZoneModeChunkTools.RegisterSelfTest();   // fat_hammer_selftest: every Chaos Hammer tool selects itself
                 AltBiomePointsParallel.RegisterCommand();
                 FiresBakeDrift.Register();
                 TileDeleteOps.Register();
                 TileAnchorHeal.RegisterCommand();   // fat_tile_purge: the retired 2D tile layer's cleanup
                 BcImport.BcImportCommands.Register();
                 FatWorldgenTest.Register();
+#if FIRES_TESTS
                 Testing.AdminToolsTest.Register();
                 Testing.FishWaterTest.Register();
                 Testing.RiverCarveTest.Register();
                 Testing.WaterLifeTest.Register();
-                Testing.ClutterFloatTest.Register();   // clutterfloat_test: grass floating over edited ground (0.2.690)
-                Testing.WaveMatchTest.Register();      // wavematch_test: swim/float wave vs the drawn wave (0.2.698)
-                Utilities.LocationRepair.RegisterCommand();   // va_location_repair: re-point damaged location proxies (0.2.700)
+                Testing.NoClipTest.Register();
+                Testing.CavesTest.Register();       // caves_test: the cave hanger pool, nearest dressed cave, ceiling shot
+                Testing.CaveEnvTest.Register();     // cave_env_test: cave env on/off in a chunk-by-chunk world cave
+                Testing.OceanTest.Register();       // ocean_test: one ocean owner, Ocean keys, Pearl effects, breath
+                Testing.WaterLookTest.Register();   // water_look_test: alpine lake look before/after, floor, lake probe
+                Testing.LoadTest.Register();        // fat_load_test: load, log, config, save and sync checks
+                Testing.SkylandCheck.Register();    // skyland_check: far shape vs near voxels, floating dressing, pad slope
+                Testing.ClutterFloatTest.Register();   // clutterfloat_test: grass floating over edited ground
+                Testing.WaveMatchTest.Register();      // wavematch_test: swim/float wave vs the drawn wave
+#endif
+                Utilities.LocationRepair.RegisterCommand();   // va_location_repair: re-point damaged location proxies
             }
         }
 
+#if FIRES_TESTS
         // The test bot's shouted replies, for every FAT test that drives it (Testing.FatTestBot).
         [HarmonyPatch(typeof(Chat), nameof(Chat.OnNewChatMessage))]
         private static class Chat_OnNewChatMessage
         {
             private static void Postfix(long senderID, string text) => Testing.FatTestBot.OnChatMessage(senderID, text);
         }
+#endif
 
         // Two modules: the zone gate's planning scope around the whole pass (it must read the real world), and the join sync's
-        // biome grid (BiomeGridSync, D12). A joined client takes the server's grid instead of sampling 4.2 M points of its own,
+        // biome grid (BiomeGridSync). A joined client takes the server's grid instead of sampling 4.2 M points of its own,
         // and a server prepares that grid once its own is in place.
         [HarmonyPatch(typeof(AltBiomeWorldData), nameof(AltBiomeWorldData.VerifyBiomeData))]
         private static class AltBiomeWorldData_VerifyBiomeData
@@ -133,16 +160,26 @@ namespace VerdantsAscent.Terrain
             {
                 ZoneModeOpening.EnsureRpcs();
                 ZoneModeCommands.EnsureRpcs();
+                ZoneModeCloseable.EnsureRpcs();
+#if FIRES_TESTS
+                Testing.CavesTest.EnsureRpcs();
+#endif
+                VerdantsAscent.Ocean.OceanKit.DecideAndStart();   // Once - dormant while RPGClasses still runs the ocean
+#if FIRES_TESTS
+                Testing.LoadTest.EnsureRpcs();
+#endif
                 ZoneModeChunkKeys.EnsureRpcs();
                 ZoneModeChunkTools.EnsureRpcs();
                 ZoneModeStartPins.EnsureRpcs();
                 FiresSkyIslands.EnsureEditRpcs();
                 RegionScrubberRPC.ResetInitialized();
                 RegionScrubberRPC.Register();
-                // TileBrushRPC is not registered: the 2D tile layer is retired (Fire, 2026-09-29); only its purge answers.
+                // TileBrushRPC is not registered: the 2D tile layer is retired; only its purge answers.
                 TileAnchorHeal.EnsureRpcs();
                 FatWorldgenTest.EnsureRpcs();
+#if FIRES_TESTS
                 Testing.AdminToolsProbe.EnsureRpcs();
+#endif
                 global::VerdantsAscent.Water.Core.FiresSeaWind.Init();
             }
 
@@ -210,7 +247,7 @@ namespace VerdantsAscent.Terrain
                 try { DistantPaintCache.Save(); } catch { }
             }
 
-            // Shutdown saves the world synchronously, so the lock can go here. R44 (0.2.626): the OnDestroy postfix
+            // Shutdown saves the world synchronously, so the lock can go here. The OnDestroy postfix
             // below logged nothing on the dedi, and every world lock there was left behind.
             private static void Postfix()
             {
@@ -222,7 +259,7 @@ namespace VerdantsAscent.Terrain
         [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
         private static class ZNetScene_Awake
         {
-            // Both postfixes run inside the main scene's activation frame ([generator] 2026-09-28: 270 ms of a 5.8 s frame), so
+            // Both postfixes run inside the main scene's activation frame (270 ms of a 5.8 s frame once), so
             // each logs its steps once to show which one to make cheaper.
             private static void Postfix()
             {
@@ -290,6 +327,7 @@ namespace VerdantsAscent.Terrain
                 CustomWaterPatches.OnPlayerSpawned(__instance);
                 VanillaTerrainOpScrubber.ResetSpawnTime();
                 ZoneModeRavenHints.OnPlayerSpawned(__instance);
+                ZoneModeRegistry.OnPlayerSpawned(__instance);   // Zone mode refused for this world's size, said once
             }
         }
 
@@ -319,11 +357,10 @@ namespace VerdantsAscent.Terrain
         [HarmonyPatch(typeof(Floating), nameof(Floating.GetWaterLevel))]
         private static class Floating_GetWaterLevel
         {
+            // The same pour + combiner/legacy + generated reads as RaiseToPourSurface + RaiseToCustomWater, timed per part,
+            // with the place gate ([Voxel Terrain] "Water level zone gate", default OFF): FatWaterLevelGate.
             private static void Postfix(Vector3 p, ref float __result)
-            {
-                CustomWaterPatches.RaiseToPourSurface(p, ref __result);
-                WaterBoatSupport.RaiseToCustomWater(p, ref __result);
-            }
+                => global::VerdantsAscent.Water.FatWaterLevelGate.Apply(p, ref __result);
         }
 
         [HarmonyPatch(typeof(Floating), nameof(Floating.CustomFixedUpdate))]
@@ -357,6 +394,7 @@ namespace VerdantsAscent.Terrain
             private static void Postfix(LiquidVolume __instance, long __state)
             {
                 LiquidVoxelSurface.Apply(__instance);
+                LiquidVoxelSurface.FlattenUnderground(__instance);   // An underground location's liquid lies flat (tar pits)
                 FiresFrameAudit.CountUpdateHeights(__state);
                 VoxelGenLiquid.ClampGuard(__instance);
             }
@@ -377,7 +415,9 @@ namespace VerdantsAscent.Terrain
 
             private static void Postfix(bool __result)
             {
-                if (__result) FiresMinimapRivers.MapReady("loaded from PNG cache");
+                if (!__result) return;
+                FiresMinimapRivers.MapReady("loaded from PNG cache");
+                FiresMinimapIslands.MapReady();
             }
 
             // A finalizer, so the borrowed world version is restored even when the load throws.
@@ -394,6 +434,7 @@ namespace VerdantsAscent.Terrain
             {
                 ZoneModeMinimapReport.Finish(__state);
                 FiresMinimapRivers.MapReady("generated fresh");
+                FiresMinimapIslands.MapReady();
             }
         }
 
@@ -408,7 +449,7 @@ namespace VerdantsAscent.Terrain
             private static bool RefuseClosedZones(TerrainOp __instance) => ZoneModeRefusals.AllowTerrainOp(__instance);
 
             // (No tile re-route: a vanilla hoe, cultivator or Infinity Hammer op always edits the ground. The 2D tile layer it
-            // used to divert into is retired - Fire, 2026-09-29.)
+            // used to divert into is retired.)
 
             // A placed location's devground, on voxel terrain, is levelled by OUR brush instead of
             // vanilla's heightmap - same circle, same target level, no sheet dragged up from the
@@ -477,7 +518,7 @@ namespace VerdantsAscent.Terrain
         private static class WorldGenerator_Pregenerate
         {
             // The server records its own lakes, rivers and streams for joining clients; a client that replays the server's
-            // lists (D13) skips vanilla's search.
+            // lists skips vanilla's search.
             private static bool Prefix(WorldGenerator __instance)
             {
                 BcImport.RiverSync.BeforePregenerate(__instance);
@@ -502,7 +543,7 @@ namespace VerdantsAscent.Terrain
                 VoxelZoneStreamer.OnZoneSystemStart();
                 ZoneSystem_PlaceVegetation_Density.WarmExemptions(__instance);
                 VegetationWarmUp.OnZoneSystemStart(__instance);
-                // HERE, not ZNet.Start. Measured 2026-09-26 on the dedi: ZNet.Start's postfix runs at log line 642
+                // HERE, not ZNet.Start. Measured on the dedi: ZNet.Start's postfix runs at log line 642
                 // and FiresWorldGenBase's world-init profile branch at 644, so reading that branch's result from
                 // ZNet.Start reads it two lines too early and silently does nothing.
                 try { global::VerdantsAscent.Terrain.Voxel.FiresWorldGenBase.SeedSkyIslandsOnVanillaGround(); }
@@ -548,7 +589,7 @@ namespace VerdantsAscent.Terrain
         private static class ClutterSystem_GenerateVegPatch
         {
             // All three run, as separate prefixes did: the water-level move and the spread takeover still happen when a
-            // dedicated server skips the build. A server without graphics grows no grass at all ([perf], 2026-09-27 23:1x:
+            // dedicated server skips the build. A server without graphics grows no grass at all (without this,
             // patches were built on the headless dedi); no patch is vanilla's own "nothing here".
             private static bool Prefix(ClutterSystem __instance, Vector2Int patchID, float size, ref object __result)
             {
@@ -557,6 +598,10 @@ namespace VerdantsAscent.Terrain
                     __result = null;
                     return false;
                 }
+                // Super flat grows no AUTO clutter (without this: 64 patches / 169 objects). This gate must come before
+                // ClutterSpread, which builds its own patch and filled it after FatSuperFlat.NoClutter had nulled the result (Harmony runs
+                // every prefix). FAP-painted clutter is placed objects, not ClutterSystem patches, so it is untouched.
+                if (global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.On && !global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.ClutterAllowed(patchID, size)) { global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.NoteAutoClutterBlocked(); __result = null; return false; }
                 bool runOriginal = global::VerdantsAscent.Utilities.EnvironmentBoxPatches.ClutterRunsHere();
                 ClutterSystem_GenerateVegPatch_WaterEcology.Apply(__instance, patchID);
                 if (!global::VerdantsAscent.Performance.ClutterSpread.OnGenerateVegPatch(__instance, patchID, size, ref __result))
@@ -602,8 +647,11 @@ namespace VerdantsAscent.Terrain
         private static class ZoneSystem_GetGroundHeight
         {
             // Voxel ground truth. (The 2D tile lift for InfinityHammer's ruler is gone with the retired tile layer.)
+            // Inside Infinity Hammer's snap / WEC's command Y the answer is the voxel surface near the aim (WecTerrainBridge).
+            // It is asked here, first: HarmonyX runs every prefix, so a separate one was overwritten by the ground truth below.
             private static bool Prefix(Vector3 p, ref float __result)
             {
+                if (WecTerrainBridge.TryHammerHeight(p, out float hammer)) { __result = hammer; return false; }
                 bool runOriginal = VoxelGroundHeight.Single(p, ref __result);
                 return runOriginal;
             }
@@ -615,6 +663,7 @@ namespace VerdantsAscent.Terrain
         {
             private static bool Prefix(Vector3 p, ref float height, ref bool __result)
             {
+                if (WecTerrainBridge.TryHammerHeight(p, out float hammer)) { height = hammer; __result = true; return false; }
                 bool runOriginal = VoxelGroundHeight.WithOut(p, ref height, ref __result);
                 return runOriginal;
             }
@@ -700,7 +749,7 @@ namespace VerdantsAscent.Terrain
             }
         }
 
-        // 0.2.697: zone mode refuses teleports into closed zones (prefix); the voxel void net remembers where a body was
+        // Zone mode refuses teleports into closed zones (prefix); the voxel void net remembers where a body was
         // teleported to, so a fall-through right after a teleport lands on the floor nearest that target (postfix).
         [HarmonyPatch(typeof(Player), nameof(Player.TeleportTo))]
         private static class Player_TeleportTo
@@ -714,7 +763,7 @@ namespace VerdantsAscent.Terrain
             }
         }
 
-        // 0.2.686: vanilla's location suitability test (ZoneSystem.cs:1271, and FAT's BiomePaint.Locations) refuses a site
+        // Vanilla's location suitability test (ZoneSystem.cs:1271, and FAT's BiomePaint.Locations) refuses a site
         // whose area overlaps FAT water (FatUnderWaterPlacement).
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetTerrainDelta))]
         private static class WorldGenerator_GetTerrainDelta
@@ -735,10 +784,17 @@ namespace VerdantsAscent.Terrain
 
             // First, so a location's pad levels to the corrected height rather than the generated one.
             [HarmonyPriority(Priority.First)]
-            private static void Prefix(ZoneSystem.ZoneLocation location, ref Vector3 pos) => FiresLocationHeight.Correct(location, ref pos);
+            private static void Prefix(ZoneSystem.ZoneLocation location, ref Vector3 pos)
+            {
+                FiresLocationHeight.Correct(location, ref pos);
+                VerdantsAscent.Terrain.Zones.FatLocationAccelerator.NoteSpawn(location, pos);   // Level sites, before any modifier wakes
+            }
 
             private static void Postfix(ZoneSystem.ZoneLocation location, Vector3 pos, ZoneSystem.SpawnMode mode)
-                => LocationSpawnPads.OnSpawned(location, pos, mode);
+            {
+                LocationSpawnPads.OnSpawned(location, pos, mode);
+                FatUndergroundLocations.OnSpawned(location, pos, mode);   // An underground location's dome, floor and shaft
+            }
         }
     }
 }

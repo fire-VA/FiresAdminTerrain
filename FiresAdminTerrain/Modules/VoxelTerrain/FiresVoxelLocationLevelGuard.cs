@@ -14,13 +14,13 @@ namespace VerdantsAscent.Terrain.Voxel
     // On a heightmap world that is exactly right. On voxel terrain it is the same defect the sky
     // island guard already refuses: the delta is measured against the GENERATED GROUND height, so
     // placing a location on voxel terrain drags a solid sheet up from the original ground - through
-    // caves, through anything hollow underneath. Fire: "it ruins caves and does weird things".
+    // caves, through anything hollow underneath: it ruins caves.
     //
     // The answer is NOT to drop the levelling. A location needs flat ground or it sits in a hillside.
     // So this keeps vanilla's decision and changes only where it lands: the SAME circle, the SAME
     // target level, done with voxel brushes (LevelWithVoxels: fill up to the level, cut down to it) that
-    // edit the voxel field in place instead of raising a heightmap vertex. Until FAT 0.2.651 this went
-    // to the 2D tile brush, which on a voxel world only drew a floating plate over the ground.
+    // edit the voxel field in place instead of raising a heightmap vertex. The 2D tile brush
+    // on a voxel world only drew a floating plate over the ground.
     //
     // ONLY location-owned ops. GetComponentInParent<Location>() is the test: a player's own hoe
     // stroke has no Location above it and is left completely alone, so nothing about hand-editing
@@ -41,10 +41,21 @@ namespace VerdantsAscent.Terrain.Voxel
 
             var settings = op.m_settings;
             if (settings == null) return true;
+            // An underground location's dome floor is already level (FatUndergroundLocations); its level op would
+            // be measured from the SURFACE and cut a hole down to it. Dropped.
+            // Strip the vanilla terrain modifier and dev grounds: EVERY op of an underground location
+            // (raise and paint too), so nothing it carries touches the surface over it.
+            bool isLocationOp = op.GetComponentInParent<Location>() != null;
+            if ((isLocationOp || FatUndergroundLocations.t_spawningUnderground) && FatUndergroundLocations.IsUnderground(op.transform.position))
+            {
+                FatUndergroundLocations.Blocked("TerrainOp", op.name, op.transform.position);   // One line per item
+                Object.Destroy(op.gameObject);
+                return false;
+            }
             if (!settings.m_level && !settings.m_smooth) return true;   // raise/paint are not the sheet problem
 
             // A location's op, not a player's brush.
-            if (op.GetComponentInParent<Location>() == null) return true;
+            if (!isLocationOp) return true;
 
             Vector3 position = op.transform.position;
             // Vanilla lifts level and smooth by m_levelOffset before using the point; matching that
@@ -69,8 +80,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Vanilla's level with voxel brushes, inside the same circle: the generated ground under it is filled up to the target y
         // and cut down to it, each by at most vanilla's MaxLevelDelta. The fill starts at the LOWEST generated ground in the
-        // circle, not below it, so a cave under the location is left alone (the reason this guard exists). FAT 0.2.651: this
-        // used to go to the 2D tile layer, which drew as a floating plate (Fire, 2026-09-29: tools are voxel only).
+        // circle, not below it, so a cave under the location is left alone (the reason this guard exists). Tools are voxel only: the 2D tile layer
+        // drew as a floating plate.
         private const float MaxLevelDelta = 8f;
         private const float LevelSampleStep = 2f;
         private const float LevelMinBand = 0.05f;

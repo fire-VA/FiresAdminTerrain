@@ -5,7 +5,7 @@ using VerdantsAscent.Water.Core;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Where FAT's start objects can stand (Tools\FAT_START_ITEMS.md): natural ground (ZoneModeStartGround: unpainted,
+    // Where FAT's start objects can stand: natural ground (ZoneModeStartGround: unpainted,
     // clear of builds, dry and flat), and on a converted map, where the start is the player's own town, a walkable build
     // floor at the height a player stands. Shared by the starter Chunk Generator, the hammer chest and the Cultivator
     // chest.
@@ -103,12 +103,12 @@ namespace VerdantsAscent.Terrain.Zones
         // ── Standing spots, build floors included ───────────────────────────
         // A spot a player could stand on at about `at`'s height: real ground or a floor piece up to MaxDrop below it (a
         // step above), with nothing in the space the object needs. Ground is the live voxel surface, else the loaded
-        // colliders, read straight down through trees and rocks: only terrain and floor pieces carry (Sanctuary 0.2.579:
-        // the old test took any collider, and the starter stood in a tree). The topmost of the two wins, so a floor over
+        // colliders, read straight down through trees and rocks: only terrain and floor pieces carry (on one
+        // test map the old test took any collider, and the starter stood in a tree). The topmost of the two wins, so a floor over
         // the ground is stood on. A zone nobody has near them holds no colliders, so floors are also read from ZDOs.
         // The space is checked twice. Where colliders are loaded, a box of the object's size over the spot is the judge:
         // walls, furniture, trunks, branches and rocks block, while flat decoration under knee height and pickables do not
-        // (Sanctuary 0.2.582: a dense town refused every spot near the spawn). ZDO pivots then only catch trees and rocks,
+        // (a dense town once refused every spot near the spawn). ZDO pivots then only catch trees and rocks,
         // whose colliders may sit away from their pivots. Where no colliders are loaded, every piece, tree and rock
         // pivot in the space blocks. LastSupport says what it stands on and how far below `at`.
         internal static bool TryStandingSpot(Vector3 at, out Vector3 spot) => TryStandingSpot(at, BodyClearance, out spot);
@@ -156,8 +156,8 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal static string LastSupport { get; private set; } = string.Empty;
 
-        // The spawn stands on a converted map's raised StartTemple, so the town round it lies metres lower (Sanctuary
-        // 0.2.586: 1,182 ring spots found no ground within 3 m below the spawn).
+        // The spawn stands on a converted map's raised StartTemple, so the town round it lies metres lower (one test
+        // map: 1,182 ring spots found no ground within 3 m below the spawn).
         private const float MaxDrop = 8f;
         private const float BoxLift = 0.15f;
         private const float KneeHeight = 0.45f;
@@ -294,7 +294,7 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // The standing spot nearest `centre`, ring by ring from `minRadius` out to `maxRadius`, at `centre`'s height, at
-        // least `apart` from `keepAway` when one is given (Fire, 2026-09-27: the hammer chest and the starter each have a
+        // least `apart` from `keepAway` when one is given (the hammer chest and the starter each have a
         // spot of their own). The objects round the rings are read once. LastRefusals says why the others were refused.
         internal static bool TryRingSpot(Vector3 centre, float minRadius, float maxRadius, float step, out Vector3 spot,
             float clearance = BodyClearance, Vector3 keepAway = default, float apart = 0f)
@@ -328,8 +328,8 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // The ring round the spawn that the converted-map starter and hammer chest search, nearest first. It reaches well
-        // past the town's first ring (Sanctuary 0.2.582: 12 m held nothing, and the starter fell back 42 m out), and the
-        // two keep ObjectsApart from each other (Fire, 2026-09-27: "the hammer in one spot the chest in another").
+        // past the town's first ring (on one test map 12 m held nothing, and the starter fell back 42 m out), and the
+        // two keep ObjectsApart from each other.
         internal const float SpawnMinRing = 3f;
         internal const float SpawnMaxRing = 30f;
         internal const float SpawnRingStep = 1.5f;
@@ -365,9 +365,9 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── The StartTemple ─────────────────────────────────────────────────
-        // On a converted map nothing of the start stands on the StartTemple location itself (Fire, 2026-09-27: the Va
-        // re-convert put the starter and chest "RIGHT on the spawn temple", on the town built over it). Its footprint is
-        // the location's own radius round its centre. A fresh world keeps Fire's rule of the chest close by the spawn.
+        // On a converted map nothing of the start stands on the StartTemple location itself (a re-convert once
+        // put the starter and chest right on the spawn temple, on the town built over it). Its footprint is
+        // the location's own radius round its centre. A fresh world keeps the chest close by the spawn.
         private const string TempleName = "StartTemple";
         private const float TempleMargin = 2f;
         private static ZoneSystem s_templeFor;

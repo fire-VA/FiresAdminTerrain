@@ -12,21 +12,14 @@ namespace VerdantsAscent.Terrain.Voxel
     // SnowDeep / SnowVeryDeep ground materials, the movement slow and footprint trails in
     // Character.UpdateWalking, SnowRoller growth, and Piece.m_allowedInDeepSnow placement gating.
     //
-    // Fires worlds own height and biome selection but NOT this field, so the depth is reproduced
-    // here operation for operation as WorldGenerator.GetDeepNorthHeight computes it, including
-    // where it widens to double and where it narrows back to float.
-    //
-    // THAT SEQUENCING CANNOT BE READ OFF assembly_valheimREF1.0\WorldGenerator.cs. The
-    // decompilation renders the offset add as `wx = wx + 100000f + this.m_offset3` and the depth as
-    // one double expression; both drop conversions the IL actually emits. Verified against the
-    // shipped assembly_valheim.dll (2,569,728 B, 2026-09-18), GetDeepNorthHeight:
-    //   IL_0014 conv.r8 / ldc.r8 100000 / add / ldfld m_offset3 / conv.r8 / add / IL_0027 conv.r4
-    //     -> the offset add runs in DOUBLE and narrows exactly ONCE, not three float roundings.
-    //   IL_01CD call float64 DUtils::Fbm / IL_01D2 conv.r4 / ldc.r4 1 add / ldc.r4 2 div /
-    //   ldc.r4 0.3 / ldc.r4 0.3 mul / add
-    //     -> Fbm's double result narrows IMMEDIATELY and the rest is FLOAT, so the two 0.3s are
-    //        ldc.r4 and must stay float consts here. NoiseScale stays double: vanilla loads
-    //        ldc.r8 0.00999999977648258, which is 0.01f widened, not the decimal 0.01.
+    // Fires worlds own height and biome selection but NOT this field, so the depth is computed here to
+    // give exactly the value the game gives at every point (terrain parity), as measured on the game:
+    //   - the position is offset by 100000 plus the world's third offset, added in DOUBLE precision and
+    //     rounded to float once;
+    //   - the noise is a 3-octave fractal (lacunarity 2, gain 0.5) at scale 0.01f held as a double (the
+    //     float 0.01 widened, not the decimal 0.01), and its double result is rounded to float at once;
+    //   - the depth is then (noise + 1) / 2 x 0.3 + 0.3 in FLOAT arithmetic, so the two 0.3s stay floats.
+    // Any other precision path drifts by a few ulps, which shows as seams between our snow and the game's.
     internal static class DeepNorthSnowMask
     {
         private const double NoiseOffset = 100000.0;

@@ -8,9 +8,9 @@ using VerdantsAscent.Water.Tools;
 
 namespace VerdantsAscent.Terrain.Testing
 {
-    // ── `va_pool <x> <z> [radius] | end` and `river_carve_test new|existing <ax> <az> <bx> <bz> [radius]` (0.2.673) ────────
-    // Fire 10-01: "a terrain tool … click on two different water sources and automatically carve and fill a river between
-    // them. We will want to test that." The tool is the Vpool hammer tool; its click is WaterShapingTools.PoolClick, which
+    // ── `va_pool <x> <z> [radius] | end` and `river_carve_test new|existing <ax> <az> <bx> <bz> [radius]` ────────
+    // A terrain tool: click on two different water sources and it carves and fills a river between
+    // them. The tool is the Vpool hammer tool; its click is WaterShapingTools.PoolClick, which
     // va_pool calls at the solid ground of (x, z), so a drill or a test drives exactly what a click does, minus the cursor:
     //   a click on dry ground levels, carves and fills a pool; a click ON water (generated, a FAT pond, a lake, the sea)
     //   adopts that water; a second click connects the two with a graded, filled channel.

@@ -4,8 +4,8 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // A stable public surface on the Chunk Generator for tools and test bots in other mods (FDT's multiplayer test bot;
-    // Tools\CHUNK_GENERATOR.md "Two-player test"). Every action runs the same client code the windows' buttons run: the
+    // A stable public surface on the Chunk Generator for tools and test bots in other mods (FDT's multiplayer test bot).
+    // Every action runs the same client code the windows' buttons run: the
     // same inventory removal and the same RPCs to the machine's ZDO owner. So a bot exercises what a human does, minus
     // the clicks. Reach it by name without a reference: Type.GetType("VerdantsAscent.Terrain.Zones.ChunkGeneratorApi,
     // FiresAdminTerrain").

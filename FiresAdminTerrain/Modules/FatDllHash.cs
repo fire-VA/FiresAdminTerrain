@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 
 namespace VerdantsAscent.Terrain
 {
-    // The first 12 hex of FAT's own DLL SHA-256, which every F5 test's BEGIN line names (Tools\FIRES_F5_TESTS.md). Hashed once
+    // The first 12 hex of FAT's own DLL SHA-256, which every F5 test's BEGIN line names. Hashed once
     // on a thread-pool thread when the console starts, so no test pays for reading 10 MB on the main thread.
     internal static class FatDllHash
     {

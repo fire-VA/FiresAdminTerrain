@@ -18,6 +18,51 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private float _nextPoll;
         private bool _forcedByUs;
+        private string _forcedEnv;
+
+        // The light flapped Clear <-> Crypt every 3-4 s at the dome edge, restarting the fade each time, so: out at
+        // 20% depth (was 40%) and at least DomeHold s between switches (was 1 s), so one crossing is one fade.
+        private const float DomeBand = 6f, DomeIn = 0.6f, DomeOut = 0.2f, DomeHold = 6f, DomeBlend = 3.5f;
+        private const float DomeStayBand = 14f;
+        private const float EnvEnterHold = 0.5f, EnvLeaveHold = 1.5f, EnvDwell = 3f;
+        private bool _caveHeld;
+        private string _whyNot;   // the gate that held the cave env back this poll (null = roof test passed)
+        private float _nextWhyNot;
+        private float _caveRawSince, _caveSwitched = -100f;
+        private bool _inDome;
+        private float _domeSince, _domeDepth;
+        private static bool s_envChecked;
+
+        private bool UpdateDome(out string env)
+        {
+            env = null;
+            var player = Player.m_localPlayer;
+            if (player == null) return _inDome = false;
+            if (!s_envChecked && EnvMan.instance != null) { s_envChecked = true; FatUndergroundLocations.CheckEnvironments(); }
+            // The grotto env holds a wider bounds than entry, so the cave env does not trigger just
+            // because the player is under an overhang in the grotto: once in, the dome is measured with the wider DomeStayBand, so it
+            // holds until ~DomeStayBand * (1 - 2 * DomeOut) m past the dome's wall / floor / top (8.4 m), and its env beats the
+            // cave env under any overhang inside or around the grotto. Entering keeps the 6 m band.
+            bool near = FatUndergroundLocations.TryDomeAt(player.transform.position + Vector3.up, _inDome ? DomeStayBand : DomeBand, out var dome, out _domeDepth);
+            bool want = near && (_inDome ? _domeDepth > DomeOut : _domeDepth >= DomeIn);
+            if (want != _inDome && Time.time - _domeSince >= DomeHold)
+            {
+                _inDome = want;
+                _domeSince = Time.time;
+            }
+            if (_inDome && near) env = dome.Environment;
+            return _inDome && near;
+        }
+
+        private static string CaveEnvHere()
+        {
+            var player = Player.m_localPlayer;
+            if (player == null || WorldGenerator.instance == null) return FiresVoxelConfig.CaveEnvironment.Value;
+            Vector3 p = player.transform.position + Vector3.up * 0.5f;
+            if (!FiresCaveBiome.TryPlayerCaveBiome(p, out var biome))   // shared player state, not a per-call check
+                biome = FiresCaveBiome.RegionBiome(p.x, p.z, WorldGenerator.instance.GetBiome(p.x, p.z));
+            return FiresCaveBiome.EnvironmentFor(biome);
+        }
         private static int s_mask = -1;
 
         // X-ray guard: vanilla shrinks the camera near plane to
@@ -65,6 +110,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (FiresWorldGenBase.Active
                         && FiresWorldGenBase.TryGetGenGround(origin.x, origin.z, out float cg))
                         underSurface = origin.y < cg - 1.5f;
+                    else if (!FiresWorldGenBase.Active && WorldGenerator.instance != null)   // vanilla-profiled voxel worlds
+                        underSurface = origin.y < WorldGenerator.instance.GetHeight(origin.x, origin.z) - 1.5f;
+                    _whyNot = underSurface ? "no voxel roof overhead" : "not below the surface";
                     if (underSurface)
                     {
                         if (s_mask < 0) s_mask = LayerMask.GetMask("terrain");
@@ -73,18 +121,57 @@ namespace VerdantsAscent.Terrain.Voxel
                             && !FiresSkyIslands.IsOnIsland(hit.point))
                         {
                             wantCave = true;
+                            _whyNot = null;
                         }
                     }
                 }
+                else _whyNot = player == null ? null : !FiresVoxelConfig.CaveEnvEnabled.Value ? "'Cave Environment Enabled' is off"
+                    : VoxelWorld.ChunkCount <= 0 ? "no voxel chunks loaded" : "in liquid";
             }
-            catch { }
+            catch (System.Exception e) { _whyNot = "probe threw " + e.GetType().Name; }
+
+            // Evidence: under a voxel roof or deep in cover, but no cave env -> say which gate held it, every 10 s at Debug.
+            if (!_forcedByUs && (_whyNot == null || CaveFactor.Factor >= 0.4f) && Time.time >= _nextWhyNot)
+            {
+                _nextWhyNot = Time.time + 10f;
+                if (_whyNot != null || !CaveFactor.InCave)
+                    FiresLogger.LogDebug($"[CaveEnv] no cave env here: {_whyNot ?? "roof OK"}; {CaveFactor.Describe()}");
+            }
+
+            // In an out-river tunnel the env flipped "(open air) -> Crypt" and back 2-5 s later, 4x in 30 s, so the raw test
+            // only proposes; in after EnvEnterHold s, out after EnvLeaveHold s, switches at least EnvDwell s apart (the clutter's
+            // rule, ClutterGroundProbe). Liquid releases at once: the underwater env owns submerged.
+            bool liquid = Player.m_localPlayer != null && Player.m_localPlayer.InLiquid();
+            // At a tunnel mouth the env kept triggering and cancelling over and over, so the tunnel
+            // environment follows CaveFactor's one decision (continuous cover x depth, in at 0.7, out at 0.3), the same one the
+            // clutter, the ocean cull and the player's cover read. The up-ray test above only gates it (a sky island overhead is
+            // not a cave). Liquid releases at once: the underwater env owns submerged.
+            _caveHeld = !liquid && CaveFactor.InCave && (wantCave || _caveHeld);
+            wantCave = _caveHeld;
 
             ApplyCameraClip(wantCave);
 
-            if (wantCave && !_forcedByUs)
+            // The environment of THIS cave's biome (FiresCaveBiome: painted, else its region's; the 'Cave environments'
+            // map, else the voxel 'Cave environment'), re-forced when the player walks into a cave region of another biome.
+            string env = wantCave ? CaveEnvHere() : null;
+            // Open chambers are lighter than the passages, with a smooth transition: inside an
+            // underground location's dome its own environment wins. Hysteresis on the dome's boundary band (in at 60% depth,
+            // out at 40%, held at least DomeHold s), and every switch goes through vanilla's forced-environment cross-fade,
+            // slowed to DomeBlend s, so passage -> dome never pops.
+            if (Player.m_localPlayer != null) FatGrottos.Tick(Player.m_localPlayer.transform.position);   // grotto glow + domes
+            if (Player.m_localPlayer != null) FatSinkFalls.Tick(Player.m_localPlayer.transform.position);   // waterfall sinkhole curtains + domes
+            FatShaftUnderwater.Tick();   // the river seen from below while under a big sinkhole's bed
+            if (Player.m_localPlayer != null) FatCaveRivers.Tick(Player.m_localPlayer.transform.position, VerdantsAscent.Performance.ClutterGroundProbe.CameraInCave);   // shaft lights + ocean cull
+            bool inDome = UpdateDome(out string domeEnv);
+            if (inDome) { wantCave = true; env = domeEnv; }
+            if (wantCave && (!_forcedByUs || env != _forcedEnv))
             {
-                EnvMan.instance.SetForceEnvironment(FiresVoxelConfig.CaveEnvironment.Value);
+                if (EnvMan.instance.m_transitionDuration < DomeBlend) EnvMan.instance.m_transitionDuration = DomeBlend;
+                FiresLogger.LogDebug($"[CaveEnv] {(_forcedByUs ? _forcedEnv : "(open air)")} -> {env} over {EnvMan.instance.m_transitionDuration:0.0} s"
+                    + (inDome ? $" (dome, band depth {_domeDepth:0.00})" : ""));
+                EnvMan.instance.SetForceEnvironment(env);
                 _forcedByUs = true;
+                _forcedEnv = env;
             }
             else if (!wantCave && _forcedByUs)
             {
@@ -92,14 +179,21 @@ namespace VerdantsAscent.Terrain.Voxel
                 // underwater env or admin-forced weather).
                 _forcedByUs = false;
                 if (EnvMan.instance != null)
+                {
+                    // Env blending over time: leaving fades too, over the
+                    // same DomeBlend floor (vanilla re-queues the weather env from the current blended state on release).
+                    if (EnvMan.instance.m_transitionDuration < DomeBlend) EnvMan.instance.m_transitionDuration = DomeBlend;
+                    FiresLogger.LogDebug($"[CaveEnv] {_forcedEnv} -> (open air) over {EnvMan.instance.m_transitionDuration:0.0} s");
                     EnvMan.instance.SetForceEnvironment(string.Empty);
+                }
             }
         }
 
         private void OnDestroy()
         {
+            ShareRoofQuery(false);
             ApplyCameraClip(false);
-            // 0.2.701 ([ghost] for [worldgen], the lead 10-02): at quit the root goes with the plugin while the scene's EnvMan and its
+            // At quit the root goes with the plugin while the scene's EnvMan and its
             // lights are being torn down, and SetForceEnvironment runs EnvMan.FixedUpdate -> SetEnv on them ("NullReferenceException
             // at EnvMan.SetEnv", every quit with the cave env on); the env goes with the scene then. A plugin reload mid-game still
             // releases it.
@@ -115,5 +209,82 @@ namespace VerdantsAscent.Terrain.Voxel
             root.AddComponent<VoxelCaveEnv>();
             FiresLogger.LogInfo("[FiresVoxel] VoxelCaveEnv attached (up-raycast cave environment).");
         }
+
+        // ── Core's swimming: is this point in a cave under the sea? When a cave passes under a water plane
+        // (like the ocean) the water must not register within the cave ──────────────────────────────────────────────────
+        // FiresCore.Movement.PlayerSwim.RoofAbove (Core 0.2.298) asks it for every character the sea reaches, and drops that sea
+        // where it answers true; water placed with FAT's tools reaches characters through other components and is never asked
+        // about. A cave is the cave environment's own test: below the generated surface (vanilla's height on a stock-generated voxel
+        // world), with a voxel ceiling straight above that is not a sky island. A sea cliff's overhang (over the sea floor, not under
+        // the ground) and open water are never caves. Registered by reflection, so FAT runs on an older Core that has no such hook.
+        private const float RoofBodyLift = 0.9f, RoofBelowGround = 1f, RoofReachMargin = 2f;
+
+        // Core asks for every character the sea touches, each time vanilla sets a liquid level, so it must stay O(1).
+        // Answers are kept per 1 m cell for a quarter second in a fixed table: no allocation, at most one ground sample and one
+        // short ray per cell and moment.
+        private const int RoofCacheSlots = 64;
+        private const float RoofCacheSeconds = 0.25f;
+        private static readonly int[] s_roofKey = new int[RoofCacheSlots];
+        private static readonly float[] s_roofUntil = new float[RoofCacheSlots];
+        private static readonly bool[] s_roofAnswer = new bool[RoofCacheSlots];
+
+        internal static bool CaveRoofAbove(Vector3 pos, float seaSurface)
+        {
+            if (VoxelWorld.ChunkCount <= 0) return false;
+            int key;
+            unchecked { key = (Mathf.FloorToInt(pos.x) * 73856093) ^ (Mathf.FloorToInt(pos.y) * 19349663) ^ (Mathf.FloorToInt(pos.z) * 83492791); }
+            int slot = (key & 0x7fffffff) % RoofCacheSlots;
+            float now = Time.time;
+            if (s_roofKey[slot] == key && s_roofUntil[slot] > now) return s_roofAnswer[slot];
+            bool answer = CaveRoofAboveNow(pos, seaSurface);
+            s_roofKey[slot] = key;
+            s_roofUntil[slot] = now + RoofCacheSeconds;
+            s_roofAnswer[slot] = answer;
+            return answer;
+        }
+
+        private static bool CaveRoofAboveNow(Vector3 pos, float seaSurface)
+        {
+            Vector3 origin = pos + Vector3.up * RoofBodyLift;   // the body's middle: a roof just over the head still counts
+            float ground;
+            if (FiresWorldGenBase.Active && FiresWorldGenBase.TryGetGenGround(origin.x, origin.z, out float gen)) ground = gen;
+            else if (WorldGenerator.instance != null) ground = WorldGenerator.instance.GetHeight(origin.x, origin.z);
+            else return false;
+            if (origin.y >= ground - RoofBelowGround) return false;
+            if (s_mask < 0) s_mask = LayerMask.GetMask("terrain");
+            float reach = Mathf.Max(seaSurface, ground) - origin.y + RoofReachMargin;
+            return Physics.Raycast(origin, Vector3.up, out var hit, reach, s_mask, QueryTriggerInteraction.Ignore)
+                   && hit.collider.GetComponent<VoxelChunkView>() != null
+                   && !FiresSkyIslands.IsOnIsland(hit.point);
+        }
+
+        private static System.Reflection.FieldInfo s_coreRoofField;
+        private static bool s_coreRoofLookedUp;
+        private static readonly System.Func<Vector3, float, bool> s_roofQuery = CaveRoofAbove;
+
+        private static void ShareRoofQuery(bool share)
+        {
+            if (!s_coreRoofLookedUp)
+            {
+                s_coreRoofLookedUp = true;
+                var swim = System.Type.GetType("FiresCore.Movement.PlayerSwim, FiresUnifiedCore");
+                s_coreRoofField = swim?.GetField("RoofAbove", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                FiresLogger.LogDebug(s_coreRoofField != null
+                    ? "[FiresVoxel] Core's swimming asks FAT whether a point is in a cave under the sea (PlayerSwim.RoofAbove)."
+                    : "[FiresVoxel] this Core has no PlayerSwim.RoofAbove (older than 0.2.298): the sea in caves stays FAT's own deep-water gate.");
+            }
+            if (s_coreRoofField == null) return;
+            try
+            {
+                if (share) s_coreRoofField.SetValue(null, s_roofQuery);
+                else if (ReferenceEquals(s_coreRoofField.GetValue(null), s_roofQuery)) s_coreRoofField.SetValue(null, null);
+            }
+            catch (System.Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresVoxel] could not {(share ? "share" : "withdraw")} the cave query with Core: {ex.Message}");
+            }
+        }
+
+        private void Awake() => ShareRoofQuery(true);
     }
 }

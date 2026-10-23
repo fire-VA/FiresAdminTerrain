@@ -36,16 +36,14 @@ namespace VerdantsAscent.Water.Core
     /// 5. Classify by shape, trace centerlines with exact heights from the heightmap
     /// 6. Heights cross-referenced in AutoWaterGenerator with real terrain sampling
     /// 
-    /// COORDINATE SYSTEM (from BC source, see BC_IMAGEMAPFLOAT_REFERENCE.txt):
+    /// COORDINATE SYSTEM (how a BC height map lays over the world, as observed in its saves and in game):
     ///   normalized = clamp(worldCoord / (TotalRadius * 2) + 0.5, 0, 1)
     ///   pixel = normalized * (Size - 1)
     ///   Map[y * Size + x], row-major, image flipped vertically on load
-    /// 
-    /// HEIGHT FORMULA (from BC source - GetBiomeHeightWithHeight postfix):
-    ///   With HeightmapOverrideAll + default blend/add/mask:
-    ///     ApplyHeightmap(x, y, 0) = pixelValue * HeightmapAmount
-    ///     GetBaseHeight = pixelValue * HeightmapAmount - 0.15 + SeaLevelAdjustment
-    ///     GetBiomeHeight = GetBaseHeight * 200
+    ///
+    /// HEIGHT (a height map that overrides everything, default blend/add/mask):
+    ///   the base height is pixelValue * HeightmapAmount - 0.15 + SeaLevelAdjustment, and the ground is that x 200
+    ///   (FAT's own reproduction: BcImport\BcWorldGen, checked against BetterContinents).
     ///   At default settings (Amount=1, SeaLevelAdj=0):
     ///     worldY = (pixelValue - 0.15) * 200 = pixelValue * 200 - 30
     ///     Sea level (worldY=30) = pixelValue 0.30
@@ -183,9 +181,9 @@ namespace VerdantsAscent.Water.Core
                 _heightmapAmountField = AccessTools.Field(settingsType, "HeightmapAmount");
                 _seaLevelField = AccessTools.Field(settingsType, "SeaLevelAdjustment");
 
-                // ImageMapFloat fields - from decompiled BC source:
-                //   private float[] Map   (on ImageMapFloat)
-                //   public int Size       (on ImageMapBase, inherited)
+                // Where an installed BC keeps its height map at run time (field names only, read by reflection):
+                //   Map  - the pixels, a float[] on the map object
+                //   Size - its edge length, on the map's base class
                 var imageMapType = _heightmapField.FieldType;
                 if (imageMapType.IsGenericType && imageMapType.GetGenericTypeDefinition() == typeof(Nullable<>))
                     imageMapType = Nullable.GetUnderlyingType(imageMapType);
@@ -310,9 +308,10 @@ namespace VerdantsAscent.Water.Core
                 float[] mapCopy = new float[mapArray.Length];
                 Array.Copy(mapArray, mapCopy, mapArray.Length);
 
-                // Read world size - BC static fields: WorldRadius=10000, TotalRadius=10500
-                float worldRadius = 10000f;
-                float totalRadius = 10500f;
+                // Read world size - BC static fields: WorldRadius=10000, TotalRadius=10500. Without them, the world's own
+                // size (FatWorldSize, 10000 / 10500 on a vanilla-size world).
+                float worldRadius = VerdantsAscent.Terrain.Voxel.FatWorldSize.Radius;
+                float totalRadius = VerdantsAscent.Terrain.Voxel.FatWorldSize.EdgeRadius;
 
                 if (_bcWorldRadiusField != null)
                 {
@@ -386,15 +385,10 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
-        /// Converts a raw heightmap pixel value (0-1) to world Y height using BC's
-        /// EXACT formula from GetBiomeHeightWithHeight -> GetBaseHeight -> ApplyHeightmap.
-        /// 
-        /// From decompiled BC source (v0.7.30):
-        ///   ApplyHeightmap: blendedValue = pixelValue * HeightmapAmount (when blend=1, add=0, mask=0)
-        ///   GetBaseHeightV3: baseHeight = blendedValue - 0.15 + SeaLevelAdjustment
-        ///   GetBiomeHeight:  worldY = baseHeight * 200
-        /// 
-        /// Combined: worldY = (pixelValue * HeightmapAmount - 0.15 + SeaLevelAdjustment) * 200
+        /// Converts a raw heightmap pixel value (0-1) to world Y height, as a BC world's ground comes out when its
+        /// height map overrides everything with the default blend (1), add (0) and mask (0):
+        ///   worldY = (pixelValue * HeightmapAmount - 0.15 + SeaLevelAdjustment) * 200
+        /// (the map scaled by its amount, the format's 0.15 water line and the sea-level setting, in Valheim's x200 units).
         /// </summary>
         public static float HeightmapToWorldY(float normalizedHeight, HeightmapSnapshot snap)
         {

@@ -4,10 +4,10 @@ using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Zones
 {
-    // Undo and redo for chunk placement, on the keys Infinity Hammer uses (numpad 7 and 9 by default), so one key
-    // takes back whichever kind of edit an admin just made. The stack lives on the server, so the key asks it and the
-    // answer comes back to the admin who pressed it. Raw key reads, not a BepInEx shortcut, which would not fire while
-    // a movement key is held.
+    // Undo and redo of chunk / area / skyland placements and biome paint, as steps in the ONE undo history (Core's UndoHistory,
+    // through FatUndo). Those edits' history lives on the server, so each step asks the server to step its history
+    // and the answer comes back to the admin who asked. The keys are Core's (numpad 7 / 9) or Infinity Hammer's, never FAT's own:
+    // the old "Chunk undo key" / "Chunk redo key" are gone, so a press never fires twice.
     internal static class ZoneModeChunkKeys
     {
         private const string RpcStep = "FiresAdminTerrain_ChunkStep";
@@ -28,19 +28,15 @@ namespace VerdantsAscent.Terrain.Zones
             catch (Exception ex) { FiresLogger.LogWarning($"[FiresZones] chunk step RPC register failed: {ex.Message}"); }
         }
 
-        internal static void ClientTick()
+        // Per frame on a client: a finished V-tool stroke becomes its undo step.
+        internal static void ClientTick() => FatUndo.ClientTick();
+
+        /// <summary>A placement or paint the server just made for this admin, as one step of the shared history.</summary>
+        internal static void RecordServerStep(string what)
         {
-            if (ZoneModeConfig.ChunkUndoKey == null || Player.m_localPlayer == null || Typing()) return;
-            if (Input.GetKeyDown(ZoneModeConfig.ChunkUndoKey.Value)) Ask(redo: false);
-            else if (Input.GetKeyDown(ZoneModeConfig.ChunkRedoKey.Value)) Ask(redo: true);
+            FatUndo.Record(what, () => { Ask(redo: false); return $"Undoing {what}…"; }, () => { Ask(redo: true); return $"Redoing {what}…"; });
         }
 
-        private static bool Typing()
-            => (Chat.instance != null && Chat.instance.HasFocus())
-               || Console.IsVisible() || InventoryGui.IsVisible() || Menu.IsVisible() || TextInput.IsVisible();
-
-        // With nothing of ours to take back the key says nothing: it is Infinity Hammer's key too, and its answer
-        // should be the one the admin sees.
         private static void Ask(bool redo)
         {
             var net = ZNet.instance;
@@ -75,7 +71,7 @@ namespace VerdantsAscent.Terrain.Zones
         {
             bool stepped = pkg.ReadBool();
             string message = pkg.ReadString();
-            if (stepped) Show(message);
+            Show(message);
         }
 
         private static void Show(string message)

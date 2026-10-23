@@ -153,7 +153,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var rsw = System.Diagnostics.Stopwatch.StartNew();
             FlatRegionAudit(h, n, (2f * _half) / (n - 1), "A: terrain + erosion, before any water");
             var w = PriorityFloodFill(h, n, "drainage fill");
-            // (v129) Remove the noise potholes from the terrain itself, BEFORE anything downstream treats them as
+            //  Remove the noise potholes from the terrain itself, BEFORE anything downstream treats them as
             // water. Threshold read off the basin histogram, not guessed: <=64 cells is 90.7% of all basins and
             // 1.8% of the filled area on the seed this was measured on. `w` is unchanged by this — raising a pit
             // floor to its own spill level cannot alter where anything else spills.
@@ -164,7 +164,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (potFilled > 0)
                     FiresLogger.LogInfo($"[FiresWorldGen]  │  POTHOLE FILL — {potFilled:N0} noise depression(s) (<={POTHOLE_MAX_AREA_M2:0} m² = {potholeMaxCells} cells here) raised to their own spill level, {potCells:N0} cell(s) of terrain. These were standing water to the router, so every inland run died in the first one it met.");
 
-                // (v133) Then say WHICH closed basins are wetlands rather than lakes. This only CLASSIFIES —
+                //  Then say WHICH closed basins are wetlands rather than lakes. This only CLASSIFIES —
                 // it writes no water and no terrain — so there is exactly one owner of "what level does this
                 // wetland sit at", and it is the planner's marsh funnel.
                 int wetl = ClassifyWetlands(h, w, n, (2f * _half) / (n - 1), out long wetC);
@@ -190,7 +190,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // physical features whether a cell is 10m or 2m. RS==1 at n=2048.
             float cellM = (2f * _half) / (n - 1);
             float cellA = cellM * cellM;
-            float RS = 2047f / (n - 1);
+            float RS = 2047f / (n - 1) * SpanScale;   // X (edge / 10500), exactly 1 on a vanilla-size world
 
             // v10 — CONVERGENT drainage. On broad uniform slopes pure
             // steepest-descent forms SHEETS of parallel streams ("30 rivers
@@ -212,7 +212,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     float wx2 = x2 + (Fbm(x2, z2, RS / 210f, 2, ms + 8) - 0.5f) * (22f / RS);
                     float wz2 = z2 + (Fbm(x2, z2, RS / 210f, 2, ms + 9) - 0.5f) * (22f / RS);
                     float vr = 1f - Math.Abs(2f * Fbm(wx2, wz2, RS / 68f, 3, ms + 7) - 1f);
-                    // (v92) ROUTE ON TRUTH — docs/HYDROLOGY.md Part III: convergence must EMERGE from the real
+                    //  ROUTE ON TRUTH — docs/HYDROLOGY.md Part III: convergence must EMERGE from the real
                     // terrain; a routing surface that lies routes rivers over ridges. The 13m valley-attractor
                     // was exactly such a lie — deep fake troughs cut ACROSS real hills, and flow followed them
                     // up-and-over (braids around knobs, channels crossing on saddles, the "no logical sense"
@@ -241,7 +241,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // v32 — D-INFINITY flow (Tarboton 1997): CONTINUOUS flow direction,
             // replacing the D8 single-flow that locked every channel to one of 8
             // compass headings — rivers drew as straight axis/diagonal segments
-            // with 45°/90° jogs (user-caught at native res). Each cell takes the
+            // with 45°/90° jogs (visible at native resolution). Each cell takes the
             // steepest of its 8 triangular facets → a REAL-VALUED flow angle, and
             // SPLITS its flow between the two neighbours bracketing that angle, so
             // accumulation (and every incised channel) follows smooth curves.
@@ -289,7 +289,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             Array.Sort(wr, order);                          // ascending fill surface — sort IN PLACE (wr is dead after this; skips a full n² clone that OOM'd the 2m carve)
             wr = null; GC.Collect();                         // reclaim the corrugated fill before acc1 grows the heap — keeps the accumulation phase off the OOM ceiling
-            // (v133) Seed accumulation with each cell's RUNOFF, not a flat 1. See RunoffAt — this is the
+            //  Seed accumulation with each cell's RUNOFF, not a flat 1. See RunoffAt — this is the
             // single line the hydrology audit turns on: with a constant, catchment is pure upstream AREA and a
             // headwater can never clear a channel threshold, which is why there was no water above 250 m.
             var acc1 = new float[n * n];
@@ -327,7 +327,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var riverPolys = TraceRivers(h, acc1, fr1, fr2, w, n, cellM, (n - 1) * cellM * 0.5f);
             FiresLogger.LogInfo($"[FiresWorldGen]  │  rivers: {(riverPolys != null ? riverPolys.Count : 0)} polyline(s) traced ({rsw.Elapsed.TotalSeconds:0}s); solving valleys...");
 
-            // (v92) ROUTE VALIDATION — detect and kill the traces that make no physical sense (user mandate).
+            //  ROUTE VALIDATION — detect and kill the traces that make no physical sense.
             // The REAL fill table `w` IS the pooled water surface on the true terrain: along any physically
             // possible flow path it is NON-INCREASING downstream by the fill's construction. A trace seduced
             // across a divide (corrugation-era routes, braids over knobs, rivers over hills) shows the
@@ -360,8 +360,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         else if (runMax - fw > CLIMB_TOL) { good = s; break; }
                     }
                     int keepM = good < 0 ? nn : good;                      // nodes retained from the mouth after divide truncation
-                    // SOURCE JUSTIFICATION (user: "no source water at the top — know where and WHY every body
-                    // of water is placed"): a surviving head must be a REAL channel head — node catchment
+                    // SOURCE JUSTIFICATION (no source water at the top; know where and WHY every body
+                    // of water is placed): a surviving head must be a REAL channel head — node catchment
                     // area ≥ AreaOnset (channels begin where drainage crosses the threshold; water never
                     // starts mid-slope from nothing). Walk in from the source end of the retained reach and
                     // trim every node that can't justify itself; a trace that never can is no river at all.

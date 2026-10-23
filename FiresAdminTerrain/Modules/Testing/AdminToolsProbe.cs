@@ -35,6 +35,13 @@ namespace VerdantsAscent.Terrain.Testing
         // Answered by the server only (it holds every ZDO and every location), for picking a test place anywhere:
         PiecesNear,     // build-piece ZDOs within PieceNearMetres of the point
         LocationNear,   // metres to the nearest placed location
+        // Vfall falls whose lip is within FallsNearMetres, as this peer holds them (the server from its zone import,
+        // the bot from the chunk anchor), so a fall that did not reach a peer reads 0 there.
+        FallsNear,
+        // Server only: the nearest placed location's prefab hash in two 16-bit halves (each exact as a float), so
+        // the surface find can name the location that ruled a flat place out.
+        LocationHashHigh,
+        LocationHashLow,
     }
 
     internal struct ProbePoint
@@ -166,11 +173,12 @@ namespace VerdantsAscent.Terrain.Testing
 
         // The arrival rule's radius (AdminToolsPlaces.PieceClearMetres).
         internal const float PieceNearMetres = 40f;
+        internal const float FallsNearMetres = 4f;
 
         private static bool IsServer => ZNet.instance != null && ZNet.instance.IsServer();
 
         // Player-placed ZDOs (they carry a creator) within PieceNearMetres (flat distance): the zone of the point and its eight
-        // neighbours. The same rule as the arrival check (AdminToolsPlaces.CheckArrival): R76 counted trees and rocks, which
+        // neighbours. The same rule as the arrival check (AdminToolsPlaces.CheckArrival): counting all Pieces counted trees and rocks, which
         // some mod gives a Piece component on the client, as "build pieces" and SKIPped a place this probe had passed.
         private static float PiecesNear(Vector3 at)
         {
@@ -199,15 +207,42 @@ namespace VerdantsAscent.Terrain.Testing
         private static float NearestLocation(Vector3 at)
         {
             if (ZoneSystem.instance == null) return float.NaN;
+            return NearestLocation(at, out _);
+        }
+
+        private static float NearestLocation(Vector3 at, out ZoneSystem.ZoneLocation nearest)
+        {
+            nearest = null;
             float best = 1e6f;
             foreach (var location in ZoneSystem.instance.GetLocationList())
             {
                 if (!location.m_placed) continue;
                 float fx = location.m_position.x - at.x, fz = location.m_position.z - at.z;
                 float d = Mathf.Sqrt(fx * fx + fz * fz);
-                if (d < best) best = d;
+                if (d < best) { best = d; nearest = location.m_location; }
             }
             return best;
+        }
+
+        // Half of the nearest placed location's prefab hash (ZoneLocation.Hash = its prefab name's stable hash); NaN when none.
+        private static float NearestLocationHashHalf(Vector3 at, bool high)
+        {
+            if (ZoneSystem.instance == null) return float.NaN;
+            NearestLocation(at, out var nearest);
+            if (nearest == null || string.IsNullOrEmpty(nearest.m_prefabName)) return float.NaN;
+            uint hash = unchecked((uint)nearest.m_prefabName.GetStableHashCode());
+            return high ? hash >> 16 : hash & 0xFFFFu;
+        }
+
+        // The location prefab a hash from the two halves above names, as this peer's location list knows it.
+        internal static string LocationName(float high, float low)
+        {
+            if (float.IsNaN(high) || float.IsNaN(low)) return "?";
+            int hash = unchecked((int)(((uint)high << 16) | (uint)low));
+            if (ZoneSystem.instance != null)
+                foreach (var location in ZoneSystem.instance.m_locations)
+                    if (!string.IsNullOrEmpty(location.m_prefabName) && location.m_prefabName.GetStableHashCode() == hash) return location.m_prefabName;
+            return "#" + hash.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         private static string Role()
@@ -227,6 +262,11 @@ namespace VerdantsAscent.Terrain.Testing
                         return IsServer ? PiecesNear(at) : float.NaN;
                     case ProbeKind.LocationNear:
                         return IsServer ? NearestLocation(at) : float.NaN;
+                    case ProbeKind.LocationHashHigh:
+                    case ProbeKind.LocationHashLow:
+                        return IsServer ? NearestLocationHashHalf(at, point.Kind == ProbeKind.LocationHashHigh) : float.NaN;
+                    case ProbeKind.FallsNear:
+                        return VerdantsAscent.Water.Tools.ToolFalls.CountNear(at, FallsNearMetres);
                     case ProbeKind.TileHeight:
                         return TileAnchorRegistry.TrySampleHeightAtWorld(at, out float tileY) ? tileY : float.NaN;
                     case ProbeKind.TilePaint:
@@ -281,7 +321,7 @@ namespace VerdantsAscent.Terrain.Testing
 
         // The ground a player would stand on: the first collider below, as the character controller finds it.
         // What a body would stand on, on this peer's colliders. On a VoxelWrap dedicated server that is vanilla's heightmap
-        // collider: it holds voxel DATA only and builds no voxel colliders (R77: server 132.81 over a 127.85 carve, 134.75 under
+        // collider: it holds voxel DATA only and builds no voxel colliders (e.g. server 132.81 over a 127.85 carve, 134.75 under
         // a 138.75 cube). LastStandingHit names the hit for the case line; the server writes its own to its log.
         internal static string LastStandingHit { get; private set; }
 
@@ -299,7 +339,7 @@ namespace VerdantsAscent.Terrain.Testing
             return hit.point.y;
         }
 
-        // FAT's water reads float.MinValue where there is none ([visual]'s WATER_TOOLS_REFERENCE.md).
+        // FAT's water reads float.MinValue where there is none (WATER_TOOLS_REFERENCE.md).
         private const float NoWater = float.MinValue / 2f;
         private const float SpringReach = 15f;
 

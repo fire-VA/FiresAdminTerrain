@@ -12,12 +12,12 @@ namespace VerdantsAscent.Terrain.Voxel
 {
     // ═══ WATER BODY SEEDING — WHERE STILL WATER IS PUT ON THE MAP ════════════════════════════════════
     // Swamp ponds, mountain tarns, lowland lakes, highland lakes and their spillways, mountain streams.
-    // This is the "stillwater first" half of the order the user set: bodies are placed and their levels
+    // This is the "stillwater first" half of the order: bodies are placed and their levels
     // fixed BEFORE any river is routed, so a run can be drawn to a junction height that is already known
     // rather than reconciled afterwards. The planner proper lives in FiresWaterPlanner.cs.
     public static partial class FiresWorldGenBase
     {
-        // SWAMP FLOOD — swamps are MOSTLY WATER (user doctrine): broad
+        // SWAMP FLOOD — swamps are MOSTLY WATER (design rule): broad
         // lowland sheets with dry hummock islands dotted about, not dry land
         // with pond acne. Per swamp REGION (connected swamp zones in the
         // survey): pick the level that submerges ~70% of the region's swamp
@@ -39,7 +39,7 @@ namespace VerdantsAscent.Terrain.Voxel
             int regions = 0; long flooded = 0;
             int skTiny = 0, skFewInt = 0, skLow = 0;   // skip-gate tallies (diagnostic)
             const ushort SWAMP_BIT = 1 << 2;
-            // Contained-basin shape (user, 2026-07-30): a raised outer bank that slopes GENTLY down into the
+            // Contained-basin shape: a raised outer bank that slopes GENTLY down into the
             // basin on the inside AND eases smoothly out into the existing terrain on the outside — never a
             // sharp dam. Slopes are GRADE-limited (fixed rise:run), so a bigger required raise auto-stretches
             // into a longer, more natural ramp instead of a wall.
@@ -71,13 +71,13 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 }
                 if (member.Count < 2) { skTiny++; continue; }   // too small to read as a marsh
-                // WATER SHAPES TERRAIN — the swamp DIPS DOWN (user doctrine:
+                // WATER SHAPES TERRAIN — the swamp DIPS DOWN (design rule:
                 // "large lowland areas with a large sheet of our water drawn
                 // across with islands dotted about"). The old flood fitted
                 // the level to the existing terrain (70th percentile minus
                 // containment clamps), so any sloped region kept 70%+ of its
                 // area as dry plain and the sheet huddled in the low corner
-                // (screenshot: Swamp at y:65, bone dry to the horizon). Now
+                // (seen: Swamp at y:65, bone dry to the horizon). Now
                 // the level comes from the BORDER (low quartile of outside
                 // ground + 0.8) and the interior is DUG to murk beds under
                 // it, feathered from natural grade at the border over an
@@ -128,7 +128,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // the rim — the sheet was written standing over its own banks,
                 // and the bank-enforcement fixpoint then DRAINED every such
                 // swamp back to mud (audit: 221k above-bank violations; dry
-                // y:130 screenshots). The 20th-pct rim sits just under the bulk
+                // y:130 in game). The 20th-pct rim sits just under the bulk
                 // of the perimeter but above the single drainage outlet (which
                 // becomes the outflow stream), so the sheet is CONTAINED and
                 // survives. The interior is then carved BELOW it (aggressively,
@@ -138,7 +138,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float lvl;
                 if (rim.Count >= 8) { rim.Sort(); lvl = rim[(int)(rim.Count * FiresGenTuning.SwampLevelPct)]; }
                 else { heights.Sort(); lvl = heights[(int)(heights.Count * 0.25f)]; }
-                // COASTAL vs INLAND (user, 2026-07-30): a marsh whose containing level sits within a few
+                // COASTAL vs INLAND: a marsh whose containing level sits within a few
                 // metres of the sea DIGS its basin BELOW sea level and lets the OCEAN fill it — no berm, no
                 // separate sheet (the ocean IS the water). Higher inland marshes get their own contained
                 // basin: a raised bank + flat inland sheet. Never berm the ocean side of a coastal marsh.
@@ -151,7 +151,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // shaping it anyway scattered pockets against cliffs, and the water
                     // reconcile's dry-margin feather then hung 16m sheets over the drops
                     // (audit: WL 44 over H 28 — the in-game floating shards). Smaller or
-                    // NO marsh beats a wrong one (user).
+                    // NO marsh beats a wrong one.
                     float sl0 = lvl <= SEA + 0.6f ? SEA : lvl;
                     int bandN = 0, bioN = 0;
                     for (int gz2 = gzA; gz2 <= gzB; gz2++)
@@ -167,7 +167,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 regions++; if (coastal) skLow++;
                 float crest = lvl + FREEBOARD;
-                // ═══ THE MARSH LAW (clean rewrite — user: "scrap it and get it right") ═══
+                // ═══ THE MARSH LAW (clean rewrite) ═══
                 // One rule set, no branches-of-branches:
                 //   • the marsh occupies only ground NEAR its level — unsuitable terrain
                 //     makes the marsh SMALLER, never forces a bowl/mesa onto it;
@@ -175,7 +175,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 //     tussock domes that clearly breach it (walkable, consistent mounds);
                 //   • HYSTERESIS: no cell may sit AT the waterline — decisively wet or
                 //     decisively dry. The ambiguous band is what rendered the sheet as
-                //     angular per-cell confetti shards (user screenshots, seed 318699305);
+                //     angular per-cell confetti shards (seed 318699305);
                 //   • coastal regions lay the same shape at SEA level and the ocean owns
                 //     the water; inland regions flood exactly lvl. Rivers/spillways still
                 //     stop at the region mouth (the incision/stamper guards).
@@ -207,7 +207,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                 || g[ci - 2 * n] > shapeLvl + 3f || g[ci + 2 * n] > shapeLvl + 3f) continue;
                             float edgeT = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(din[li] / 10f));   // 0 at the marsh edge → 1 inside
                             float bed = shapeLvl - (0.5f + 1.3f * Fbm(wxs, wzs, 1f / 42f, 2, _seed + 77));   // smooth murk, 0.5..1.8 under
-                            float mt = Smooth01Glsl(0.58f, 0.72f, Fbm(wxs, wzs, 1f / 26f, 2, _seed + 177));   // (v102) GLSL semantics — Unity SmoothStep diverged (see FiresTerrain3D.Smooth01); this gate now computes what the studio always showed
+                            float mt = Smooth01Glsl(0.58f, 0.72f, Fbm(wxs, wzs, 1f / 26f, 2, _seed + 177));   //  GLSL semantics — Unity SmoothStep diverged (see FiresTerrain3D.Smooth01); this gate now computes what the studio always showed
                             bed = Mathf.Lerp(bed, shapeLvl + 0.8f, mt);                   // wide low domes rise THROUGH the sheet
                             bed = Mathf.Lerp(gv, bed, edgeT);                             // blend from natural ground at the rim
                             // hysteresis — never AT the waterline, and wet runs DEEP enough
@@ -250,7 +250,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // CONTAIN BY RETREAT, then SEAL. A sheet cell bordering a dry drop the
                     // level cannot sit against (>2m below lvl — footprint edges on cliffs,
                     // near-sea slopes the berm never touches: the 16m bank-riding cells in
-                    // the audit) is NOT walled in (user: never raise surrounding high
+                    // the audit) is NOT walled in (never raise surrounding high
                     // ground) — the marsh RETREATS from it, iterated until the shoreline
                     // settles on defensible ground. Then the surviving shoreline's shallow
                     // dry dips are sealed just above the level. Smaller marsh > wrong marsh.
@@ -461,13 +461,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                     if (blocked || ringMin == float.MaxValue || innerMin == float.MaxValue) return false;
                     if (ringMax - ringMin > WaterRules.Lake.RingRejectRelief) return false;   // cliff-straddling site would quarry a crater
-                    // NATURAL BASIN ONLY (user: "we cannot place a lake where a lake doesn't belong").
+                    // NATURAL BASIN ONLY (a lake is never placed where a lake doesn't belong).
                     // The site must ALREADY be a closed hollow — its natural floor below the LOWEST
                     // surrounding bank — so water would pool here on its own. A flat / convex / sloping
                     // spot (floor at or above its lowest rim → water drains out) is rejected; we no longer
                     // quarry a crater into dry ground just to hit a biome quota.
                     if (innerMin > ringMin - WaterRules.Lake.BasinGate) return false;
-                    // STRICTLY below the lowest bank (user: "drops a bit below
+                    // STRICTLY below the lowest bank (it "drops a bit below
                     // the lowest bank and levels perfectly"). The old relief
                     // bonus could push the level ABOVE ringMin on a high-relief
                     // ring — that lowest bank then floated. −0.35 guarantees
@@ -515,7 +515,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // berm. The outlet brooks used to dig only the path's CENTER cell —
         // on the 8-dir descent consecutive cells touch at CORNERS, so the
         // "brook" was a beaded chain of single-cell pits with berm lips
-        // (user screenshots: dotted trench lines that are obviously not
+        // (dotted trench lines that are obviously not
         // rivers). A disk stamp per step overlaps across diagonal moves and
         // the channel is continuous by construction. skipWetAbove: don't
         // wet cells 4-adjacent to standing water above the brook (keeps a
@@ -523,8 +523,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // Marsh-footprint test for the channel stampers — a seeded INLAND marsh region
         // (its zone blocks are registered in s_seedLevels by SeedSwampPonds) owns its
         // ground: spillways / mountain streams / lake outlet brooks stop at the region
-        // mouth exactly like the incised rivers do (user: "rivers stop at the mouth of
-        // the swamp and continue from the other side"). The stampers' wet-skip already
+        // mouth exactly like the incised rivers do (rivers stop at the mouth of
+        // the swamp and continue from the other side). The stampers' wet-skip already
         // protects the SHEET; this stops the groove they cut across the DRY mound
         // corridors between pools. Swamp-biome-scoped — lakes/rivers/ocean untouched.
         private static bool IsSeededMarshCell(int i)
@@ -535,7 +535,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return s_marshZones.Contains(SeedKey(i % n, i / n));
         }
 
-        // ═══ THE CHANNEL CROSS-SECTION — ONE CURVE, EVERY CHANNEL (2026-08-13) ═══════════════════════════
+        // ═══ THE CHANNEL CROSS-SECTION — ONE CURVE, EVERY CHANNEL ═══════════════════════════
         // UE's water plugin keeps the river's cross-section in a single Elevation Curve asset: normalized 0-1
         // on both axes, Y multiplied by each spline point's Depth, one default S-curve shared by every river.
         // We had TWO different sections in two code paths that had drifted apart at the one place it matters —
@@ -599,7 +599,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         // the wet-skip locked them there — the sheet rendered
                         // as a U-trough hugging the cutout with lifted edges
                         // instead of FLAT ACROSS THE SECTION flowing cleanly
-                        // downhill (user). Water only ever steps DOWN: own
+                        // downhill. Water only ever steps DOWN: own
                         // channel cells take the minimum level and the bed
                         // re-digs to match. A river at the junction sits
                         // BELOW the arriving stream, so w > lvl is false
@@ -614,7 +614,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     if (rc <= bedR)
                     {
-                        // ONE CURVE (2026-08-13): was `1 − 0.65t²`, which at the rim left the bed 0.35·depth
+                        // ONE CURVE: was `1 − 0.65t²`, which at the rim left the bed 0.35·depth
                         // under the level while line 3992 below still laid water at lvl — so every outlet and
                         // spillway disc ended in a vertical lip of exposed mesh 0.23-0.63m tall. ChannelShape
                         // reaches 0 at t=1, so the bed rises to MEET the surface and the sheet tapers to nothing.
@@ -653,7 +653,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return stamped;
         }
 
-        // RUNOFF STREAM stamp — real mountain runoff (user): a LARGE CARVED EROSION PATH (a snowmelt/flood
+        // RUNOFF STREAM stamp — real mountain runoff: a LARGE CARVED EROSION PATH (a snowmelt/flood
         // gully) with only a TRICKLE of water in the bottom, like you see in summer. So we cut a wide V-ravine
         // (bounded) and wet ONLY the ~centre as a thin continuous ribbon — the rest of the gully is carved but
         // dry. The overlapping disks keep it continuous on diagonal steps (no beading into dots), and the water
@@ -730,7 +730,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             // mask-2 BENCH cells are WALKABLE: the river's dry
                             // margin blocked the trace 2-6m short of the real
                             // channel and every confluence had a dry strip
-                            // (user screenshot: stream fanning out on the sand
+                            // (a stream fanning out on the sand
                             // beside the river). Only the channel itself ends
                             // the stream.
                             if (m[j] == 1 || m[j] == 3) { if (guard > 3) metMask = true; continue; }
@@ -754,7 +754,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // NO truncation at still water: the old RemoveAt(×2) left
                     // a 4m UNCARVED dirt lip between the channel and every
                     // pool it fed ("streams still not properly carving out
-                    // between pools" — user). The stamp skips wet cells, so
+                    // between pools"). The stamp skips wet cells, so
                     // carving flush to the pool can't damage the pool itself.
                     sources++;
                     // ORIGINAL surface captured BEFORE any digging (the disk
@@ -763,8 +763,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // reference height is the pristine MIN over the FULL
                     // stamp box, not the centreline — on spiky ground the
                     // centreline rides the ridge and the sheet FLOATED over
-                    // every crevice beside it, curl shards and all (user
-                    // screenshot). With the box min, the level sits below
+                    // every crevice beside it, curl shards and all. With the box min, the level sits below
                     // every bank cell the sheet spans and the carve digs the
                     // channel down to it — the mesh clips INTO the banks.
                     pathG.Clear();
@@ -784,7 +783,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     for (int k = 0; k < path.Count; k++)
                     {
                         int i = path[k];
-                        // Real summer RUNOFF: a carved erosion GULLY with a TRICKLE in the bottom (user). The
+                        // Real summer RUNOFF: a carved erosion GULLY with a TRICKLE in the bottom. The
                         // ravine deepens + widens downstream; the trickle surface sits well below the ground so
                         // it can't float off the terrain, and the overlapping stamp keeps it continuous (no dots).
                         float gd = WaterRules.Stream.RavineDepthMin + Mathf.Min(WaterRules.Stream.RavineDepthMax, k * WaterRules.Stream.RavineDepthRate);            // ravine depth 1.8 → 4.4m
@@ -792,7 +791,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         cellsN += StampRunoffCell(i, lvl, gd, k < 100 ? 1 : 2);
                     }
                     // TERMINAL RULE: a channel ends IN WATER or INTO A BANK —
-                    // never hanging on open ground (user screenshot: the
+                    // never hanging on open ground (the
                     // run's end standing as a floating curtain). A trace that
                     // died in a pit or on the flats gets a terminal POOL: one
                     // wide deep stamp — bowl, cut banks, berms — so the
@@ -814,7 +813,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // so we SHAPE them the way water would over time: a lake sits in a valley on the real drainage,
         // fed from upstream and DAMMED at the downstream lip with a cut OUTLET notch (the outflow
         // stream), a steep CUT-BANK cliff on one shore and a gentle DELTA shelf on the other — the
-        // erosion asymmetry the user described. Runs before NormalizeBasinWater so the drop-to-bank
+        // erosion asymmetry of real rivers. Runs before NormalizeBasinWater so the drop-to-bank
         // pass then levels each below its banks.
         private struct HLake { public int Px, Pz, DownE; }
         private static readonly System.Collections.Generic.List<HLake> s_highlandLakes = new System.Collections.Generic.List<HLake>();
@@ -868,8 +867,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     if (bad || (wallL < 3f && wallR < 3f)) continue;
 
-                    // CARVE an ORGANIC depression and LAY the water in (user: "carve the depression and lay the
-                    // water in, at whatever size is needed" — we're not simulating flow, the mesh just sits
+                    // CARVE an ORGANIC depression and LAY the water in, at whatever size is needed (we're
+                    // not simulating flow, the mesh just sits
                     // where we put it). The outline is a DOMAIN-WARPED blob — each point is shoved by smooth
                     // fbm before the radial test — so the shore is curved and irregular: NO circle, NO straight
                     // dam edge, NO radius clip. Bed is a bowl (deep centre → shore); the warped rim just past
@@ -906,8 +905,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 FiresLogger.LogInfo($"[FiresWorldGen] highland lakes: {made} closed valley basins carved ({wet:N0} cells wet) — cut-bank cliff + delta shore; spillways cut after leveling.");
         }
 
-        // Cut each highland lake's SPILLWAY + OUTFLOW after drop-to-bank has leveled the basin (user:
-        // "run the spillway notch after drop to banks, then run the river out from that"). Carving the
+        // Cut each highland lake's SPILLWAY + OUTFLOW after drop-to-bank has leveled the basin (run the
+        // spillway notch after drop to banks, then run the river out from that). Carving the
         // outlet earlier let drop-to-bank drain the whole lake down it. Here the level is FINAL: breach the
         // downstream bank down to the surface (the notch) and run a channel — a real outflow river —
         // stepping downhill until it meets lower water.

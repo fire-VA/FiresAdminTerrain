@@ -5,9 +5,9 @@ using UnityEngine;
 namespace VerdantsAscent.Terrain.Voxel
 {
     // ═══ RIVER LEVELS — THE ONE PLACE A RIVER'S SURFACE HEIGHT IS DECIDED ═══════════════════════════════
-    // (user, 2026-09: "WE PLACE STILLWATER FIRST WE SHOULD BE ABLE TO DRAW THE FUCKING CONNECTIONS AT THE
-    // CORRECT HEIGHTS NOT FUCKING RE PASS TO FIX THEM LATER"; and "part of the problem is it shouldnt BE a
-    // 14k line file … it should be broken up into manageable sections".)
+    // (Still water is placed first, so the connections can be drawn at the
+    // correct heights instead of being re-passed to fix them later; and a 14k-line file
+    // is broken up into manageable sections.)
     //
     // This file replaced ~250 lines of shaping that ran AFTER the levels were already correct and un-knew
     // them: the weir max(sm,stair), the CHANNEL_DROP taper, the junction blend, the slope relief, the
@@ -42,8 +42,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 var inCanyon = new bool[nn];   // node in a slot — takes the SMOOTH profile, not the weir staircase (see the restore below)
                 var anchorLvl = new float[nn]; // the body surface at each anchored node — restored HARD after every shaping pass
                 // ═══ THE CONTAINMENT CEILING — WHAT THIS NODE'S OWN BANKS CAN ACTUALLY HOLD ══════════════
-                // (2026-08-19, user: "the only reason we currently raise the green line is because you cannot
-                // seem to get the red and blue line to place right".) The FIRST value computed below is
+                // (The green line was only being raised because the red and blue lines
+                // did not place right.) The FIRST value computed below is
                 // already the physically correct ceiling — lowest bank minus relief — and if the level simply
                 // stayed at or under it, water could never stand above its own banks and the berm would have
                 // nothing to catch. It does not stay under it: of the ten longitudinal passes that follow,
@@ -63,9 +63,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     float fl = Mathf.Sqrt(fdx * fdx + fdz * fdz); if (fl < 1e-4f) fl = 1f;
                     float px = -fdz / fl, pz = fdx / fl;   // perpendicular to flow (the T-section direction)
                     // ═══ THE BANK IS THE LOWEST POINT THE WATER MUST STAY UNDER, NOT ONE SAMPLE OF IT ═══════
-                    // (2026-08-19, user: "if the rivers carve deep enough then we can afford to lay the mesh at
-                    // a steeper angle where we need to by dropping it down into the carve further to avoid
-                    // exposing the edge of the meshes".) Exactly — and that is affordable here BY CONSTRUCTION,
+                    // (If the rivers carve deep enough, the mesh can be laid at
+                    // a steeper angle where needed by dropping it further into the carve, to avoid
+                    // exposing the edge of the meshes.) That is affordable here BY CONSTRUCTION,
                     // because the bed is cut FROM the level (`profile = wl − depth·ChannelShape(dN/half)`), so
                     // dropping the level takes the whole channel down with it. There is no cost to going lower
                     // except a steeper bank, which is the thing being asked for.
@@ -92,11 +92,11 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (r2 < bankR) bankR = r2;
                     }
                     // ═══ A CANYON IS NOT A RIVER WITH TALL BANKS — ITS LEVEL COMES OFF THE FLOOR ══════════
-                    // (User, 2026-08-20: "a canyon has to know its a canyon and cannot use generic river
-                    // logic, because by default its a river at the bottom of a cliff on each side, so the
-                    // leveling logic is different and the bank offsets… the water within the canyon should
-                    // follow the same rules other water does, where it descends to the lowest point, not
-                    // drawing at multiple levels.")
+                    // (A canyon has to know it is a canyon and cannot use generic river
+                    // logic: by default it is a river at the bottom of a cliff on each side, so the
+                    // levelling logic and the bank offsets differ. The water within the canyon still
+                    // follows the same rules other water does, descending to the lowest point, never
+                    // drawing at multiple levels.)
                     // THE MECHANISM, and it is an OFFSET problem. `edge` above is ~3.5 m for a brook and ~12 m
                     // for a trunk, and ExcavateCanyons runs BEFORE `hOrig` is cloned (:9511 vs :9513) — so
                     // inside a canyon `hOrig` already holds the dug slot, and the perpendicular sample lands
@@ -110,7 +110,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // THE RULE: in a canyon the containing surface is the FLOOR the river runs on, not a bank
                     // a cliff away. Take the level from the pre-carve ground AT THE SPINE and let the monotone
                     // + backwater passes below carry it down to the lowest point exactly as they do
-                    // everywhere else — which is the user's requirement that canyon water obey the same rules
+                    // everywhere else — which is the requirement that canyon water obey the same rules
                     // as all other water. The rim then has no say in the water height, which is the point.
                     // ⚠ The class is available here only because ClassifyChannelIncision runs at :9482, ahead
                     // of this solve. It is GEN-TIME state and is NOT in the artifact — which is why the
@@ -129,7 +129,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // only ~417 nodes still carry a class. Meanwhile the terrain test below finds 13,705
                     // canyon-LOOKING water cells. The surviving classification and the water that actually
                     // reads as a canyon disagree by roughly 30x, so gating on `incCls` describes almost none
-                    // of what the user is pointing at — the first two cuts of this rule A/B'd BYTE-IDENTICAL
+                    // of the canyons that were observed — the first two cuts of this rule A/B'd BYTE-IDENTICAL
                     // for exactly that reason.
                     // So ask the ground, with the same test the in-world "Canyon river" label uses
                     // (IsCanyonWaterAt) so the label and the rule always agree about what a canyon is: a wall
@@ -144,8 +144,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         // wall did not measure 12 m above it and the reach failed its own detector, worst
                         // exactly in the deepest slots. That bug produced a "canyon nodes are 1.0 % of the
                         // network" figure, and a conclusion drawn from it ("the staircase was never a canyon
-                        // phenomenon") that the user correctly rejected with screenshots of confirmed canyons
-                        // showing the stepping. The floor at the node is the thing a wall stands over.
+                        // phenomenon") that was wrong: confirmed canyons
+                        // show the stepping. The floor at the node is the thing a wall stands over.
                         float probeLvl = hOrig[ncz * n + ncx];               // the bed here — what a wall is measured from
                         for (int rr = 4; rr <= (int)CANYON_RING_M && kcls == INC_NONE; rr += 4)
                             for (int a = 0; a < 8; a++)
@@ -157,9 +157,9 @@ namespace VerdantsAscent.Terrain.Voxel
                             }
                     }
                     // ═══ THE LEVEL IS REFERENCED TO THE BED; THE BANK ONLY SAYS "DO NOT OVERFLOW" ═════════
-                    // (User, 2026-08-20: "maybe filling to the lowest bank minus relief really only works when
-                    // all rivers are shallow and dont have tall banks — maybe instead we should be drawing
-                    // river depth from the bed and just making sure it doesnt overflow the bank?" That is the
+                    // (Filling to the lowest bank minus relief only works when
+                    // all rivers are shallow and have no tall banks; instead, river depth is drawn
+                    // from the bed, making sure it does not overflow the bank. That is the
                     // right model and it subsumes the canyon special case below.)
                     // `min(bank) − RELIEF` is a TOP-DOWN rule. It assumes the banks sit close to the water,
                     // which is true of a meadow stream and nonsense for a river at the bottom of a cliff,
@@ -191,8 +191,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         // The bed is the primary, and the bank may only lower it by a bounded amount: a bank
                         // genuinely a little below the bed is a real spill point and should pull the level
                         // down; a bank 200 m below is a sampling artifact and must not. Beyond that bound the
-                        // existing berm/rim safety is what holds the water in — which is the role the user
-                        // scopes it to ("a safety for when you inevitably cannot contain the mesh in spots").
+                        // existing berm/rim safety is what holds the water in — which is the role it is
+                        // given (a safety for where the mesh cannot be contained in spots).
                         const float MAX_BANK_DRAW = 3f;
                         cap[k] = Mathf.Max(bankCap, floorCap - MAX_BANK_DRAW);
                         if (kcls != INC_NONE) System.Threading.Interlocked.Increment(ref s_canyonNodes);
@@ -200,9 +200,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     else cap[k] = bankCap;
                     // ═══ THE PLAN ALREADY SOLVED THIS SURFACE. STOP THROWING IT AWAY. ════════════════════
-                    // (2026-08-19, user: "I explicitly said I wanted all water accounted for and placed with
-                    // purpose — how can our water be planned and purpose built and still have overlaps?"
-                    // He is right, and the answer is that it is planned for PLACEMENT and improvised for
+                    // (All water is accounted for and placed with purpose, so a planned,
+                    // purpose-built water network must not have overlaps.
+                    // The answer is that it was planned for PLACEMENT and improvised for
                     // HEIGHT.)
                     // FiresWaterPlanner.EmitConnection solves every run's levels GLOBALLY: anchored at the
                     // FromBody surface, descending monotonically to the ToBody surface, never uphill, never
@@ -248,7 +248,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     // `min(bank) - RELIEF`, which is the same statement made with a wider stencil).
                     // ⚠ THE BODY ANCHOR BELOW IS UNTOUCHED and must stay so: a node under a seeded body takes
                     // that body's surface, which is what makes a river meet a pond at the pond's level — the
-                    // half the user says already works. Still water is not in scope here at all; this function
+                    // half that already works. Still water is not in scope here at all; this function
                     // only ever sees river polylines.
                     // ⚠ The fill table is NOT the wet set — it fills every depression to its spill point. The
                     // dry pass that follows (mask 0 + above sea => w = g) already handles that, and is what the
@@ -261,7 +261,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         lvl[k] = fl2 < cap[k] ? fl2 : cap[k];        // …and the local bank is its ceiling
                     }
                     else lvl[k] = (s_riverPlanLevels && planLvl > 0f) ? planLvl : cap[k];
-                    // (v92) BASE-LEVEL ANCHOR (Playfair / HYDROLOGY.md Part V): a node UNDER a seeded body
+                    //  BASE-LEVEL ANCHOR (Playfair / HYDROLOGY.md Part V): a node UNDER a seeded body
                     // (lake/swamp) carries the body's surface EXACTLY — the outlet run then STARTS at the
                     // lake's spill elevation (the WHY of an outlet river), holds it flat across the body, and
                     // the monotone pass keeps everything downstream ≤ it. No step at the shore, no early dip.
@@ -269,7 +269,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int ai = az * n + ax;
                     if (seeded != null && seeded[ai] > hOrig[ai] + 0.01f) { lvl[k] = seeded[ai]; anchored[k] = true; anchorLvl[k] = seeded[ai]; }
                 }
-                // ═══ (TRACE 2026-08-19) DOES THE BASE-LEVEL ANCHOR EVER ACTUALLY FIRE? ═══════════════════
+                // ═══ (TRACE) DOES THE BASE-LEVEL ANCHOR EVER ACTUALLY FIRE? ═══════════════════
                 // The whole coherence of this network rests on it. A plan run is a HOP BETWEEN TWO BODIES —
                 // p50 is 28 m, because FiresWaterPlanner starts a run in open country and ends it the moment
                 // it enters a body — and `EmitConnection` makes it coherent by pinning both ends to those

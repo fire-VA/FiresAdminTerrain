@@ -14,12 +14,12 @@ namespace VerdantsAscent.Terrain.BcImport
     // never had it, so it generated the world on vanilla heights under the server's objects: "a BC world loaded without
     // BC". This hands the data over the way BetterContinents did (its ZNetPatch): the server holds the client's PeerInfo,
     // streams its own file in packets with backpressure, and only then lets PeerInfo run, so the client's WorldGenerator
-    // initialises with the data already on disk. The server's biome grid (BiomeGridSync, D12), its lakes, rivers and
-    // streams (RiverSync, D13) and a studio-baked world's terrain cache and river flow field (D14) follow the same way.
+    // initialises with the data already on disk. The server's biome grid (BiomeGridSync), its lakes, rivers and
+    // streams (RiverSync) and a studio-baked world's terrain cache and river flow field follow the same way.
     // Every item is content-addressed, so a returning client that already holds it transfers nothing, and the loading
     // screen says what is downloading or loading (JoinSyncScreen). On a client the server is the only authority: its
-    // announcement decides, never a local copy of a same-named world. Tools/BC_CHUNK_CONVERSION.md (D5, D11-D14).
-    internal static class BcJoinSync
+    // announcement decides, never a local copy of a same-named world.
+    internal static partial class BcJoinSync
     {
         internal enum ServerAnswer
         {
@@ -36,6 +36,8 @@ namespace VerdantsAscent.Terrain.BcImport
             Rivers,
             Bake,
             BakeFlow,
+            BakeCuts,   // The bake's big waterfall sinkholes (firesgen_<world>_sinkfalls.txt)
+            Surface,    // The world's water surface cache (firesgen_<world>_surface_<inputs>.bin), so a client skips the reconcile
         }
 
         // What each item is called in the log and on screen, its cache file extension, its two RPCs, and how many of its
@@ -69,6 +71,10 @@ namespace VerdantsAscent.Terrain.BcImport
                 CachedBakesKept),
             new ItemKind("studio river flow field", "river flow field", ".bakeflow", "FiresAdminTerrain_BcFlowCached",
                 "FiresAdminTerrain_BcFlowStart", CachedBakesKept),
+            new ItemKind("big waterfall sinkholes", "sinkholes", ".bakecuts", "FiresAdminTerrain_BcCutsCached",
+                "FiresAdminTerrain_BcCutsStart", CachedBakesKept),
+            new ItemKind("water surface cache", "water surface", ".surface", "FiresAdminTerrain_BcSurfCached",
+                "FiresAdminTerrain_BcSurfStart", CachedBakesKept),
         };
 
         private const string RpcHave = "FiresAdminTerrain_BcHave";
@@ -77,13 +83,13 @@ namespace VerdantsAscent.Terrain.BcImport
         // Client to server: false at connection ("I read a bake on a worker and will say when it is done"), true once done.
         private const string RpcBakeRead = "FiresAdminTerrain_BcBakeRead";
         private const string PeerInfoRpc = "PeerInfo";
-        // A client takes what its Steam receive buffer holds each frame (FGN's 256 KB on the rig), and only whole messages are
-        // handed over, so 128 KB packets left it one a frame: R3, 131 KB a frame at any fps. Smaller packets fill the buffer.
+        // A client takes what its Steam receive buffer holds each frame (e.g. 256 KB), and only whole messages are
+        // handed over, so 128 KB packets left it one a frame: 131 KB a frame at any fps. Smaller packets fill the buffer.
         private const int PacketBytes = 32 * 1024;
         private const int SendWindowBytes = 1024 * 1024;
         // PlayFab's GetSendQueueSize is the UNACKNOWLEDGED bytes x 0.25 (ZPlayFabSocket), so the 1 MB window let ~4 MB sit
-        // unacked; vanilla's retransmit then resent that whole queue every 6 s and R53's 151 MB crawled at ~0.3 MB/s
-        // ([fgn], 2026-09-28). 32 KB here is ~128 KB in flight, the scale VAngarde's character upload uses.
+        // unacked; vanilla's retransmit then resent that whole queue every 6 s and a 151 MB send crawled at ~0.3 MB/s.
+        // 32 KB here is ~128 KB in flight, the scale VAngarde's character upload uses.
         private const int PlayFabSendWindowBytes = 32 * 1024;
         private const long FrameBudgetMs = 4;
         private const float StallSeconds = 60f;
@@ -112,6 +118,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         private static readonly ServerAnswer[] s_answers = new ServerAnswer[Kinds.Length];
         private static readonly string[] s_answerIds = new string[Kinds.Length];
+        private static readonly string[] s_answerPaths = new string[Kinds.Length];   // A local world cache used in place
         private static Item s_receivingItem;
         private static string s_receivingId;
         private static int s_expected;
@@ -149,7 +156,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 peer.m_rpc.Register<string>(KindOf(each).CachedRpc, (rpc, id) => OnCached(each, id));
                 peer.m_rpc.Register<string, int>(KindOf(each).StartRpc, (rpc, id, length) => OnStart(each, id, length));
             }
-            peer.m_rpc.Register<int, ZPackage>(RpcPacket, (rpc, offset, pkg) => OnPacket(offset, pkg));
+            peer.m_rpc.Register<int, ZPackage>(RpcPacket, (rpc, offset, pkg) => { KeepAlive(rpc); OnPacket(offset, pkg); });
             peer.m_rpc.Register<ZPackage>(PeerInfoRpc, (rpc, pkg) => RunPeerInfoTimed(net, rpc, pkg));
             s_server = peer.m_rpc;
             peer.m_rpc.Invoke(RpcBakeRead, false);
@@ -157,9 +164,9 @@ namespace VerdantsAscent.Terrain.BcImport
         }
 
         // Client: the server's PeerInfo builds the world on the main thread, so what it costs there is the freeze a joining
-        // player sees ([perf]: 7.8 s in R25, most of it reading the bake, which a worker now does ahead of it).
+        // player sees (7.8 s once, most of it reading the bake, which a worker now does ahead of it).
         // A PeerInfo still queued when this game has already dropped the connection is not run: vanilla returns at once for
-        // a peer that is gone, but other mods' postfixes still ran and threw on it (M1, PlayFab: Server Devcommands'
+        // a peer that is gone, but other mods' postfixes still ran and threw on it (PlayFab: Server Devcommands'
         // RegisterRPCs, GetPeer(rpc).m_server), which read as a join failure of its own.
         private static void RunPeerInfoTimed(ZNet net, ZRpc rpc, ZPackage peerInfo)
         {
@@ -184,7 +191,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         private static void ReadBakeAhead(ServerAnswer answer, string id)
         {
-            if (answer == ServerAnswer.Data && ReadsBakeAhead) Voxel.BakePreload.Start(CachePath(id, Item.Bake));
+            if (answer == ServerAnswer.Data && ReadsBakeAhead) Voxel.BakePreload.Start(s_answerPaths[(int)Item.Bake] ?? CachePath(id, Item.Bake));
             ZRpc server = s_server;
             if (server != null && ZNet.instance != null) ZNet.instance.StartCoroutine(ReportBakeReadWhenDone(server));
         }
@@ -197,13 +204,23 @@ namespace VerdantsAscent.Terrain.BcImport
 
         // ── Server ──────────────────────────────────────────────────────────
         // Server, as a studio bake loads: its hash starts on a worker at once, so the first joining client does not wait for
-        // hundreds of MB to be hashed (R22: Core hashed the 377 MB bake on the main thread at every join, 3 s).
+        // hundreds of MB to be hashed (Core hashed a 377 MB bake on the main thread at every join, 3 s).
         internal static void Prehash(string path)
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
             HashOf(path);
             string flow = Path.ChangeExtension(path, FlowExtension);
             if (File.Exists(flow)) HashOf(flow);
+            string cuts = CutsBeside(path) ?? Voxel.FiresWorldGenBase.LoadedCutsPath;   // A generated world's list
+            if (cuts != null && File.Exists(cuts)) HashOf(cuts);
+        }
+
+        // A bake's big waterfall sinkholes sit beside it as firesgen_<world>_sinkfalls.txt (FatSinkFallCuts).
+        private static string CutsBeside(string bake)
+        {
+            const string bakedSuffix = "_baked.bin";
+            return bake != null && bake.EndsWith(bakedSuffix, StringComparison.OrdinalIgnoreCase)
+                ? bake.Substring(0, bake.Length - bakedSuffix.Length) + Voxel.FatSinkFallCuts.Suffix : null;
         }
 
         // Every join passes through here, so a fault in the sync must never strand a player at "Connecting". PeerInfo runs
@@ -296,15 +313,42 @@ namespace VerdantsAscent.Terrain.BcImport
             }
             if (bake != null)
             {
-                yield return net.StartCoroutine(SendFile(net, rpc, Item.Bake, bake, holds, outcome));
-                if (!outcome.Ok) yield break;
-                string flow = Path.ChangeExtension(bake, FlowExtension);
-                if (File.Exists(flow))
+                // A GENERATED world's cache rides the same item as a studio bake. A client CAN
+                // build a generated world itself, so a failed send of one admits it anyway (it generates, loudly logged on
+                // both sides) instead of turning it away; a studio bake, which a client cannot rebuild, still turns it away.
+                bool clientCanBuild = CutsBeside(bake) == null;
+                yield return net.StartCoroutine(SendFile(net, rpc, Item.Bake, bake, holds, outcome, refuseOnFail: !clientCanBuild));
+                if (outcome.Gone) yield break;
+                if (!outcome.Ok)
                 {
-                    yield return net.StartCoroutine(SendFile(net, rpc, Item.BakeFlow, flow, holds, outcome));
-                    if (!outcome.Ok) yield break;
+                    if (!clientCanBuild) yield break;
+                    FiresLogger.LogError($"[BcImport] join sync: this world's cache could not be sent to {Describe(rpc)}; it is admitted "
+                        + "and will GENERATE the world itself (a first join then takes several minutes and many GB of memory).");
                 }
-                yield return net.StartCoroutine(AwaitBakeRead(rpc));
+                else
+                {
+                    string flow = Path.ChangeExtension(bake, FlowExtension);
+                    if (File.Exists(flow))
+                    {
+                        yield return net.StartCoroutine(SendFile(net, rpc, Item.BakeFlow, flow, holds, outcome, refuseOnFail: !clientCanBuild));
+                        if (outcome.Gone || (!outcome.Ok && !clientCanBuild)) yield break;
+                    }
+                    string cuts = CutsBeside(bake) ?? Voxel.FiresWorldGenBase.LoadedCutsPath;   // A generated world's list
+                    if (cuts != null && File.Exists(cuts))
+                    {
+                        yield return net.StartCoroutine(SendFile(net, rpc, Item.BakeCuts, cuts, holds, outcome, refuseOnFail: !clientCanBuild));
+                        if (outcome.Gone || (!outcome.Ok && !clientCanBuild)) yield break;
+                    }
+                    // The water surface cache, so the client skips the full-res reconcile (~6 GB). Optional: a client rebuilds it.
+                    string surface = Voxel.FiresWorldGenBase.LoadedSurfacePath;
+                    if (surface != null && File.Exists(surface))
+                    {
+                        yield return net.StartCoroutine(SendFile(net, rpc, Item.Surface, surface, holds, outcome, refuseOnFail: false));
+                        if (outcome.Gone) yield break;
+                        if (!outcome.Ok) FiresLogger.LogWarning($"[BcImport] join sync: the water surface cache could not be sent to {Describe(rpc)}; it rebuilds its own.");
+                    }
+                    yield return net.StartCoroutine(AwaitBakeRead(rpc));
+                }
             }
             if (IsConnected(rpc)) RunPeerInfo(net, rpc, peerInfo);
         }
@@ -337,7 +381,8 @@ namespace VerdantsAscent.Terrain.BcImport
 
         // A file on the server's disk: hashed on a worker (kept per file and write time), then sent like any item. Refuses the
         // client when it cannot be read or sent; outcome.Ok says the client has it.
-        private static IEnumerator SendFile(ZNet net, ZRpc rpc, Item item, string path, HashSet<string> holds, SendOutcome outcome)
+        private static IEnumerator SendFile(ZNet net, ZRpc rpc, Item item, string path, HashSet<string> holds, SendOutcome outcome,
+            bool refuseOnFail = true)
         {
             outcome.Ok = false;
             outcome.Gone = false;
@@ -345,13 +390,13 @@ namespace VerdantsAscent.Terrain.BcImport
             while (!hash.IsCompleted) yield return null;
             if (hash.IsFaulted || string.IsNullOrEmpty(hash.Result))
             {
-                FiresLogger.LogError($"[BcImport] join sync: {path} could not be read ({hash.Exception?.GetBaseException().Message}), "
-                    + $"so {Describe(rpc)} was turned away rather than shown different terrain.");
-                Refuse(net, rpc);
+                FiresLogger.LogError($"[BcImport] join sync: {path} could not be read ({hash.Exception?.GetBaseException().Message})"
+                    + (refuseOnFail ? $", so {Describe(rpc)} was turned away rather than shown different terrain." : "."));
+                if (refuseOnFail) Refuse(net, rpc);
                 yield break;
             }
             yield return net.StartCoroutine(SendItem(rpc, item, hash.Result, () => TryOpen(path, rpc), holds, outcome));
-            if (!outcome.Gone && !outcome.Ok) Refuse(net, rpc);
+            if (!outcome.Gone && !outcome.Ok && refuseOnFail) Refuse(net, rpc);
         }
 
         // After an item the join goes on unless the client left or the send failed (then it is turned away).
@@ -557,11 +602,13 @@ namespace VerdantsAscent.Terrain.BcImport
         internal static ServerAnswer BakeAnswer(out string cachedPath) => AnswerFor(Item.Bake, out cachedPath);
 
         internal static ServerAnswer BakeFlowAnswer(out string cachedPath) => AnswerFor(Item.BakeFlow, out cachedPath);
+        internal static ServerAnswer BakeCutsAnswer(out string cachedPath) => AnswerFor(Item.BakeCuts, out cachedPath);
+        internal static ServerAnswer SurfaceAnswer(out string cachedPath) => AnswerFor(Item.Surface, out cachedPath);
 
         private static ServerAnswer AnswerFor(Item item, out string cachedPath)
         {
             var answer = s_answers[(int)item];
-            cachedPath = answer == ServerAnswer.Data ? CachePath(s_answerIds[(int)item], item) : null;
+            cachedPath = answer == ServerAnswer.Data ? s_answerPaths[(int)item] ?? CachePath(s_answerIds[(int)item], item) : null;
             return answer;
         }
 
@@ -572,6 +619,7 @@ namespace VerdantsAscent.Terrain.BcImport
             {
                 s_answers[i] = ServerAnswer.NoAnswer;
                 s_answerIds[i] = null;
+                s_answerPaths[i] = null;
             }
             s_server = null;
             Voxel.BakePreload.Reset();
@@ -599,6 +647,17 @@ namespace VerdantsAscent.Terrain.BcImport
         private static void OnCached(Item item, string id)
         {
             string path = CachePath(id, item);
+            // The id may be this game's OWN world cache (a firesgen_*.bin it generated or loaded before),
+            // offered in the held list by BcLocalCaches. It is used where it lies: no download, nothing written to bcsync.
+            if (!File.Exists(path) && BcLocalCaches.TryGet(id, out string local))
+            {
+                s_answerPaths[(int)item] = local;   // before SetAnswer: the bake's read-ahead starts from it
+                SetAnswer(item, ServerAnswer.Data, id);
+                FiresLogger.LogInfo($"[BcImport] join sync: the server's {NameOf(item)} {id} matches this game's own world cache {local}: "
+                    + "using local cache, no download.");
+                ShowWhatLoadsNext();
+                return;
+            }
             if (!File.Exists(path))
             {
                 SetAnswer(item, ServerAnswer.Failed, null);
@@ -629,6 +688,17 @@ namespace VerdantsAscent.Terrain.BcImport
             FiresLogger.LogInfo($"[BcImport] join sync: receiving the server's {NameOf(item)} {id} "
                 + $"({length / BytesPerMegabyte:0.#} MB); it is kept, so this happens once per content.");
             if (length >= ScreenFromBytes) JoinSyncScreen.ShowDownload(KindOf(item).ScreenName, 0, length, 0f);
+        }
+
+        // Vanilla ZRpc only counts the server's ping REPLY as alive, and that
+        // reply waits behind the queued download data in Steam's in-order delivery. The client was running (17-164 fps,
+        // 14 MB/s) but dropped itself with "ZRpc timeout detected" at 175.8 of 585.9 MB. A download packet from the server
+        // proves the link just as well, so each one resets the client's ping clock.
+        private static readonly AccessTools.FieldRef<ZRpc, float> TimeSinceLastPing = AccessTools.FieldRefAccess<ZRpc, float>("m_timeSinceLastPing");
+
+        private static void KeepAlive(ZRpc rpc)
+        {
+            if (rpc != null) TimeSinceLastPing(rpc) = 0f;
         }
 
         private static void OnPacket(int offset, ZPackage pkg)
@@ -715,6 +785,7 @@ namespace VerdantsAscent.Terrain.BcImport
             string[] ids = Directory.Exists(CacheFolder)
                 ? Kinds.SelectMany(kind => Directory.GetFiles(CacheFolder, "*" + kind.Extension)).Select(Path.GetFileNameWithoutExtension).ToArray()
                 : Array.Empty<string>();
+            ids = ids.Concat(BcLocalCaches.KnownIds()).Distinct().ToArray();   // This game's own world caches too
             pkg.Write(ids.Length);
             foreach (string id in ids) pkg.Write(id);
             return pkg;

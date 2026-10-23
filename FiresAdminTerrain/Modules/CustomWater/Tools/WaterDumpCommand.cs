@@ -276,7 +276,7 @@ namespace VerdantsAscent.Water.Core
             // File: full report
             try
             {
-                string cfgDir = Path.Combine(BepInEx.Paths.ConfigPath, "FiresAdminTerrain");
+                string cfgDir = global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain");   // cache folder, not config
                 Directory.CreateDirectory(cfgDir);
                 string filePath = Path.Combine(cfgDir, DumpFileName);
                 File.WriteAllText(filePath, report.ToString());
