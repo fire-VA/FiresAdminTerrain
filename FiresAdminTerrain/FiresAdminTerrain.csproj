@@ -32,7 +32,7 @@
     <OutputPath>bin\Release\</OutputPath>
     <!-- ENABLE_PROFILER: ProfilerMarker.Begin/End are [Conditional("ENABLE_PROFILER")], so without it every marker
          compiles away and FAT is invisible in a Unity Profiler capture. The markers cost tens of nanoseconds when no
-         profiler is attached, and they are what lets [perf] name FAT's frames instead of guessing at "(native code)". -->
+         profiler is attached, and they are what lets a profiling session name FAT's frames instead of guessing at "(native code)". -->
     <DefineConstants>TRACE;ENABLE_PROFILER</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
