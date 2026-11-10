@@ -30,7 +30,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 // Only looked up when Server Devcommands is loaded, so a game without it never logs a missing type.
                 if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(SdcGuid))
                 {
-                    Type flyFeatures = AccessTools.TypeByName("ServerDevcommands.FlyFeatures");
+                    Type flyFeatures = FatSoftTypes.Find("ServerDevcommands.FlyFeatures");
                     s_sdcNoClip = flyFeatures != null ? AccessTools.Method(flyFeatures, "NoClipPlayerEnabled") : null;
                 }
             }

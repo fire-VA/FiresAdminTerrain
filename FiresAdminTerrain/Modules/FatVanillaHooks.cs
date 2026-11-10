@@ -39,6 +39,7 @@ namespace VerdantsAscent.Terrain
                 FatGroundProbe.RegisterCommand();            // va_ground_probe: what the SERVER stands on at a spot
                 FatGroundProbe.RegisterSurfaceProbe();
                 global::VerdantsAscent.Water.FatWaterLevelGate.RegisterCommand();
+                global::VerdantsAscent.Water.Core.ToolWaterStencil.RegisterCommand();   // 0.2.1068
                 global::VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.RegisterSwimProbe();   // fat_swim_probe   // fat_waterlevel_ab (the zone gate A/B)       // fat_surface_probe: every voxel surface crossing in a column
                 FiresCaveBiome.RegisterProbe();              // fat_biome_probe: every biome reader at a point
                 VerdantsAscent.Performance.ClutterGroundProbe.RegisterProbe();   // fat_clutter_probe: grass by layer
@@ -52,6 +53,7 @@ namespace VerdantsAscent.Terrain
                 Zones.ZoneModeChunkSpawner.RegisterAimProbe();   // fat_hammer_aim: the Chunk Hammer's target zone
                 global::VerdantsAscent.Water.Core.FishCheckCommand.Register();   // va_fish_check / va_fish_spawn: inland fish proof (admin)
                 FiresSkyIslands.RegisterCommands();
+                FatHaloArc.RegisterCommand();   // 0.2.1027 fat_halo_arc: the halo ring spike arc
                 FiresWorldClone.RegisterCommands();
                 FiresWorldCloudArchive.RegisterCommands();
                 global::VerdantsAscent.Terrain.Zones.ZoneModeChunkTools.RegisterSelfTest();   // fat_hammer_selftest: every Chaos Hammer tool selects itself
@@ -122,10 +124,13 @@ namespace VerdantsAscent.Terrain
                 try { FiresWorldLoadGuard.BeforeFirstLookup(name); }
                 catch (Exception ex) { FiresLogger.LogError($"[FiresWorldLoadGuard] sorting '{name}' before its first save lookup failed: {ex}"); }
                 __state = World.HaveWorld(name);
-                return FiresWorldLoadGuard.BeforeCreateWorld(name, ref __result);
+                // 0.2.1059 (load/save audit M3): a throw here means "no opinion": vanilla creates or loads as it would.
+                try { return FiresWorldLoadGuard.BeforeCreateWorld(name, ref __result); }
+                catch (Exception ex) { FatLoadGuard.Failed("world create guard", ex); return true; }
             }
 
-            private static void Postfix(World __result, bool __state) => ZoneModeNewWorld.AfterCreateWorld(__result, existed: __state);
+            private static void Postfix(World __result, bool __state)
+                => FatLoadGuard.Step("zone-mode new world", () => ZoneModeNewWorld.AfterCreateWorld(__result, existed: __state));
         }
 
         [HarmonyPatch(typeof(SaveSystem), nameof(SaveSystem.GetWorldList))]
@@ -156,31 +161,32 @@ namespace VerdantsAscent.Terrain
         [HarmonyPatch(typeof(ZNet), nameof(ZNet.Awake))]
         private static class ZNet_Awake
         {
+            // 0.2.1059 (load/save audit M5): one guarded step per registration, so a throw skips only that one.
             private static void Postfix()
             {
-                ZoneModeOpening.EnsureRpcs();
-                ZoneModeCommands.EnsureRpcs();
-                ZoneModeCloseable.EnsureRpcs();
+                FatLoadGuard.Step("ZoneModeOpening RPCs", ZoneModeOpening.EnsureRpcs);
+                FatLoadGuard.Step("ZoneModeCommands RPCs", ZoneModeCommands.EnsureRpcs);
+                FatLoadGuard.Step("ZoneModeCloseable RPCs", ZoneModeCloseable.EnsureRpcs);
 #if FIRES_TESTS
-                Testing.CavesTest.EnsureRpcs();
+                FatLoadGuard.Step("CavesTest RPCs", Testing.CavesTest.EnsureRpcs);
 #endif
-                VerdantsAscent.Ocean.OceanKit.DecideAndStart();   // Once - dormant while RPGClasses still runs the ocean
+                FatLoadGuard.Step("OceanKit start", VerdantsAscent.Ocean.OceanKit.DecideAndStart);   // Once - dormant while RPGClasses still runs the ocean
 #if FIRES_TESTS
-                Testing.LoadTest.EnsureRpcs();
+                FatLoadGuard.Step("LoadTest RPCs", Testing.LoadTest.EnsureRpcs);
 #endif
-                ZoneModeChunkKeys.EnsureRpcs();
-                ZoneModeChunkTools.EnsureRpcs();
-                ZoneModeStartPins.EnsureRpcs();
-                FiresSkyIslands.EnsureEditRpcs();
-                RegionScrubberRPC.ResetInitialized();
-                RegionScrubberRPC.Register();
+                FatLoadGuard.Step("ZoneModeChunkKeys RPCs", ZoneModeChunkKeys.EnsureRpcs);
+                FatLoadGuard.Step("ZoneModeChunkTools RPCs", ZoneModeChunkTools.EnsureRpcs);
+                FatLoadGuard.Step("ZoneModeStartPins RPCs", ZoneModeStartPins.EnsureRpcs);
+                FatLoadGuard.Step("sky island edit RPCs", FiresSkyIslands.EnsureEditRpcs);
+                FatLoadGuard.Step("RegionScrubber RPC", () => { RegionScrubberRPC.ResetInitialized(); RegionScrubberRPC.Register(); });
+                FatLoadGuard.Step("BcRegen RPCs", BcImport.BcRegenCommand.EnsureRpcs);   // 0.2.1219
                 // TileBrushRPC is not registered: the 2D tile layer is retired; only its purge answers.
-                TileAnchorHeal.EnsureRpcs();
-                FatWorldgenTest.EnsureRpcs();
+                FatLoadGuard.Step("TileAnchorHeal RPCs", TileAnchorHeal.EnsureRpcs);
+                FatLoadGuard.Step("FatWorldgenTest RPCs", FatWorldgenTest.EnsureRpcs);
 #if FIRES_TESTS
-                Testing.AdminToolsProbe.EnsureRpcs();
+                FatLoadGuard.Step("AdminToolsProbe RPCs", Testing.AdminToolsProbe.EnsureRpcs);
 #endif
-                global::VerdantsAscent.Water.Core.FiresSeaWind.Init();
+                FatLoadGuard.Step("sea wind init", global::VerdantsAscent.Water.Core.FiresSeaWind.Init);
             }
 
             // After every registration, this mod's and ConfigSync's, so the counts it reports are real.
@@ -264,15 +270,16 @@ namespace VerdantsAscent.Terrain
             private static void Postfix()
             {
                 var steps = new StepTimes();
-                TileAnchorPrefab.Ensure();
+                // 0.2.1059 (load/save audit M5): each step guarded.
+                FatLoadGuard.Step("tile anchor prefab", () => TileAnchorPrefab.Ensure());
                 steps.Lap("tile anchor");
-                ZoneModeChunkGenerator.OnZNetSceneAwake();
+                FatLoadGuard.Step("chunk generator prefab", ZoneModeChunkGenerator.OnZNetSceneAwake);
                 steps.Lap("chunk generator");
-                TreeSaplingPrefabs.OnZNetSceneAwake();
+                FatLoadGuard.Step("sapling prefabs", TreeSaplingPrefabs.OnZNetSceneAwake);
                 steps.Lap("saplings");
-                TreeSeedDrops.OnZNetSceneAwake();
+                FatLoadGuard.Step("seed drops", TreeSeedDrops.OnZNetSceneAwake);
                 steps.Lap("seed drops");
-                Utilities.ArmorStandEffectFix.OnZNetSceneAwake();
+                FatLoadGuard.Step("armor stand fix", Utilities.ArmorStandEffectFix.OnZNetSceneAwake);
                 steps.Lap("armor stands");
                 FiresLogger.LogInfo($"[FiresAdminTerrain] ZNetScene.Awake steps: {steps}.");
             }
@@ -282,15 +289,15 @@ namespace VerdantsAscent.Terrain
             private static void EnsureAnchors()
             {
                 var steps = new StepTimes();
-                WaterAnchorPrefab.Ensure();
+                FatLoadGuard.Step("water anchor prefab", () => WaterAnchorPrefab.Ensure());
                 steps.Lap("water anchor");
-                FiresLiquidWaterPrefab.Ensure();
+                FatLoadGuard.Step("liquid water prefab", () => FiresLiquidWaterPrefab.Ensure());
                 steps.Lap("liquid water");
-                LandIceAnchorPrefab.Ensure();
+                FatLoadGuard.Step("land ice anchor prefab", () => LandIceAnchorPrefab.Ensure());
                 steps.Lap("land ice");
-                LandSnowAnchorPrefab.Ensure();
+                FatLoadGuard.Step("land snow anchor prefab", () => LandSnowAnchorPrefab.Ensure());
                 steps.Lap("land snow");
-                VoxelAnchorPrefab.Ensure();
+                FatLoadGuard.Step("voxel anchor prefab", () => VoxelAnchorPrefab.Ensure());
                 steps.Lap("voxel anchor");
                 FiresLogger.LogInfo($"[FiresAdminTerrain] ZNetScene.Awake anchor steps: {steps}.");
             }
@@ -301,11 +308,12 @@ namespace VerdantsAscent.Terrain
         {
             private static void Postfix(ObjectDB __instance)
             {
-                VoxelToolPieces.OnObjectDBAwake(__instance);
-                ZoneModeChunkGenerator.OnObjectDBAwake(__instance);
-                ZoneModeChunkTools.OnObjectDBAwake(__instance);
-                TreeSaplingPrefabs.OnObjectDBAwake();
-                VAFatToolIcons.Register();
+                // 0.2.1059 (load/save audit M5): each step guarded.
+                FatLoadGuard.Step("voxel tool pieces", () => VoxelToolPieces.OnObjectDBAwake(__instance));
+                FatLoadGuard.Step("chunk generator items", () => ZoneModeChunkGenerator.OnObjectDBAwake(__instance));
+                FatLoadGuard.Step("chunk tool items", () => ZoneModeChunkTools.OnObjectDBAwake(__instance));
+                FatLoadGuard.Step("sapling items", TreeSaplingPrefabs.OnObjectDBAwake);
+                FatLoadGuard.Step("tool icons", VAFatToolIcons.Register);
             }
         }
 
@@ -418,6 +426,7 @@ namespace VerdantsAscent.Terrain
                 if (!__result) return;
                 FiresMinimapRivers.MapReady("loaded from PNG cache");
                 FiresMinimapIslands.MapReady();
+                VerdantsAscent.Terrain.Voxel.FatHaloMap.MapReady();   // 0.2.1037 HaloFlat: the ring only
             }
 
             // A finalizer, so the borrowed world version is restored even when the load throws.
@@ -435,6 +444,7 @@ namespace VerdantsAscent.Terrain
                 ZoneModeMinimapReport.Finish(__state);
                 FiresMinimapRivers.MapReady("generated fresh");
                 FiresMinimapIslands.MapReady();
+                VerdantsAscent.Terrain.Voxel.FatHaloMap.MapReady();   // 0.2.1037 HaloFlat: the ring only
             }
         }
 
@@ -519,17 +529,24 @@ namespace VerdantsAscent.Terrain
         {
             // The server records its own lakes, rivers and streams for joining clients; a client that replays the server's
             // lists skips vanilla's search.
+            // 0.2.1059 (load/save audit M4): a throw here = no replay; vanilla runs its own search.
             private static bool Prefix(WorldGenerator __instance)
             {
-                BcImport.RiverSync.BeforePregenerate(__instance);
-                return !BcImport.RiverSync.TryReplay(__instance);
+                try
+                {
+                    BcImport.RiverSync.BeforePregenerate(__instance);
+                    return !BcImport.RiverSync.TryReplay(__instance);
+                }
+                catch (Exception ex) { FatLoadGuard.Failed("river replay", ex); return true; }
             }
 
-            private static void Postfix(WorldGenerator __instance) => BcImport.RiverSync.AfterPregenerate(__instance);
+            private static void Postfix(WorldGenerator __instance)
+                => FatLoadGuard.Step("river record", () => BcImport.RiverSync.AfterPregenerate(__instance));
 
             [HarmonyPostfix]
             [HarmonyPriority(Priority.Low)]
-            private static void AutoWater(WorldGenerator __instance) => AutoWaterPatches.OnPregenerated(__instance);
+            private static void AutoWater(WorldGenerator __instance)
+                => FatLoadGuard.Step("auto water data", () => AutoWaterPatches.OnPregenerated(__instance));
         }
 
         [HarmonyPatch(typeof(ZoneSystem), "Start")]
@@ -537,12 +554,15 @@ namespace VerdantsAscent.Terrain
         {
             private static void Postfix(ZoneSystem __instance)
             {
-                CustomWaterPatches.OnZoneSystemStart(__instance);
-                ZoneModeRegistry.SubscribeSeeding();
-                FarQuilt.OnZoneSystemStart();
-                VoxelZoneStreamer.OnZoneSystemStart();
-                ZoneSystem_PlaceVegetation_Density.WarmExemptions(__instance);
-                VegetationWarmUp.OnZoneSystemStart(__instance);
+                // 0.2.1059 (load/save audit M5): each step guarded.
+                FatLoadGuard.Step("custom water start", () => CustomWaterPatches.OnZoneSystemStart(__instance));
+                FatLoadGuard.Step("zone seeding", ZoneModeRegistry.SubscribeSeeding);
+                FatLoadGuard.Step("far quilt start", FarQuilt.OnZoneSystemStart);
+                FatLoadGuard.Step("placevegetation patch report", ReportPlaceVegetationPatches);   // 0.2.1415 (EWD proof)
+                FatLoadGuard.Step("far forest start", () => VerdantsAscent.Terrain.FarForest.FarForest.OnZoneSystemStart(__instance));   // 0.2.1412
+                FatLoadGuard.Step("voxel streamer start", VoxelZoneStreamer.OnZoneSystemStart);
+                FatLoadGuard.Step("vegetation exemptions", () => ZoneSystem_PlaceVegetation_Density.WarmExemptions(__instance));
+                FatLoadGuard.Step("vegetation warm-up", () => VegetationWarmUp.OnZoneSystemStart(__instance));
                 // HERE, not ZNet.Start. Measured on the dedi: ZNet.Start's postfix runs at log line 642
                 // and FiresWorldGenBase's world-init profile branch at 644, so reading that branch's result from
                 // ZNet.Start reads it two lines too early and silently does nothing.
@@ -558,6 +578,19 @@ namespace VerdantsAscent.Terrain
             {
                 VoxelZoneStreamer.OnHeightmapRegenerate(__instance);
                 DistantPaintCache.OnHeightmapRegenerate(__instance);
+                VerdantsAscent.Water.Core.PlacedWaterField.OnHeightmapRegenerate(__instance);   // 0.2.1331
+            }
+        }
+
+        // 0.2.1350 (proof only, Debug): the zone's spawn stamp for the zone stage line. Reads, sets nothing on the heightmap.
+        [HarmonyPatch(typeof(Heightmap), "OnEnable")]
+        private static class Heightmap_OnEnable
+        {
+            private static void Postfix(Heightmap __instance)
+            {
+                if (!FiresLogger.DebugEnabled) return;
+                try { VoxelZoneStreamer.NoteHeightmapEnabled(__instance); }
+                catch (Exception ex) { FiresLogger.LogDebug($"[FiresVoxel] heightmap spawn proof threw: {ex.Message}"); }
             }
         }
 
@@ -577,12 +610,20 @@ namespace VerdantsAscent.Terrain
             [HarmonyPostfix]
             [HarmonyPriority(Priority.Last)]
             private static void EnvBoxColours(Heightmap __instance)
-                => global::VerdantsAscent.Utilities.EnvironmentBoxPatches.AfterRebuildRenderMesh(__instance);
+            {
+                long t0 = ZoneUpdateTimes.Now();
+                global::VerdantsAscent.Utilities.EnvironmentBoxPatches.AfterRebuildRenderMesh(__instance);
+                ZoneUpdateTimes.AddIfInside(ZoneUpdateTimes.Cause.HmEnvBox, t0);   // 0.2.1089 [ZoneUpdate]
+            }
 
             [HarmonyPostfix]
             [HarmonyPriority(Priority.Last - 5)]
             private static void BiomePaint(Heightmap __instance)
-                => global::VerdantsAscent.Terrain.Biome.BiomePaintPersistence.BiomePaintPatches.ApplyPaintColors(__instance);
+            {
+                long t0 = ZoneUpdateTimes.Now();
+                global::VerdantsAscent.Terrain.Biome.BiomePaintPersistence.BiomePaintPatches.ApplyPaintColors(__instance);
+                ZoneUpdateTimes.AddIfInside(ZoneUpdateTimes.Cause.HmPaintColours, t0);   // 0.2.1089 [ZoneUpdate]
+            }
         }
 
         [HarmonyPatch(typeof(ClutterSystem), "GenerateVegPatch")]
@@ -591,29 +632,80 @@ namespace VerdantsAscent.Terrain
             // All three run, as separate prefixes did: the water-level move and the spread takeover still happen when a
             // dedicated server skips the build. A server without graphics grows no grass at all (without this,
             // patches were built on the headless dedi); no patch is vanilla's own "nothing here".
+            // 0.2.1089 (FDT, live 1088: this prefix + finalizer were among the hottest hooks, 372 calls/s): the headless answer
+            // is asked of the engine once, the finalizer does work only when an exception is present or the water band was moved,
+            // and the gate stages are timed for the [ClutterGate] hook line (every 30 s, Debug).
+            private static int s_headless = -1;   // -1 unknown, 0 no, 1 yes
+            private static int s_calls, s_headlessSkips, s_flatBlocked, s_spreadBuilt, s_vanillaRan;
+            private static long s_gateTicks, s_buildTicks;
+            private static float s_logAt;
+
             private static bool Prefix(ClutterSystem __instance, Vector2Int patchID, float size, ref object __result)
             {
-                if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
+                if (s_headless < 0) s_headless = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null ? 1 : 0;
+                s_calls++;
+                if (s_headless == 1)
                 {
+                    s_headlessSkips++;
                     __result = null;
                     return false;
                 }
+                long t0 = Stopwatch.GetTimestamp();
                 // Super flat grows no AUTO clutter (without this: 64 patches / 169 objects). This gate must come before
                 // ClutterSpread, which builds its own patch and filled it after FatSuperFlat.NoClutter had nulled the result (Harmony runs
                 // every prefix). FAP-painted clutter is placed objects, not ClutterSystem patches, so it is untouched.
-                if (global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.On && !global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.ClutterAllowed(patchID, size)) { global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.NoteAutoClutterBlocked(); __result = null; return false; }
+                if (global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.On && !global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.ClutterAllowed(patchID, size))
+                {
+                    global::VerdantsAscent.Terrain.Voxel.FatSuperFlat.NoteAutoClutterBlocked();
+                    s_flatBlocked++;
+                    s_gateTicks += Stopwatch.GetTimestamp() - t0;
+                    Report();
+                    __result = null;
+                    return false;
+                }
                 bool runOriginal = global::VerdantsAscent.Utilities.EnvironmentBoxPatches.ClutterRunsHere();
                 ClutterSystem_GenerateVegPatch_WaterEcology.Apply(__instance, patchID);
+                long t1 = Stopwatch.GetTimestamp();
+                s_gateTicks += t1 - t0;
                 if (!global::VerdantsAscent.Performance.ClutterSpread.OnGenerateVegPatch(__instance, patchID, size, ref __result))
+                {
                     runOriginal = false;
+                    s_spreadBuilt++;
+                }
+                else if (runOriginal) s_vanillaRan++;
+                s_buildTicks += Stopwatch.GetTimestamp() - t1;
+                Report();
                 return runOriginal;
             }
 
             private static Exception Finalizer(ClutterSystem __instance, Exception __exception, Vector2Int patchID)
             {
-                var exception = global::VerdantsAscent.Utilities.EnvironmentBoxPatches.SuppressClutterNre(__exception, patchID);
-                ClutterSystem_GenerateVegPatch_WaterEcology.Restore(__instance);
-                return exception;
+                if (__exception != null)
+                    __exception = global::VerdantsAscent.Utilities.EnvironmentBoxPatches.SuppressClutterNre(__exception, patchID);
+                ClutterSystem_GenerateVegPatch_WaterEcology.Restore(__instance);   // returns at once unless Apply moved the band
+                return __exception;
+            }
+
+            // [ClutterGate] hook line: how many patches were asked for, what the gates answered, and the time the gates
+            // (super flat + water memo) and the build (ClutterSpread / vanilla) took. A high patch count with a cheap gate
+            // means grass is being RESET, not that the gate is slow: the ResetGrass line names who resets.
+            private static void Report()
+            {
+                float now = Time.unscaledTime;
+                if (now < s_logAt) return;
+                bool first = s_logAt == 0f;
+                s_logAt = now + 30f;
+                if (first) { FiresLogger.LogDebug("[ClutterGate] GenerateVegPatch hook executing"); return; }
+                if (FatDiag.ClutterGate)
+                {
+                    double ms = 1000.0 / Stopwatch.Frequency;
+                    FiresLogger.LogDebug($"[ClutterGate] GenerateVegPatch last 30 s: {s_calls} patch(es) asked ({s_calls / 30f:0.0}/s); "
+                        + $"super-flat gate refused {s_flatBlocked}, ClutterSpread built {s_spreadBuilt}, vanilla built {s_vanillaRan}, headless skipped {s_headlessSkips}; "
+                        + $"gates {s_gateTicks * ms:0.0} ms total ({(s_calls > 0 ? s_gateTicks * ms / s_calls : 0):0.000} ms a patch), builds {s_buildTicks * ms:0.0} ms; "
+                        + $"water memo {ClutterSystem_GenerateVegPatch_WaterEcology.TakeMemoStats()}");
+                }
+                s_calls = s_headlessSkips = s_flatBlocked = s_spreadBuilt = s_vanillaRan = 0;
+                s_gateTicks = s_buildTicks = 0;
             }
         }
 
@@ -637,6 +729,15 @@ namespace VerdantsAscent.Terrain
             // Both checks always run, as separate prefixes did: the voxel one also resets the character's check timer.
             private static bool Prefix(Character __instance, float dt)
             {
+                // 0.2.1029 HaloFlat: inside the ring's gravity field "ground" is the shell beside/under you along the ring's up,
+                // not the world-down ray vanilla casts from y 6000 (it would hit the wall above and snap the character onto it).
+                if (__instance != null && VerdantsAscent.Terrain.Voxel.FatHaloArc.Active
+                    && VerdantsAscent.Terrain.Voxel.FatHaloArc.TryGetUp(__instance.transform.position, out Vector3 ringUp))
+                {
+                    // A13 ([fgn]): a player stuck inside the ring's shell goes up along the ring's up (VoxelUnderWorld.RingLiftIfEmbedded).
+                    VerdantsAscent.Terrain.Voxel.VoxelUnderWorld.RingLiftIfEmbedded(__instance, __instance.transform.position, ringUp);
+                    return false;
+                }
                 bool voxel = VoxelUnderWorld.Allow(__instance, dt);
                 bool tiles = TileCharacterPhysicsPatches.AllowUnderWorldCheck(__instance);
                 return voxel && tiles;
@@ -706,8 +807,32 @@ namespace VerdantsAscent.Terrain
             [HarmonyPriority(Priority.Last)]
             private static void Profile() => FiresVegProfiler.AfterZone();
 
-            private static Exception Finalizer(Exception __exception, bool __state)
-                => ZoneMode_ZoneSystem_SpawnZone.Finally(__exception, __state);
+            // 0.2.1257 ([lead] round N: "ZoneSystem.Update threw ... ArgumentOutOfRangeException at ZoneSystem.DMD<ZoneSystem::SpawnZone> at
+            // ZoneSystem.CreateGhostZones" with no deeper frame): Harmony rethrows a finalizer's exception from the DMD, which resets its
+            // trace, so the real thrower inside SpawnZone (vanilla or any mod's patch it calls) was hidden. The ORIGINAL trace + the zone
+            // and mode are logged here first (every 10 s at most).
+            private static float s_nextTrace;
+            private static Exception Finalizer(Exception __exception, bool __state, Vector2s zoneID, ZoneSystem.SpawnMode mode)
+            {
+                if (__exception != null && UnityEngine.Time.realtimeSinceStartup >= s_nextTrace)
+                {
+                    s_nextTrace = UnityEngine.Time.realtimeSinceStartup + 10f;
+                    FiresLogger.LogWarning($"[FiresZones] SpawnZone({zoneID.x},{zoneID.y}, {mode}) threw (the original trace, before Harmony rethrows it from the DMD): {__exception}");
+                }
+                return ZoneMode_ZoneSystem_SpawnZone.Finally(__exception, __state);
+            }
+        }
+
+        // 0.2.1415 ([lead] URGENT 11-08, Expand World Data's PlaceVegetation transpiler was dropped under FAT 1412-1414): one Info line
+        // per world start listing every owner's patches on ZoneSystem.PlaceVegetation from Harmony's own patch info, so the log proves
+        // which transpilers are live (EWD's expand_world_data among them when it patched cleanly).
+        private static void ReportPlaceVegetationPatches()
+        {
+            var m = AccessTools.Method(typeof(ZoneSystem), "PlaceVegetation");
+            var info = m != null ? Harmony.GetPatchInfo(m) : null;
+            if (info == null) { FiresLogger.LogInfo("[FatHooks] PlaceVegetation: no Harmony patches."); return; }
+            string Owners(IEnumerable<Patch> ps) { var l = new List<string>(); foreach (var p in ps) l.Add(p.owner); return l.Count == 0 ? "none" : string.Join(", ", l); }
+            FiresLogger.LogInfo($"[FatHooks] PlaceVegetation patches: transpilers [{Owners(info.Transpilers)}]; prefixes [{Owners(info.Prefixes)}]; postfixes [{Owners(info.Postfixes)}]; finalizers [{Owners(info.Finalizers)}].");
         }
 
         [HarmonyPatch(typeof(ZoneSystem), "PlaceVegetation")]
@@ -721,6 +846,7 @@ namespace VerdantsAscent.Terrain
             // clearAreas is vanilla's private List<ZoneSystem.ClearArea>, bound as object.
             private static void Prefix(ZoneSystem __instance, Vector3 zoneCenterPos, object clearAreas)
             {
+                VerdantsAscent.Terrain.FarForest.FarForest.BeginPlaceVegetation();   // 0.2.1415: census depth flag (no IL change)
                 ZoneSystem_PlaceVegetation_Density.Apply(__instance);
                 ZoneSystem_PlaceVegetation_WaterEcology.Apply(__instance);
                 ZoneModeStartCave.KeepMouthClear(zoneCenterPos, clearAreas);
@@ -728,7 +854,7 @@ namespace VerdantsAscent.Terrain
             }
 
             private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
-                => FatUnderWaterPlacement.Transpile(ZoneSystem_PlaceVegetation_WaterEcology.Transpile(instructions));
+                => FatUnderWaterPlacement.Transpile(ZoneSystem_PlaceVegetation_WaterEcology.Transpile(instructions));   // 0.2.1415: the 1412-1414 census wrap is GONE (it replaced the two Instantiate calls Expand World Data anchors on)
 
             // The floe cull scans the spawned list before the skyland props join it.
             private static void Postfix(Vector2s zoneID, Vector3 zoneCenterPos, ZoneSystem.SpawnMode mode, List<GameObject> spawnedObjects)
@@ -744,6 +870,7 @@ namespace VerdantsAscent.Terrain
 
             private static void Finalizer(ZoneSystem __instance)
             {
+                VerdantsAscent.Terrain.FarForest.FarForest.EndPlaceVegetation();
                 ZoneSystem_PlaceVegetation_Density.Restore(__instance);
                 ZoneSystem_PlaceVegetation_WaterEcology.Restore(__instance);
             }
@@ -772,9 +899,88 @@ namespace VerdantsAscent.Terrain
                 => FatUnderWaterPlacement.TerrainDeltaPostfix(center, radius, ref delta);
         }
 
+        // 0.2.1331: the scope ZoneSystem_SpawnLocation reads. The finalizer clears it on an exception too; __state means a finalizer
+        // whose prefix never ran (another mod's skip) cannot unbalance it.
+        // 0.2.1338: calls and refusals per proxy (location hash + position) while fat_morgenhole_retry_test watches.
+        internal sealed class ProxyWatch
+        {
+            internal readonly Dictionary<KeyValuePair<int, Vector3>, int> Calls = new Dictionary<KeyValuePair<int, Vector3>, int>();
+            internal int Total, Refusals;
+            internal void Call(int hash, Vector3 pos) { Total++; var k = new KeyValuePair<int, Vector3>(hash, pos); Calls.TryGetValue(k, out int n); Calls[k] = n + 1; }
+        }
+        internal static ProxyWatch WatchProxies { set { ZoneSystem_SpawnProxyLocation.s_watch = value; } }
+
+        [HarmonyPatch(typeof(ZoneSystem), nameof(ZoneSystem.SpawnProxyLocation))]
+        private static class ZoneSystem_SpawnProxyLocation
+        {
+            private static int s_depth;
+            private static bool s_infoSaid;
+            private static readonly HashSet<string> s_said = new HashSet<string>();
+            internal static bool Active => s_depth > 0;
+
+            internal static void NoteLetThrough(string prefab, Vector3 pos)
+            {
+                if (!s_infoSaid) { s_infoSaid = true; FiresLogger.LogInfo("[FAT] super flat: an existing LocationProxy's location passes the surface rule; planned locations stay refused (0.2.1331)"); }
+                if (s_said.Add(prefab ?? "")) FiresLogger.LogDebug($"[FAT] super flat: location {prefab} at ({pos.x:0},{pos.y:0},{pos.z:0}) let through: LocationProxy spawn (ZoneSystem.SpawnProxyLocation scope), no per-frame retry");
+            }
+
+            [HarmonyPriority(Priority.First)]
+            private static void Prefix(int hash, Vector3 pos, out bool __state) { s_depth++; __state = true; s_watch?.Call(hash, pos); }
+
+            // 0.2.1338 (fat_morgenhole_retry_test): the postfix sees vanilla's answer; a null is a refused proxy call. Only while a test watches.
+            private static void Postfix(GameObject __result) { if (s_watch != null && __result == null) s_watch.Refusals++; }
+            internal static ProxyWatch s_watch;
+
+            [HarmonyPriority(Priority.Last)]
+            private static void Finalizer(bool __state) { if (__state && s_depth > 0) s_depth--; }
+        }
+
+        // 0.2.1340: the client's redraw of a no-level location. ZoneSystem.SpawnLocation only sees pos + location; the proxy's ZDO says it carries vanilla's
+        // TerrainModifier field override (FAP/FDM proxies, PlanBuild blueprint rows): the same three steps stand aside as inside FatApi.BeginNoLevelSpawn.
+        [HarmonyPatch(typeof(LocationProxy), "SpawnLocation")]
+        private static class LocationProxy_SpawnLocation
+        {
+            private const string FieldKey = "HasFieldsTerrainModifier";
+            private static readonly FieldInfo s_nview = AccessTools.Field(typeof(LocationProxy), "m_nview");
+            private static bool s_missingSaid;
+            private static int s_depth;
+            internal static bool Active => s_depth > 0;
+
+            [HarmonyPriority(Priority.First)]
+            private static void Prefix(LocationProxy __instance, out bool __state)
+            {
+                __state = false;
+                if (s_nview == null)
+                {
+                    if (!s_missingSaid) { s_missingSaid = true; FiresLogger.LogWarning("[FAT] LocationProxy.m_nview not found: proxy no-level check off"); }
+                    return;
+                }
+                var zdo = (s_nview.GetValue(__instance) as ZNetView)?.GetZDO();
+                if (zdo == null || !zdo.GetBool(FieldKey)) return;
+                s_depth++;
+                __state = true;
+            }
+
+            [HarmonyPriority(Priority.Last)]
+            private static void Finalizer(bool __state) { if (__state && s_depth > 0) s_depth--; }
+        }
+
         [HarmonyPatch]
         private static class ZoneSystem_SpawnLocation
         {
+            private static readonly HashSet<string> s_noLevelSaid = new HashSet<string>();
+            private static bool s_noLevelInfoSaid;
+
+            // Scope or proxy field: this location sits exactly at its pos (0.2.1340).
+            private static bool NoLevel(ZoneSystem.ZoneLocation location, Vector3 pos)
+            {
+                bool scope = FatApi.NoLevelSpawn, field = LocationProxy_SpawnLocation.Active;
+                if (!scope && !field) return false;
+                if (!s_noLevelInfoSaid) { s_noLevelInfoSaid = true; FiresLogger.LogInfo("[FAT] locations in FatApi.BeginNoLevelSpawn, or redrawn from a proxy with the TerrainModifier field, are not levelled (0.2.1340)"); }
+                if (s_noLevelSaid.Add(location?.m_prefabName ?? "")) FiresLogger.LogDebug($"[FAT] location {location?.m_prefabName} at ({pos.x:0},{pos.y:0},{pos.z:0}): no levelling ({(scope ? "scope" : "proxy field")})");
+                return true;
+            }
+
             private static MethodBase TargetMethod()
                 => AccessTools.Method(typeof(ZoneSystem), "SpawnLocation", new[]
                 {
@@ -784,15 +990,32 @@ namespace VerdantsAscent.Terrain
 
             // First, so a location's pad levels to the corrected height rather than the generated one.
             [HarmonyPriority(Priority.First)]
-            private static void Prefix(ZoneSystem.ZoneLocation location, ref Vector3 pos)
+            private static bool Prefix(ZoneSystem.ZoneLocation location, ref Vector3 pos, bool cheated, ref GameObject __result, out bool __state)
             {
-                FiresLocationHeight.Correct(location, ref pos);
-                VerdantsAscent.Terrain.Zones.FatLocationAccelerator.NoteSpawn(location, pos);   // Level sites, before any modifier wakes
+                bool noLevel = NoLevel(location, pos);
+                if (!noLevel) FiresLocationHeight.Correct(location, ref pos);
+                // 0.2.1075 (Fire: only the overworld is flat): on super flat a location may stand in a cave or on a sky island, never on
+                // the flat ground (the start temple and the allowed extras excepted).
+                // 0.2.1325 ([saddles] launch 2: FAP dungeons / `location` / FDM doors refused, dedi "PlaceofMystery3 ... refused"): the rule is
+                // for world-gen placement only; a deliberate spawn (vanilla's cheated flag, or a mod inside FatApi.BeginDeliberateSpawn) passes.
+                bool deliberate = cheated || FatApi.DeliberateSpawn;
+                bool refused = !deliberate && VerdantsAscent.Terrain.Voxel.FatSuperFlat.RefusesSurfaceLocation(location, pos);
+                // 0.2.1331 (proxy loop): vanilla LocationProxy retries every frame while its location is not spawned, so a refusal here
+                // looped ~113 times a second for 12 h and could hold SetLoadingInZone. A proxy already stands in the world: drawing its
+                // location is not world-gen placement. ONLY ZoneSystem.SpawnProxyLocation's scope passes; PlaceZone's planned locations
+                // (also mode Client, also through here) stay refused.
+                if (refused && ZoneSystem_SpawnProxyLocation.Active) { refused = false; ZoneSystem_SpawnProxyLocation.NoteLetThrough(location?.m_prefabName, pos); }
+                __state = !refused;
+                if (deliberate && VerdantsAscent.Terrain.Voxel.FatSuperFlat.On) FatApi.NoteDeliberateSpawn(location?.m_prefabName, pos, cheated);
+                if (!__state) { __result = null; return false; }
+                if (!noLevel) VerdantsAscent.Terrain.Zones.FatLocationAccelerator.NoteSpawn(location, pos);   // Level sites, before any modifier wakes
+                return true;
             }
 
-            private static void Postfix(ZoneSystem.ZoneLocation location, Vector3 pos, ZoneSystem.SpawnMode mode)
+            private static void Postfix(ZoneSystem.ZoneLocation location, Vector3 pos, ZoneSystem.SpawnMode mode, bool __state)
             {
-                LocationSpawnPads.OnSpawned(location, pos, mode);
+                if (!__state) return;
+                if (!NoLevel(location, pos)) LocationSpawnPads.OnSpawned(location, pos, mode);
                 FatUndergroundLocations.OnSpawned(location, pos, mode);   // An underground location's dome, floor and shaft
             }
         }

@@ -101,6 +101,7 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModePark.ZoneRestored += OnZoneRestored;
             RegisterCommand();
             ZoneModeChunkGeneratorTest.RegisterRpc();
+            VerdantsAscent.Terrain.Testing.FatWaterPersistTests.RegisterRpc();   // 0.2.1339: add-only, test RPC
             if (s_legacy.Count == 0)
                 foreach (var tier in ZoneModeChunkTiers.All)
                     if (!tier.RestoresOnly) s_legacy[tier.MachinePrefab.GetStableHashCode()] = tier;
@@ -534,6 +535,14 @@ namespace VerdantsAscent.Terrain.Zones
         {
             var nview = smelter.GetComponent<ZNetView>();
             if (!nview.IsOwner() || amount <= 0) return;
+            // Only fuel goes in, and no more per delivery than the generator holds: anything else would let a crafted client
+            // spawn any item, or loop billions of drops on the owner.
+            if (string.IsNullOrEmpty(prefab) || !s_fuel.ContainsKey(prefab))
+            {
+                FatNetGuard.Refuse("chunk generator fuel", $"'{prefab}' from {sender} is not a fuel");
+                return;
+            }
+            amount = Mathf.Min(amount, Capacity);
             var zdo = nview.GetZDO();
             var fuel = LoadedFuel(zdo);
             bool burnable = s_fuel.ContainsKey(prefab) && ZoneModeChunkTiers.Burns(CurrentRecipe(zdo), prefab);
@@ -622,8 +631,9 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void Drop(string prefabName, int amount, Vector3 at, bool cheated)
         {
-            var item = s_fuel.TryGetValue(prefabName, out var known) ? known : ObjectDB.instance?.GetItemPrefab(prefabName)?.GetComponent<ItemDrop>();
-            if (item == null) return;
+            // Only fuel is ever dropped back (every caller hands back fuel), and never more than a full load at once.
+            if (!s_fuel.TryGetValue(prefabName, out var item) || item == null) return;
+            amount = Mathf.Min(amount, Capacity);
             int max = Mathf.Max(1, item.m_itemData.m_shared.m_maxStackSize);
             while (amount > 0)
             {

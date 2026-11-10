@@ -240,6 +240,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 else if (terrain != null)
                     FiresLogger.LogInfo($"[FiresWorldGen] {terrain}");
                 profile.CreatedUtc = DateTime.UtcNow;
+                profile.WorldUid = cloneUid;   // 0.2.1327: the clone's own uid, never the source's (a copied uid would be rejected)
                 profile.Write(cloneName);
                 if (options.ChunkByChunk)
                 {

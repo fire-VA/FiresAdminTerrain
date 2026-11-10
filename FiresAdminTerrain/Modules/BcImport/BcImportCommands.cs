@@ -40,9 +40,89 @@ namespace VerdantsAscent.Terrain.BcImport
                 + " [x z] - defaults to where you stand.",
                 args => Report(HeightAt(args), args),
                 isCheat: true);
+
+            RegisterDnCensus();   // 0.2.1205
+            BcRegenCommand.Register();   // 0.2.1216
+            global::VerdantsAscent.Terrain.FatMeshAtCommand.Register();   // 0.2.1207
         }
 
         private const string HeightCommand = "fires_bc_height";
+        private const string DnCensusCommand = "fires_bc_dn_census";
+
+        // 0.2.1205 (lead / Fire 10-28: "a deep North update on the VA DN world"): READ-ONLY. Which zones read Deep North through the LIVE
+        // generator (the patched GetBiome: BC's biome map where it paints, vanilla's rules under its black pixels), so the Deep North
+        // update knows its zones before anything writes. 5 samples a zone (centre + 4 points 16 m in from the corners) over the
+        // playable radius, spread over frames (8 ms a frame). Writes nothing to the world: the zone list goes to a text file in
+        // FAT's cache folder; one Info line with the totals and one Debug proof line.
+        internal static void RegisterDnCensus()
+        {
+            new Terminal.ConsoleCommand(DnCensusCommand,
+                "Read-only: lists the zones that read Deep North through the live generator (BetterContinents map + vanilla underneath) "
+                + "and writes the list to FAT's cache folder. Usage: " + DnCensusCommand,
+                args =>
+                {
+                    if (s_censusRunning) { args.Context?.AddString(DnCensusCommand + ": already running."); return; }
+                    if (WorldGenerator.instance == null || Game.instance == null) { args.Context?.AddString(DnCensusCommand + ": no world loaded."); return; }
+                    args.Context?.AddString(DnCensusCommand + ": started (read-only; spread over frames, result in the log).");
+                    Game.instance.StartCoroutine(DnCensus());
+                },
+                isCheat: true);
+        }
+
+        private static bool s_censusRunning;
+        private const string FatVersion = global::VerdantsAscent.FiresAdminTerrain.PluginVersion;
+
+        private static System.Collections.IEnumerator DnCensus()
+        {
+            s_censusRunning = true;
+            var wg = WorldGenerator.instance;
+            var gen = BcMigratedWorld.Generator;
+            string world = ZNet.instance?.GetWorldName() ?? "?";
+            float radius = gen != null ? gen.Settings.WorldSize : 10000f;
+            int zr = Mathf.CeilToInt(radius / ZoneSystem.c_ZoneSize);
+            var clock = Stopwatch.StartNew();
+            var frame = Stopwatch.StartNew();
+            int zones = 0, dn = 0, dnMap = 0, dnVanilla = 0, samples = 0;
+            var list = new StringBuilder();
+            list.AppendLine($"# {DnCensusCommand} {world} {DateTime.Now:yyyy-MM-dd HH:mm} FAT {FatVersion}: BcImport active {BcMigratedWorld.Active}"
+                + (gen != null ? $", settings v{gen.Settings.Version}" : "") + $", seed {wg.GetSeed()}; zone x,z  samples-DN/5  source");
+            for (int zx = -zr; zx <= zr; zx++)
+            {
+                for (int zz = -zr; zz <= zr; zz++)
+                {
+                    Vector3 c = ZoneSystem.GetZonePos(new Vector2s((short)zx, (short)zz));
+                    if (new Vector2(c.x, c.z).magnitude > radius + ZoneSystem.c_ZoneSize) continue;
+                    zones++;
+                    int hit = 0; bool fromMap = false;
+                    for (int s = 0; s < 5; s++)
+                    {
+                        float x = c.x + (s == 0 ? 0f : (s == 1 || s == 3 ? -16f : 16f)), z = c.z + (s == 0 ? 0f : (s <= 2 ? -16f : 16f));
+                        samples++;
+                        if (wg.GetBiome(x, z) != Heightmap.Biome.DeepNorth) continue;
+                        hit++;
+                        if (BcMigratedWorld.TryGetBiome(x, z, out var painted) && painted == Heightmap.Biome.DeepNorth) fromMap = true;
+                    }
+                    if (hit > 0)
+                    {
+                        dn++; if (fromMap) dnMap++; else dnVanilla++;
+                        list.AppendLine($"{zx},{zz}  {hit}/5  {(fromMap ? "map" : "vanilla-rule")}");
+                    }
+                    if (frame.ElapsedMilliseconds >= 8) { yield return null; frame.Restart(); if (WorldGenerator.instance != wg) { s_censusRunning = false; yield break; } }
+                }
+            }
+            string path = null;
+            try
+            {
+                string dir = global::VerdantsAscent.FiresCachePaths.For("FiresAdminTerrain", "Census");
+                System.IO.Directory.CreateDirectory(dir);
+                path = System.IO.Path.Combine(dir, $"dn_census_{string.Concat(world.Split(System.IO.Path.GetInvalidFileNameChars()))}.txt");
+                System.IO.File.WriteAllText(path, list.ToString());
+            }
+            catch (Exception ex) { path = "(not written: " + ex.Message + ")"; }
+            FiresLogger.LogInfo($"[BcImport] {DnCensusCommand} '{world}': {dn} of {zones} zone(s) read Deep North ({dnMap} from the BetterContinents map, {dnVanilla} by vanilla's rule under unpainted pixels); list: {path}");
+            FiresLogger.LogDebug($"[BcImport] {DnCensusCommand} proof: BcImport active {BcMigratedWorld.Active}{(gen != null ? $", settings v{gen.Settings.Version}, world {gen.Settings.WorldSize}" : " (NOT a converted world here: this is vanilla's answer)")}, seed {wg.GetSeed()}, {samples} GetBiome sample(s) through the live (patched) generator in {clock.ElapsedMilliseconds} ms; read-only, nothing written to the world (0.2.1205)");
+            s_censusRunning = false;
+        }
 
         // The ground at one spot, BC side by side with vanilla: BC's smooth height (base x 200), the roughmap weight, the
         // generated height (with BC's blend), vanilla's own biome height (solved back from the blend), and the live

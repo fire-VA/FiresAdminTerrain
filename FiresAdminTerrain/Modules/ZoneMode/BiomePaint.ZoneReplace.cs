@@ -194,7 +194,7 @@ namespace VerdantsAscent.Terrain.Zones
         // only what vanilla needs stays: the start temple, the boss altars / summoning sites and the
         // one-per-world places (m_unique: the traders and the like). Fuling villages, every dungeon, runestones and the rest go.
         private static readonly string[] BossSites = { "Eikthyrnir", "GDKing", "Bonemass", "Dragonqueen", "GoblinKing", "Mistlands_DvergrBossEntrance", "FaderLocation" };
-        private static bool VanillaNeeds(ZoneSystem.ZoneLocation location, out string why)
+        internal static bool VanillaNeeds(ZoneSystem.ZoneLocation location, out string why)
         {
             string n = ZoneModeSwaps.NameOf(location);
             why = null;

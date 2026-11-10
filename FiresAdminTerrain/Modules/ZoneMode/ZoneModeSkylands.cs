@@ -121,10 +121,73 @@ namespace VerdantsAscent.Terrain.Zones
         // ── World init: a zone world with stock generation owns an island registry too ─────────────
         internal static void OnWorldInitialized(World world)
         {
-            if (world == null || world.m_menu || !ZoneModeRegistry.ModeActive || FiresWorldGenBase.Active) return;
+            if (world == null || world.m_menu || !ZoneModeRegistry.ModeActive || FiresWorldGenBase.Active) return;   // super flat seeds its registry through FiresWorldGenBase
             if (!FiresVoxelConfig.BuildsSkyIslands) return;
             FiresSkyIslands.ShapeSeed = world.m_seed;
             FiresSkyIslands.Initialize(world);
+        }
+
+        // ── Super flat (0.2.1075, Fire: "just the overworld is meant to be super flat") ─────────────
+        // Skylands (every archetype, archipelago and shaped kind, their dressing, locations and water) used to rise only in a zone-mode
+        // world, so a super flat world with Sky islands ticked only ever had the plain lattice islands (disc / lens / mound shapes).
+        // On such a world the same skyland driver runs, with the zones around the players standing in for the open set.
+        // 0.2.1076 (Fire: "we dont want the basic islands at all... every mode with skylands gets the varied types"): the plain lattice
+        // islands are gone, and EVERY world with sky islands on raises skylands through this driver - zone mode from its open zones,
+        // every other world (super flat, normal Fires / vanilla-voxel, a ring over a normal world) from the zones around the players.
+        // A ring-only world (HaloFlat) has no overworld under any sky, so it raises none.
+        internal static bool PlayerDriven => !ZoneModeRegistry.ModeActive && FiresVoxelConfig.BuildsSkyIslands
+            && (!FatSuperFlat.On || FiresWorldProfile.Current?.SkyIslands == true) && !VerdantsAscent.Terrain.Voxel.FatHaloArc.RingOnly;
+        internal static bool SuperFlatDriven => PlayerDriven && FatSuperFlat.On;   // the "super-flat bypass" label in the proof lines
+        internal static bool Driven => ZoneModeRegistry.ModeActive || PlayerDriven;
+        internal static string DriverMode => ZoneModeRegistry.ModeActive ? "zone mode" : FatSuperFlat.On ? "super flat"
+            : VerdantsAscent.Terrain.Voxel.FatHaloArc.Active ? "ring" : "normal";
+        private const int SuperFlatZoneReach = 4;   // zones around each player whose skylands rise (the lattice reach adds ~520 m)
+        private static string s_superFlatZonesKey;
+        private static readonly List<Vector2s> s_superFlatZones = new List<Vector2s>();
+
+        private static List<Vector2s> SuperFlatZones(out bool changed)
+        {
+            s_superFlatZones.Clear();
+            var seen = new HashSet<long>();
+            foreach (var peer in ZNet.instance.GetPeers()) AddZonesAround(peer.GetRefPos(), seen);
+            if (Player.m_localPlayer != null) AddZonesAround(Player.m_localPlayer.transform.position, seen);
+            var keys = new List<long>(seen);
+            keys.Sort();
+            string key = string.Join(",", keys);
+            changed = key != s_superFlatZonesKey;
+            s_superFlatZonesKey = key;
+            return s_superFlatZones;
+
+            void AddZonesAround(Vector3 p, HashSet<long> set)
+            {
+                Vector2s c = ZoneSystem.GetZone(p);
+                for (int dx = -SuperFlatZoneReach; dx <= SuperFlatZoneReach; dx++)
+                    for (int dz = -SuperFlatZoneReach; dz <= SuperFlatZoneReach; dz++)
+                    {
+                        var z = new Vector2s(c.x + dx, c.y + dz);
+                        if (set.Add(((long)z.x << 32) ^ (uint)z.y)) s_superFlatZones.Add(z);
+                    }
+            }
+        }
+
+        private static void SuperFlatServerTick()
+        {
+            if (!FiresVoxelConfig.BuildsSkyIslands || !FiresSkyIslands.ZoneSkylandsReady) return;
+            EnsureDressedLoaded();
+            if (s_sitesPending.Count > 0) PlaceSites();
+            var zones = SuperFlatZones(out bool changed);
+            if (!changed || zones.Count == 0) return;
+            var before = FiresSkyIslands.SnapshotSet();
+            FiresSkyIslands.ActivateZoneSkylands(zones, ZNet.World.m_seed, RealGround, RealWet, s_added);
+            if (s_added.Count > 0)
+            {
+                AnnounceRising(s_added);
+                var lines = new List<string>();
+                FiresSkyIslands.PublishSkylands(before, lines);
+                FiresLogger.LogInfo($"[FiresSkyIslands] {DriverMode}: {s_added.Count} skyland(s) rose around the players (skyland driver{(SuperFlatDriven ? ", super-flat bypass" : "")}). {string.Join(" ", lines)}");
+                foreach (int i in s_added) FiresSkyIslands.LogIslandProof(i);
+            }
+            DressUndressed();
         }
 
         // ── Server ──────────────────────────────────────────────────────────────────────────────────
@@ -135,6 +198,9 @@ namespace VerdantsAscent.Terrain.Zones
             s_nextServerCheck = Time.time + ServerCheckSeconds;
             var net = ZNet.instance;
             if (net == null || !net.IsServer() || ZNet.World == null || ZNetScene.instance == null || ZDOMan.instance == null) return;
+            FiresSkyIslands.SweepDroppedLattice();   // 0.2.1076: once, what saved lattice islands left behind
+            FiresSkyIslands.SweepStrayRingProps();   // 0.2.1080: once per world, saved disc-ring props hanging off or fallen under skylands
+            if (PlayerDriven) { SuperFlatServerTick(); return; }
             if (!ZoneModeRegistry.Seeded || !ZoneModeRegistry.WorldLoaded || !FiresVoxelConfig.BuildsSkyIslands
                 || !FiresSkyIslands.ZoneSkylandsReady) return;
             var view = ZoneModeGate.Current;
@@ -168,6 +234,8 @@ namespace VerdantsAscent.Terrain.Zones
         private static bool RealWet(float x, float z)
             => GenWaterField.TryWaterSurfaceSmooth(x, z, out float level, out float depth) && depth > 0.1f && level > FiresWaterfalls.SeaLevel;
 
+        private const int DressBudgetPerTick = 300;   // 0.2.1078: objects created per dressing tick; the rest wait a tick
+
         private static void DressUndressed()
         {
             FiresSkyIslands.SkylandsNear(Vector3.zero, float.MaxValue, s_nearIds, s_nearIndices);
@@ -198,9 +266,12 @@ namespace VerdantsAscent.Terrain.Zones
                     | FiresSkyIslands.DressSurface;
                 if (!holdsSite) done |= FiresSkyIslands.DressLocation;
                 int missing = FiresSkyIslands.DressAll & ~done;
-                if (missing != 0)
+                if (missing != 0 && objects < DressBudgetPerTick)
                 {
-                    objects += Dress(index, missing);
+                    int laid = Dress(index, missing);
+                    objects += laid;
+                    // 0.2.1075: per-skyland proof (Fire: "where did these vines come from"): the dressing incl. rim vines + belly roots/rocks.
+                    FiresLogger.LogDebug($"[FiresSkyIslands] island {index} ({biome}) dressed: {laid} object(s) (top vegetation, rim vines {FiresSkyIslands.ScaledVinesPrefab}, belly roots/rocks), location site {(holdsSite ? "yes" : "no")}{(SuperFlatDriven ? ", super-flat bypass=true" : "")}");
                     done |= missing;
                     s_dressedBiomes.TryGetValue(biome, out int count);
                     s_dressedBiomes[biome] = count + 1;
@@ -211,6 +282,14 @@ namespace VerdantsAscent.Terrain.Zones
                 s_dressed[id] = new DressRecord(done, biome);
                 changed = true;
             }
+            // 0.2.1078 (Fire's skyland stalls): dressing is budgeted per tick; the rest dresses on the next ticks.
+            int queued = 0;
+            for (int q = 0; q < s_nearIds.Count; q++)
+            {
+                s_dressed.TryGetValue(s_nearIds[q], out var r);
+                if ((FiresSkyIslands.DressAll & ~r.Layers) != 0) queued++;
+            }
+            if (objects > 0 || queued > 0) FiresLogger.LogDebug($"[FiresSkyIslands] dressing budget: {objects} object(s) this tick (cap {DressBudgetPerTick}), {queued} skyland(s) queued");
             if (changed) SaveDressed();
             if (dressed == 0) return;
             var biomes = new StringBuilder();
@@ -228,6 +307,7 @@ namespace VerdantsAscent.Terrain.Zones
             var zoneSystem = ZoneSystem.instance;
             var spawnLocation = VanillaSpawnLocation();
             if (zoneSystem == null || spawnLocation == null) return;
+            bool spawnedLocation = false;
             FiresSkyIslands.SkylandsNear(Vector3.zero, float.MaxValue, s_nearIds, s_nearIndices);
             bool changed = false;
             for (int i = 0; i < s_nearIds.Count; i++)
@@ -257,6 +337,8 @@ namespace VerdantsAscent.Terrain.Zones
                 s_dressed.TryGetValue(id, out var record);
                 s_dressed[id] = new DressRecord(record.Layers | FiresSkyIslands.DressLocation, record.Biome);
                 changed = true;
+                spawnedLocation = true;
+                if (spawnedLocation && location != null) break;   // 0.2.1078: one whole location per tick (SpawnMode.Full instantiates it at once)
             }
             if (changed) SaveDressed();
         }
@@ -370,7 +452,7 @@ namespace VerdantsAscent.Terrain.Zones
         internal static List<string> Redress(Vector3 center, float radius)
         {
             var lines = new List<string>();
-            if (!ZoneModeRegistry.ModeActive) { lines.Add("[Islands] Re-dress works on zone-mode skylands only (this world is not in zone mode)."); return lines; }
+            if (!Driven) { lines.Add("[Islands] Re-dress works on zone-mode (or super flat) skylands only (this world is not in zone mode)."); return lines; }
             EnsureDressedLoaded();
             var ids = new List<uint>();
             var indices = new List<int>();
@@ -407,9 +489,14 @@ namespace VerdantsAscent.Terrain.Zones
         private static int Dress(int index, int layers, uint id)
         {
             FiresSkyIslands.CollectSkylandDressing(index, layers, s_pos, s_rot, s_name, s_scale);
-            int placed = 0;
+            int placed = 0, refused = 0;
             for (int i = 0; i < s_pos.Count; i++)
             {
+                // 0.2.1077 (Fire: "sky islands are miscalculating their size for the veg placement causing a bunch to float"): the
+                // palettes lay their points on the island's DISC (isl.R; vines on the circle at R + 0.15), but a shaped skyland's
+                // outline is smaller and irregular, so points past the real rim hung in air and fell. Each point must stand on,
+                // or hang from, the island's own solid column (its shape math), here or within FootprintReach of it.
+                if (!OnFootprint(s_pos[i])) { refused++; continue; }
                 var zdo = NetworkObjectHelper.CreateZdo(ZNetScene.instance.GetPrefab(s_name[i]), s_pos[i], s_rot[i]);
                 if (zdo == null)
                 {
@@ -421,7 +508,25 @@ namespace VerdantsAscent.Terrain.Zones
                 zdo.Set(DressTag, (long)id + 1L);   // what the skyland code placed, so a later clear takes only this
                 placed++;
             }
+            FiresLogger.LogDebug($"[FiresSkyIslands] island {index} dressed {placed}, refused {refused} off-footprint");
+            { string fp = FiresSkyIslands.FootprintLine(index); if (fp != null) FiresLogger.LogDebug(fp); }   // 0.2.1080: placement vs built shape proof
             return placed;
+        }
+
+        // The island's real solid at a dressing point: the column holds island at that height (within FootprintSlack above the
+        // top / below the underside), here or one step inward in any direction (rim vines hang just past the edge).
+        private const float FootprintReach = 1.5f, FootprintSlack = 6f;
+
+        private static bool OnFootprint(Vector3 p)
+        {
+            if (FiresSkyIslands.TryIslandAt(p, FootprintSlack, out _, out _, out _)) return true;
+            for (int d = 0; d < 8; d++)
+            {
+                float a = d * Mathf.PI * 0.25f;
+                var q = new Vector3(p.x + Mathf.Cos(a) * FootprintReach, p.y, p.z + Mathf.Sin(a) * FootprintReach);
+                if (FiresSkyIslands.TryIslandAt(q, FootprintSlack, out _, out _, out _)) return true;
+            }
+            return false;
         }
 
         private static string DressedPath()
@@ -577,7 +682,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void HoldDressing(ZDO zdo, GameObject go)
         {
-            if (go == null || zdo == null || !ZoneModeRegistry.ModeActive || !FiresSkyIslands.Enabled) return;
+            if (go == null || zdo == null || !Driven || !FiresSkyIslands.Enabled) return;
             if (zdo.GetLong(DressTag, 0L) == 0L || SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null) return;
             var zone = ZoneSystem.GetZone(go.transform.position);
             if (VoxelZoneStreamer.IsZoneSolid(zone)) return;
@@ -755,7 +860,7 @@ namespace VerdantsAscent.Terrain.Zones
                         s_fallColumns.Add(new FiresWaterfalls.Column { Base = fall.Lip + across * offset, LipY = fall.Lip.y, FallLength = fall.Drop });
                     }
                     if (!FiresWaterfalls.AppendCurtain(s_fallColumns, fall.Outward, FallLipOut, fall.Drop * FallFade,
-                            Mathf.Repeat(fall.Lip.x * 0.37f + fall.Lip.z * 0.11f, 97f), SkylandFace))
+                            Mathf.Repeat(fall.Lip.x * 0.37f + fall.Lip.z * 0.11f, 97f), SkylandFace, placed: true))   // 0.2.1095: see below
                     {
                         caught++;
                         continue;
@@ -763,9 +868,15 @@ namespace VerdantsAscent.Terrain.Zones
                     s_fallSites.Add(FiresWaterfalls.SoundSite(s_fallColumns, fall.Outward));
                     s_mistSites.Add(FiresWaterfalls.LastSite);
                 }
-                FiresLogger.LogInfo($"[FiresZones] skyland {islandId:x8}: drew {s_fallSites.Count} of {s_falls.Count} mouth fall(s)"
-                    + (inland > 0 ? $"; {inland} stop short of the rim" : "")
-                    + (caught > 0 ? $"; {caught} caught by the rock at the lip" : "") + ".");
+                // 0.2.1095 (Fire shot 548: "did we break skyland waterfalls?"; his log: "drew 0 of 1 mouth fall(s); 1 caught by the rock
+                // at the lip"): FiresWaterfalls.AppendCurtain refuses every non-placed fall on super flat (its "no falls at the real
+                // world's cliffs" guard), and that false was counted as "caught by the rock". A skyland's mouth falls are FAT's own
+                // designed falls, so they pass placed: true. An Ashlands skyland pours a LAVAFALL (the custom-liquid lava material).
+                bool lavaFall = visual.Biome == Heightmap.Biome.AshLands;
+                FiresLogger.LogDebug($"[SkyFalls] island {islandId:x8}: {s_fallSites.Count} mouth fall(s) drawn (kind {(lavaFall ? "lava" : "water")}), "
+                    + $"{s_falls.Count - s_fallSites.Count} refused"
+                    + (inland > 0 ? $" ({inland} stop short of the rim" : " (")
+                    + (caught > 0 ? $"{(inland > 0 ? ", " : "")}{caught} curtain cut by the rock at the lip)" : ")") + ".");
                 visual.FallMesh = new Mesh { name = "SkylandFall" };
                 if (FiresWaterfalls.EndMesh(visual.FallMesh) > 0)
                 {
@@ -775,7 +886,12 @@ namespace VerdantsAscent.Terrain.Zones
                     var fallRenderer = visual.Fall.AddComponent<MeshRenderer>();
                     fallRenderer.shadowCastingMode = ShadowCastingMode.Off;
                     fallRenderer.receiveShadows = false;
-                    fallRenderer.sharedMaterials = FiresWaterfalls.Materials;
+                    var lavaMat = lavaFall ? VerdantsAscent.Water.Core.WaterMaterialManager.GetMaterial(VerdantsAscent.Water.Core.CustomLiquidType.Lava) : null;
+                    if (lavaMat != null)
+                    {
+                        fallRenderer.sharedMaterials = new[] { lavaMat };   // one opaque lava pass (the water pair dims + lights a clear curtain)
+                    }
+                    else fallRenderer.sharedMaterials = FiresWaterfalls.Materials;
                     VoxelRenderGroup.Apply(fallRenderer);
                     FiresWaterfalls.SetSounds(visual.Fall.transform, s_fallSites);
                     FiresWaterfallMist.SetEmitters(visual.Fall.transform, s_mistSites);
@@ -792,11 +908,14 @@ namespace VerdantsAscent.Terrain.Zones
         private const float FaceStep = 0.5f;
         private const float FaceClearance = 0.35f;
 
-        private static float SkylandFace(Vector3 basePos, Vector3 outward, float y)
+        // 0.2.1321: the two-sided OutwardProfile signature; the skyland face keeps its one-sided march (landed = the old -1).
+        private static float SkylandFace(Vector3 basePos, Vector3 outward, float y, float above, out bool landed, out bool inward)
         {
+            inward = false; landed = false;
             for (float d = 0f; d <= FaceReach; d += FaceStep)
                 if (FiresSkyIslands.Sdf(basePos.x + outward.x * d, y, basePos.z + outward.z * d) <= 0f) return d + FaceClearance;
-            return -1f;
+            landed = true;
+            return above;
         }
 
         // Is this lip a spillway? Within a few metres outward the island has to fall away, with nothing solid for the
@@ -944,14 +1063,17 @@ namespace VerdantsAscent.Terrain.Zones
             s_risingBus.InvokeRoutedRPC(ZRoutedRpc.Everybody, RisingRpc, pkg);
         }
 
+        private const int MaxRisingSkylands = 4096;
+
         // The server holds the island set already; only clients wait for it.
         private static void OnRising(long sender, ZPackage pkg)
         {
-            if (ZNet.instance == null || ZNet.instance.IsServer()) return;
-            int count = pkg.ReadInt();
+            if (ZNet.instance == null || ZNet.instance.IsServer() || !FatNetGuard.FromServer(sender, "rising skylands")) return;
+            int count = FatNetGuard.Count(pkg.ReadInt(), MaxRisingSkylands, "rising skylands");
             for (int i = 0; i < count; i++)
             {
                 float x = pkg.ReadSingle(), z = pkg.ReadSingle(), radius = pkg.ReadSingle();
+                if (s_rising.Count >= MaxRisingSkylands) break;
                 s_rising.Add(new Disc(x, z, radius));
             }
             FiresLogger.LogInfo($"[FiresZones] {count} skyland(s) rising: vines and veg under them wait until the island set arrives.");

@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using BepInEx.Configuration;
-using FiresCore.Sync;
+using FiresCore.Config;
 using UnityEngine;
 using VerdantsAscent.Terrain.Voxel;
 
@@ -11,7 +11,7 @@ namespace VerdantsAscent.Ocean
     /// <summary>
     /// The ocean overhaul lives in FAT: breath under water, drowning,
     /// treading water and the ocean gems (FRC's FrcEffects, Pearl), moved here from FiresRPGClasses (Ocean\OceanKit.cs).
-    /// - Bind(cfg, sync): the "Ocean" keys, always bound and always synced through FAT's own ConfigSync (no second sync, nothing lazy).
+    /// - Config: 0.2.1335 (Fire 11-02): Advanced Player Movement 0.1.3 owns the four "Ocean" keys (bound + synced there); read with CoreSettings.Get.
     /// - DecideAndStart(): once, at FAT's first ZNet.Awake: DORMANT while FiresRPGClasses still ships its own OceanKit (stage 1 - no FRC
     ///   registration, no swim-field writes, no component), else ACTIVE; never on a headless server (config only there).
     /// - Breath: drains while Core's PlayerSwim.HeadUnderwater (by reflection) says the head is under, except under a voxel cave roof
@@ -35,12 +35,49 @@ namespace VerdantsAscent.Ocean
         private const string Section = "Ocean";
         private const string RpgGuid = "com.Fire.FiresRPGClasses";
         private const string RpgOceanType = "FiresRPGClasses.Ocean.OceanKit";
-        private const string RpgSection = "10 - Ocean";
 
-        internal static ConfigEntry<bool> BreathEnabled;
-        internal static ConfigEntry<float> BreathSeconds;
-        internal static ConfigEntry<float> DrownPercent;
-        internal static ConfigEntry<float> TreadStamina;
+        // 0.2.1335: APM's keys through CoreSettings.Get (no APM = these defaults, the same as FAT's old ones). Breath reads them every frame and
+        // Get allocates (key string + boxing), so the values are cached and refreshed by CoreSettings.Changed: same behaviour, a live or server
+        // change applies at once. A Core without that event (older than 0.2.1074) or a getter-only provider: read every time, nothing goes stale.
+        private static bool s_breathEnabled = true;
+        private static float s_breathSeconds = 45f, s_drownPercent = 5f, s_treadStamina = 2f;
+        private static bool s_changedHooked, s_dirty = true, s_alwaysRead;
+        private static MethodInfo s_hasChangeEvent;
+
+        internal static bool BreathEnabled { get { Refresh(); return s_breathEnabled; } }
+        internal static float BreathSeconds { get { Refresh(); return s_breathSeconds; } }
+        internal static float DrownPercent { get { Refresh(); return s_drownPercent; } }
+        internal static float TreadStamina { get { Refresh(); return s_treadStamina; } }
+
+        private static void Refresh()
+        {
+            if (!s_changedHooked) HookChanged();
+            if (!s_dirty && !s_alwaysRead) return;
+            s_dirty = false;
+            s_breathEnabled = CoreSettings.Get(Section, "Breath", true);
+            s_breathSeconds = CoreSettings.Get(Section, "Breath seconds", 45f);
+            s_drownPercent = CoreSettings.Get(Section, "Drowning damage percent", 5f);
+            s_treadStamina = CoreSettings.Get(Section, "Treading water stamina per second", 2f);
+            s_alwaysRead = s_hasChangeEvent == null || !Evented("Breath") || !Evented("Breath seconds") || !Evented("Drowning damage percent") || !Evented("Treading water stamina per second");
+        }
+
+        // No provider yet is fine: a new provider raises Changed.
+        private static bool Evented(string key) => !CoreSettings.IsProvided(Section, key) || (bool)s_hasChangeEvent.Invoke(null, new object[] { Section, key });
+
+        // By reflection: FAT compiles against Core 0.2.1036, the event is 0.2.1074
+        private static void HookChanged()
+        {
+            s_changedHooked = true;
+            try
+            {
+                var changed = typeof(CoreSettings).GetEvent("Changed");
+                var has = typeof(CoreSettings).GetMethod("HasChangeEvent");
+                if (changed == null || has == null) return;
+                changed.AddEventHandler(null, new Action<string, string>((section, key) => { if (section == Section) s_dirty = true; }));
+                s_hasChangeEvent = has;
+            }
+            catch (Exception e) { FiresLogger.LogDebug($"[Ocean] CoreSettings.Changed not hooked ({e.GetType().Name}: {e.Message}): settings read every time"); }
+        }
 
         /// <summary>True once DecideAndStart chose to run here (false while dormant, on a dedi, or before the decision).</summary>
         public static bool Active { get; private set; }
@@ -48,7 +85,7 @@ namespace VerdantsAscent.Ocean
         public static string Decision { get; private set; } = "not decided yet";
         /// <summary>Current breath in seconds for the local player (-1 = not ticking).</summary>
         public static float Breath { get; internal set; } = -1f;
-        public static float BreathMax => (BreathSeconds != null ? BreathSeconds.Value : 45f) * (1f + BreathPerGrade * Grade(BreathId));
+        public static float BreathMax => BreathSeconds * (1f + BreathPerGrade * Grade(BreathId));
 
         private static readonly int[] Grades = new int[4];
         private static MethodInfo s_getGrade;
@@ -59,30 +96,6 @@ namespace VerdantsAscent.Ocean
         {
             int i = Array.IndexOf(Ids, effectId);
             return i >= 0 ? Grades[i] : 0;
-        }
-
-        // ---- config (always) ------------------------------------------------------------------------------
-
-        public static void Bind(ConfigFile cfg, ConfigSync sync)
-        {
-            if (BreathEnabled != null) return;
-            BreathEnabled = cfg.Bind(Section, "Breath", true,
-                "Breath under water: it drains while your head is under (Core diving), and you drown at 0. [Synced with Server]");
-            BreathSeconds = cfg.Bind(Section, "Breath seconds", 45f,
-                new ConfigDescription("Seconds of breath before drowning (Pearl ocean_breath gems add 20% a grade). [Synced with Server]",
-                    new AcceptableValueRange<float>(10f, 600f)));
-            DrownPercent = cfg.Bind(Section, "Drowning damage percent", 5f,
-                new ConfigDescription("Max health lost per second while out of breath. [Synced with Server]", new AcceptableValueRange<float>(1f, 50f)));
-            TreadStamina = cfg.Bind(Section, "Treading water stamina per second", 2f,
-                new ConfigDescription("Stamina regained per second while floating still at the surface (0 = off). [Synced with Server]",
-                    new AcceptableValueRange<float>(0f, 20f)));
-            if (sync != null)
-            {
-                sync.AddConfigEntry(BreathEnabled);
-                sync.AddConfigEntry(BreathSeconds);
-                sync.AddConfigEntry(DrownPercent);
-                sync.AddConfigEntry(TreadStamina);
-            }
         }
 
         // ---- the one decision ---------------------------------------------------------------------------
@@ -107,7 +120,6 @@ namespace VerdantsAscent.Ocean
             Active = true;
             Decision = "active";
             FiresLogger.LogInfo("[Ocean] active");
-            ImportFromRpgClasses();
             HookFrc();
             if (global::VerdantsAscent.FiresAdminTerrain.RootObject != null && global::VerdantsAscent.FiresAdminTerrain.RootObject.GetComponent<OceanTicker>() == null)
                 global::VerdantsAscent.FiresAdminTerrain.RootObject.AddComponent<OceanTicker>();
@@ -118,48 +130,6 @@ namespace VerdantsAscent.Ocean
         {
             if (!BepInEx.Bootstrap.Chainloader.PluginInfos.TryGetValue(RpgGuid, out BepInEx.PluginInfo info) || info?.Instance == null) return null;
             return info.Instance.GetType().Assembly.GetType(RpgOceanType) != null ? info.Metadata.Version.ToString() : null;
-        }
-
-        // Stage 3: the four values move once from RPGClasses' cfg [10 - Ocean], only into keys still at their defaults here (an admin's
-        // value in FAT's cfg wins). RPGClasses' file is only read, never written (its own TidyConfig prunes the old section).
-        // It used to re-import on every start ("imported 4" logged on EVERY load) - harmless while RPGClasses' old
-        // values equal the defaults, but a FAT value an admin set back to its default would have been overwritten by an old one. Now
-        // ONCE per install: a marker file next to the cfgs records it, and only values that actually change count.
-        private const string ImportMarker = "com.Fire.FiresAdminTerrain.ocean-imported";
-
-        private static void ImportFromRpgClasses()
-        {
-            try
-            {
-                string marker = Path.Combine(BepInEx.Paths.ConfigPath, ImportMarker);
-                if (File.Exists(marker)) return;
-                string path = Path.Combine(BepInEx.Paths.ConfigPath, RpgGuid + ".cfg");
-                if (!File.Exists(path)) { File.WriteAllText(marker, "no RPGClasses cfg: nothing to import\n"); return; }
-                string section = null;
-                int moved = 0;
-                foreach (string raw in File.ReadAllLines(path))
-                {
-                    string line = raw.Trim();
-                    if (line.StartsWith("[") && line.EndsWith("]")) { section = line.Substring(1, line.Length - 2); continue; }
-                    if (section != RpgSection || line.Length == 0 || line.StartsWith("#")) continue;
-                    int eq = line.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string key = line.Substring(0, eq).Trim(), value = line.Substring(eq + 1).Trim();
-                    ConfigEntryBase entry = key == "Breath" ? BreathEnabled : key == "Breath seconds" ? BreathSeconds
-                        : key == "Drowning damage percent" ? DrownPercent : key == "Treading water stamina per second" ? (ConfigEntryBase)TreadStamina : null;
-                    if (entry == null || !Equals(entry.BoxedValue, entry.DefaultValue)) continue;
-                    try
-                    {
-                        string before = entry.GetSerializedValue();
-                        entry.SetSerializedValue(value);
-                        if (entry.GetSerializedValue() != before) moved++;
-                    }
-                    catch { }
-                }
-                File.WriteAllText(marker, $"imported {moved} changed ocean setting(s) from {RpgGuid}.cfg [{RpgSection}]\n");
-                FiresLogger.LogInfo($"[Ocean] one-time import from {RpgGuid}.cfg [{RpgSection}]: {moved} setting(s) changed");
-            }
-            catch (Exception e) { FiresLogger.LogWarning($"[Ocean] RPGClasses ocean settings not imported ({e.GetType().Name}: {e.Message})"); }
         }
 
         // ---- FRC (by reflection) ------------------------------------------------------------------------
@@ -258,7 +228,7 @@ namespace VerdantsAscent.Ocean
         {
             float max = OceanKit.BreathMax;
             if (OceanKit.Breath < 0f) OceanKit.Breath = max;
-            bool under = OceanKit.BreathEnabled != null && OceanKit.BreathEnabled.Value && !me.IsDead() && OceanKit.HeadUnderwater(me);
+            bool under = OceanKit.BreathEnabled && !me.IsDead() && OceanKit.HeadUnderwater(me);
             if (!under || OceanKit.Grade(OceanKit.WaterBreathingId) >= 5)
             {
                 OceanKit.Breath = Mathf.Min(max, OceanKit.Breath + Time.deltaTime * OceanKit.RefillRate);
@@ -275,14 +245,14 @@ namespace VerdantsAscent.Ocean
             if (OceanKit.Breath > 0f || Time.time < _nextDrown) return;
             _nextDrown = Time.time + 1f;
             var hit = new HitData { m_point = me.GetCenterPoint(), m_hitType = HitData.HitType.Drowning };
-            hit.m_damage.m_damage = me.GetMaxHealth() * (OceanKit.DrownPercent != null ? OceanKit.DrownPercent.Value : 5f) / 100f;
+            hit.m_damage.m_damage = me.GetMaxHealth() * OceanKit.DrownPercent / 100f;
             me.Damage(hit);
         }
 
         // Floating still at the surface: a slow stamina refill. Logged once per float.
         private void TreadWater(Player me)
         {
-            float rate = OceanKit.TreadStamina != null ? OceanKit.TreadStamina.Value : 0f;
+            float rate = OceanKit.TreadStamina;
             Vector3 v = me.GetVelocity(); v.y = 0f;
             bool still = rate > 0f && me.IsSwimming() && v.magnitude < 0.3f && me.GetMoveDir().sqrMagnitude < 0.01f;
             if (still != _treading) { _treading = still; if (still) FiresLogger.LogDebug($"[Ocean] treading water: +{rate:0.0} stamina/s"); }

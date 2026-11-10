@@ -264,6 +264,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void RPC_OnEditResult(long sender, ZPackage pkg)
         {
+            if (!FatNetGuard.FromServer(sender, "skyland edit result")) return;
             s_awaitingEditReply = false;
             string message = pkg.ReadString();
             try { if (Console.instance != null) Console.instance.AddString(message); } catch { }

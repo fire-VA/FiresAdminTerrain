@@ -1,3 +1,7 @@
+## 0.2.1327
+- Fixed: a new world could inherit chunk-by-chunk / voxel settings from a deleted world with the same name.
+- Deleting a world now also removes its FAT settings files.
+
 ## 0.2.1006
 - Smoother flying and exploring: far fewer hitches while terrain, shores and caves load.
 - Forced-biome territories (with Fires RPGmaker): a territory now grows its forced biome's plants and gets that biome's locations, and the old locations there are replaced. The start temple, boss altars and traders always stay, and player builds are never touched.

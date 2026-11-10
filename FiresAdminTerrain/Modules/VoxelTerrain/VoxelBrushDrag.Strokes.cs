@@ -100,6 +100,7 @@ namespace VerdantsAscent.Terrain.Voxel
             Vector3 ground = cursor;
             bool hasGround = virtualPress || PondTool.GroundCursor(out ground);
             if (!hasGround) ground = cursor;
+            if (!virtualPress) ApplyFreeze(piece, player, ref cursor, ref ground, ref hasGround);
             Vector3 view = GameCamera.instance != null ? GameCamera.instance.transform.forward : Vector3.forward;
             float radius = EffectiveGizmoRadius();
             float offset = NudgeOffset(piece, driver, ground.y, radius, player);
@@ -170,13 +171,43 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly Dictionary<string, float> s_offsets = new Dictionary<string, float>();
         private static float s_offsetHeldSince;
 
+        // The ghost keys (FiresVoxelConfig, defaulting to Infinity Hammer's binds).
+        internal static KeyCode GhostUp => FiresVoxelConfig.GhostUpKey != null ? FiresVoxelConfig.GhostUpKey.Value : KeyCode.PageUp;
+        internal static KeyCode GhostDown => FiresVoxelConfig.GhostDownKey != null ? FiresVoxelConfig.GhostDownKey.Value : KeyCode.PageDown;
+        internal static KeyCode GhostLargeKey => FiresVoxelConfig.GhostLargeStepKey != null ? FiresVoxelConfig.GhostLargeStepKey.Value : KeyCode.LeftAlt;
+        internal static KeyCode GhostFreeze => FiresVoxelConfig.GhostFreezeKey != null ? FiresVoxelConfig.GhostFreezeKey.Value : KeyCode.Keypad0;
+        private const float GhostLargeFactor = 5f;
+
+        // FREEZE (Infinity Hammer's Freeze selection): the ghost holds the crosshair point it had when the key was pressed; the
+        // tool keeps drawing and acting there until the key is pressed again or the tool changes.
+        private static bool s_ghostFrozen;
+        private static string s_frozenPiece;
+        private static Vector3 s_frozenCursor, s_frozenGround;
+        private static bool s_frozenHasGround;
+
+        private static void ApplyFreeze(string piece, Player player, ref Vector3 cursor, ref Vector3 ground, ref bool hasGround)
+        {
+            if (s_ghostFrozen && s_frozenPiece != piece) s_ghostFrozen = false;
+            if (VerdantsAscent.Terrain.FatInput.KeyDown(GhostFreeze))
+            {
+                s_ghostFrozen = !s_ghostFrozen;
+                s_frozenPiece = piece; s_frozenCursor = cursor; s_frozenGround = ground; s_frozenHasGround = hasGround;
+                string line = s_ghostFrozen ? $"{piece} ghost frozen at ({ground.x:F1},{ground.y:F1},{ground.z:F1}) - {GhostFreeze} releases" : $"{piece} ghost follows the crosshair again";
+                FiresLogger.LogDebug("[FiresVoxel] " + line);
+                if (player != null) player.Message(MessageHud.MessageType.TopLeft, line, 0, null, false);
+            }
+            if (!s_ghostFrozen) return;
+            cursor = s_frozenCursor; ground = s_frozenGround; hasGround = s_frozenHasGround;
+        }
+
         private static float NudgeOffset(string piece, IVToolDriver driver, float groundY, float radius, Player player)
         {
             if (!s_offsets.TryGetValue(piece, out float o)) o = driver.DefaultOffset;
             float before = o;
-            float step = VerdantsAscent.Terrain.FatInput.ShiftHeld ? LevelFineStep : LEVEL_OFFSET_STEP;
-            int dir = VerdantsAscent.Terrain.FatInput.Key(KeyCode.PageUp) ? 1 : VerdantsAscent.Terrain.FatInput.Key(KeyCode.PageDown) ? -1 : 0;
-            if (VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.PageUp) || VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.PageDown))
+            float step = VerdantsAscent.Terrain.FatInput.ShiftHeld ? LevelFineStep
+                : VerdantsAscent.Terrain.FatInput.Key(GhostLargeKey) ? LEVEL_OFFSET_STEP * GhostLargeFactor : LEVEL_OFFSET_STEP;
+            int dir = VerdantsAscent.Terrain.FatInput.Key(GhostUp) ? 1 : VerdantsAscent.Terrain.FatInput.Key(GhostDown) ? -1 : 0;
+            if (VerdantsAscent.Terrain.FatInput.KeyDown(GhostUp) || VerdantsAscent.Terrain.FatInput.KeyDown(GhostDown))
             {
                 o += dir * step;
                 s_offsetHeldSince = Time.unscaledTime;
@@ -281,13 +312,14 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (s_driversRegistered) return;
             s_driversRegistered = true;
-            VToolDrivers.Register("Vcarve", new CylinderDriver(VoxelBrushMode.Carve));
+            VToolDrivers.Register("Vcarve", new CarveSphereDriver());   // Fire 10-23: a sphere at the aim point, any direction (was a ground-riding trench)
             VToolDrivers.Register("Vfill", new CylinderDriver(VoxelBrushMode.Fill));
             VToolDrivers.Register("Vdelete", new CylinderDriver(VoxelBrushMode.Restore));
             VToolDrivers.Register("Vlevel", new LevelDriver());
             VToolDrivers.Register("Vcube", new ShapeDriver(VoxelBrushShape.Cube));
             VToolDrivers.Register("Vsphere", new ShapeDriver(VoxelBrushShape.Sphere));
             VToolDrivers.Register("Vskin", new SkinDriver());
+            VToolDrivers.Register("Vramp", new RampDriver());   // 0.2.1057 (Fire: Voxheim pick 6)
         }
 
         // ── Vskin: smooths over the top of lattice meshes broken into the caves, following the existing terrain
@@ -307,19 +339,44 @@ namespace VerdantsAscent.Terrain.Voxel
             public float MinOffset => 0.2f;
             public string OffsetLabel => "thickness";
 
+            // 0.2.1066 (Fire: "z fighting when shown over the existing terrain"): the solid Terrain-material shell was drawn
+            // with its top face exactly on the fitted ground, so over intact ground it z-fought the real surface. Now the
+            // solid shell shows only when the brush covers a hole, lifted SkinGhostLift above the surface; over intact ground
+            // it is the line ring alone. The hole count is cached while the aim stays within half a metre.
+            private Vector3 _previewAt = new Vector3(float.NaN, 0f, 0f);
+            private float _previewRadius = -1f;
+            private int _previewHoles;
+            private bool _previewLogged;
+
             public Ghost Preview(in StrokeInput s)
             {
                 if (!FitRim(s.HitGround, s.Radius, s.Offset, out var fit))
                     return new Ghost { Shape = GhostShape.Disc, Centre = s.HitGround, Radius = s.Radius, Height = LevelGhostThickness, Material = GhostMaterial.Lines };
                 float top = fit.At(s.HitGround.x, s.HitGround.z);
+                if (float.IsNaN(_previewAt.x) || (s.HitGround - _previewAt).sqrMagnitude > 0.25f || !Mathf.Approximately(_previewRadius, s.Radius))
+                {
+                    _previewAt = s.HitGround; _previewRadius = s.Radius;
+                    _previewHoles = Classify(s, fit, null, out _, out _, out _);
+                    if (!_previewLogged)
+                    {
+                        _previewLogged = true;
+                        FiresLogger.LogDebug($"[FiresVoxel] skin preview: {_previewHoles} hole cell(s) under the brush at ({F(s.HitGround.x)},{F(top)},{F(s.HitGround.z)}); "
+                            + (_previewHoles > 0 ? $"shell drawn {F(SkinGhostLift)} m above the ground" : "intact ground, ring only (no shell to z-fight)"));
+                    }
+                }
+                if (_previewHoles == 0)
+                    return new Ghost { Shape = GhostShape.Disc, Centre = new Vector3(s.HitGround.x, top, s.HitGround.z), Radius = s.Radius, Height = LevelGhostThickness, Material = GhostMaterial.Lines };
                 return new Ghost
                 {
-                    Shape = GhostShape.Disc, Centre = new Vector3(s.HitGround.x, top - s.Offset * 0.5f, s.HitGround.z),
-                    Radius = s.Radius, Height = s.Offset, Material = GhostMaterial.Terrain,
+                    Shape = GhostShape.Disc, Centre = new Vector3(s.HitGround.x, top - Mathf.Max(s.Offset, SkinMinShell) * 0.5f + SkinGhostLift, s.HitGround.z),
+                    Radius = s.Radius, Height = Mathf.Max(s.Offset, SkinMinShell), Material = GhostMaterial.Terrain,
                 };
             }
 
-            public void Begin(in StrokeInput s) => Dab(s);
+            private bool _toldNothing;
+            private int _skinnedCells;
+
+            public void Begin(in StrokeInput s) { _toldNothing = false; _skinnedCells = 0; Dab(s); }
 
             public void Dab(in StrokeInput s)
             {
@@ -328,7 +385,49 @@ namespace VerdantsAscent.Terrain.Voxel
                     FiresLogger.LogDebug($"[FiresVoxel] stroke Vskin at ({F(s.HitGround.x)},{F(s.HitGround.z)}) r={F(s.Radius)}: too little intact ground round the brush to fit the surface ({fit.Used} point(s)), nothing laid");
                     return;
                 }
-                int holes = 0, intact = 0, higher = 0, unloaded = 0;
+                int holes = Classify(s, fit, s_skinJobs, out int intact, out int higher, out int unloaded);
+                // 0.2.1080: say so instead of doing nothing silently: once per stroke when no hole is under the ring, and the
+                // skinned area + height when it lays a shell.
+                var me = Player.m_localPlayer;
+                if (holes == 0)
+                {
+                    if (!_toldNothing && me != null) me.Message(MessageHud.MessageType.Center, "Nothing to skin here: no hole under the ring");
+                    _toldNothing = true;
+                }
+                else
+                {
+                    _skinnedCells += holes;
+                    if (me != null) me.Message(MessageHud.MessageType.TopLeft, $"Skinned {_skinnedCells} m² at y {F(fit.At(s.HitGround.x, s.HitGround.z))}");
+                }
+                FiresLogger.LogDebug($"[FiresVoxel] skin: holes {holes}, intact {intact}, higher {higher}, not loaded {unloaded}, wrote {holes} cell(s) at y "
+                    + $"{F(fit.At(s.HitGround.x, s.HitGround.z))} (fitted from {fit.Used} rim points; grid-snap ignored: voxel probe, not physics)");
+                FiresLogger.LogDebug($"[FiresVoxel] stroke Vskin at ({F(s.HitGround.x)},{F(s.HitGround.z)}) r={F(s.Radius)} surface {F(fit.At(s.HitGround.x, s.HitGround.z))} "
+                    + $"(fitted from {fit.Used} rim point(s)), thickness {F(s.Offset)}: {holes} hole cell(s) queued, {intact} intact, {higher} higher ground, {unloaded} not loaded");
+                if (holes > 0)
+                {
+                    float shellT = Mathf.Max(s.Offset, SkinMinShell), topC = fit.At(s.HitGround.x, s.HitGround.z);
+                    FiresLogger.LogDebug($"[FiresVoxel] skin fill: {holes} cell(s) filled, shell {F(shellT)} m thick (y {F(topC - shellT)}..{F(topC)} at the centre, "
+                        + $"stamp r {F(SkinStampRadius)} per 1 m cell), skipped: {intact} intact, {higher} higher ground (left alone), {unloaded} not loaded");
+                }
+                int before = s_skinWrote;
+                PumpSkin();
+                if (Time.unscaledTime >= s_skinNextLine)
+                {
+                    s_skinNextLine = Time.unscaledTime + 1f;
+                    FiresLogger.LogDebug($"[FiresVoxel] skin: drag at ({F(s.HitGround.x)},{F(fit.At(s.HitGround.x, s.HitGround.z))},{F(s.HitGround.z)}) found {holes} hole cell(s), "
+                        + $"wrote {s_skinWrote - before} voxel stamp(s) this frame ({s_skinJobs.Count} queued)");
+                }
+            }
+
+            // Per 1 m cell inside the brush: hole (queued when jobs != null), intact, higher ground, or not loaded.
+            // 0.2.1066 (Fire: "vskin doesnt work"; his log: "293 hole cell(s) queued, 0 intact" on flat intact ground at y 50,
+            // then "fill changed nothing ... density@center=20"): the intact test sampled the surface in a +-0.3 m window,
+            // narrower than one voxel cell, so the column sampler (solid-to-air crossings between whole cells) never found the
+            // surface and every cell of flat ground read as a hole. The window is now SkinSurfaceWindow (over a cell) and the
+            // found surface must sit within SkinTolerance of the fitted height.
+            private static int Classify(in StrokeInput s, SurfaceFit fit, Queue<LevelJob> jobs, out int intact, out int higher, out int unloaded)
+            {
+                int holes = 0; intact = 0; higher = 0; unloaded = 0;
                 int r = Mathf.CeilToInt(s.Radius);
                 for (int dz = -r; dz <= r; dz++)
                     for (int dx = -r; dx <= r; dx++)
@@ -336,29 +435,49 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (dx * dx + dz * dz > s.Radius * s.Radius) continue;
                         float x = Mathf.Floor(s.HitGround.x) + dx + 0.5f, z = Mathf.Floor(s.HitGround.z) + dz + 0.5f;
                         float top = fit.At(x, z);
-                        // Ground standing above the fitted surface (a bank, a wall) is left alone.
-                        if (VoxelWorld.TrySampleSurfaceY(x, z, top + SkinAboveCheck, top + SkinTolerance, out _, out _)) { higher++; continue; }
-                        bool surfaceHere = VoxelWorld.TrySampleSurfaceY(x, z, top + SkinTolerance, top - SkinTolerance, out _, out _);
-                        if (!VoxelWorld.TryIsSolid(x, top - s.Offset * 0.5f, z, out bool solidBelow)) { unloaded++; continue; }
-                        if (surfaceHere && solidBelow) { intact++; continue; }
-                        s_skinJobs.Enqueue(new LevelJob
+                        // 0.2.1080 (Fire on SuperFlatSkyCaves2: "v skin still does not work"; his log: "surface 50.00 (fitted from
+                        // 32 rim point(s)) ... 357 hole cell(s) queued, 0 intact" on intact flat ground): the narrow +-1.5 m column
+                        // probe still never found the flat y 50 surface that the rim fit's +-LevelSurfaceReach probe found at the
+                        // same spots. The cell test now reads the surface exactly as the rim fit does (the same wide probe, the
+                        // same solid-under check), so a cell counts as intact whenever it would have counted as a rim point.
+                        if (!VoxelWorld.TrySampleSurfaceY(x, z, top + LevelSurfaceReach, top - LevelSurfaceReach, out float sy, out _))
                         {
-                            Centre = new Vector3(x, top - s.Offset * 0.5f, z), Radius = SkinStampRadius, Height = s.Offset, Mode = VoxelBrushMode.Fill,
-                        });
+                            if (!VoxelWorld.TryIsSolid(x, top - s.Offset * 0.5f, z, out _)) { unloaded++; continue; }
+                            sy = float.MinValue;   // loaded, no surface in reach: an open shaft, a hole
+                        }
+                        // Ground standing above the fitted surface (a bank, a wall) is left alone.
+                        if (sy > top + SkinSurfaceWindow) { higher++; continue; }
+                        bool solidBelow = sy > float.MinValue
+                            && VoxelWorld.TryIsSolid(x, sy - Mathf.Max(0.5f, s.Offset), z, out bool sb) && sb;
+                        if (Mathf.Abs(sy - top) <= SkinTolerance && solidBelow) { intact++; continue; }
+                        // 0.2.1086 (Fire: "v skin is fucking useless"; his log: "holes 10 ... wrote 10 cell(s) at y 50.01", the openings
+                        // stayed open, the next stroke "changed nothing"): the density grid samples whole metres, and the old stamp
+                        // (r 0.8 from the cell CENTRE, 0.75 m tall, top at 50.01) reached grid points only at y 50, where its inside
+                        // distance was min(0.8 - 0.707, 0.375 - 0.365) = 0.01 m = round(0.01 x QUANT 20) = 0: density 0, never solid
+                        // (> 0), and y 49 lay outside it. Ten stamps wrote zeros; the mesher drew nothing; Fill never lowers, so a
+                        // repeat "changed nothing". Now each hole cell is a SkinStampRadius 1.5 m cylinder (covers the cell's four
+                        // grid columns at >= 0.79 m inside) and at least SkinMinShell 2 m thick (>= 2 grid layers solid), top on the
+                        // fitted surface: flush, never above it, the cave under the shell still hollow.
+                        float shell = Mathf.Max(s.Offset, SkinMinShell);
+                        if (jobs != null)
+                            jobs.Enqueue(new LevelJob
+                            {
+                                Centre = new Vector3(x, top - shell * 0.5f, z), Radius = SkinStampRadius, Height = shell, Mode = VoxelBrushMode.Fill,
+                            });
                         holes++;
                     }
-                FiresLogger.LogDebug($"[FiresVoxel] stroke Vskin at ({F(s.HitGround.x)},{F(s.HitGround.z)}) r={F(s.Radius)} surface {F(fit.At(s.HitGround.x, s.HitGround.z))} "
-                    + $"(fitted from {fit.Used} rim point(s)), thickness {F(s.Offset)}: {holes} hole cell(s) queued, {intact} intact, {higher} higher ground, {unloaded} not loaded");
-                PumpSkin();
+                return holes;
             }
 
             public void End(in StrokeInput s) { }
             public void DrawExtras(in StrokeInput s) { }
         }
 
-        private const float SkinTolerance = 0.3f, SkinAboveCheck = 3f, SkinStampRadius = 0.8f;
+        private const float SkinTolerance = 0.5f, SkinSurfaceWindow = 1.5f, SkinAboveCheck = 3f, SkinStampRadius = 1.5f, SkinGhostLift = 0.08f, SkinMinShell = 2f;
         private const int SkinStampsPerFrame = 32;
         private static readonly Queue<LevelJob> s_skinJobs = new Queue<LevelJob>();
+        private static int s_skinWrote;
+        private static float s_skinNextLine;
 
         // From Update every frame (beside PumpLevel).
         private static void PumpSkin()
@@ -371,6 +490,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     var job = s_skinJobs.Dequeue();
                     LevelStamp(job.Centre, job.Radius, job.Height, VoxelBrushShape.Cylinder, job.Mode);
+                    s_skinWrote++;
                 }
             }
             finally { VoxelWorld.VToolScope--; FatUndo.EndPlayerEdit(); }
@@ -594,6 +714,47 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // ── Vcube / Vsphere: drag a solid shape (LeftAlt carves it), its centre Offset over the crosshair ─────────────────
+        // ── Vcarve: a SPHERE carved at the aim point, in any direction ─────────────────────────────────────────────────────
+        // Fire 10-23: "this was meant to be something that could carve in any direction" and "display as a sphere we can
+        // scale". The aim point is the crosshair's hit on the terrain (floor, wall or ceiling; water is ignored); held, each
+        // dab carves another sphere where the crosshair now hits, so a drag cuts a tunnel along the aim. Scroll = radius
+        // (team rule). The offset pushes the sphere's centre past the hit along the view (0 = centred on the hit).
+        // No layer / cave-roof rule: the old trench driver refused dabs whose column read as "cave", which is every dab once
+        // the carve is under the ground.
+        private sealed class CarveSphereDriver : IVToolDriver
+        {
+            public float DrawSpeed => ConfigSpeed(FiresVoxelConfig.CarveDrawSpeed, 3f);
+            public bool ClickOnly => false;
+            public float DefaultOffset => 0f;
+            public float MinOffset => 0f;
+            public string OffsetLabel => "push in";
+
+            private static Vector3 Centre(in StrokeInput s)
+            {
+                var dir = s.View.sqrMagnitude > 1e-6f ? s.View.normalized : Vector3.forward;
+                return s.HitGround + dir * Mathf.Max(0f, s.Offset);
+            }
+
+            public Ghost Preview(in StrokeInput s) => new Ghost
+            {
+                Shape = s.HasGround ? GhostShape.Sphere : GhostShape.None, Centre = Centre(s), Radius = s.Radius, Height = s.Radius * 2f,
+                Material = GhostMaterial.Lines,
+            };
+
+            public void Begin(in StrokeInput s) => Dab(s);
+
+            public void Dab(in StrokeInput s)
+            {
+                if (!s.HasGround) return;
+                var c = Centre(s);
+                string result = VoxelWorld.ApplyBrush(c, s.Radius, 0f, VoxelBrushShape.Sphere, VoxelBrushMode.Carve);
+                FiresLogger.LogDebug($"[FiresVoxel] stroke {s.Piece} sphere carve at ({F(c.x)},{F(c.y)},{F(c.z)}) r={F(s.Radius)} -> {result ?? "no result"}");
+            }
+
+            public void End(in StrokeInput s) { }
+            public void DrawExtras(in StrokeInput s) { }
+        }
+
         private sealed class ShapeDriver : IVToolDriver
         {
             private readonly VoxelBrushShape _shape;

@@ -155,6 +155,15 @@ namespace VerdantsAscent.Terrain.Zones
         internal static bool AllowTeleport(Player __instance, Vector3 pos, ref bool __result)
         {
             if (!ZoneModeGate.Active || !IsClosedAt(pos)) return true;
+            // 0.2.1034 (Fire 10-24: "open sea or not it should teleport us to the coordinates"): an admin's own teleport goes
+            // through. Vanilla's distant teleport settles the height on the ground there once the area loads; closed sea has
+            // only the sea floor, and FAT's void rescue catches a fall through missing ground. Non-admins keep the rule.
+            if (__instance == Player.m_localPlayer && FiresCore.Sync.AdminSyncing.IsLocalAdmin())
+            {
+                FiresLogger.LogInfo($"[FiresZones] admin teleport into closed zone ({ZoneSystem.GetZone(pos).x},{ZoneSystem.GetZone(pos).y}) "
+                    + $"at ({pos.x:0},{pos.y:0},{pos.z:0}) allowed (an admin's teleport ignores the unopened-sea rule)");
+                return true;
+            }
             TeleportsRefused++;
             FiresLogger.LogInfo($"[FiresZones] refused a teleport to ({pos.x:0},{pos.z:0}) — zone "
                 + $"({ZoneSystem.GetZone(pos).x},{ZoneSystem.GetZone(pos).y}) is closed.");

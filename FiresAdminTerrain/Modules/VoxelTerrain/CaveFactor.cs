@@ -99,4 +99,45 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_in ? "entered" : "left", s_factor, s_cover, s_depth, eye.x, eye.y, eye.z));
         }
     }
+
+    // CAVE LIGHT LEVEL (Fire 10-23: "we should get a light level slider for our caves, so even if we use a dark env we can lighten
+    // it up a bit"). Client only, live: every time EnvMan sets the ambient light (each environment update), the cave share of it is
+    // lifted by 'Cave light level' x MaxLift grey, scaled by CaveFactor (0 open sky .. 1 deep inside, already smoothed), so the
+    // lift fades in and out at a cave mouth with the cave fog and environment. 0 = the cave environment exactly as it is.
+    [HarmonyLib.HarmonyPatch(typeof(EnvMan), "SetEnv")]
+    internal static class CaveAmbientLift
+    {
+        private const string Section = "Voxel Terrain - Caves";
+        private const float MaxLift = 0.35f;   // ambient grey added at level 1 deep in a cave (a dark env's ambient is ~0.02-0.1)
+        private static readonly int s_ambientColor = Shader.PropertyToID("_AmbientColor");
+        private static BepInEx.Configuration.ConfigEntry<float> s_level;
+        private static float s_nextNote;
+
+        internal static void Bind(BepInEx.Configuration.ConfigFile cfg)
+        {
+            s_level = cfg.Bind(Section, "Cave light level", 0f, new BepInEx.Configuration.ConfigDescription(
+                "Brightens caves and tunnels without changing their environment (0 = as dark as the cave environment makes it, "
+                + "1 = brightest). Fades in and out at a cave mouth; applies live.",
+                new BepInEx.Configuration.AcceptableValueRange<float>(0f, 1f)));
+        }
+
+        [HarmonyLib.HarmonyPostfix]
+        [HarmonyLib.HarmonyPriority(HarmonyLib.Priority.Last)]   // after any other mod that sets the ambient
+        private static void Postfix()
+        {
+            float level = s_level?.Value ?? 0f;
+            if (level <= 0f || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
+            float f = CaveFactor.Factor;
+            if (f <= 0.001f) return;
+            float lift = level * MaxLift * f;
+            Color before = RenderSettings.ambientLight;
+            RenderSettings.ambientLight = before + new Color(lift, lift, lift, 0f);
+            Shader.SetGlobalColor(s_ambientColor, RenderSettings.ambientLight);   // what vanilla's SetEnv pushed, lifted the same way
+            if (FiresLogger.DebugEnabled && Time.time >= s_nextNote)
+            {
+                s_nextNote = Time.time + 30f;
+                FiresLogger.LogDebug($"[CaveLight] cave light level {level:0.00} x cave factor {f:0.00}: ambient {before.r:0.000},{before.g:0.000},{before.b:0.000} + {lift:0.000}");
+            }
+        }
+    }
 }

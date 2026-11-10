@@ -47,6 +47,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static ConfigEntry<float> s_floorChance, s_ceilingChance, s_wallChance, s_wallScaleMin, s_wallScaleMax,
             s_rubbleChance, s_propChance, s_oreChance;
         private static ConfigEntry<int> s_oresPerZone;
+        private static ConfigEntry<float> s_richCaveChance;
         private static ConfigEntry<bool> s_chestsEnabled;
         private static ConfigEntry<float> s_chestChance, s_restockMinDays, s_restockMaxDays, s_restockClearance;
         private static ConfigEntry<bool> s_pickablesRestock;
@@ -74,6 +75,8 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static float PropChance => s_propChance.Value;
         internal static float OreChance => s_oreChance.Value;
         internal static int OresPerZone => s_oresPerZone.Value;
+        internal static float RichCaveChance => s_richCaveChance != null ? s_richCaveChance.Value : 0.10f;
+        internal static ConfigEntry<float> RichCaveChanceEntry => s_richCaveChance;   // 0.2.1135: server-synced (FiresVoxelConfig.RegisterServerAuthority)
         internal static bool ChestsEnabled => s_chestsEnabled.Value;
         internal static float ChestChance => s_chestChance.Value;
         internal static float RestockMinDays => s_restockMinDays.Value;
@@ -101,6 +104,7 @@ namespace VerdantsAscent.Terrain.Voxel
             VoxelCaveClutter.Bind(cfg);
             VoxelUnderwaterClutter.Bind(cfg);
             CaveLight.Bind(cfg);   // Cave grass by light
+            CaveAmbientLift.Bind(cfg);   // Fire 10-23: cave light level slider
             s_floorChance = cfg.Bind(Section, "Floor pickable chance", 0.10f, new ConfigDescription(
                 "Chance per cave floor spot (one every ~4 m) of a floor pickable or prop from the biome's Floor list. Small ones come in clumps of 1-3.",
                 new AcceptableValueRange<float>(0f, 1f)));
@@ -125,6 +129,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 new AcceptableValueRange<float>(0f, 1f)));
             s_oresPerZone = cfg.Bind(Section, "Ore nodes per zone", 3, new ConfigDescription(
                 "Most ore nodes one 64 m zone's caves may hold.", new AcceptableValueRange<int>(0, 32)));
+            // 0.2.1133 (Fire: "some caves are mineral rich and become 'mines'"): a share of 64 m cave zones roll MINERAL RICH (FatCaveOre).
+            s_richCaveChance = cfg.Bind(Section, "Mineral-rich cave chance", 0.10f, new ConfigDescription(
+                "Share of 64 m cave zones that are mineral rich (a fixed roll from the world seed, the same on every peer): their ore is rolled "
+                + "6x as often, up to 6-10 nodes by cave size, from the biome's 'Ore' list. Broken deposits there regrow after Core's "
+                + "'[Loot] Rich cave ore regrow days'. 0 = no rich caves.", new AcceptableValueRange<float>(0f, 1f)));
             s_chestsEnabled = cfg.Bind(Section, "Chests", true,
                 "Place vanilla treasure chests in caverns, filled from the chest's own loot table like a location chest, and restock them after they are looted.");
             s_chestChance = cfg.Bind(Section, "Chest chance per zone", 0.35f, new ConfigDescription(
@@ -182,6 +191,15 @@ namespace VerdantsAscent.Terrain.Voxel
                     ceiling.Value = defaults.Ceiling;
                     FiresLogger.LogInfo($"[FiresVoxel] '{section} / Ceiling' was the old default: now {defaults.Ceiling}.");
                 }
+                var ores = cfg.Bind(section, "Ore", defaults.Ores,
+                    "Mineable nodes, placed only where their whole footprint fits. Mineral-rich zones ('Mineral-rich cave chance') roll this list "
+                    + "6x as often; other mods may add entries (FatCaveOreApi).");
+                // 0.2.1133 (Fire's ore-in-caves table): a list still at its old default takes the new one; one anybody edited stays.
+                if (OldOreDefaults.TryGetValue(defaults.Key, out string oldOre) && ores.Value == oldOre && oldOre != defaults.Ores)
+                {
+                    ores.Value = defaults.Ores;
+                    FiresLogger.LogInfo($"[CaveOre] '{section} / Ore' was the old default: now {defaults.Ores}.");
+                }
                 s_tables[defaults.Biome] = new BiomeTable
                 {
                     Floor = new WeightedPrefabs(cfg.Bind(section, "Floor", defaults.Floor,
@@ -193,8 +211,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         "Rocks for cavern floors, shrunk by 'Cave Rock Scale' when the prefab syncs its scale.")),
                     Props = new WeightedPrefabs(cfg.Bind(section, "Props", defaults.Props,
                         "Floor props at their own size (skulls, bones, ice spikes, debris), placed only where their footprint fits.")),
-                    Ores = new WeightedPrefabs(cfg.Bind(section, "Ore", defaults.Ores,
-                        "Mineable nodes, placed only where their whole footprint fits.")),
+                    Ores = new WeightedPrefabs(ores),
                     Chests = new WeightedPrefabs(cfg.Bind(section, "Chests", defaults.Chests,
                         "Treasure chest prefabs; the chest's own Container loot table fills it.")),
                     Spawners = new WeightedPrefabs(cfg.Bind(section, "Monster spawners", defaults.Spawners,
@@ -219,6 +236,18 @@ namespace VerdantsAscent.Terrain.Voxel
             { "Mistlands", "CreepProp_hanging01:2,CreepProp_egg_hanging01:1,CreepProp_egg_hanging02:1" },
         };
 
+        // The 'Ore' defaults before 0.2.1133 (a list still equal to one of these is moved to the new default).
+        private static readonly Dictionary<string, string> OldOreDefaults = new Dictionary<string, string>
+        {
+            { "Meadows", "" },
+            { "Black Forest", "MineRock_Tin:3,rock4_copper:1" },
+            { "Swamp", "mudpile:3,mudpile2:1" },
+            { "Mountain", "MineRock_Obsidian:3,silvervein:2" },
+            { "Plains", "" },
+            { "Mistlands", "" },
+            { "Ashlands", "UnstableLavaRock" },
+        };
+
         private static readonly TableDefaults[] DefaultTables =
         {
             new TableDefaults
@@ -229,7 +258,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Wall = "root08:1,root12:1",
                 Rubble = "Rock_4:2,Rock_3:1",
                 Props = "Skull1:1,LargeBone_half01:0.5",
-                Ores = "",
+                Ores = "MineRock_Tin:2,rock4_copper:1",
                 Chests = "TreasureChest_meadows",
                 Spawners = "Spawner_Skeleton_Meadows",
             },
@@ -241,7 +270,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Wall = "root08:1,root12:1",
                 Rubble = "Rock_3:2,Rock_4:1",
                 Props = "Skull1:1,LargeBone_half01:0.5,LargeBone_half02:0.5",
-                Ores = "MineRock_Tin:3,rock4_copper:1",
+                Ores = "rock4_copper:2,MineRock_Tin:2",
                 Chests = "TreasureChest_forestcrypt:3,TreasureChest_blackforest:1,TreasureChest_trollcave:1",
                 Spawners = "Spawner_Skeleton:4,Spawner_Skeleton_poison:1,Spawner_Ghost:1,Spawner_Troll:0.3",
             },
@@ -265,7 +294,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Wall = "caverock_ice_stalagmite",
                 Rubble = "Rock_3",
                 Props = "Skull1:0.5",
-                Ores = "MineRock_Obsidian:3,silvervein:2",
+                Ores = "silvervein:3,MineRock_Obsidian:2",
                 Chests = "TreasureChest_mountaincave:3,TreasureChest_mountains:1",
                 Spawners = "Spawner_Bat:3,Spawner_Ulv:2,Spawner_Cultist:1,Spawner_StoneGolem:0.3",
             },
@@ -277,7 +306,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Wall = "",
                 Rubble = "Rock_4",
                 Props = "LargeBone_half01:1,LargeBone_half02:1,goblin_trashpile:0.3,Skull1:0.5",
-                Ores = "",
+                Ores = "mudpile:3,mudpile2:1,rock4_copper:1,MineRock_Tin:1",
                 Chests = "TreasureChest_heath:2,TreasureChest_plains_stone:1",
                 Spawners = "Spawner_Goblin:3,Spawner_GoblinArcher:2,Spawner_GoblinShaman:1,Spawner_GoblinBrute:0.5",
             },
@@ -289,7 +318,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Wall = "CreepProp_wall01",
                 Rubble = "",
                 Props = "LargeBone_half02:0.5",
-                Ores = "",
+                Ores = "silvervein:3,MineRock_Obsidian:2,mudpile:1,rock4_copper:1",
                 Chests = "TreasureChest_dvergrtown:2,TreasureChest_dvergr_loose_stone:1",
                 Spawners = "Spawner_Seeker:3,Spawner_Tick:2,Spawner_SeekerBrute:1",
             },
@@ -301,7 +330,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Wall = "",
                 Rubble = "",
                 Props = "",
-                Ores = "UnstableLavaRock",
+                Ores = "FlametalRockstand:2,UnstableLavaRock:1",
                 Chests = "TreasureChest_ashland_stone:2,TreasureChest_charredfortress:1",
                 Spawners = "Spawner_Twitcher:3,Spawner_Charred:2,Spawner_Charred_Archer:1,Spawner_Charred_Mage:0.5,Spawner_Morgen:0.3",
             },

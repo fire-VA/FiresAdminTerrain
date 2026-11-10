@@ -99,18 +99,54 @@ namespace VerdantsAscent.Terrain.Paint
         [HarmonyPatch(typeof(TerrainComp), nameof(TerrainComp.ApplyToHeightmap))]
         private static class Capture
         {
-            private static void Postfix(Texture2D clearedMask, Heightmap hm)
+            private static void Postfix(TerrainComp __instance, Texture2D clearedMask, Heightmap hm)
             {
                 if (!Active || clearedMask == null || hm == null) return;
                 try
                 {
                     EnsureLoaded();
                     Vector2s zone = ZoneSystem.GetZone(hm.transform.position);
-                    s_cache[zone] = new Entry { Res = clearedMask.width, Pixels = clearedMask.GetPixels32() };
+                    var px = clearedMask.GetPixels32();
+                    KeepCultivationOnly(__instance, hm, px, clearedMask.width);
+                    s_cache[zone] = new Entry { Res = clearedMask.width, Pixels = px };
+                    s_cacheRev++;   // 0.2.1319: running spread LOD jobs restart
                     s_dirty = true;
                     FarQuilt.OnZonePaintChanged(zone);
                 }
                 catch { /* best-effort — never break terrain application */ }
+            }
+        }
+
+        // 0.2.1308 ([lead]: Core 1060 writes its seasonal snow into the heightmap's RUNTIME mask G, sRGB-encoded, ~0.41 = 104/255 on
+        // 0.29 m of snow; this cache copied that mask, and OverlayMask / the far tiles read G > 63 as cultivated soil = winter snow drawn
+        // as tilled fields far away): outside world-gen Deep North the cached G is rebuilt from the TerrainComp's OWN stored paint - a
+        // modified texel keeps the G an op stored there (real cultivation), an untouched one is 0 - so Core's runtime snow never reaches
+        // the far tiles. Real Deep North keeps the mask's G (vanilla's own deep snow there). Debug count once per 30 s.
+        private static readonly HarmonyLib.AccessTools.FieldRef<TerrainComp, Color[]> s_compPaint = HarmonyLib.AccessTools.FieldRefAccess<TerrainComp, Color[]>("m_paintMask");
+        private static readonly HarmonyLib.AccessTools.FieldRef<TerrainComp, bool[]> s_compMod = HarmonyLib.AccessTools.FieldRefAccess<TerrainComp, bool[]>("m_modifiedPaint");
+        private static int s_snowGDropped; private static float s_snowGLogAt;
+        private static void KeepCultivationOnly(TerrainComp comp, Heightmap hm, Color32[] px, int res)
+        {
+            if (px == null || res < 2) return;
+            Color[] cp = comp != null ? s_compPaint(comp) : null; bool[] cm = comp != null ? s_compMod(comp) : null;
+            bool compOk = cp != null && cm != null && cp.Length == px.Length && cm.Length == px.Length;
+            float span = hm.m_width * hm.m_scale, texel = span / (res - 1);
+            Vector3 pos = hm.transform.position;
+            float x0 = pos.x - span * 0.5f, z0 = pos.z - span * 0.5f;
+            for (int y = 0; y < res; y++)
+                for (int x = 0; x < res; x++)
+                {
+                    int i = y * res + x;
+                    if (WorldGenerator.IsDeepnorth(x0 + x * texel, z0 + y * texel)) continue;
+                    float bG = compOk && cm[i] ? VoxelWorld.BaseG(hm, x, y) : 0f;   // 0.2.1312: proportional cut over the build-data base G, as the near compose
+                    byte g = compOk && cm[i] ? (byte)Mathf.RoundToInt(Mathf.Clamp01((cp[i].g - bG) / Mathf.Max(1e-3f, 1f - bG)) * 255f) : (byte)0;
+                    if (px[i].g != g) { if (px[i].g > 63 && g <= 63) s_snowGDropped++; px[i].g = g; }
+                }
+            if (s_snowGDropped > 0 && Time.unscaledTime >= s_snowGLogAt)
+            {
+                s_snowGLogAt = Time.unscaledTime + 30f;
+                FiresLogger.LogDebug($"[DistantPaint] far-tile cache: {s_snowGDropped} texel(s) whose runtime G (Core's seasonal snow) would have read as cultivated were reset to the stored cultivation (0.2.1308)");
+                s_snowGDropped = 0;
             }
         }
 
@@ -132,68 +168,75 @@ namespace VerdantsAscent.Terrain.Paint
             wetPending = FiresWorldGenBase.Active && !FiresWorldGenBase.WaterSurfaceReady;
             if (wetPending || px == null || px.Length < res * res || res < 2) return;
             EnsureLoaded();
-
+            // 0.2.1319: the two passes are per-row helpers now (shared with the spread LOD job below); same pixels, same order per texel
             if (s_cache.Count > 0)
-            {
-                int lastZx = int.MinValue, lastZz = int.MinValue;
-                Entry e = null;
-                for (int y = 0; y < res; y++)
-                {
-                    float wz = cornerZ + y * texelMeters;
-                    int zz = Mathf.FloorToInt((wz + 32f) / 64f);
-                    int row = y * res;
-                    for (int x = 0; x < res; x++)
-                    {
-                        float wx = cornerX + x * texelMeters;
-                        int zx = Mathf.FloorToInt((wx + 32f) / 64f);
-                        if (zx != lastZx || zz != lastZz)
-                        {
-                            lastZx = zx; lastZz = zz;
-                            s_cache.TryGetValue(new Vector2s(zx, zz), out e);
-                        }
-                        if (e == null || e.Pixels == null || e.Res < 2) continue;
-                        int sx = Mathf.Clamp(Mathf.RoundToInt((wx - (zx * 64f - 32f)) * (e.Res - 1) / 64f), 0, e.Res - 1);
-                        int sz = Mathf.Clamp(Mathf.RoundToInt((wz - (zz * 64f - 32f)) * (e.Res - 1) / 64f), 0, e.Res - 1);
-                        px[row + x] = e.Pixels[sz * e.Res + sx];
-                        changed = true;
-                    }
-                }
-            }
-
+                for (int y = 0; y < res; y++) OverlayCacheRow(cornerX, cornerZ, texelMeters, res, px, y, ref changed);
             if (!FiresWorldGenBase.Active) return;
-            // Whole-grid early out from the BAKED zone flags, +1 zone border —
-            // the band reaches ~12m past wet cells (near-field stamp precedent).
+            if (!AnyWetPaint(cornerX, cornerZ, texelMeters, res)) return;
+            for (int y = 0; y < res; y++) OverlayWetRow(cornerX, cornerZ, texelMeters, res, px, y, ref changed);
+        }
+
+        // 1. cached zone masks for one row (replace).
+        private static void OverlayCacheRow(float cornerX, float cornerZ, float texelMeters, int res, Color32[] px, int y, ref bool changed)
+        {
+            int lastZx = int.MinValue, lastZz = int.MinValue;
+            Entry e = null;
+            float wz = cornerZ + y * texelMeters;
+            int zz = Mathf.FloorToInt((wz + 32f) / 64f);
+            int row = y * res;
+            for (int x = 0; x < res; x++)
+            {
+                float wx = cornerX + x * texelMeters;
+                int zx = Mathf.FloorToInt((wx + 32f) / 64f);
+                if (zx != lastZx || zz != lastZz)
+                {
+                    lastZx = zx; lastZz = zz;
+                    s_cache.TryGetValue(new Vector2s(zx, zz), out e);
+                }
+                if (e == null || e.Pixels == null || e.Res < 2) continue;
+                int sx = Mathf.Clamp(Mathf.RoundToInt((wx - (zx * 64f - 32f)) * (e.Res - 1) / 64f), 0, e.Res - 1);
+                int sz = Mathf.Clamp(Mathf.RoundToInt((wz - (zz * 64f - 32f)) * (e.Res - 1) / 64f), 0, e.Res - 1);
+                px[row + x] = e.Pixels[sz * e.Res + sx];
+                changed = true;
+            }
+        }
+
+        // Whole-grid early out from the BAKED zone flags, +1 zone border —
+        // the band reaches ~12m past wet cells (near-field stamp precedent).
+        private static bool AnyWetPaint(float cornerX, float cornerZ, float texelMeters, int res)
+        {
             float spanM = texelMeters * (res - 1);
             int zMinX = Mathf.FloorToInt((cornerX + 32f) / 64f) - 1;
             int zMaxX = Mathf.FloorToInt((cornerX + spanM + 32f) / 64f) + 1;
             int zMinZ = Mathf.FloorToInt((cornerZ + 32f) / 64f) - 1;
             int zMaxZ = Mathf.FloorToInt((cornerZ + spanM + 32f) / 64f) + 1;
-            bool anyPaint = false;
-            for (int zz = zMinZ; zz <= zMaxZ && !anyPaint; zz++)
-                for (int zx = zMinX; zx <= zMaxX && !anyPaint; zx++)
+            for (int zz = zMinZ; zz <= zMaxZ; zz++)
+                for (int zx = zMinX; zx <= zMaxX; zx++)
                     if ((FiresWorldGenBase.ZoneWaterFlags(zx, zz) & FiresWorldGenBase.ZW_PAINT) != 0)
-                        anyPaint = true;
-            if (!anyPaint) return;
-            for (int y = 0; y < res; y++)
+                        return true;
+            return false;
+        }
+
+        // 2. the wet band for one row.
+        private static void OverlayWetRow(float cornerX, float cornerZ, float texelMeters, int res, Color32[] px, int y, ref bool changed)
+        {
+            float wz = cornerZ + y * texelMeters;
+            int row = y * res;
+            for (int x = 0; x < res; x++)
             {
-                float wz = cornerZ + y * texelMeters;
-                int row = y * res;
-                for (int x = 0; x < res; x++)
+                float wet = VoxelZoneStreamer.PaintWet01(cornerX + x * texelMeters, wz);
+                if (wet <= 0.03f) continue;
+                var c = px[row + x];
+                if (c.g > 63 || c.b > 63) continue;   // cultivated/paved player paint wins
+                byte r2 = (byte)Mathf.Max(c.r, Mathf.RoundToInt(wet * 255f));
+                // ASHLANDS: alpha is LAVA — wet paint keeps its hands off
+                // (the shoreline lava band). r (dirt) is safe.
+                byte a2 = FiresWorldGenBase.BiomeCodeAt(cornerX + x * texelMeters, wz) == 6
+                    ? c.a : (byte)Mathf.RoundToInt(Mathf.Lerp(c.a, wet * 255f, wet));
+                if (r2 != c.r || a2 != c.a)
                 {
-                    float wet = VoxelZoneStreamer.PaintWet01(cornerX + x * texelMeters, wz);
-                    if (wet <= 0.03f) continue;
-                    var c = px[row + x];
-                    if (c.g > 63 || c.b > 63) continue;   // cultivated/paved player paint wins
-                    byte r2 = (byte)Mathf.Max(c.r, Mathf.RoundToInt(wet * 255f));
-                    // ASHLANDS: alpha is LAVA — wet paint keeps its hands off
-                    // (the shoreline lava band). r (dirt) is safe.
-                    byte a2 = FiresWorldGenBase.BiomeCodeAt(cornerX + x * texelMeters, wz) == 6
-                        ? c.a : (byte)Mathf.RoundToInt(Mathf.Lerp(c.a, wet * 255f, wet));
-                    if (r2 != c.r || a2 != c.a)
-                    {
-                        px[row + x] = new Color32(r2, c.g, c.b, a2);
-                        changed = true;
-                    }
+                    px[row + x] = new Color32(r2, c.g, c.b, a2);
+                    changed = true;
                 }
             }
         }
@@ -224,6 +267,19 @@ namespace VerdantsAscent.Terrain.Paint
             float texel = span / (res - 1);
             Vector3 pos = hm.transform.position;
 
+            // 0.2.1319 (PLAN_fat_frame_spread item 11): key "Distant paint copy spread" composes the rows over frames into this
+            // job's own buffer (PumpLodJobs, under FatBudget) and uploads + binds ONCE when every row is done; the tile keeps its
+            // current binding until then (never a half-composed mask). Off = the old one-frame compose below.
+            if (SpreadOn)
+            {
+                bool pending = FiresWorldGenBase.Active && !FiresWorldGenBase.WaterSurfaceReady;
+                if (pending) { s_lodPending.Add(hm); s_lodJobs.Remove(hm); return; }
+                s_lodPending.Remove(hm);
+                EnsureLoaded();
+                StartLodJob(hm, own, res, pos.x - span * 0.5f, pos.z - span * 0.5f, texel);
+                return;
+            }
+
             // Base = the tile's OWN worldgen mask — richer than a flat fill
             // (keeps whatever vanilla's builder painted, e.g. Ashlands lava alpha).
             var px = own.GetPixels32();
@@ -232,7 +288,11 @@ namespace VerdantsAscent.Terrain.Paint
             if (wetPending) { s_lodPending.Add(hm); return; }
             s_lodPending.Remove(hm);
             if (!changed) return;   // nothing beyond its own base — leave vanilla's binding alone
+            BindLod(hm, mat, res, px);
+        }
 
+        private static void BindLod(Heightmap hm, Material mat, int res, Color32[] px)
+        {
             if (s_propClearedMask == 0) s_propClearedMask = Shader.PropertyToID("_ClearedMaskTex");
             if (!s_injected.TryGetValue(hm, out Texture2D tex) || tex == null)
             {
@@ -244,6 +304,74 @@ namespace VerdantsAscent.Terrain.Paint
             tex.SetPixels32(px);
             tex.Apply(false);
             mat.SetTexture(s_propClearedMask, tex);
+        }
+
+        // ---- 0.2.1319 spread LOD compose jobs
+        private static bool SpreadOn => VoxelZoneStreamer.HasDriver && (VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.DistantPaintSpread != null && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.DistantPaintSpread.Value);
+        private sealed class LodJob { public Color32[] Px; public int Res, Row, Rev, Restarts; public float X0, Z0, Texel; public bool Cache, Wet, Changed; }
+        private static readonly Dictionary<Heightmap, LodJob> s_lodJobs = new Dictionary<Heightmap, LodJob>();
+        private static readonly List<Heightmap> s_lodJobScratch = new List<Heightmap>(16);
+        private static int s_cacheRev;   // bumped by every capture: a job that read rows before a capture restarts (same final pixels as a one-frame compose after it)
+        private const int LodJobMaxRestarts = 3;
+        private static bool s_lodSpreadProof;
+        private static readonly VerdantsAscent.Terrain.Voxel.FatSpreadStat s_lodSpread = new VerdantsAscent.Terrain.Voxel.FatSpreadStat("distant paint LOD compose");
+
+        private static void StartLodJob(Heightmap hm, Texture2D own, int res, float x0, float z0, float texel)
+        {
+            var px = own.GetPixels32();
+            if (px == null || px.Length < res * res) { s_lodJobs.Remove(hm); return; }
+            int restarts = s_lodJobs.TryGetValue(hm, out var old) && old != null ? old.Restarts : 0;
+            s_lodJobs[hm] = new LodJob
+            {
+                Px = px, Res = res, Row = 0, Rev = s_cacheRev, Restarts = restarts, X0 = x0, Z0 = z0, Texel = texel,
+                Cache = s_cache.Count > 0,
+                Wet = FiresWorldGenBase.Active && AnyWetPaint(x0, z0, texel, res),
+            };
+            if (!s_lodSpreadProof) { s_lodSpreadProof = true; FiresLogger.LogInfo("[DistantPaint] distant LOD paint composes over frames into a scratch buffer, one upload when done (0.2.1319)"); }
+        }
+
+        // Every frame from the streamer driver: rows of the running jobs while FatBudget has time (at least one row a frame).
+        internal static void PumpLodJobs()
+        {
+            if (s_lodJobs.Count == 0) return;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            double allow = System.Math.Max(0.1, System.Math.Min(1.0, VerdantsAscent.Terrain.Voxel.FatBudget.LeftMs()));
+            long limit = t0 + (long)(allow * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+            s_lodJobScratch.Clear();
+            foreach (var kv in s_lodJobs) s_lodJobScratch.Add(kv.Key);
+            bool any = false;
+            for (int i = 0; i < s_lodJobScratch.Count; i++)
+            {
+                var hm = s_lodJobScratch[i];
+                if (hm == null || !Active) { s_lodJobs.Remove(hm); continue; }
+                var job = s_lodJobs[hm];
+                if (job.Rev != s_cacheRev && job.Cache && job.Restarts < LodJobMaxRestarts)
+                {
+                    // a zone mask changed under the rows already read: start over from the tile's own mask
+                    job.Restarts++;
+                    var own = hm.GetPaintMask();
+                    if (own == null || own.width != job.Res) { s_lodJobs.Remove(hm); continue; }
+                    StartLodJob(hm, own, job.Res, job.X0, job.Z0, job.Texel);
+                    job = s_lodJobs[hm];
+                }
+                job.Rev = s_cacheRev;
+                bool cacheNow = s_cache.Count > 0;
+                while (job.Row < job.Res)
+                {
+                    if (any && System.Diagnostics.Stopwatch.GetTimestamp() >= limit) break;
+                    if (job.Cache && cacheNow) OverlayCacheRow(job.X0, job.Z0, job.Texel, job.Res, job.Px, job.Row, ref job.Changed);
+                    if (job.Wet) OverlayWetRow(job.X0, job.Z0, job.Texel, job.Res, job.Px, job.Row, ref job.Changed);
+                    job.Row++; any = true;
+                }
+                if (job.Row < job.Res) break;
+                s_lodJobs.Remove(hm);
+                Material mat = s_materialInstance(hm);
+                if (job.Changed && mat != null) BindLod(hm, mat, job.Res, job.Px);   // not changed = leave vanilla's binding alone (as before)
+                if (System.Diagnostics.Stopwatch.GetTimestamp() >= limit) break;
+            }
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            VerdantsAscent.Terrain.Voxel.FatBudget.Spend(VerdantsAscent.Terrain.Voxel.FatBudget.Who.Spread, ms);
+            s_lodSpread.Note(ms);
         }
 
         // A TerrainLod heightmap that is destroyed used to leave its injected texture behind
@@ -312,6 +440,7 @@ namespace VerdantsAscent.Terrain.Paint
             if (path == null || path == s_loadedPath) return;
             s_cache.Clear();
             PruneInjected(true);
+            s_lodJobs.Clear(); s_cacheRev++;   // 0.2.1319
             s_lodPending.Clear();
             s_dirty = false;
             s_loadedPath = path;

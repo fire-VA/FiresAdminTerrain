@@ -31,6 +31,7 @@ namespace VerdantsAscent.Water.Core
         private const float ICE_THICKNESS = 0.45f;
         private const float ICE_SURFACE_OFFSET = 0.05f;
         private const float CELL_SIZE = 0.25f;
+        private const int GridExtra = 2;   // 0.2.1336: InitializeHeightGrid's cells past the bounds
         private const int MAX_HOLES = 20;
         private const float ICEBERG_DEPTH = 2.5f;
 
@@ -564,6 +565,7 @@ namespace VerdantsAscent.Water.Core
             _waterMeshFilter = _waterGO.AddComponent<MeshFilter>();
             _waterMeshFilter.sharedMesh = _waterMesh;
             _waterRenderer = _waterGO.AddComponent<MeshRenderer>();
+            _waterRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;   // 0.2.1093: a see-through water/overlay surface never casts a shadow (Fire shot 537: phantom shadow bar on the snow)
             if (_waterMaterial != null) _waterRenderer.material = _waterMaterial;
 
             // Ice shell (top face + side walls, walkable collider)
@@ -594,6 +596,8 @@ namespace VerdantsAscent.Water.Core
             _walkColliderMesh = new Mesh { name = "FloatingIceWalkCollider" };
             _walkCollider = _iceGO.AddComponent<MeshCollider>();
             _walkCollider.convex = false;
+            VanillaIce.OptIn(_walkCollider);   // 0.2.1095: vanilla slippery ice (layer static_solid + SlipperyIce); FAT's home-made slide is gone
+            VanillaIce.AddSnap(_walkCollider);   // 0.2.1095: plus a snap collider on layer piece for Infinity Hammer
 
             // Bottom mesh (visual only - deep iceberg shape, no collider)
             if (_bottomGO != null) Destroy(_bottomGO);
@@ -931,6 +935,7 @@ namespace VerdantsAscent.Water.Core
             {
                 _walkCollider.sharedMesh = null;
                 _walkCollider.sharedMesh = _walkColliderMesh;
+                VanillaIce.SyncSnap(_walkCollider);
             }
         }
 
@@ -1328,24 +1333,17 @@ namespace VerdantsAscent.Water.Core
             _noiseSeed = zdo.GetFloat(s_floatIceNoiseSeedHash, (s_instanceCounter++) * 137.5f);
 
             byte[] gridParams = zdo.GetByteArray(s_floatIceGridHash);
-            if (gridParams != null && gridParams.Length >= 24)
-            {
-                _gridWidth = BitConverter.ToInt32(gridParams, 0);
-                _gridHeight = BitConverter.ToInt32(gridParams, 4);
-                _boundsMinX = BitConverter.ToSingle(gridParams, 8);
-                _boundsMinZ = BitConverter.ToSingle(gridParams, 12);
-                _boundsMaxX = BitConverter.ToSingle(gridParams, 16);
-                _boundsMaxZ = BitConverter.ToSingle(gridParams, 20);
-            }
-            else
+            // 0.2.1336: range-checked before anything is allocated; a bad block is skipped and the grid comes from the footprints.
+            if (!IceGridCheck.Read(gridParams, CELL_SIZE, GridExtra, "floating ice", out _gridWidth, out _gridHeight, out _boundsMinX, out _boundsMinZ, out _boundsMaxX, out _boundsMaxZ))
             {
                 RecalcBounds();
+                if (!IceGridCheck.Fits(_boundsMinX, _boundsMinZ, _boundsMaxX, _boundsMaxZ, CELL_SIZE, GridExtra, "floating ice footprints")) return false;
                 _gridWidth = Mathf.CeilToInt((_boundsMaxX - _boundsMinX) / CELL_SIZE) + 2;
                 _gridHeight = Mathf.CeilToInt((_boundsMaxZ - _boundsMinZ) / CELL_SIZE) + 2;
             }
 
             byte[] heightData = zdo.GetByteArray(s_floatIceHeightsHash);
-            if (heightData != null && heightData.Length == _gridWidth * _gridHeight * 4)
+            if (heightData != null && heightData.Length == _gridWidth * (long)_gridHeight * 4L)
             {
                 _heights = new float[_gridWidth * _gridHeight];
                 Buffer.BlockCopy(heightData, 0, _heights, 0, heightData.Length);

@@ -21,11 +21,25 @@ namespace VerdantsAscent.Terrain.Voxel
         // stays loaded: forget the committed revision so the next poll
         // re-applies the brushwork onto the regenerated chunk.
         // World unload (VoxelWorld.Clear) forgets every applied record with the chunks.
-        internal static void ClearApplied() => s_applied.Clear();
+        internal static void ClearApplied() { s_applied.Clear(); s_mopSeen.Clear(); s_mopDroppedAt.Clear(); }
+
+        // 0.2.1344: the mop signature last acted on per chunk key, and when its chunk was last dropped.
+        private static readonly Dictionary<Vector3Int, int> s_mopSeen = new Dictionary<Vector3Int, int>();
+        private static readonly Dictionary<Vector3Int, float> s_mopDroppedAt = new Dictionary<Vector3Int, float>();
+        // 0.2.1344 [FiresWater] Debug clause: the record budget (2.5 ms by time, tested BEFORE each apply, so a frame's first apply is never bounded).
+        private static int s_bFrameRecords, s_bWorstRecords, s_bTotalRecords;
+        private static float s_bWorstFrameMs, s_bWorstOneMs;
+        internal static string TakeBudgetStats()
+        {
+            string s = $"record applies {s_bTotalRecords}, most in one frame {s_bWorstRecords}, worst frame {s_bWorstFrameMs:0.0} ms, worst one {s_bWorstOneMs:0.0} ms against the {ApplyBudgetMs} ms budget, held total {s_budgetDeferred}";
+            s_bTotalRecords = s_bWorstRecords = 0; s_bWorstFrameMs = s_bWorstOneMs = 0f;
+            return s;
+        }
 
         public static void InvalidateKey(Vector3Int key)
         {
             s_applied.Remove(key);   // a dropped chunk's arrays are not kept alive by the dedupe, and its record re-applies
+            if (s_mopSeen.ContainsKey(key)) s_mopDroppedAt[key] = Time.realtimeSinceStartup;   // 0.2.1344
             if (s_byKey.TryGetValue(key, out var a) && a != null)
             {
                 a._lastRev = uint.MaxValue;
@@ -155,6 +169,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 _keyKnown = true;
                 s_byKey[_key] = this;
+                VoxelZoneStreamer.NoteAnchorKnown(_key, Time.time - _bornAt);   // 0.2.1350 (proof)
             }
 
             uint rev = zdo.DataRevision;
@@ -170,18 +185,23 @@ namespace VerdantsAscent.Terrain.Voxel
             // FPS was pinned near 30 while running, frames up to 363 ms: every anchor applied its record in its own
             // Update with no shared limit, so a streamed-in edited area applied dozens of records (decompress, import, 27 ring
             // mirrors) in one frame. A frame budget now: once ApplyBudgetMs is spent this frame, the rest wait a frame or two.
-            if (Time.frameCount != s_budgetFrame) { s_budgetFrame = Time.frameCount; s_budgetSpent = 0f; }
+            if (Time.frameCount != s_budgetFrame) { s_budgetFrame = Time.frameCount; s_budgetSpent = 0f; s_bFrameRecords = 0; }
             if (s_budgetSpent >= ApplyBudgetMs) { _nextPoll = Time.time + UnityEngine.Random.Range(0.02f, 0.1f); s_budgetDeferred++; return; }
             var spkR = FatSpike.Start();
             float applyStart = Time.realtimeSinceStartup;
             var outcome = Apply(zdo);
             FatSpike.Add(FatSpike.Stage.RecordApply, spkR);
-            s_budgetSpent += (Time.realtimeSinceStartup - applyStart) * 1000f;
+            float applyOneMs = (Time.realtimeSinceStartup - applyStart) * 1000f;   // 0.2.1344
+            s_budgetSpent += applyOneMs;
+            s_bTotalRecords++; s_bFrameRecords++;
+            if (s_bFrameRecords > s_bWorstRecords) s_bWorstRecords = s_bFrameRecords;
+            if (s_budgetSpent > s_bWorstFrameMs) s_bWorstFrameMs = s_budgetSpent;
+            if (applyOneMs > s_bWorstOneMs) s_bWorstOneMs = applyOneMs;
             // When a dedicated server takes in a runtime edit, at Debug.
             if (ZNet.instance != null && ZNet.instance.IsDedicated() && FiresLogger.DebugEnabled)
                 FiresLogger.LogDebug($"[FiresVoxel] server applied edit: chunk {_key} rev {rev} → {outcome} in {(Time.realtimeSinceStartup - applyStart) * 1000f:0} ms"
                     + $" ({Time.time - _bornAt:0.0} s after its anchor arrived).");
-            if (outcome == ApplyOutcome.Success) _lastRev = rev;
+            if (outcome == ApplyOutcome.Success) { _lastRev = rev; VoxelZoneStreamer.NoteAnchorApplied(_key); }   // 0.2.1350 (proof)
             else if (outcome == ApplyOutcome.PermanentForRevision) _lastFailedRev = rev;
             else _nextPoll = Time.time + 5f;
         }
@@ -233,7 +253,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         FiresLogger.LogDebug($"[FiresVoxel] chunk {_key}: the same record arrived again (rev {zdo.DataRevision}), not re-applied ({s_sameRecordSkips} such skip(s) this session)");
                     return ApplyOutcome.Success;
                 }
-                var raw = Utils.Decompress(packed);
+                var raw = FatInflate.Gzip(packed, "voxel edits ZDO");   // 0.2.1333: null = refused, ImportBrushEdits rejects it
                 int mopsBefore = chunk.MopSignature;
                 if (!chunk.ImportBrushEdits(raw))
                 {
@@ -259,19 +279,37 @@ namespace VerdantsAscent.Terrain.Voxel
                             if (!VoxelWorld.TryGetChunk(new Vector3Int(_key.x + dx, _key.y + dy, _key.z + dz), out var near) || near == null) continue;
                             if (near.MirrorBordersNow(true) > 0) { VoxelMeshPipeline.EnqueueRemesh(near); neighboursFixed++; }
                         }
-                if (neighboursFixed > 0 && FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] chunk {_key}'s record re-mirrored {neighboursFixed} neighbour ring(s) (remeshed)");
-                if (chunk.HasBrushEdits) VoxelZoneStreamer.MarkZoneBrushed(_key);
+                if (neighboursFixed > 0 && FatDiag.Terraform) FiresLogger.LogDebug($"[FiresVoxel] chunk {_key}'s record re-mirrored {neighboursFixed} neighbour ring(s) (remeshed)");
+                if (chunk.HasBrushEdits) VoxelZoneStreamer.MarkZoneBrushed(_key, "a saved anchor record");
                 VerdantsAscent.Water.Tools.ToolFalls.ReadFrom(_key, zdo);   // the chunk's Vfall falls
                 // Vmop: a mask that changed here (a peer's mop or restore, or the saved one arriving after the water
                 // was built) rebuilds the hand-drawn water over this chunk.
                 if (chunk.MopSignature != mopsBefore)
                 {
                     var centre = chunk.WorldOrigin + new Vector3(16f, 16f, 16f);
-                    int rebuilt = VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(centre, 24f);
-                    FiresLogger.LogDebug($"[FiresWater] chunk {_key}'s mop mask changed: {rebuilt} drawn water bod(ies) rebuilt.");
+                    long mop0 = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1343 timer
+                    int rebuilt, sheets;
+                    if (VerdantsAscent.Water.Core.WaterMeshCombiner.MopQueueOn)
+                    {
+                        // 0.2.1344: a reloaded chunk starts with no mask, so its own saved mask read as "changed" on every load. The SAME mask back only
+                        // concerns what was built while the chunk was away (read without the mask); anything older already has it.
+                        int sigNow = chunk.MopSignature;
+                        float since = s_mopSeen.TryGetValue(_key, out int seen) && seen == sigNow && s_mopDroppedAt.TryGetValue(_key, out float dropped) ? dropped : -1f;
+                        s_mopSeen[_key] = sigNow;
+                        rebuilt = VerdantsAscent.Water.Core.WaterMeshCombiner.QueueMopRefreshIn(centre, 24f, since);
+                        sheets = VerdantsAscent.Water.Core.PlacedWaterSheets.MarkDirtyIn(centre, 24f, false, since);
+                    }
+                    else
+                    {
+                    rebuilt = VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(centre, 24f);
+                    // 0.2.1331: RefreshMopsIn only reaches the combiners; the placed sheets draw that water, so a mask arriving late left them unmopped.
+                    sheets = VerdantsAscent.Water.Core.PlacedWaterSheets.MarkDirtyIn(centre, 24f);
+                    }
+                    VerdantsAscent.Water.Core.PlacedWaterSheets.NoteMopRefresh((System.Diagnostics.Stopwatch.GetTimestamp() - mop0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency, rebuilt, sheets);
+                    FiresLogger.LogDebug($"[FiresWater] chunk {_key}'s mop mask changed: {rebuilt} drawn water bod(ies) rebuilt, {sheets} placed sheet chunk(s) queued.");
                 }
                 // Evidence (at Debug): a peer's (or the saved world's) edit applied here.
-                if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] applied chunk {_key} from the shared record ({packed.Length} bytes packed, rev {zdo.DataRevision}).");
+                if (FatDiag.Terraform) FiresLogger.LogDebug($"[FiresVoxel] applied chunk {_key} from the shared record ({packed.Length} bytes packed, rev {zdo.DataRevision}).");
                 if (s_applied.Count >= AppliedCap) s_applied.Clear();
                 s_applied[_key] = (chunk, packedHash, packed.Length);
                 return ApplyOutcome.Success;
@@ -294,6 +332,19 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static readonly List<ZDO> s_zoneAnchors = new List<ZDO>();
         private static readonly HashSet<Vector3Int> s_skippedKeys = new HashSet<Vector3Int>();
+
+        // 0.2.1350 (proof only): the anchor ZDOs this peer knows in a zone right now, -1 before ZDOMan exists. Main thread.
+        internal static int CountZoneAnchors(Vector2s zone)
+        {
+            if (ZDOMan.instance == null) return -1;
+            int anchorPrefab = VoxelAnchorPrefab.PrefabName.GetStableHashCode();
+            s_zoneAnchors.Clear();
+            ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(0, 0), s_zoneAnchors);
+            int n = 0;
+            foreach (var zdo in s_zoneAnchors) if (zdo != null && zdo.GetPrefab() == anchorPrefab) n++;
+            s_zoneAnchors.Clear();
+            return n;
+        }
 
         // A dedicated server keeps no anchor instances near its players, so its copy of a zone reads the zone's
         // VAVoxel ZDOs directly. Only chunks the zone holds, and only revisions not imported yet.
@@ -331,7 +382,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 var chunk = VoxelWorld.GetOrCreateForRestore(key);
                 if (chunk == null) { NoteServerImport(key, revision, zone, "NOT imported: the chunk cap refused the chunk"); continue; }
                 int mopsBefore = chunk.MopSignature;
-                if (!chunk.ImportBrushEdits(Utils.Decompress(packed)))
+                if (!chunk.ImportBrushEdits(FatInflate.Gzip(packed, "voxel edits ZDO")))
                 {
                     NoteServerImport(key, revision, zone, $"NOT imported: the import refused the blob ({packed.Length} bytes packed; kind {chunk.Kind})");
                     continue;
@@ -344,7 +395,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 // The server's copy of the chunk's falls and of the drawn water a mop changed.
                 VerdantsAscent.Water.Tools.ToolFalls.ReadFrom(key, zdo);
                 if (chunk.MopSignature != mopsBefore)
-                    VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(chunk.WorldOrigin + new Vector3(16f, 16f, 16f), 24f);
+                {
+                    if (VerdantsAscent.Water.Core.WaterMeshCombiner.MopQueueOn) VerdantsAscent.Water.Core.WaterMeshCombiner.QueueMopRefreshIn(chunk.WorldOrigin + new Vector3(16f, 16f, 16f), 24f);   // 0.2.1344
+                    else VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(chunk.WorldOrigin + new Vector3(16f, 16f, 16f), 24f);
+                }
                 importedRevisions[key] = revision;
                 imported++;
                 NoteServerImport(key, revision, zone, $"imported ({packed.Length} bytes packed), {healed} border sample(s) re-mirrored around it");

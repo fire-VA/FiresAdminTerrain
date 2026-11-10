@@ -26,7 +26,7 @@ namespace VerdantsAscent.Terrain.Zones
         // Main thread only: built when a list is installed, read by any thread afterwards.
         private static BiomeSector SectorFor(in Circle circle)
         {
-            if (circle.Brush == Brush.Restore) return null;
+            if (circle.Brush == Brush.Restore || (circle.Brush == Brush.Custom && circle.Ground == Heightmap.Biome.None)) return null;
             string key = KeyOf(circle.Brush, circle.Ground, circle.Blend);
             if (s_sectors.TryGetValue(key, out var sector)) return sector;
             AltBiome blend = null;
@@ -43,23 +43,77 @@ namespace VerdantsAscent.Terrain.Zones
         // circle never lean toward the circle; the circle itself turns point by point (BiomePaint.Ground).
         private static void Paint(float wx, float wz, ref BiomeSector result)
         {
+            if (PaintCircles(wx, wz, ref result)) return;
+            // No circle here: a registered override provider (a ForceBiome territory) answers with a plain sector of its biome.
+            if (result == null || BiomeOverride.ProviderCount == 0 || !OverrideLookupAllowed || result.Biome == Heightmap.Biome.Ocean) return;
+            if (!BiomeOverride.TryProviderSector(wx, wz, out var forced, out var biome)) return;
+            if (forced != null) result = forced;                                   // the provider's own sector (keeps its alt biome)
+            else if (biome != result.Biome) result = PlainSector(biome);
+        }
+
+        // True when a paint circle decided the sector (painted, or a Restore circle keeping the world's answer).
+        private static bool PaintCircles(float wx, float wz, ref BiomeSector result)
+        {
             var snapshot = s_snapshot;
-            if (snapshot.Circles.Length == 0 || result == null || t_resolving > 0 || (ZoneModeGate.InSourceLookup && t_regrow == 0)) return;
+            if (snapshot.Circles.Length == 0 || result == null || t_resolving > 0 || (ZoneModeGate.InSourceLookup && t_regrow == 0)) return false;
             Interlocked.Increment(ref s_checked);
-            if (!snapshot.Cells.TryGetValue(CellKey(wx, wz), out var candidates)) return;
+            if (!snapshot.Cells.TryGetValue(CellKey(wx, wz), out var candidates)) return false;
             Interlocked.Increment(ref s_inCell);
             foreach (int index in candidates)
             {
                 var circle = snapshot.Circles[index];
                 if (!circle.Holds(wx, wz)) continue;
-                if (circle.Brush == Brush.Restore) return;
+                if (circle.Brush == Brush.Restore) return true;
                 var sector = snapshot.Sectors[index];
                 if (sector == null || (t_cornerScope > 0 && result.Biome != circle.Ground)) continue;
                 result = sector;
                 Interlocked.Increment(ref s_painted);
-                return;
+                return true;
+            }
+            return false;
+        }
+
+        private static readonly Dictionary<Heightmap.Biome, BiomeSector> s_plainSectors = new Dictionary<Heightmap.Biome, BiomeSector>();
+
+        // 0.2.1429 ([worldgen], Fire: "Yes fix the env box code"): the env-box corner override and the biome overlay painter take their corner sectors here too
+        // (one shared plain sector per biome, never a world sector edited in place).
+        internal static BiomeSector PlainSectorFor(Heightmap.Biome biome) => PlainSector(biome);
+
+        private static BiomeSector PlainSector(Heightmap.Biome biome)
+        {
+            lock (s_plainSectors)
+            {
+                if (!s_plainSectors.TryGetValue(biome, out var sector)) s_plainSectors[biome] = sector = new BiomeSector(null, biome);
+                return sector;
             }
         }
+
+        // The one guard every override lookup shares: never while resolving the world's own answer, inside a heightmap's corner
+        // scope (the zone keeps its own ground shape), or inside a zone-mode source lookup (outside a paint regrow).
+        internal static bool OverrideLookupAllowed => t_resolving == 0 && t_cornerScope == 0 && !(ZoneModeGate.InSourceLookup && t_regrow == 0);
+
+        // The newest paint circle over the point, as a biome (a Restore circle = none). Thread-safe: reads the published snapshot.
+        internal static bool TryPaintedGround(float wx, float wz, out Heightmap.Biome ground)
+        {
+            ground = Heightmap.Biome.None;
+            if (!OverrideLookupAllowed || !TryNewest(wx, wz, out var circle, out _) || circle.Brush == Brush.Restore) return false;
+            ground = circle.Ground;
+            return true;
+        }
+
+        // 0.2.1086 (Fire: "painted biomes should get normal goddamn biome logic" on super flat): the painted ground and sector also
+        // inside a heightmap's corner scope, for FatSuperFlat only (the flat world has no ground shape of its own to keep; the height
+        // stays flat, only the biome follows the paint). Not while resolving or inside a zone-mode source lookup.
+        internal static bool TryPaintedSectorAnyScope(float wx, float wz, out Heightmap.Biome ground, out BiomeSector sector)
+        {
+            ground = Heightmap.Biome.None;
+            if (t_resolving > 0 || (ZoneModeGate.InSourceLookup && t_regrow == 0)) { sector = null; return false; }
+            if (!TryNewest(wx, wz, out var circle, out sector) || circle.Brush == Brush.Restore || sector == null) { sector = null; return false; }
+            ground = circle.Ground;
+            return true;
+        }
+
+        internal static bool InCornerScope => t_cornerScope > 0;
 
         // Per minute, for performance accounting: lookups that met a painted world, those whose 64 m cell holds a circle, and
         // those answered with a painted sector. Logged only while anything is painted.
@@ -74,8 +128,9 @@ namespace VerdantsAscent.Terrain.Zones
             long checkedCount = Interlocked.Exchange(ref s_checked, 0L);
             long inCell = Interlocked.Exchange(ref s_inCell, 0L);
             long painted = Interlocked.Exchange(ref s_painted, 0L);
+            NoteHeightCost();
             if (checkedCount > 0)
-                FiresLogger.LogInfo($"[BiomePaint] sector lookups last minute: {checkedCount:N0} with paint in the world, {inCell:N0} in a painted "
+                FiresLogger.LogDebug($"[BiomePaint] sector lookups last minute: {checkedCount:N0} with paint in the world, {inCell:N0} in a painted "
                     + $"cell, {painted:N0} answered painted ({s_snapshot.Circles.Length} circle(s)).");
         }
 

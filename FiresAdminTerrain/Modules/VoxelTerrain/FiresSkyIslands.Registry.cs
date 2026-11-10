@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
@@ -103,6 +104,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // so a set left pending by one world can never gate the next.
         private static void ResetRegistryState()
         {
+            SitesYes = SitesNoChance = SitesNoRoom = SitesNoDry = SitesNoPondDry = SitesPondIslands = 0; SitesMini = SitesPondDry = SitesRule3Islands = 0;   // 0.2.1137   // 0.2.1096 [Locations] tally
             ActiveSetHash = NoIslandsHash;
             s_seeded = false;
             s_seededRarity = 0f;
@@ -154,9 +156,51 @@ namespace VerdantsAscent.Terrain.Voxel
         // RPC_PeerInfo, so authority is always knowable here. No ZNet at all means
         // offline tooling, which keeps the old recompute-in-place behaviour and
         // writes nothing, since there is no world save to bind a registry to.
+        // 0.2.1076: the saved plain lattice islands dropped at the last registry load (kind, centre, radius, height band), for the sweep.
+        private static readonly List<Island> DroppedLattice = new List<Island>();
+        private static readonly System.Reflection.FieldInfo s_zdosById = HarmonyLib.AccessTools.Field(typeof(ZDOMan), "m_objectsByID");
+
+        // 0.2.1076: once per world, on the server, after the registry dropped saved lattice islands: the objects their generation left
+        // (vegetation, rim / belly props, pickables, wild creatures) inside each dropped island's footprint and height band are destroyed.
+        // Player builds (a creator), tamed creatures, players, tombstones and dropped items are never touched; terrain edit records
+        // (voxel chunk anchors) are left as they are. Called from the skyland driver's server tick once ZDOMan is up.
+        internal static void SweepDroppedLattice()
+        {
+            if (DroppedLattice.Count == 0 || ZDOMan.instance == null || ZNetScene.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
+            var islands = new List<Island>(DroppedLattice);
+            DroppedLattice.Clear();
+            var all = new List<ZDO>();
+            if (s_zdosById?.GetValue(ZDOMan.instance) is System.Collections.IDictionary dict)
+                foreach (System.Collections.DictionaryEntry e in dict) if (e.Value is ZDO z) all.Add(z);
+            int removed = 0, kept = 0;
+            foreach (var zdo in all)
+            {
+                Vector3 p = zdo.GetPosition();
+                bool inside = false;
+                foreach (var isl in islands)
+                {
+                    float dx = p.x - WorldX(in isl), dz = p.z - WorldZ(in isl), reach = isl.R + 12f;
+                    if (dx * dx + dz * dz > reach * reach) continue;
+                    if (p.y < isl.Bot + isl.OffY - 10f || p.y > isl.Top + isl.OffY + 25f) continue;
+                    inside = true; break;
+                }
+                if (!inside) continue;
+                var prefab = ZNetScene.instance.GetPrefab(zdo.GetPrefab());
+                if (zdo.GetLong(ZDOVars.s_creator) != 0L || zdo.GetBool(ZDOVars.s_tamed) || prefab == null
+                    || prefab.GetComponent<Player>() != null || prefab.GetComponent<TombStone>() != null || prefab.GetComponent<ItemDrop>() != null
+                    || prefab.GetComponent<VoxelChunkAnchor>() != null)
+                { kept++; continue; }
+                ZDOMan.instance.DestroyZDO(zdo);
+                removed++;
+            }
+            FiresLogger.LogInfo($"[FiresSkyIslands] removed the content of {islands.Count} dropped lattice island(s): {removed} object(s) destroyed, "
+                + $"{kept} kept (player builds, tamed creatures, players, tombstones, dropped items, terrain edit records).");
+        }
+
         internal static void Initialize(World world)
         {
             var net = ZNet.instance;
+            FiresLogger.LogInfo($"[FiresSkyIslands] lattice islands: off; skyland driver: {(Zones.ZoneModeSkylands.Driven ? "on" : FiresVoxelConfig.BuildsSkyIslands ? "off (ring-only world, or sky islands unticked)" : "off (sky islands off)")} (mode {Zones.ZoneModeSkylands.DriverMode})");
             if (net == null)
             {
                 Build(world.m_seed);
@@ -179,6 +223,14 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (TryLoadRegistry(path, world, out string failure))
                 {
+                    if (DroppedLattice.Count > 0)
+                    {
+                        // 0.2.1076: the dropped lattice islands leave the frozen file too, so clients get the skyland-only set.
+                        bool saved = TrySaveRegistry(path, world, out string saveFailure);
+                        if (!saved) SetActiveHash(Serialize(world, CurrentRarity()));
+                        FiresLogger.LogInfo($"[FiresSkyIslands] removed {DroppedLattice.Count} saved lattice island(s) (kept {s_islands.Count} skyland(s)) from {file}"
+                            + (saved ? "; registry re-saved." : $"; re-save failed ({saveFailure}), live this session only."));
+                    }
                     if (!s_seeded && BuildsSkyIslandsNow())
                     {
                         FiresLogger.LogInfo(
@@ -420,9 +472,18 @@ namespace VerdantsAscent.Terrain.Voxel
             s_awaitingServer = awaiting;
             s_awaitingSince = since;
 
-            foreach (var isl in loaded) AddIsland(in isl);
+            // 0.2.1076: saved plain lattice islands are dropped (skylands kept); their footprints are remembered so the server can
+            // clear what they left behind (FiresSkyIslands.SweepDroppedLattice).
+            DroppedLattice.Clear();
+            foreach (var isl in loaded)
+            {
+                // Saved lattice islands are dropped (and swept) on super-flat test worlds only; an existing normal/ring world keeps its
+                // saved ones until Fire OKs touching real saves (new worlds seed none anywhere: LatticeIslandsOn).
+                if (!LatticeIslandsOn && !IsSkyland(isl.Kind) && FiresWorldProfile.CurrentIsSuperFlat) { DroppedLattice.Add(isl); continue; }
+                AddIsland(in isl);
+            }
             s_any = s_islands.Count > 0;
-            ClusterCount = clusters;
+            ClusterCount = DroppedLattice.Count > 0 ? 0 : clusters;
             s_seeded = seeded;
             s_seededRarity = seededRarity;
             SetActiveHash(bytes);

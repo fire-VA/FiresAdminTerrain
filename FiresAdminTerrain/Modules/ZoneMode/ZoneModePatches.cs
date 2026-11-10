@@ -47,7 +47,35 @@ namespace VerdantsAscent.Terrain.Zones
     [HarmonyPatch(typeof(ZoneSystem), "Update")]
     internal static class ZoneMode_ZoneSystem_Update
     {
+        // 0.2.1089: First/Last bracket the whole call (vanilla + every mod) for the [ZoneUpdate] line.
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        private static void TimeStart() => ZoneUpdateTimes.Begin();
+
         private static void Postfix() => ZoneModeDiagnostics.Tick();
+
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
+        private static void TimeEnd() => ZoneUpdateTimes.End();
+
+        // An exception inside the call must not leave the bracket open.
+        // 0.2.1248 ([lead] round H: 8x ArgumentOutOfRangeException "in ZoneSystem.DMD<ZoneSystem::Update>" with no other frame): Harmony
+        // rethrows a finalizer's returned exception from the patched method, which resets its stack trace to the DMD, so the real
+        // thrower (vanilla, or any mod's ZoneSystem.Update postfix) was hidden. Its ORIGINAL trace is logged here first (every 10 s at most).
+        private static float s_nextTrace;
+        private static System.Exception Finalizer(System.Exception __exception)
+        {
+            if (__exception != null)
+            {
+                ZoneUpdateTimes.End();
+                if (UnityEngine.Time.realtimeSinceStartup >= s_nextTrace)
+                {
+                    s_nextTrace = UnityEngine.Time.realtimeSinceStartup + 10f;
+                    FiresLogger.LogWarning($"[FiresZones] ZoneSystem.Update threw (the original trace, before Harmony rethrows it from the DMD): {__exception}");
+                }
+            }
+            return __exception;
+        }
     }
 
     // A dedicated server has no creation popup: `-fireszones` on its command line makes a world it
@@ -230,13 +258,19 @@ namespace VerdantsAscent.Terrain.Zones
     [HarmonyPatch(typeof(HeightmapBuilder), nameof(HeightmapBuilder.RequestTerrainSync))]
     internal static class ZoneMode_HeightmapBuilder_RequestTerrainSync
     {
-        private static void Prefix(HeightmapBuilder __instance, out long __state)
+        private static void Prefix(HeightmapBuilder __instance, Vector3 center, int width, float scale, bool distantLod, WorldGenerator worldGen, out long __state)
         {
             ZoneModeBuilderCache.DropStaleBuilds(__instance);
+            global::VerdantsAscent.Terrain.BcImport.FatGenTiming.SyncQueueAtRequest(__instance, center, width, scale, distantLod, worldGen);
             __state = Stopwatch.GetTimestamp();
         }
 
-        private static void Postfix(long __state) => ZoneModeBuilderCache.RecordSyncRequest(Stopwatch.GetTimestamp() - __state);
+        private static void Postfix(long __state, Vector3 center)
+        {
+            long ticks = Stopwatch.GetTimestamp() - __state;
+            ZoneModeBuilderCache.RecordSyncRequest(ticks);
+            global::VerdantsAscent.Terrain.BcImport.FatGenTiming.SyncWaitDone(ticks, center);
+        }
     }
 
     // ── Minimap: gated through the samplers; this only reports the result ──

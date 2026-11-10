@@ -61,6 +61,7 @@ namespace VerdantsAscent.Terrain.Zones
             rpc.Register<ZPackage>(RpcDumpRequest, RPC_DumpRequest);
             rpc.Register<string>(RpcDumpReply, (sender, message) =>
             {
+                if (!FatNetGuard.FromServer(sender, "zone dump reply")) return;
                 try { Console.instance?.AddString(message); } catch { }
                 FiresLogger.LogInfo(message);
             });

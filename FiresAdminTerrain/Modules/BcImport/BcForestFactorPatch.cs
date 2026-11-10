@@ -22,7 +22,9 @@ namespace VerdantsAscent.Terrain.BcImport
         private static void Postfix(ref float __result, Vector3 __state)
         {
             if (!BcMigratedWorld.Active) return;
+            long t = FatGenTiming.Begin();   // 0.2.1209 timer (read-only)
             BcMigratedWorld.TryApplyForest(__state, ref __result);
+            FatGenTiming.End(FatGenTiming.BcForest, t);
         }
     }
 }

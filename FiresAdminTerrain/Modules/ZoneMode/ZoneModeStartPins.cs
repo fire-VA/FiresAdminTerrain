@@ -66,7 +66,7 @@ namespace VerdantsAscent.Terrain.Zones
             else ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.instance.GetServerPeerID(), RpcAsk);
         }
 
-        private static void RPC_Tell(long sender, ZPackage pkg) => Take(pkg);
+        private static void RPC_Tell(long sender, ZPackage pkg) { if (FatNetGuard.FromServer(sender, "start pins")) Take(pkg); }
 
         private static void Take(ZPackage pkg)
         {

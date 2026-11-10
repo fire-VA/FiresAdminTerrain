@@ -27,11 +27,20 @@ namespace VerdantsAscent.Terrain.Zones
     [HarmonyPatch]
     internal static class FatLocationAccelerator
     {
+        // 0.2.1231 (Fire's shrine yaml: "generate new locations"): fires_regen genloc plans NEW location types on an existing world.
+        // While GenLocActive: the refused zones (protect list) take the place of vanilla's "already generated" refusal, so new types
+        // may land in generated zones the regen then spawns; a dry run collects the accepted sites instead of registering them; vanilla's
+        // fallback loop never runs (it would register in a dry run and has no refused-zone rule).
+        internal static bool GenLocActive, GenLocDry;
+        internal static HashSet<Vector2s> GenLocRefused = new HashSet<Vector2s>();
+        internal static readonly List<Vector3> GenLocPlanned = new List<Vector3>();
+
         private const string Section = "09 - World generation";
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<int> Threads;
         internal static ConfigEntry<bool> RelaxVital;
         internal static ConfigEntry<string> HalfQuotaLocations;
+        internal static ConfigEntry<bool> ApplyReplanExisting;   // 0.2.1137: gates FatLocationReplan's add-only steps on existing worlds
 
         private const int PointsPerZone = 6, RelaxSteps = 4, TerrainSamples = 10;
         private const float RelaxPerStep = 0.05f, Altitude0 = 30f, FrameBudgetMs = 12f;
@@ -49,6 +58,10 @@ namespace VerdantsAscent.Terrain.Zones
             HalfQuotaLocations = cfg.Bind(Section, "Relax to half quota", "Crypt2,Crypt3,Crypt4,SunkenCrypt4,TrollCave02,"
                 + "Mistlands_DvergrTownEntrance1,Mistlands_DvergrTownEntrance2",
                 "Location prefab names the relaxation tops up to at least half their quota (with 'Relax vital locations' on).");
+            ApplyReplanExisting = cfg.Bind(Section, "Apply location replan to existing worlds", false,
+                "Super flat worlds made before 0.2.1137: add the cave locations their creation could not plan (only in zones nobody has "
+                + "visited yet) and give sky islands with no site and no built ground a site. Add-only, once per world (server). "
+                + "A world made on 0.2.1137 or later gets the new rules at creation regardless. Server-owned.");
         }
 
         // ── Vanilla access ───────────────────────────────────────────────────────────────────────────────────────────
@@ -94,18 +107,24 @@ namespace VerdantsAscent.Terrain.Zones
         private sealed class Tally
         {
             internal int Iterations, LocationInZone, CenterDistance, Biome, BiomeArea, Altitude, Forest, CenterRing, TerrainDelta,
-                UnderWater, Similar, NotSimilar, Vegetation, AltBiomeMissing, AltBiomeBlock, Surround;
+                UnderWater, Similar, NotSimilar, Vegetation, AltBiomeMissing, AltBiomeBlock, Surround,
+                CaveNoRoom, CaveTooDeep, CaveNoAccess, CaveBiome, CaveCover, CaveOther;   // 0.2.1096: plan-time cave test
             public override string ToString()
                 => $"zone taken {LocationInZone}, centre distance {CenterDistance}, biome {Biome}, biome area {BiomeArea}, altitude {Altitude}, "
                 + $"forest {Forest}, centre ring {CenterRing}, terrain delta {TerrainDelta} (FAT water {UnderWater}), similar {Similar}, "
                 + $"not similar {NotSimilar}, vegetation {Vegetation}, alt biome missing {AltBiomeMissing}, alt biome block {AltBiomeBlock}, "
-                + $"surround {Surround}";
+                + $"surround {Surround}, cave room refused {CaveNoRoom} (too deep {CaveTooDeep}, no access {CaveNoAccess}, biome {CaveBiome}, cover {CaveCover}, other {CaveOther})";
         }
 
         // Shared state of one pass; everything order-dependent is read and written under Gate.
         private sealed class Pass
         {
             internal ZoneSystem.ZoneLocation Location;
+            // 0.2.1076 (Fire: "caves need their locations everywhere too, not just meadows spots"): on super flat with caves on, a
+            // location that may go underground is planned against the CAVE region's own biome (FiresCaveBiome.RegionBiome of the world's
+            // biome), not the flat Meadows surface; altitude, forest and vegetation (all read off the flat ground) are not asked, since the
+            // cave hosts it. Spawning then moves it into the cave (FatUndergroundLocations), as in 0.2.1075.
+            internal bool CavePlan;
             internal Rules Rules;
             internal int Attempts, Quota, Placed, AttemptCursor, MaxRangeBase;
             internal float MaxRadius;
@@ -149,10 +168,10 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly System.Reflection.MethodInfo VanillaLoop =
             AccessTools.Method(typeof(ZoneSystem), "GenerateLocationsTimeSliced", new[] { typeof(ZoneSystem.ZoneLocation), typeof(Stopwatch), typeof(ZPackage) });
 
-        private static IEnumerator Place(ZoneSystem zs, ZoneSystem.ZoneLocation location, ZPackage pkg)
+        internal static IEnumerator Place(ZoneSystem zs, ZoneSystem.ZoneLocation location, ZPackage pkg)
         {
             var clock = Stopwatch.StartNew();
-            int placed = CountPlaced(zs, location);
+            int placed = CountOwn(zs, location);
             int iterations = 0;
             var tallies = new List<Tally>();
             int threads = WorkerCount(out string single);
@@ -178,9 +197,11 @@ namespace VerdantsAscent.Terrain.Zones
                         else Thread.Sleep(1);
                     }
                     Drain(zs, pass);
-                    placed = CountPlaced(zs, location);
+                    placed = GenLocActive && GenLocDry ? pass.Placed : CountOwn(zs, location);
                     iterations += pass.Tally.Iterations;
                     tallies.Add(pass.Tally);
+                    if (pass.CavePlan)   // 0.2.1096 [Locations]
+                        FatLocationsReport.NoteCavePass(pass.Tally.CaveNoRoom, pass.Tally.CaveTooDeep, pass.Tally.CaveNoAccess, pass.Tally.CaveBiome, pass.Tally.CaveCover, pass.Tally.CaveOther);
                     if (pass.Failed > 0)
                     {
                         FiresLogger.LogWarning($"[LocationAccel] {location.m_prefab.Name}: the threaded pass stopped on an error ({pass.FailMessage}); "
@@ -196,7 +217,7 @@ namespace VerdantsAscent.Terrain.Zones
             // A threaded pass that stopped on an error never leaves a type short: vanilla's own loop (main thread, its own
             // RNG and caches) runs on top of what was placed, to the same quota, exactly as with the accelerator off.
             // Vital (prioritized: bosses, the start temple, traders) are topped up the same way whenever they fall short.
-            if ((failed || location.m_prioritized) && VanillaLoop != null && placed < location.m_quantity && !(location.m_unique && placed > 0))
+            if (!GenLocActive && (failed || location.m_prioritized) && VanillaLoop != null && placed < location.m_quantity && !(location.m_unique && placed > 0))
             {
                 var vanillaPkg = new ZPackage();
                 IEnumerator loop;
@@ -207,7 +228,7 @@ namespace VerdantsAscent.Terrain.Zones
                 vanillaPkg.SetPos(0);
                 iterations += vanillaPkg.ReadInt();
                 int before = placed;
-                placed = CountPlaced(zs, location);
+                placed = CountOwn(zs, location);
                 FiresLogger.LogWarning($"[LocationAccel] {location.m_prefab.Name}: vanilla's loop placed {placed - before} more, now {placed}/{location.m_quantity}.");
             }
             pkg.Write(iterations);
@@ -232,18 +253,45 @@ namespace VerdantsAscent.Terrain.Zones
             {
                 Location = l,
                 Rules = Rules.Of(l, step),
+                CavePlan = FatSuperFlat.CavesOn && FatUndergroundLocations.MayGoUnderground(l),
                 Attempts = l.m_prioritized ? 60000 : 12000,
                 Quota = step == 0 ? l.m_quantity : Target(l, step),
                 Placed = placed,
                 MaxRadius = Mathf.Max(l.m_exteriorRadius, l.m_interiorRadius),
                 MaxRangeBase = l.m_centerFirst ? (int)l.m_minDistance : 10000,
                 Taken = new HashSet<Vector2s>(zs.m_locationInstances.Keys),
-                Generated = new HashSet<Vector2s>(GeneratedZones(zs) ?? new HashSet<Vector2s>()),
-                SameId = IdPositions(zs, l),
+                Generated = GenLocActive ? new HashSet<Vector2s>(GenLocRefused) : new HashSet<Vector2s>(GeneratedZones(zs) ?? new HashSet<Vector2s>()),
+                SameId = SharesPrefab(zs, l) ? OwnPositions(zs, l) : IdPositions(zs, l),
                 SameGroup = l.m_group.Length > 0 ? Positions(GroupCache(zs), l.m_group) : new List<Vector3>(),
                 SameMaxGroup = l.m_groupMax.Length > 0 ? Positions(MaxGroupCache(zs), l.m_groupMax) : new List<Vector3>(),
             };
             return pass;
+        }
+
+        // 0.2.1241 (the shrine apply placed 257 of ~2,300): EWD blueprint locations share ONE stand-in prefab, so vanilla's count (by m_prefab.Name)
+        // and the similarity cache (by asset id) lumped every shrine type together - each type saw all the others as "already placed" and
+        // "too close to a similar one". A type whose prefab is shared is now counted and spaced by its own name (m_prefabName / m_name).
+        private static bool SharesPrefab(ZoneSystem zs, ZoneSystem.ZoneLocation l)
+        {
+            if (!l.m_prefab.IsValid) return true;
+            int n = 0;
+            foreach (var o in zs.m_locations) if (o != null && o.m_prefab.IsValid && o.m_prefab.m_assetID == l.m_prefab.m_assetID && ++n > 1) return true;
+            return false;
+        }
+        private static bool SameType(ZoneSystem.ZoneLocation a, ZoneSystem.ZoneLocation b)
+            => ReferenceEquals(a, b) || string.Equals(BcImport.BcRegenCommand.LocName(a), BcImport.BcRegenCommand.LocName(b), StringComparison.Ordinal);
+        private static int CountOwn(ZoneSystem zs, ZoneSystem.ZoneLocation l)
+        {
+            if (!SharesPrefab(zs, l)) return CountPlaced(zs, l);
+            int n = 0;
+            foreach (var i in zs.m_locationInstances.Values) if (i.m_location != null && SameType(i.m_location, l)) n++;
+            return n;
+        }
+        private static List<Vector3> OwnPositions(ZoneSystem zs, ZoneSystem.ZoneLocation l)
+        {
+            var list = new List<Vector3>();
+            foreach (var i in zs.m_locationInstances.Values) if (i.m_location != null && SameType(i.m_location, l)) list.Add(i.m_position);
+            return list;
         }
 
         // The asset-ID cache is keyed by a type from an assembly FAT does not reference: read it as a plain dictionary.
@@ -257,7 +305,11 @@ namespace VerdantsAscent.Terrain.Zones
         // Main thread: register what the workers accepted (vanilla's own RegisterLocation fills the instance + caches).
         private static void Drain(ZoneSystem zs, Pass pass)
         {
-            while (pass.Accepted.TryDequeue(out var p)) Register(zs, pass.Location, p, false);
+            while (pass.Accepted.TryDequeue(out var p))
+            {
+                if (GenLocActive) GenLocPlanned.Add(p);
+                if (!(GenLocActive && GenLocDry)) Register(zs, pass.Location, p, false);
+            }
         }
 
         private static int WorkerCount(out string reason)
@@ -339,6 +391,25 @@ namespace VerdantsAscent.Terrain.Zones
             }
         }
 
+        // 0.2.1096: plan-time cave test (see TryPoint). A worker that throws in it accepts the site and leaves it to the spawn gate.
+        private static bool CaveCanHost(ZoneSystem.ZoneLocation l, Vector3 p, Tally tally)
+        {
+            Terrain.Voxel.FatUndergroundLocations.Verdict v;
+            try { v = Terrain.Voxel.FatUndergroundLocations.Plan(l, p.x, p.z, out _); }
+            catch { return true; }
+            if (v == Terrain.Voxel.FatUndergroundLocations.Verdict.Underground) return true;
+            tally.CaveNoRoom++;
+            switch (v)
+            {
+                case Terrain.Voxel.FatUndergroundLocations.Verdict.TooDeep: tally.CaveTooDeep++; break;
+                case Terrain.Voxel.FatUndergroundLocations.Verdict.NoAccess: tally.CaveNoAccess++; break;
+                case Terrain.Voxel.FatUndergroundLocations.Verdict.BiomeMismatch: tally.CaveBiome++; break;
+                case Terrain.Voxel.FatUndergroundLocations.Verdict.ShortCover: tally.CaveCover++; break;
+                default: tally.CaveOther++; break;
+            }
+            return false;
+        }
+
         // Vanilla's checks, in vanilla's order (ZoneSystem.cs:1234-1332). True when the site was accepted.
         private static bool TryPoint(Pass pass, System.Random rng, WorldGenerator wg, Vector2s zone, Tally tally)
         {
@@ -348,11 +419,12 @@ namespace VerdantsAscent.Terrain.Zones
             Vector3 p = ZoneSystem.GetZonePos(zone) + new Vector3(Range(rng, -half, half), 0f, Range(rng, -half, half));
             float magnitude = p.magnitude;
             if ((l.m_minDistance != 0f && magnitude < l.m_minDistance) || (l.m_maxDistance != 0f && magnitude > l.m_maxDistance)) { tally.CenterDistance++; return false; }
-            if ((l.m_biome & wg.GetBiome(p)) == Heightmap.Biome.None) { tally.Biome++; return false; }
+            var biomeHere = pass.CavePlan ? FiresCaveBiome.RegionBiome(p.x, p.z, FatSuperFlat.WorldBiome(p.x, p.z)) : wg.GetBiome(p);
+            if ((l.m_biome & biomeHere) == Heightmap.Biome.None) { tally.Biome++; return false; }
             p.y = wg.GetHeight(p.x, p.z, out Color mask);
             float altitude = p.y - Altitude0;
-            if (altitude < r.MinAlt || altitude > r.MaxAlt) { tally.Altitude++; return false; }
-            if (l.m_inForest)
+            if (!pass.CavePlan && (altitude < r.MinAlt || altitude > r.MaxAlt)) { tally.Altitude++; return false; }
+            if (l.m_inForest && !pass.CavePlan)
             {
                 float forest = WorldGenerator.GetForestFactor(p);
                 if (forest < l.m_forestTresholdMin || forest > l.m_forestTresholdMax) { tally.Forest++; return false; }
@@ -373,12 +445,18 @@ namespace VerdantsAscent.Terrain.Zones
             if (FatUnderWaterPlacement.RefusesSite(p, l.m_exteriorRadius)) { tally.TerrainDelta++; tally.UnderWater++; return false; }
             // Order-free checks ahead of the lock (vanilla runs them after the similarity tests; the verdict is the same).
             float vegetation = mask.a;
-            if ((l.m_minimumVegetation > 0f && vegetation <= l.m_minimumVegetation) || (l.m_maximumVegetation < 1f && vegetation >= l.m_maximumVegetation))
+            if (!pass.CavePlan && ((l.m_minimumVegetation > 0f && vegetation <= l.m_minimumVegetation) || (l.m_maximumVegetation < 1f && vegetation >= l.m_maximumVegetation)))
             { tally.Vegetation++; return false; }
             var sector = wg.GetBiomeSector(p);
             if (l.AltBiomeParent != null && !sector.AltBiomes.Any(x => x.m_name == l.AltBiomeParent)) { tally.AltBiomeMissing++; return false; }
             if (sector.AltBiomes.Any(x => x.m_blockLocationNames.Contains(l.m_name))) { tally.AltBiomeBlock++; return false; }
             float surround = l.m_surroundCheckVegetation ? Surround(wg, l, p) : 0f;
+            // 0.2.1096 (Fire: "our flat worlds no locations logic screwed us on skyland and cave location placement"; research
+            // Tools\_worldgen_locations_1096.md): a cave-planned site was only tested for a cavern at SPAWN, so every site with no
+            // cave room (too deep, no access) took its zone and quota and was then refused on the flat ground. The same test now runs
+            // here, at plan time (FatUndergroundLocations.Plan is noise-only: SampleFinalMeters + CarveSdf), so only sites a cave can
+            // host are planned. The spawn gate stays as the safety net.
+            if (pass.CavePlan && !CaveCanHost(l, p, tally)) return false;
 
             lock (pass.Gate)
             {
@@ -597,6 +675,12 @@ namespace VerdantsAscent.Terrain.Zones
             Interlocked.Add(ref into.AltBiomeMissing, from.AltBiomeMissing);
             Interlocked.Add(ref into.AltBiomeBlock, from.AltBiomeBlock);
             Interlocked.Add(ref into.Surround, from.Surround);
+            Interlocked.Add(ref into.CaveNoRoom, from.CaveNoRoom);
+            Interlocked.Add(ref into.CaveTooDeep, from.CaveTooDeep);
+            Interlocked.Add(ref into.CaveNoAccess, from.CaveNoAccess);
+            Interlocked.Add(ref into.CaveBiome, from.CaveBiome);
+            Interlocked.Add(ref into.CaveCover, from.CaveCover);
+            Interlocked.Add(ref into.CaveOther, from.CaveOther);
         }
     }
 }

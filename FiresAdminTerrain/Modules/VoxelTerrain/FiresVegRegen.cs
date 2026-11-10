@@ -173,6 +173,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void RPC_OnResult(long sender, ZPackage pkg)
         {
+            if (!FatNetGuard.FromServer(sender, "vegetation regen result")) return;
             _awaitingReply = false;
             string message = pkg.ReadString();
             try { if (Console.instance != null) Console.instance.AddString(message); } catch { }

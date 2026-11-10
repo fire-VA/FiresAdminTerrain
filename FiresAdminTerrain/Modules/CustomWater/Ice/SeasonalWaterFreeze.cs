@@ -1,63 +1,49 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
     /// <summary>
-    /// Ported from Galaxies 0.1.39 (which drops its copy in 0.1.40): Vedr's winter
-    /// freezes FAT's custom ponds, rivers and springs (FAT owns all custom water when loaded), with no double handling.
-    /// Vedr only ices vanilla WaterVolumes, so FAT freezes its own water: while Vedr says winter and its "Freeze lakes"
-    /// is on, plain custom water turns to seasonal ice (never saved); outside winter, or without Vedr, that ice thaws.
-    /// FAT also claims its water footprint through VedrApi.RegisterWaterOwner, so Vedr's lake ice never covers it.
-    /// Every peer reads the same synced Vedr season, so no network traffic is needed. Vedr is used by reflection only.
+    /// Freezes and thaws FAT's placed fresh water (ponds, rivers, springs: every WaterMeshCombiner of plain water).
+    /// 0.2.1095 (Fire: "water in the deep north should freeze over and become slippery"): the rule is VanillaIce.ShouldFreeze
+    /// ([seasons]: Deep North, painted or snow-base, is ALWAYS frozen; other biomes only in Vedr's winter while it freezes lakes,
+    /// read through Core's FiresCore.Bridge.SeasonBridge). A frozen combiner turns to seasonal ice (FrozenWaterController: the ice
+    /// look plus a walkable collider that opts into vanilla's slippery ice, VanillaIce.OptIn); seasonal ice is never saved, so it
+    /// thaws back to the water it was when the rule stops (a biome repaint, the thaw season). FAT also claims its water footprint
+    /// through SeasonBridge.RegisterWaterOwner, so Vedr's lake ice never covers it. Every peer reads the same synced biome paint and
+    /// season, so no network traffic is needed.
     /// </summary>
     internal static class SeasonalWaterFreeze
     {
-        // Same as Vedr's FrozenWater.NeverFrozen.
-        private const Heightmap.Biome NeverFrozen = Heightmap.Biome.Ocean | Heightmap.Biome.AshLands | Heightmap.Biome.DeepNorth;
-        private const float PollInterval = 2f;
-        private const int MaxChangesPerPoll = 4;
-
-        private static bool _resolved, _registered;
-        private static Func<bool> _isWinter, _freezesLakes;
-        private static float _nextPoll;
-        private static bool _lastWinter;
+        // 0.2.1097: the per-body freeze/lava switching that lived here (Decide, the per-combiner states, SetSeasonalIce / SetBiomeLava) is
+        // REMOVED: ice / lava / crust are per 1 m column in WaterStateField. What stays: the Core water-owner registration and the tick.
+        private static bool _registered;
 
         internal static void Tick()
         {
-            if (Time.time < _nextPoll) return;
-            _nextPoll = Time.time + PollInterval;
-            Resolve();
-
-            bool winter = false;
-            try { winter = _isWinter != null && _freezesLakes != null && _isWinter() && _freezesLakes(); } catch { }
-            if (winter != _lastWinter)
-            {
-                _lastWinter = winter;
-                FiresLogger.LogDebug($"[FiresWater] seasonal water: {(winter ? "Vedr winter, freezing custom water" : "not winter, thawing seasonal ice")}");
-            }
-
-            int changes = 0;
-            foreach (WaterMeshCombiner c in WaterMeshCombiner.AllCombiners)
-            {
-                if (c == null) continue;
-                bool want = winter && c.CustomLiquidType == CustomLiquidType.Water && Freezable(c);
-                if (c.SeasonalIce) want = winter;
-                if (want == c.SeasonalIce) continue;
-                c.SetSeasonalIce(want);
-                if (++changes >= MaxChangesPerPoll) { _nextPoll = Time.time + 0.25f; break; }
-            }
+            Register();
+            WaterStateField.Tick();
+            PlacedWaterSolids.Tick();
+            WaterSteam.Tick();
         }
 
-        private static bool Freezable(WaterMeshCombiner c)
+        private static Func<int> s_paintVersion;
+        private static bool s_paintBound;
+        private static int PaintVersion()
         {
-            if (WorldGenerator.instance == null) return false;
-            Vector3 p = c.GetCombinedBounds().center;
-            return (WorldGenerator.instance.GetBiome(p.x, p.z) & NeverFrozen) == 0;
+            if (!s_paintBound)
+            {
+                s_paintBound = true;
+                var p = AccessTools.TypeByName("VerdantsAscent.Terrain.Zones.BiomePaint")?.GetProperty("BiomePaintVersion", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetGetMethod(true);
+                if (p != null && p.ReturnType == typeof(int)) s_paintVersion = (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), p);
+            }
+            try { return s_paintVersion != null ? s_paintVersion() : 0; } catch { return 0; }
         }
 
-        /// <summary>Vedr's water-owner query: true where FAT custom water lies (XZ footprint).</summary>
+        /// <summary>The water-owner query: true where FAT custom water lies (XZ footprint).</summary>
         private static bool OwnsWater(Vector3 point)
         {
             var all = WaterMeshCombiner.AllCombiners;
@@ -72,27 +58,19 @@ namespace VerdantsAscent.Water.Core
             return false;
         }
 
-        private static void Resolve()
+        // Once: SeasonBridge.RegisterWaterOwner (Core queues it until Vedr binds).
+        private static void Register()
         {
-            if (_resolved) return;
-            Type api = Type.GetType("Vedr.VedrApi, Norger.Vedr");
-            if (api == null) return;   // Vedr absent or not loaded yet: look again next poll
-            _resolved = true;
+            if (_registered) return;
+            _registered = true;
             try
             {
-                MethodInfo w = api.GetProperty("IsWinter")?.GetGetMethod();
-                MethodInfo f = api.GetProperty("FreezesLakes")?.GetGetMethod();
-                if (w != null) _isWinter = (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), w);
-                if (f != null) _freezesLakes = (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), f);
-                MethodInfo reg = api.GetMethod("RegisterWaterOwner", new[] { typeof(Func<Vector3, bool>) });
-                if (reg != null && !_registered)
-                {
-                    reg.Invoke(null, new object[] { new Func<Vector3, bool>(OwnsWater) });
-                    _registered = true;
-                }
+                var sb = AccessTools.TypeByName("FiresCore.Bridge.SeasonBridge");
+                var reg = sb?.GetMethod("RegisterWaterOwner", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(Func<Vector3, bool>) }, null);
+                if (reg != null) reg.Invoke(null, new object[] { new Func<Vector3, bool>(OwnsWater) });
+                FiresLogger.LogInfo($"[WaterIce] water owner {(reg != null ? "registered with Core SeasonBridge" : "NOT registered (SeasonBridge.RegisterWaterOwner missing)")}");
             }
-            catch (Exception e) { FiresLogger.LogWarning($"[FiresWater] seasonal water: Vedr API lookup failed: {e.Message}"); }
-            FiresLogger.LogInfo($"[FiresWater] seasonal water: Vedr found; winter={( _isWinter != null)}, freezeLakes={(_freezesLakes != null)}, water owner registered={_registered}");
+            catch (Exception e) { FiresLogger.LogWarning($"[WaterIce] RegisterWaterOwner failed: {e.Message}"); }
         }
     }
 }

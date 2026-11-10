@@ -157,6 +157,16 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private const float DigExtra = 2f, TunnelRadius = 2.2f, TunnelRise = 0.45f, TunnelStep = 1.5f, TunnelMax = 160f;
+
+        // 0.2.1137 (SFSC3's creation log: "cave planned 0 ... refused at planning 1022931 (too deep 991360, cover 31571)"): on super
+        // flat the ground stands at y 50, only 16 m over 'Cave Min Y' 34, so the dug cavern (8 m cover + 2 m dig + 8 m walls + a
+        // 0.3 x radius cap) always landed under it. Super flat ONLY: a shallower stack (3 m cover, 1 m dig, 5 m walls, 0.15 cap)
+        // puts the floor at ~y 37-39. Every other world keeps its values.
+        private const float SfCover = 3f, SfDigExtra = 1f, SfWallHeight = 5f, SfCapShare = 0.15f;
+        internal static float CoverM => FatSuperFlat.On ? SfCover : (Cover != null ? Cover.Value : 8f);
+        private static float DigM => FatSuperFlat.On ? SfDigExtra : DigExtra;
+        internal static float WallM => FatSuperFlat.On ? SfWallHeight : WallHeight;
+        private static float CapM => FatSuperFlat.On ? SfCapShare : CapShare;
         private const int TunnelTries = 8;
 
         // The access tunnel of a dug cavern: from the chamber wall at floor height, outward and up at TunnelRise (~24 deg) until
@@ -201,12 +211,17 @@ namespace VerdantsAscent.Terrain.Voxel
         // [ThreadStatic] scope set by the PlaceLocations prefix: only a NEW placement may go underground.
         [ThreadStatic] internal static bool t_placing;
 
+        // 0.2.1075: a location that may ever go underground (super flat plans only these when its caves are on).
+        internal static bool MayGoUnderground(ZoneSystem.ZoneLocation l)
+            => l != null && Share != null && Share.Value > 0f && FiresWorldGenBase.Active && FiresVoxelConfig.GeneratesCaves
+               && !l.m_snapToWater && !l.m_unique && !IsSurfaceOnly(l.m_prefabName);
+
         internal static Verdict Plan(ZoneSystem.ZoneLocation l, float x, float z, out Site site)
         {
             site = default;
             if (l == null || Share == null || Share.Value <= 0f || !FiresWorldGenBase.Active || !FiresVoxelConfig.GeneratesCaves) return Verdict.Surface;
             if (l.m_snapToWater || l.m_unique || IsSurfaceOnly(l.m_prefabName)) return Verdict.Excluded;
-            if (Hash01(x, z, 0x6E0D) >= Share.Value) return Verdict.NotRolled;
+            if (!FatSuperFlat.On && Hash01(x, z, 0x6E0D) >= Share.Value) return Verdict.NotRolled;   // super flat: every eligible placement tries the cave (its surface is refused)
             var wg = WorldGenerator.instance;
             if (wg == null) return Verdict.Surface;
             float surface = FiresWorldGenBase.SampleFinalMeters(x, z);
@@ -228,19 +243,23 @@ namespace VerdantsAscent.Terrain.Voxel
                 // An access tunnel when it cannot connect to an existing cave network, or a small chance of a
                 // sinkhole entrance instead: connect to the nearest generated cave first; else, at 'Sinkhole entrance chance', a
                 // dry shaft with a spiral ramp; else the walkable tunnel to dry land.
-                floor = min - Cover.Value - DigExtra - WallHeight - CapShare * radius;
-                if (floor < FiresVoxelConfig.CaveMinY.Value + 1f) return Verdict.TooDeep;
+                floor = min - CoverM - DigM - WallM - CapM * radius;
+                if (floor < FiresVoxelConfig.CaveMinY.Value + 1f)
+                {
+                    NoteTooDeep(l.m_prefabName, x, z, min, radius, floor);
+                    return Verdict.TooDeep;
+                }
                 if (TryConnect(x, z, floor, radius, out entrance)) access = Access.Connect;
                 else if (Hash01(x, z, 0x51C4) < SinkholeChance.Value && TrySinkhole(x, z, radius, out entrance)) access = Access.Sinkhole;
                 else if (TryAccess(x, z, floor, radius, out entrance)) access = Access.Tunnel;
                 else return Verdict.NoAccess;
                 dug = true;
             }
-            var biome = FiresCaveBiome.RegionBiome(x, z, wg.GetBiome(x, z));
+            var biome = FiresCaveBiome.RegionBiome(x, z, FatSuperFlat.WorldBiome(x, z));   // 0.2.1075: the world's biome on super flat too
             if ((l.m_biome & biome) == Heightmap.Biome.None) return Verdict.BiomeMismatch;
 
-            float top = floor + WallHeight + CapShare * radius;
-            if (min - top < Cover.Value) return Verdict.ShortCover;
+            float top = floor + WallM + CapM * radius;
+            if (min - top < CoverM) return Verdict.ShortCover;
             site = new Site
             {
                 Centre = new Vector3(x, floor, z), Radius = radius, Top = top, SurfaceMin = min, Biome = biome,
@@ -407,7 +426,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void Carve(string prefab, Vector3 pos, Site site)
         {
-            var lines = CarveChamber(pos, site.Radius, site.Top, WallHeight);
+            var lines = CarveChamber(pos, site.Radius, site.Top, WallM);
             if (site.Access == Access.Connect) lines.Add(CarveConnector(pos, site.Radius, site.Entrance));
             else if (site.Access == Access.Sinkhole) lines.Add(CarveSinkhole(pos, site.Top, site.Entrance));
             else if (site.Access == Access.Tunnel) lines.Add(CarveAccess(pos, site.Radius, site.Entrance));
@@ -486,6 +505,18 @@ namespace VerdantsAscent.Terrain.Voxel
             if (unknown.Count > 0)
                 FiresLogger.LogWarning($"[Underground] unknown environment name(s) in 'Underground location environments': {string.Join(", ", unknown)}; "
                     + "those domes use 'Clear'. Known: " + string.Join(", ", env.m_environments.Select(e => e.m_name)));
+        }
+
+        // 0.2.1137: the first 3 "too deep" refusals per type with their numbers (Plan runs on the accelerator's worker threads).
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> s_tooDeepSaid = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        private static void NoteTooDeep(string prefab, float x, float z, float min, float radius, float floor)
+        {
+            if (s_tooDeepSaid.AddOrUpdate(prefab ?? "?", 1, (_, n) => n + 1) > 3) return;
+            FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture,
+                "[Underground] too deep: {0} at ({1:0},{2:0}): dug floor {3:0.0} = lowest ground {4:0.0} - cover {5:0.0} - dig {6:0.0} - walls {7:0.0} - cap {8:0.00} x r {9:0.0}; "
+                + "needs >= Cave Min Y + 1 = {10:0.0} ({11})",
+                prefab, x, z, floor, min, CoverM, DigM, WallM, CapM, radius, FiresVoxelConfig.CaveMinY.Value + 1f,
+                FatSuperFlat.On ? "super-flat stack" : "normal stack"));
         }
 
         // ── counts + fat_location_dump ──────────────────────────────────────────────────────────────────────────────

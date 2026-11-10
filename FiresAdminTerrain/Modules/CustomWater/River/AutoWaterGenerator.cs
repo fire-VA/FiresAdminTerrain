@@ -1140,6 +1140,7 @@ namespace VerdantsAscent.Water.Core
                 if (anyDiskModified)
                 {
                     floatingFixed++;
+                    combiner.NoteDisksChanged();   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
                     combinersNeedingRegen.Add(combiner);
                 }
             }
@@ -1149,6 +1150,7 @@ namespace VerdantsAscent.Water.Core
             {
                 if (combiner != null)
                 {
+                    foreach (var disk in combiner.GetWaterDisks()) VerdantsAscent.Water.Core.WaterRemovedDisks.NoteRemovedHere(disk);   // 0.2.1354 (review: permanent disk loss)
                     combiner.DestroyPermanently();
                 }
             }

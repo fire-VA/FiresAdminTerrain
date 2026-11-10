@@ -59,11 +59,15 @@ namespace VerdantsAscent.Performance
             // ClutterSystem.m_waterLevel while the GenerateVegPatch hook held the patch: the water-ecology move is
             // restored before this builder runs.
             public float WaterLevel;
+            // 0.2.1072 ([seasons]): the patch sits on our water: underwater bands take shallow beds (FiresClutterWaterEcology.WideMaxAlt)
+            public bool UnderwaterWide;
             // Grass must not blank on every cave crossing: a RESET patch's old grass, kept drawn until this
             // builder has filled the replacement, then destroyed (build-then-swap). Null for a fresh patch.
             public List<GameObject> Retiring;
             // The cave light at this patch (CaveLight), NaN until its first cave-floor candidate.
             public float Light = float.NaN;
+            // 0.2.1348: the highest water around this patch, NaN until a water band first asks (the cheap gate before a candidate's own water read).
+            public float WaterTop = float.NaN;
         }
 
         // A deterministic 0..1 from a candidate's position and type (does not touch UnityEngine.Random, so vanilla's sequence holds).
@@ -215,6 +219,7 @@ namespace VerdantsAscent.Performance
                 ClutterIndex = 0,
                 EnqueuedAt = Time.unscaledTime,
                 WaterLevel = cs.m_waterLevel,
+                UnderwaterWide = VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.UnderwaterWide,
             };
             s_winQueued++;
 
@@ -304,6 +309,36 @@ namespace VerdantsAscent.Performance
 
         // Place whole clutter types from the resume cursor until the frame budget
         // is hit. Returns true when the patch is fully built.
+        // 0.2.1083 (Fire: "still no lillies vass"): every water-band candidate (an underwater or snap-to-water clutter) in a patch on
+        // our water, by outcome: past the biome + altitude gates, refused by biome, refused by altitude (with the last alt / band).
+        private static int s_wbPassed, s_wbBiome, s_wbAlt;
+        private static string s_wbLast = "";
+        private static float s_wbLogAt;
+        private static void WaterBandNote(ClutterSystem.Clutter c, int outcome, float alt = 0f, float maxAlt = 0f)
+        {
+            if (outcome == 0) s_wbPassed++;
+            else if (outcome == 1) { s_wbBiome++; s_wbLast = $"{c.m_name} refused by biome"; }
+            else { s_wbAlt++; s_wbLast = $"{c.m_name} alt {alt:0.00} outside {c.m_minAlt:0.00}..{maxAlt:0.00}"; }
+            if (Time.unscaledTime < s_wbLogAt) return;
+            s_wbLogAt = Time.unscaledTime + 30f;
+            FiresLogger.LogDebug($"[FiresWater] water plants on our water last 30 s: {s_wbPassed} candidate(s) past biome + altitude, {s_wbBiome} refused by biome, {s_wbAlt} by altitude (last: {s_wbLast})");
+            s_wbPassed = s_wbBiome = s_wbAlt = 0;
+        }
+
+        // 0.2.1081: our water stands over this instance point (water surface above the ground there); only asked in patches on our water.
+        private static int s_landUnderWater;
+        private static float s_nextLandLog;
+        private static bool UnderOurWater(Vector3 point)
+        {
+            if (Time.unscaledTime >= s_nextLandLog && s_landUnderWater > 0)
+            {
+                s_nextLandLog = Time.unscaledTime + 30f;
+                if (VerdantsAscent.Terrain.Voxel.FatDiag.WaterClutter) FiresLogger.LogDebug($"[FiresWater] clutter: {s_landUnderWater} land clutter instance(s) refused under our water (vass/lilies only there) last 30 s");
+                s_landUnderWater = 0;
+            }
+            return VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(point.x, point.z, 0.05f, false, out float surface, out _) && surface > point.y + 0.05f;
+        }
+
         private static bool AdvanceBuilder(ClutterSystem cs, Builder b, ClutterSystem.Quality quality,
             GameObject grassRoot, Stopwatch sw)
         {
@@ -342,11 +377,72 @@ namespace VerdantsAscent.Performance
         // Returns FALSE when the frame budget was hit mid-type (the builder
         // resumes at b.InstanceIndex with the saved RNG state next frame —
         // instance placement stays byte-identical to a single-frame run).
+        // 0.2.1094: a lily pad's footprint (vanilla pads are ~0.5 m across at scale 1).
+        private const float PadReach = 0.6f;
+
+        // The highest water surface over a pad's footprint: the centre plus 4 points at PadReach (FatWaterChecks asks the placed
+        // water field first, then the generated water). Points with no water, or more than 1 m off the centre's level, are skipped,
+        // so a pad at a shore never borrows another body's level. Returns `centre` when nothing higher is found.
+        private static float FootprintSurface(float x, float z, float centre)
+        {
+            float best = centre;
+            for (int i = 0; i < 5; i++)
+            {
+                float px = x + (i == 1 ? PadReach : i == 2 ? -PadReach : 0f);
+                float pz = z + (i == 3 ? PadReach : i == 4 ? -PadReach : 0f);
+                if (!global::VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(px, pz, 0.05f, false, out float s, out _)) continue;
+                if (Mathf.Abs(s - centre) <= 1f && s > best) best = s;
+            }
+            return best;
+        }
+
+        // 0.2.1348 (Fire: "our logic for the clutter is flawed since we get floating clutter off the edge of the meshes"): a patch has one water level (its centre, else the highest on its shore
+        // rings), so a bank beside a river stepping down a slope read as under water with none there. A water band now reads the water at its own spot, last of the gates, and a lily under its whole pad.
+        private const float WaterTopSlack = 1f, OwnWaterMinDepth = 0.05f;
+        private static long s_ownNoWater, s_ownOutOfBand, s_ownOverhang, s_ownTopGate, s_ownPlaced;
+        private static float s_ownLogAt;
+        private static bool s_ownProof;
+        private static bool OwnWaterOn => VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.ClutterWaterAtOwnSpot != null && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.ClutterWaterAtOwnSpot.Value;
+        internal static string OwnWaterStats() => $"no water at own spot {s_ownNoWater}, out of its depth band {s_ownOutOfBand}, lily overhang {s_ownOverhang}, above all water near (cheap gate) {s_ownTopGate}, placed {s_ownPlaced}";
+
+        private static float PatchWaterTop(Builder b, float level)
+        {
+            if (!float.IsNaN(b.WaterTop)) return b.WaterTop;
+            float top = level;
+            for (int ix = -1; ix <= 1; ix++)
+                for (int iz = -1; iz <= 1; iz++)
+                    if (global::VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(b.Center.x + ix * b.HalfSize, b.Center.z + iz * b.HalfSize, OwnWaterMinDepth, true, out float s, out _) && s > top) top = s;
+            return b.WaterTop = top;
+        }
+
+        // Water at all five pad points, each within 1 m of the centre's level (another body's level is not this pad's water). Best = the highest of them.
+        private static bool PadOnWater(float x, float z, float centre, out float best)
+        {
+            best = centre;
+            for (int i = 1; i < 5; i++)
+            {
+                float px = x + (i == 1 ? PadReach : i == 2 ? -PadReach : 0f);
+                float pz = z + (i == 3 ? PadReach : i == 4 ? -PadReach : 0f);
+                if (!global::VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(px, pz, OwnWaterMinDepth, true, out float s, out _) || Mathf.Abs(s - centre) > 1f) return false;
+                if (s > best) best = s;
+            }
+            return true;
+        }
+
+        private static void NoteOwnWater()
+        {
+            if (!s_ownProof) { s_ownProof = true; FiresLogger.LogInfo("[WaterLife] lilies and vass need water at their own spot, lilies under the whole pad (0.2.1348)"); }
+            if (!FiresLogger.DebugEnabled || Time.unscaledTime < s_ownLogAt) return;
+            s_ownLogAt = Time.unscaledTime + 10f;
+            FiresLogger.LogDebug($"[WaterLife] water clutter so far: {OwnWaterStats()} (0.2.1348)");
+        }
+
         private static bool PlaceClutterType(ClutterSystem cs, Builder b, ClutterSystem.Clutter c, int index1,
             ClutterSystem.Quality quality, float amountScale, float waterLevel, GameObject grassRoot, float lodCap,
             Stopwatch sw)
         {
             if (!c.m_enabled || (b.Biomes & c.m_biome) == Heightmap.Biome.None) return true;
+            float lilyLift = c.m_snapToWater && b.UnderwaterWide ? global::VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.LilyLift() : 0f;
             // A patch with no voxel edit anchor within reach skips the per-candidate edit lookup.
             bool patchNearEdits = global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.HasEditsXZ(b.Center.x, b.Center.z, b.HalfSize * 1.5f);
 
@@ -414,10 +510,23 @@ namespace VerdantsAscent.Performance
                 { GateCount(edited, Gate.NoGround); continue; }
                 // From here on, "edited" is the ground itself, off the generated height (FatGroundProbe.IsGroundEdited).
                 edited = global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.IsGroundEdited(point.x, point.z, point.y);
-                if ((c.m_biome & biome) == Heightmap.Biome.None) { GateCount(edited, Gate.Biome); continue; }
+                bool waterBand = b.UnderwaterWide && (c.m_maxAlt < 0f || c.m_snapToWater);   // 0.2.1083: vass / lilies on our water, counted per gate
+                if ((c.m_biome & biome) == Heightmap.Biome.None) { GateCount(edited, Gate.Biome); if (waterBand) WaterBandNote(c, 1); continue; }
 
                 float alt = point.y - waterLevel;
-                if (alt < c.m_minAlt || alt > c.m_maxAlt) { GateCount(edited, Gate.Altitude); continue; }
+                float maxAlt = b.UnderwaterWide ? VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.WideMaxAlt(c) : c.m_maxAlt;
+                float minAlt = b.UnderwaterWide ? VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.WideMinAlt(c) : c.m_minAlt;   // 0.2.1086: lilies over any depth
+                bool ownWater = waterBand && OwnWaterOn;   // 0.2.1348: judged at its own spot below; here only the cheap gate
+                if (ownWater)
+                {
+                    if (point.y - (PatchWaterTop(b, waterLevel) + WaterTopSlack) > maxAlt) { s_ownTopGate++; GateCount(edited, Gate.Altitude); WaterBandNote(c, 2, alt, maxAlt); continue; }
+                }
+                else if (alt < minAlt || alt > maxAlt) { GateCount(edited, Gate.Altitude); if (waterBand) WaterBandNote(c, 2, alt, maxAlt); continue; }
+                if (waterBand && !ownWater) WaterBandNote(c, 0);
+                // 0.2.1081 (Fire: "i dont WANT grass in the rivers i just want vass or lillies"; "grass ferns and shrubs can be on
+                // the shores out of the water, not in it"): in a patch on our water, a LAND band (not an underwater band, not a
+                // surface band) is refused at every instance point that is under our water; the banks above the line keep it.
+                if (b.UnderwaterWide && c.m_maxAlt >= 0f && !c.m_snapToWater && UnderOurWater(point)) { GateCount(edited, Gate.Altitude); s_landUnderWater++; continue; }
                 if (normal.y < cosMaxTilt || normal.y > cosMinTilt) { GateCount(edited, Gate.Tilt); continue; }
 
                 if (c.m_minOceanDepth != c.m_maxOceanDepth)
@@ -444,6 +553,9 @@ namespace VerdantsAscent.Performance
                     bool cleared = caveFloor ? cavePaint != 0 : hmap.IsCleared(point);
                     if ((c.m_onCleared && !cleared) || (c.m_onUncleared & cleared)) { GateCount(edited, Gate.Cleared); continue; }
                 }
+                // 0.2.1132 (Fire: no grass/snow clutter over a campfire's dry + wet rings): the melt core counts as cleared ground.
+                if (global::VerdantsAscent.Terrain.Voxel.FatFireBullseye.HasHeat && global::VerdantsAscent.Terrain.Voxel.FatFireBullseye.InMeltCore(point))
+                { global::VerdantsAscent.Terrain.Voxel.FatFireBullseye.ClutterRefused++; GateCount(edited, Gate.Cleared); continue; }
                 // Cave clutter by light: in a cave the biome's clutter keeps 'Dark density' of its pieces at
                 // 'Dark scale' where no light reaches, rising to all of them at full size toward mouths, shafts and sinkholes.
                 float lightScale = 1f;
@@ -454,11 +566,42 @@ namespace VerdantsAscent.Performance
                     if (CandidateHash(pos, index1) >= keep) { GateCount(edited, Gate.Cleared); continue; }
                     lightScale = Mathf.Lerp(global::VerdantsAscent.Terrain.Voxel.CaveLight.DarkScale, 1f, b.Light);
                 }
+                // 0.2.1348: last, the dearest gate: the water at this instance's own spot (generated, placed or the sea).
+                float ownSurface = float.NaN, padBest = float.NaN;
+                if (ownWater)
+                {
+                    NoteOwnWater();
+                    if (!global::VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(point.x, point.z, OwnWaterMinDepth, true, out ownSurface, out _))
+                    { s_ownNoWater++; GateCount(edited, Gate.Altitude); WaterBandNote(c, 2, alt, maxAlt); continue; }
+                    float ownAlt = point.y - (ownSurface - VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.VanillaClutterGap);
+                    if (ownAlt < minAlt || ownAlt > maxAlt) { s_ownOutOfBand++; GateCount(edited, Gate.Altitude); WaterBandNote(c, 2, ownAlt, maxAlt); continue; }
+                    if (VerdantsAscent.Terrain.Voxel.ClutterSystem_GenerateVegPatch_WaterEcology.IsLily(c) && !PadOnWater(point.x, point.z, ownSurface, out padBest))
+                    { s_ownOverhang++; GateCount(edited, Gate.Altitude); WaterBandNote(c, 2, ownAlt, maxAlt); continue; }
+                    s_ownPlaced++;
+                    WaterBandNote(c, 0);
+                }
                 GateCount(edited, Gate.Placed);
 
                 pos = point;
-                if (c.m_snapToWater) pos.y = waterLevel;
-                if (c.m_randomOffset != 0f) pos.y += UnityEngine.Random.Range(-c.m_randomOffset, c.m_randomOffset);
+                // 0.2.1090: on our water a lily sits above the shader's swell crest (FiresClutterWaterEcology.LilyLift), and its
+                // random offset only lifts, so no pad dips into the swelling surface and z-fights. The RNG draw is kept either way.
+                bool lily = c.m_snapToWater && b.UnderwaterWide;
+                if (c.m_snapToWater) pos.y = waterLevel + (lily ? lilyLift : 0f);
+                // 0.2.1091: a pad on placed water sits on PlacedWaterField at its own x,z (the drawn surface, which dips with the
+                // bed and bank cap), not the patch's one sampled level.
+                if (lily && !float.IsNaN(ownSurface)) pos.y = (float.IsNaN(padBest) ? ownSurface : padBest) + lilyLift;   // 0.2.1348: the surface already read, the pad's highest point
+                else if (lily && global::VerdantsAscent.Water.Core.PlacedWaterField.TrySurface(pos.x, pos.z, waterLevel - 3f, waterLevel + 3f,
+                        global::VerdantsAscent.Water.Core.PlacedWaterField.Consumer.Lily, out float padSurface, out _))
+                    pos.y = padSurface + lilyLift;
+                // 0.2.1094 (Fire: "lillies could still get bumped up a tiny bit ... on slopes at least"): on a sloped surface (a river
+                // running downhill, a bank edge) the centre sample sits under the uphill side of the pad. The pad takes the highest
+                // surface over its footprint (centre + 4 points at PadReach); on flat water that equals the centre, so no extra lift.
+                if (lily && float.IsNaN(padBest)) pos.y = Mathf.Max(pos.y, FootprintSurface(pos.x, pos.z, pos.y - lilyLift) + lilyLift);
+                if (c.m_randomOffset != 0f)
+                {
+                    float off = UnityEngine.Random.Range(-c.m_randomOffset, c.m_randomOffset);
+                    pos.y += lily ? Mathf.Abs(off) : off;
+                }
 
                 Quaternion rot = !c.m_terrainTilt
                     ? Quaternion.Euler(0f, rotY, 0f)

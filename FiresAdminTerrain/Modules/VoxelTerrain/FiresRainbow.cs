@@ -44,6 +44,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly int FogModeId = Shader.PropertyToID("_FiresFogMode");
 
         private static ConfigEntry<bool> s_enabled, s_secondary, s_skyEnabled;
+        private static bool s_vedrBowsSaid;   // 0.2.1410: last Vedr rainbow state logged
         private static ConfigEntry<float> s_bowSize, s_bandThickness, s_skyBowSize, s_skyBandThickness, s_mistBowSize, s_mistBandThickness;
         private static ConfigEntry<float> s_skyChance, s_skyMinutes, s_skyIntensity, s_mistIntensity;
 
@@ -218,12 +219,22 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_skyUntil = now + s_skyMinutes.Value * 60f;
                 }
                 s_skyCause = $"rain ended ({(env != null ? env.m_name : "?")}), chance {s_skyChance.Value:0.00}: {(roll ? "rolled a bow" : "no bow this time")}";
-                FiresLogger.LogDebug($"[Rainbow] {s_skyCause}");
+                if (FatDiag.Looks) FiresLogger.LogDebug($"[Rainbow] {s_skyCause}");
             }
             s_wasWet = wet;
             s_wetKnown = env != null;
 
             if (!s_enabled.Value || !s_skyEnabled.Value) { why = "sky rainbow off in the config"; return 0f; }
+            // 0.2.1410 ([seasons] single owner via [lead] 11-08): Vedr draws the sky rainbow while VedrApi.RainbowsActive (live); FAT's sky bow
+            // stands down then. The waterfall-spray bow is FAT's alone and is not touched.
+            bool vedrBows = VedrLooks.RainbowsActive;
+            if (vedrBows != s_vedrBowsSaid)
+            {
+                s_vedrBowsSaid = vedrBows;
+                FiresLogger.LogDebug(vedrBows ? "[Rainbow] sky bow stands down: Vedr draws the sky rainbows (VedrApi.RainbowsActive); FAT keeps its waterfall-spray bow (0.2.1410)"
+                                              : "[Rainbow] sky bow back: Vedr's rainbows are off or Vedr is absent (0.2.1410)");
+            }
+            if (vedrBows) { why = "not shown: Vedr draws the sky rainbows (VedrApi.RainbowsActive)"; return 0f; }
             if (now >= s_skyUntil || s_skyStart < 0f) { why = s_skyCause.Length > 0 ? $"not shown: no bow running ({s_skyCause})" : "not shown: no rain has ended yet"; return 0f; }
             if (sunLight <= 0f) { why = "not shown: the sun is down"; return 0f; }
             float altitude = Mathf.Asin(Mathf.Clamp(toSun.y, -1f, 1f)) * Mathf.Rad2Deg;
@@ -291,7 +302,7 @@ namespace VerdantsAscent.Terrain.Voxel
             float altitude = Mathf.Asin(Mathf.Clamp(toSun.y, -1f, 1f)) * Mathf.Rad2Deg;
             Vector3 antisolar = -toSun;
             float skySize = Shared(s_skyBowSize, s_bowSize), skyThick = Shared(s_skyBandThickness, s_bandThickness);
-            FiresLogger.LogDebug($"[Rainbow] sky bow: sun alt {altitude:0.0} deg, antisolar ({antisolar.x:0.00},{antisolar.y:0.00},{antisolar.z:0.00}), "
+            if (FatDiag.Looks) FiresLogger.LogDebug($"[Rainbow] sky bow: sun alt {altitude:0.0} deg, antisolar ({antisolar.x:0.00},{antisolar.y:0.00},{antisolar.z:0.00}), "
                 + $"primary radius {s_primaryRed * skySize:0.0} deg (size {skySize:0.00}, thickness {skyThick:0.00}), fade {fade:0.00} (x{SkyBrightness:0.0} brightness), "
                 + $"camera at y {camera.transform.position.y:0}, drawn on the sky (far plane) as an arc fading out over the last 12 deg above the horizon; {why}");
 
@@ -302,7 +313,7 @@ namespace VerdantsAscent.Terrain.Voxel
             float turned = Vector3.Angle(toLight, toSun);
             float lookAngle = Vector3.Angle(camera.transform.forward, antisolar);
             float radius = s_primaryRed * mistShape.x;
-            FiresLogger.LogDebug($"[Rainbow] mist bow: sun alt {altitude:0.0} deg, sunlight {sunLight:0.00}, antisolar ({antisolar.x:0.00},{antisolar.y:0.00},{antisolar.z:0.00}), "
+            if (FatDiag.Looks) FiresLogger.LogDebug($"[Rainbow] mist bow: sun alt {altitude:0.0} deg, sunlight {sunLight:0.00}, antisolar ({antisolar.x:0.00},{antisolar.y:0.00},{antisolar.z:0.00}), "
                 + $"primary radius {radius:0.0} deg (size {mistShape.x:0.00}, thickness {mistShape.y:0.00}); the camera looks {lookAngle:0.0} deg from the antisolar point "
                 + $"({(Mathf.Abs(lookAngle - radius) < 20f ? "the bow is in view where there is mist" : lookAngle < radius ? "inside the bow" : "outside the bow")}); "
                 + $"Valheim's light is turned {turned:0} deg from the true sun{(turned > 90f ? " (flipped for moonlight: the old mist bow sat around the SUN)" : "")}");

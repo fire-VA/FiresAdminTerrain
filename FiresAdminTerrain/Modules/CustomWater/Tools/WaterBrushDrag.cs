@@ -101,6 +101,10 @@ namespace VerdantsAscent.Water.Tools
         // are about to place, and it follows the raycast while you hold.
         private GameObject _ghost;
 
+        private GameObject _ghostParts;
+        private Transform _cage;
+        private MeshRenderer _solidRenderer;
+
         private void UpdateGhost(Player player)
         {
             bool show = player != null && IsOurBrushToolSelected(player);
@@ -130,15 +134,20 @@ namespace VerdantsAscent.Water.Tools
             _ghost.SetActive(true);
             _ghost.transform.position = cursor;
             _ghost.transform.localScale = Vector3.one * (Terrain.Voxel.VoxelBrushDrag.EffectiveGizmoRadius() * 2f);
-            var cage = _ghost.transform.Find("cage");
-            if (cage != null)
-                cage.localRotation = Quaternion.Euler(0f, Time.time * Terrain.Voxel.VoxelBrushDrag.CAGE_SPIN_DEG_PER_SEC, 0f);
-            var solid = _ghost.transform.Find("solid");
-            if (solid != null)
+            // 0.2.1058 (UI efficiency audit T5): the cage and the solid's renderer are looked up once per ghost, not every frame.
+            if (_ghostParts != _ghost)
             {
-                var mr = solid.GetComponent<MeshRenderer>();
+                _ghostParts = _ghost;
+                _cage = _ghost.transform.Find("cage");
+                var solid = _ghost.transform.Find("solid");
+                _solidRenderer = solid != null ? solid.GetComponent<MeshRenderer>() : null;
+            }
+            if (_cage != null)
+                _cage.localRotation = Quaternion.Euler(0f, Time.time * Terrain.Voxel.VoxelBrushDrag.CAGE_SPIN_DEG_PER_SEC, 0f);
+            if (_solidRenderer != null)
+            {
                 var mat = Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
-                if (mr != null && mat != null && mr.sharedMaterial != mat) mr.sharedMaterial = mat;
+                if (mat != null && _solidRenderer.sharedMaterial != mat) _solidRenderer.sharedMaterial = mat;
             }
         }
 

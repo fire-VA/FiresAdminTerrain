@@ -38,13 +38,16 @@ namespace VerdantsAscent.Terrain.Zones
         };
 
         private static readonly Color RestoreColour = new Color(0.55f, 0.55f, 0.55f);
+        private static readonly Color CustomColour = new Color(0.75f, 0.25f, 0.65f);
         private static readonly Color RingColour = new Color(1f, 1f, 1f, 0.95f);
 
         private static readonly List<GameObject> s_pieces = new List<GameObject>();
         private static readonly Dictionary<Piece, Entry> s_entries = new Dictionary<Piece, Entry>();
         private static int s_builtFrom = -1;
 
-        internal static bool IsStale => s_builtFrom != BlendCount();
+        internal static bool IsStale => s_builtFrom != BuildStamp();
+
+        private static int BuildStamp() => BlendCount() * 31 + BiomePaint.CustomStamp();
 
         internal static bool TryGet(Piece piece, out Entry entry)
         {
@@ -84,7 +87,7 @@ namespace VerdantsAscent.Terrain.Zones
             }
             s_pieces.Clear();
             s_entries.Clear();
-            s_builtFrom = BlendCount();
+            s_builtFrom = BuildStamp();
             foreach (var (biome, label, colour) in Grounds)
             {
                 Add(template, BiomePaint.KeyOf(BiomePaint.Brush.Plain, biome, null), biome, PlainPrefix + label,
@@ -97,10 +100,16 @@ namespace VerdantsAscent.Terrain.Zones
                         + $"{blend.m_name}.", colour, true);
                 }
             }
+            foreach (string custom in BiomePaint.CustomBiomeNames())
+            {
+                if (!BiomePaint.TryResolveCustom(custom, out var bit)) continue;
+                Add(template, BiomePaint.KeyOf(BiomePaint.Brush.Custom, bit, custom), bit, custom,
+                    $"Turns a circle to {custom}: its look, what grows and spawns there, and the land's height from its yaml.", CustomColour, true);
+            }
             Add(template, BiomePaint.KeyOf(BiomePaint.Brush.Restore, Heightmap.Biome.None, null), Heightmap.Biome.None, RestoreName,
                 "Paints the world's own blends back over a circle, undoing any paint there; what grows there grows again as it "
                 + "was.", RestoreColour, true);
-            FiresLogger.LogInfo($"[BiomePaint] {s_pieces.Count} paint entries on the Chaos Hammer ({s_builtFrom} blend(s) in this game).");
+            FiresLogger.LogInfo($"[BiomePaint] {s_pieces.Count} paint entries on the Chaos Hammer ({BlendCount()} blend(s) in this game).");
             return s_pieces;
         }
 
@@ -125,6 +134,23 @@ namespace VerdantsAscent.Terrain.Zones
             piece.m_icon = Icon(colour, ring);
             s_pieces.Add(go);
             s_entries[piece] = new Entry { Key = key, Ground = ground };
+        }
+
+        // The vanilla brushes and Restore last, as the hammer lists them (BiomePaint.ListBrushes adds the custom ones before Restore).
+        internal static void ListVanilla(List<string> keys, List<string> names, List<bool> custom)
+        {
+            foreach (var (biome, label, _) in Grounds)
+            {
+                string shown = Localization.instance != null ? Localization.instance.Localize(label) : label;
+                keys.Add(BiomePaint.KeyOf(BiomePaint.Brush.Plain, biome, null)); names.Add(PlainPrefix + shown); custom.Add(false);
+                foreach (var blend in BlendsOf(biome))
+                {
+                    keys.Add(BiomePaint.KeyOf(BiomePaint.Brush.Blend, biome, blend.m_name));
+                    names.Add(CountGrounds(blend.m_biome) > 1 ? $"{blend.m_name} ({shown})" : blend.m_name);
+                    custom.Add(false);
+                }
+            }
+            keys.Add(BiomePaint.KeyOf(BiomePaint.Brush.Restore, Heightmap.Biome.None, null)); names.Add(RestoreName); custom.Add(false);
         }
 
         private static IEnumerable<AltBiome> BlendsOf(Heightmap.Biome biome)

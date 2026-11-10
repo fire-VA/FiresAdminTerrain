@@ -253,17 +253,11 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static byte[] Unpack(byte[] packed, int count)
         {
+            // 0.2.1333: the server sends this block (TakeIcon); the limit is the picture's exact size, a short one stays zero padded as before
+            var got = FatInflate.Deflate(packed, 0, packed != null ? packed.Length : 0, "blueprint icon", count);
+            if (got == null) throw new InvalidDataException("the blueprint map was refused");
             var bytes = new byte[count];
-            using (var input = new DeflateStream(new MemoryStream(packed), CompressionMode.Decompress))
-            {
-                int read = 0;
-                while (read < count)
-                {
-                    int got = input.Read(bytes, read, count - read);
-                    if (got <= 0) break;
-                    read += got;
-                }
-            }
+            Buffer.BlockCopy(got, 0, bytes, 0, got.Length);
             return bytes;
         }
 

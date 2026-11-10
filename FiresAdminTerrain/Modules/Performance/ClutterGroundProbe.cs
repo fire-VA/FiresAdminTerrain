@@ -31,6 +31,7 @@ namespace VerdantsAscent.Performance
         private static bool Prefix(ClutterSystem __instance, Vector3 p, out Vector3 point, out Vector3 normal,
             out Heightmap hmap, out Heightmap.Biome biome, ref bool __result)
         {
+            s_probeStart = FiresLogger.DebugEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
             point = p;
             normal = Vector3.up;
             hmap = null;
@@ -186,6 +187,28 @@ namespace VerdantsAscent.Performance
                     FiresLogger.LogInfo(line);
                     args.Context?.AddString(line);
                 });
+        }
+
+        // 0.2.1395: what grass ground reads cost, Debug logging only: one line per 10 s in which any ran. Finalizer: the prefix returns false on every path.
+        private const float TimingLineSeconds = 10f;
+        private static long s_probeStart, s_probeTicks, s_probeWorstTicks;
+        private static int s_probeCalls, s_probeFrames, s_probeLastFrame = -1;
+        private static float s_probeNextLine;
+
+        [HarmonyFinalizer]
+        private static void Finalizer()
+        {
+            if (s_probeStart == 0L) return;
+            long ticks = System.Diagnostics.Stopwatch.GetTimestamp() - s_probeStart;
+            s_probeStart = 0L;
+            s_probeTicks += ticks; s_probeCalls++;
+            if (ticks > s_probeWorstTicks) s_probeWorstTicks = ticks;
+            if (s_probeLastFrame != Time.frameCount) { s_probeLastFrame = Time.frameCount; s_probeFrames++; }
+            if (Time.unscaledTime < s_probeNextLine) return;
+            s_probeNextLine = Time.unscaledTime + TimingLineSeconds;
+            double ms = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            FiresLogger.LogDebug($"[ClutterProbe] ground reads: {s_probeCalls} in {s_probeFrames} frame(s), {s_probeTicks * ms:0.0} ms total, {s_probeTicks * ms / s_probeFrames:0.00} ms per frame that read, worst read {s_probeWorstTicks * ms:0.000} ms");
+            s_probeTicks = 0L; s_probeWorstTicks = 0L; s_probeCalls = 0; s_probeFrames = 0;
         }
 
         private static int s_cameraFrame = -1;

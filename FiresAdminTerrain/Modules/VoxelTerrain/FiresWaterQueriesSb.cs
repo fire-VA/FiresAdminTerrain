@@ -971,6 +971,9 @@ namespace VerdantsAscent.Terrain.Voxel
         public static float SeasonalIceReachM(float wx, float wz)
         {
             float reach = FatSeasons.IceReachAt(wx, wz);
+            // 0.2.1095: Deep North ice is not only still water; every flat sheet freezes (the ice sheet's own flatness test still
+            // keeps sloped channels from turning into ice ramps).
+            if (reach >= FatSeasons.AlwaysFrozenReachM) return reach;
             return reach > 0f && StillWaterNear(wx, wz) ? reach : 0f;
         }
 

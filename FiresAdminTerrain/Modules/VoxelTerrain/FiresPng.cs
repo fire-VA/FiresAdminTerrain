@@ -71,6 +71,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private const int ZlibHeaderBytes = 2;
+        internal const int MaxImageSide = 16384;   // 0.2.1333: twice the largest map this code handles (8192 squared, BcBandedImage / BcImageMaps)
 
         public static PngLayout ReadLayout(byte[] bytes)
         {
@@ -84,6 +85,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 int len = (bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3];
                 string type = System.Text.Encoding.ASCII.GetString(bytes, pos + 4, 4);
                 int dataAt = pos + 8;
+                if (len < 0 || dataAt + (long)len > bytes.Length) throw new Exception($"PNG chunk length {len} does not fit");   // 0.2.1333: a negative one walked backwards
                 if (type == "IHDR")
                 {
                     layout.Width = (bytes[dataAt] << 24) | (bytes[dataAt + 1] << 16) | (bytes[dataAt + 2] << 8) | bytes[dataAt + 3];
@@ -99,6 +101,10 @@ namespace VerdantsAscent.Terrain.Voxel
             layout.Channels = colorType == 0 ? 1 : colorType == 2 ? 3 : colorType == 4 ? 2 : colorType == 6 ? 4 : -1;
             if (layout.Channels < 0) throw new Exception($"unsupported PNG color type {colorType}");
             if (layout.BitDepth != 8 && layout.BitDepth != 16) throw new Exception($"unsupported PNG bit depth {layout.BitDepth}");
+            // 0.2.1333: this file can come from the server (BcJoinSync); checked before DecodeRaw or a row buffer allocates from it
+            if (layout.Width < 1 || layout.Width > MaxImageSide || layout.Height < 1 || layout.Height > MaxImageSide
+                || layout.Width * (long)layout.Channels * (layout.BitDepth / 8) * layout.Height > int.MaxValue)
+                throw new Exception($"PNG size {layout.Width} x {layout.Height} out of range");
             return layout;
         }
 
@@ -127,7 +133,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var idat = new IdatStream(bytes, layout.Idat);
             var header = new byte[ZlibHeaderBytes];
             if (idat.Read(header, 0, ZlibHeaderBytes) != ZlibHeaderBytes) throw new EndOfStreamException();
-            using (var ds = new DeflateStream(idat, CompressionMode.Decompress))
+            using (var ds = FatInflate.DeflateReader(idat, "png map", (rowBytes + 1L) * h))   // 0.2.1333: limit = filter byte + row, exact
             {
                 var prev = new byte[rowBytes];
                 var cur = new byte[rowBytes];

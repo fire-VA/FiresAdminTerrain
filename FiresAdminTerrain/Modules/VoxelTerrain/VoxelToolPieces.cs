@@ -25,14 +25,15 @@ namespace VerdantsAscent.Terrain.Voxel
         // The tool pieces, in menu order, for the Chaos Hammer's Voxel tab.
         internal static IReadOnlyList<GameObject> Tools => s_tools;
 
+        internal static bool IsTool(Piece piece) => piece != null && Names.Contains(piece.m_name);   // 0.2.1287
         internal static readonly HashSet<string> Names = new HashSet<string>
-        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vskin", "Vriver", "Vpour", "Vpool", "Vpond", "Vfall", "Vmop" };
+        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vskin", "Vramp", "Vriver", "Vpour", "Vpool", "Vpond", "Vfall", "Vmop" };
 
         // Tools the VoxelBrushDrag pump actually drives. Only these take the
         // scroll wheel off the camera — a registered-but-unwired tool must not
         // swallow input and read as broken.
         internal static readonly HashSet<string> PumpedNames = new HashSet<string>
-        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vskin", "Vriver", "Vpour", "Vpool", "Vpond", "Vfall", "Vmop" };
+        { "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vskin", "Vramp", "Vriver", "Vpour", "Vpool", "Vpond", "Vfall", "Vmop" };
 
         // Our own tool state (was IH ruler / console args before the divorce).
         public static float ToolRadius = 3f;
@@ -59,8 +60,8 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_tools.Count > 0) return;
 
             // The texts say what the stroke tools do (click and drag at the draw speed, PgUp/PgDn offset).
-            AddTool("Vcarve", "Carve voxel terrain — click and DRAG to sculpt a trench at a constant depth under the ground "
-                + "(it rides the terrain as it was before the stroke). Scroll = width, Shift+scroll or PgUp/PgDn = depth (Shift+PgUp = fine, hold = faster).");
+            AddTool("Vcarve", "Carve voxel terrain — a SPHERE where you aim: floor, wall or ceiling, in any direction. Click to carve one, "
+                + "hold and DRAG to keep carving along your aim (tunnels, caves, overhangs). Scroll = sphere size, PgUp/PgDn = push the sphere further in (Shift+PgUp = fine).");
             AddTool("Vfill", "Fill voxel terrain — click and DRAG to raise the ground by a constant height along the stroke. "
                 + "Scroll = width, Shift+scroll or PgUp/PgDn = height (Shift+PgUp = fine, hold = faster).");
             AddTool("Vdelete", "Restore voxel terrain to its generated state — click and DRAG over the edits to undo them. "
@@ -74,25 +75,23 @@ namespace VerdantsAscent.Terrain.Voxel
             AddTool("Vskin", "Skin over holes — click and DRAG across a cave opening or a broken lattice: a thin smooth shell is "
                 + "laid exactly at the surrounding ground's height (roads stay flat), only where there is a hole; the cave below "
                 + "stays hollow and intact ground is never raised. Scroll = size, Shift+scroll or PgUp/PgDn = shell thickness.");
+            AddTool("Vramp", "Ramp - click to cut and fill a straight ramp from where you click, rising away from you. "
+                + "Scroll = width, Shift+scroll or PgUp/PgDn = rise (negative = down), Q/E = turn it 90 degrees. Numpad 7/9 = undo/redo.");
 
-            AddTool("Vriver", "Carve a river bed — hold LMB and DRAG the spine you want. Sweeps a "
-                + "channel between samples and clears vegetation across the wet width, so vanilla's shore "
-                + "sand and water ecology take over. Scroll = width, Shift+scroll or PgUp/PgDn = depth below the cursor.");
-            AddTool("Vpour", "Pour a water ribbon — hold LMB and DRAG to lay a smoothed water "
-                + "surface along the path. Scroll = width, Shift+scroll or PgUp/PgDn = surface offset from the terrain hit.");
-            AddTool("Vpool", "Pool shaper (all-in-one) — click to level, carve, fill and seed a pool, or click existing water "
-                + "to use it. Click again (a new spot or another water) to auto-carve and fill a river between the two, routed "
-                + "along the low ground; click the higher one first. LeftAlt + click = fill the dip under the cursor to its rim "
-                + "(nothing carved). Scroll = size, Shift+scroll or PgUp/PgDn = water level.");
-            AddTool("Vpond", "Pond — a flat circle of water at the height you set: Shift+scroll or PgUp/PgDn nudge it over the ground under the "
-                + "crosshair (Shift = fine), scroll = radius. Click fills the dip under the circle with water flat at that height. "
-                + "Red with posts = it would spill there (lower it or shrink it); nothing is laid until it holds all round.");
+            // Fire 10-24: three water tools, each doing one job. Vpool (the old all-in-one pool shaper + two-click river) is
+            // no longer in the menu: Water, River and Lake replace it.
+            AddTool("Vpour", "WATER - click or drag to lay water at the height shown; it never changes the ground. "
+                + "Scroll = width, Shift+scroll or PgUp/PgDn = water height (Shift+PgUp = fine).");
+            AddTool("Vriver", "RIVER - click and drag to carve a smooth riverbed and fill it with water. "
+                + "Scroll = width, Shift+scroll or PgUp/PgDn = depth.");
+            AddTool("Vpond", "LAKE - click to dig a lake or pond and fill it to the rim. River between lakes: click the first lake, "
+                + "LeftAlt+click points along the river's path, then click the end lake. Scroll = size, Shift+scroll or PgUp/PgDn = depth.");
             AddTool("Vfall", "Waterfall — click the ground just before an edge (a cliff, a sky island's rim): a "
                 + "spillway at the lip, a curtain with mist down to the ground or water below, and a pool where it "
-                + "lands. Scroll = width. LeftAlt + click = remove the falls in the ring.");
+                + "lands. Scroll = width. Numpad 7 = undo the last fall, Numpad 9 = redo. Remove (middle mouse) = remove the falls in the ring.");
             AddTool("Vmop", "Water mop — hold LMB and DRAG to remove water in the ring for good: generated rivers, "
                 + "lakes and ponds (sky islands too) AND water you drew. Water outside the ring stays. Redraw with "
-                + "Vpour/Vpool/Vriver. Scroll = size. LeftAlt = restore what was mopped there.");
+                + "Vpour/Vpool/Vriver and Vfall waterfalls. Scroll = size. Remove (middle mouse) = restore what was mopped in the ring.");
 
             FiresLogger.LogInfo($"[FiresVoxel] {s_tools.Count} V-tools built for the Chaos Hammer's Voxel tab (IH-free, admin-gated).");
         }

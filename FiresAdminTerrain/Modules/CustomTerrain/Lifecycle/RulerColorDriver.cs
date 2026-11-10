@@ -111,16 +111,32 @@ namespace VerdantsAscent.Terrain.Lifecycle
         // materials. Segment count is small (ring ≈ 4·radius segments),
         // and repeated .material access returns the same instance, so the
         // per-tick cost is a few dozen color writes.
+        // 0.2.1058 ([classes-ui]'s UI efficiency audit T4): the renderer walk + material writes run only when the projector,
+        // its segment count or the colour changed (new segments spawn untinted), or every RetintSeconds as a safety net; the
+        // property names are shader ids.
+        private const float RetintSeconds = 2f;
+        private static readonly int ColorId = Shader.PropertyToID("_Color");
+        private static readonly int EmissionId = Shader.PropertyToID("_EmissionColor");
+        private readonly List<Renderer> _renderers = new List<Renderer>();
+        private Transform _tintedProjector;
+        private int _tintedChildren = -1;
+        private Color _tintedColor;
+        private float _retintAt;
+
         private void ApplyTint(Color color)
         {
             if (!InfinityHammerRulerProbe.TryGetProjector(out var projector)) return;
 
-            var renderers = projector.GetComponentsInChildren<Renderer>(true);
-            if (renderers == null || renderers.Length == 0) return;
+            var pt = projector.transform;
+            if (_tinted && pt == _tintedProjector && pt.childCount == _tintedChildren && color == _tintedColor && Time.time < _retintAt) return;
+            _tintedProjector = pt; _tintedChildren = pt.childCount; _tintedColor = color; _retintAt = Time.time + RetintSeconds;
 
-            for (int i = 0; i < renderers.Length; i++)
+            projector.GetComponentsInChildren(true, _renderers);
+            if (_renderers.Count == 0) return;
+
+            for (int i = 0; i < _renderers.Count; i++)
             {
-                var r = renderers[i];
+                var r = _renderers[i];
                 if (r == null) continue;
 
                 var mat = r.material; // instance — never sharedMaterial
@@ -129,17 +145,17 @@ namespace VerdantsAscent.Terrain.Lifecycle
                 // Capture the segment prefab's original color once so we
                 // can restore it when the player switches to a non-Fires
                 // tool while the same segments are still alive.
-                if (!_originalCaptured && mat.HasProperty("_Color"))
+                if (!_originalCaptured && mat.HasProperty(ColorId))
                 {
                     _originalColor = mat.color;
                     _originalCaptured = true;
                 }
 
-                if (mat.HasProperty("_Color")) mat.color = color;
+                if (mat.HasProperty(ColorId)) mat.SetColor(ColorId, color);
                 // The workbench segment material glows via emission on
                 // some shader variants — keep it in step when present so
                 // the ring doesn't tint pale-white-with-colored-fringe.
-                if (mat.HasProperty("_EmissionColor")) mat.SetColor("_EmissionColor", color * 0.6f);
+                if (mat.HasProperty(EmissionId)) mat.SetColor(EmissionId, color * 0.6f);
             }
 
             _tinted = true;

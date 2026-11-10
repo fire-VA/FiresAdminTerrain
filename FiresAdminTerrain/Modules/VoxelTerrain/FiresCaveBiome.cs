@@ -70,7 +70,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Thread.CurrentThread.ManagedThreadId != s_mainThread || WorldGenerator.instance == null) return false;
             if (!InCave(p)) return false;
             if (VoxelLayerPaint.TryPaintedBiomeAt(p, out biome)) return true;
-            biome = RegionBiome(p.x, p.z, WorldGenerator.instance.GetBiome(p.x, p.z));
+            biome = RegionBiome(p.x, p.z, FatSuperFlat.WorldBiome(p.x, p.z));
             return true;
         }
 
@@ -79,17 +79,29 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly Dictionary<Vector3Int, bool> s_inCave = new Dictionary<Vector3Int, bool>();
         private static float s_inCaveAt = -1000f; private static int s_inCaveCalls, s_inCaveComputed; private static float s_inCaveLogAt;
 
+        private static int s_inCaveNoVoxel; private static bool s_noVoxelSaid;
+
         internal static bool InCave(Vector3 p)
         {
-            if (Thread.CurrentThread.ManagedThreadId != s_mainThread) return InCaveUncached(p);   // the cache is main-thread only
+            // 0.2.1369 (winter audit near Raven's Rest: 87k calls/60 s, 82 % evaluated, 2 ms/s on a heightmap world): with no voxel chunks TryIsSolid can never answer, so
+            // InCaveUncached is always false. Answer before the height lookup and the cache, the same gate as VoxelCaveEnv.CaveRoofAbove.
+            var skipKey = FiresVoxelConfig.CaveChecksSkipNoVoxel;
+            bool noVoxel = (skipKey == null || skipKey.Value) && VoxelWorld.ChunkCount <= 0;
+            if (Thread.CurrentThread.ManagedThreadId != s_mainThread) return !noVoxel && InCaveUncached(p);   // the cache is main-thread only
             if (Time.time - s_inCaveAt >= 1f || s_inCave.Count > 4096) { s_inCave.Clear(); s_inCaveAt = Time.time; }
             s_inCaveCalls++;
             if ((s_inCaveCalls & 1023) == 0) TallyCaller();   // Who asks 14k times a second (sampled 1 in 1024)
             if (Time.unscaledTime >= s_inCaveLogAt)
             {
-                if (s_inCaveLogAt > 0f) FiresLogger.LogDebug($"[FiresCaveBiome] InCave /60s: {s_inCaveCalls} calls, {s_inCaveComputed} evaluated, {s_inCaveTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.00} ms; player state {s_playerEvals} evaluations");
+                if (s_inCaveLogAt > 0f) FiresLogger.LogDebug($"[FiresCaveBiome] InCave /60s: {s_inCaveCalls} calls, {s_inCaveComputed} evaluated, {s_inCaveTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.00} ms; {s_inCaveNoVoxel} answered at once (no voxel ground); player state {s_playerEvals} evaluations");
                 if (s_callers.Count > 0) { var top = new List<KeyValuePair<string, int>>(s_callers); top.Sort((a, b) => b.Value.CompareTo(a.Value)); var sb = new System.Text.StringBuilder("[FiresCaveBiome] InCave callers (1 in 1024 sampled): "); for (int k = 0; k < top.Count && k < 6; k++) sb.Append(top[k].Key).Append(' ').Append(top[k].Value).Append("; "); FiresLogger.LogDebug(sb.ToString()); s_callers.Clear(); }
-                s_inCaveCalls = s_inCaveComputed = s_playerEvals = 0; s_inCaveTicks = 0; s_inCaveLogAt = Time.unscaledTime + 60f;
+                s_inCaveCalls = s_inCaveComputed = s_playerEvals = s_inCaveNoVoxel = 0; s_inCaveTicks = 0; s_inCaveLogAt = Time.unscaledTime + 60f;
+            }
+            if (noVoxel)
+            {
+                s_inCaveNoVoxel++;
+                if (!s_noVoxelSaid) { s_noVoxelSaid = true; FiresLogger.LogInfo("[FiresCaveBiome] no voxel ground on this world yet: cave checks answer at once (0.2.1369)"); }
+                return false;
             }
             var key = Vector3Int.FloorToInt(p);
             if (s_inCave.TryGetValue(key, out bool known)) return known;

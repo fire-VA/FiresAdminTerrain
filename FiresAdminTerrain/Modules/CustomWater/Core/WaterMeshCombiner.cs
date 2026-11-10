@@ -203,23 +203,12 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public CustomLiquidType CustomLiquidType { get; set; } = CustomLiquidType.Water;
 
-        /// <summary>
-        /// Ported from Galaxies 0.1.39: true while this water is iced only for Vedr's winter.
-        /// Seasonal ice is never saved: the anchor stores plain water, so it can't outlast winter or Vedr.
-        /// </summary>
-        public bool SeasonalIce { get; private set; }
+        // 0.2.1097: the whole-body seasonal ice (Galaxies 0.1.39 port) and the 0.2.1095 biome lava flag are REMOVED: placed water
+        // takes ice / lava / crust per 1 m column from WaterStateField (look: the sheet's state texture; walk: PlacedWaterSolids;
+        // no liquid level: PlacedWaterField.TrySurface; heat: FatLava). A combiner's own CustomLiquidType is only what a player set.
 
-        /// <summary>The type the anchor saves: plain water while the ice is only seasonal.</summary>
-        public CustomLiquidType SavedCustomLiquidType => SeasonalIce ? CustomLiquidType.Water : CustomLiquidType;
-
-        /// <summary>Seasonal freeze/thaw (SeasonalWaterFreeze). Freezes only plain water; thaws only its own seasonal ice.</summary>
-        public void SetSeasonalIce(bool frozen)
-        {
-            if (frozen == SeasonalIce) return;
-            if (frozen && CustomLiquidType != CustomLiquidType.Water) return;
-            SeasonalIce = frozen;
-            ApplyCustomLiquidType(frozen ? CustomLiquidType.Ice : CustomLiquidType.Water, false);
-        }
+        /// <summary>The type the anchor saves.</summary>
+        public CustomLiquidType SavedCustomLiquidType => CustomLiquidType;
 
         /// <summary>
         /// Damage handler for hazardous liquids. Null for safe liquids (water, tar, ice).
@@ -289,6 +278,7 @@ namespace VerdantsAscent.Water.Core
         /// Read-only access to all combiners.
         /// </summary>
         public static IReadOnlyList<WaterMeshCombiner> AllCombiners => s_allCombiners;
+        internal MeshRenderer CombinerRenderer => _meshRenderer;   // 0.2.1068: ToolWaterStencil
 
         /// <summary>
         /// When true, enables verbose debug logging. Set to false to reduce log spam during world load.
@@ -340,6 +330,7 @@ namespace VerdantsAscent.Water.Core
             _meshFilter.sharedMesh = _waterMesh;
 
             _meshRenderer = gameObject.AddComponent<MeshRenderer>();
+            _meshRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;   // 0.2.1093: a see-through water/overlay surface never casts a shadow (Fire shot 537: phantom shadow bar on the snow)
 
             // Set layer for water
             gameObject.layer = LayerMask.NameToLayer("Water");
@@ -563,6 +554,8 @@ namespace VerdantsAscent.Water.Core
             if (_waterDisks.Contains(disk)) return;
 
             _waterDisks.Add(disk);
+            _disksChanged = true;   // 0.2.1349
+            _lastGainedHash = disk.StableHash;
             MarkDirty();
 
             if (s_verboseLogging)
@@ -590,6 +583,20 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         /// <param name="disks">The disks to add</param>
         /// <param name="skipRegeneration">If true, doesn't mark dirty (for restoration where ForceRegenerate will be called)</param>
+        // 0.2.1331: a cache-restored combiner whose anchor proved newer takes the anchor's disks in place (the anchor and cache group stay).
+        // 0.2.1349 (Fire: "every time we log back in its broken"): the anchor repair's de-duplication; the disks stay in the anchor that holds them. Grid untouched.
+        // 0.2.1354: no _disksChanged here: the repair just wrote this combiner's anchor without these disks, so the ZDO already matches.
+        internal void DropDisksHeldElsewhere(HashSet<int> hashes)
+        {
+            _waterDisks.RemoveAll(d => hashes.Contains(d.StableHash));
+        }
+
+        internal void ReplaceDisksFromAnchor(List<WaterDisk> disks)
+        {
+            _waterDisks.Clear();
+            AddWaterDisksBatch(disks, skipRegeneration: true);
+        }
+
         public void AddWaterDisksBatch(IEnumerable<WaterDisk> disks, bool skipRegeneration = false)
         {
             if (disks == null) return;
@@ -610,6 +617,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     // Mark dirty once for all added disks
                     MarkDirty();
+                    _disksChanged = true;   // 0.2.1354 (review: a combiner with no anchor instance skipped its save). skipRegeneration = a restore: the list came from its own save.
                 }
                 if (s_verboseLogging)
                 {
@@ -630,6 +638,7 @@ namespace VerdantsAscent.Water.Core
             if (_waterDisks.Remove(disk))
             {
                 MarkDirty();
+                _disksChanged = true;   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
 
                 // Destroy if no disks left
                 if (_waterDisks.Count == 0)
@@ -797,8 +806,58 @@ namespace VerdantsAscent.Water.Core
         /// Gets the water surface level at a world position.
         /// Returns float.MinValue if no water at position.
         /// </summary>
+        private static int s_liveBedMask;
+        private static float s_nextLiveBedNote;
+
+        // True when a ray from the water surface straight down to the point meets no solid ground: the water reaches it.
+        private static bool OpenWaterDownTo(Vector3 worldPos, float surfaceLevel)
+        {
+            if (s_liveBedMask == 0) s_liveBedMask = LayerMask.GetMask("terrain", "Default", "static_solid");
+            float span = surfaceLevel - worldPos.y;
+            if (span <= 0f) return true;
+            bool blocked;
+            try { blocked = Physics.Raycast(new Vector3(worldPos.x, surfaceLevel, worldPos.z), Vector3.down, span - 0.05f, s_liveBedMask, QueryTriggerInteraction.Ignore); }
+            catch (UnityException) { return false; }   // not the main thread: keep the stored bed's answer
+            if (!blocked && FiresLogger.DebugEnabled && Time.time >= s_nextLiveBedNote)
+            {
+                s_nextLiveBedNote = Time.time + 10f;
+                FiresLogger.LogDebug($"[FiresWater] swim: ({worldPos.x:0.0},{worldPos.y:0.0},{worldPos.z:0.0}) is under the stored bed of the water at y {surfaceLevel:0.0} but nothing solid is between: in the water (the bed was carved deeper after the water was laid)");
+            }
+            return !blocked;
+        }
+
+        // 0.2.1091 (Fire: one implementation): placed fresh water is answered by PlacedWaterField, the same surface the drawn sheet is
+        // built from (bank-capped, dry where it would ride over ground), so what you see is where you swim. The swim waves ride on it
+        // as before; the same proximity rules (0.8 m above, the live bed below) decide "near this water". Other liquids keep their grid.
+        internal bool IsPlacedFreshWater => CustomLiquidType == CustomLiquidType.Water && LiquidType == LiquidType.Water;
+        private int _fieldYCount = -1;
+        private long _fieldYSig;
+        private float _fieldMinY, _fieldMaxY;
+
+        private float FieldSurfaceAt(Vector3 worldPos)
+        {
+            if (!_combinedBounds.Contains(new Vector3(worldPos.x, _combinedBounds.center.y, worldPos.z))) return float.MinValue;
+            if (!IsWithinAnyDiskRadius(worldPos)) return float.MinValue;
+            if (_fieldYCount != _waterDisks.Count || _fieldYSig != Tools.WaterSheets.Signature)   // restored combiners never ran CalculateCombinedBounds: the disks' own y range
+            {
+                _fieldYCount = _waterDisks.Count; _fieldYSig = Tools.WaterSheets.Signature;
+                _fieldMinY = float.MaxValue; _fieldMaxY = float.MinValue;
+                foreach (var d in _waterDisks) if (d != null) { _fieldMinY = Mathf.Min(_fieldMinY, d.Position.y); _fieldMaxY = Mathf.Max(_fieldMaxY, d.Position.y); }
+            }
+            float yLow = Mathf.Max(worldPos.y - 0.8f, _fieldMinY - 2f), yHigh = _fieldMaxY + 0.5f;
+            if (yHigh < yLow) return float.MinValue;
+            if (!PlacedWaterField.TrySurface(worldPos.x, worldPos.z, yLow, yHigh, PlacedWaterField.Consumer.Level, out float baseHeight, out float bed))
+                return float.MinValue;
+            float depth = float.IsNaN(bed) ? 1f : baseHeight - bed;
+            float surfaceLevel = baseHeight + CalculateWaveHeight(worldPos, depth);
+            if (worldPos.y > surfaceLevel + 0.8f) return float.MinValue;
+            if (!float.IsNaN(bed) && worldPos.y < bed - 1f && !OpenWaterDownTo(worldPos, surfaceLevel)) return float.MinValue;
+            return surfaceLevel;
+        }
+
         public float GetWaterSurfaceAt(Vector3 worldPos)
         {
+            if (IsPlacedFreshWater) return FieldSurfaceAt(worldPos);   // 0.2.1097: no level on solid ice / crust / hot lava (the field)
             if (_surfaceHeights == null || _waterDepths == null)
                 return float.MinValue;
 
@@ -838,7 +897,13 @@ namespace VerdantsAscent.Water.Core
             // The 0.8m margin above surface handles wading into water but prevents standing
             // on banks 1-2m above the water from triggering swim state.
             float waterBottom = surfaceLevel - _waterDepths[idx];
-            if (worldPos.y > surfaceLevel + 0.8f || worldPos.y < waterBottom - 1f)
+            if (worldPos.y > surfaceLevel + 0.8f)
+                return float.MinValue;
+            // 0.2.1025 (Fire 10-24: "we fell out of the swim trigger ... now were walking under the mesh"): the stored depth is
+            // the terrain as it was when this water was built. A bed carved deeper afterwards (or one whose carve colliders
+            // were not there yet) left the stored bottom above the real floor, and a swimmer on that floor counted as out of the
+            // water. Below the stored bottom the LIVE bed decides: nothing solid between the surface and the point = in water.
+            if (worldPos.y < waterBottom - 1f && !OpenWaterDownTo(worldPos, surfaceLevel))
                 return float.MinValue;
 
             return surfaceLevel;
@@ -1172,7 +1237,8 @@ namespace VerdantsAscent.Water.Core
 
                 if (combiner != null
                     && combiner.CustomLiquidType == disk.CustomLiquidType
-                    && combiner.WouldOverlapWith(disk))
+                    && combiner.WouldOverlapWith(disk)
+                    && combiner.OverlapsOnSameFloor(disk))   // 0.2.1349
                 {
                     // Add disk to EXISTING combiner - use its existing anchor
                     combiner.AddWaterDiskInternal(disk);
@@ -1242,6 +1308,29 @@ namespace VerdantsAscent.Water.Core
             }
 
             return newCombiner;
+        }
+
+        // 0.2.1349 (Fire, x-28 z937: 49.0 disks joined a group holding a 33.43 pit disk): two POND disks more than this apart never make one body
+        // (the anchors' own 8 m height band). River disks stay exempt: a fall joins them across any drop (IsTerrainBlockingBetweenDisks). Judged on
+        // Y and kind only, so server and clients group alike. Saved mixed groups load as they are; a disk beside its own level still joins them.
+        private const float PondFloorGap = 8f;
+
+        private bool OverlapsOnSameFloor(WaterDisk newDisk)
+        {
+            var key = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.WaterFloorGate;
+            if (key != null && !key.Value) return true;
+            if (newDisk.Kind != WaterDiskKind.Pond) return true;
+            float closest = float.MaxValue;
+            foreach (var d in _waterDisks)
+            {
+                if (!d.OverlapsWith(newDisk, BlendDistance)) continue;
+                if (d.Kind != WaterDiskKind.Pond) return true;
+                float gap = Mathf.Abs(d.Position.y - newDisk.Position.y);
+                if (gap <= PondFloorGap) return true;
+                if (gap < closest) closest = gap;
+            }
+            FiresLogger.LogDebug($"[WaterAnchorRepair] pond disk {newDisk.StableHash} at y {newDisk.Position.y:F2} stays out of the combiner at {transform.position}: nearest overlapping level is {closest:F2} m away (> {PondFloorGap} m)");
+            return false;
         }
 
         /// <summary>
@@ -1477,6 +1566,7 @@ namespace VerdantsAscent.Water.Core
                     if (s_verboseLogging) FiresLogger.LogInfo("[WaterMeshCombiner] MopWaterAt: All water removed, destroying combiner");
                     // All water removed - destroy anchor and combiner
                     // Don't save here - we're about to destroy everything anyway
+                    foreach (var gone in _waterDisks) WaterRemovedDisks.NoteRemovedHere(gone);   // 0.2.1354 (review: permanent disk loss): no water is left under any of them
                     if (Anchor != null)
                     {
                         Anchor.DestroyPermanently();
@@ -1488,7 +1578,7 @@ namespace VerdantsAscent.Water.Core
 
                 // CRITICAL: Sync disk list with grid state
                 // Remove disks that no longer have any water coverage
-                SyncDisksWithGridState();
+                SyncDisksWithGridState(worldPos, radius);
 
                 // Save the new state to anchor (only if we still have water)
                 SaveToAnchor();
@@ -1507,7 +1597,9 @@ namespace VerdantsAscent.Water.Core
         /// Removes any disks that no longer have water coverage in the grid.
         /// This ensures the persisted disk list matches the actual water state.
         /// </summary>
-        private void SyncDisksWithGridState()
+        // 0.2.1354 (review: permanent disk loss): a removal here now goes on the removed list, so it is limited to what this mop reached. A disk that merely stands dry, or lies
+        // off the grid, was not mopped; it used to leave the list with any mop anywhere on the body. Partly covered disks stay in the list, under the mask, and are not noted.
+        private void SyncDisksWithGridState(Vector3 mopAt, float mopRadius)
         {
             if (_surfaceHeights == null || _waterDisks.Count == 0) return;
 
@@ -1515,6 +1607,9 @@ namespace VerdantsAscent.Water.Core
 
             foreach (var disk in _waterDisks)
             {
+                float mdx = disk.Position.x - mopAt.x, mdz = disk.Position.z - mopAt.z, mopReach = mopRadius + disk.Radius;
+                if (mdx * mdx + mdz * mdz > mopReach * mopReach) continue;
+
                 // Check if this disk has ANY water coverage remaining
                 bool hasWaterCoverage = false;
 
@@ -1555,6 +1650,8 @@ namespace VerdantsAscent.Water.Core
                     }
                 }
 
+                if (samples == 0) continue;   // 0.2.1354: off the grid: nothing here says it was mopped
+
                 // Disk has water coverage if at least 30% of samples have water
                 hasWaterCoverage = samples > 0 && (float)samplesWithWater / samples >= 0.3f;
 
@@ -1571,11 +1668,13 @@ namespace VerdantsAscent.Water.Core
             // Remove disks that no longer have coverage
             foreach (var disk in disksToRemove)
             {
+                WaterRemovedDisks.NoteRemovedHere(disk);   // 0.2.1354 (review: permanent disk loss): before MopWaterAt's save
                 _waterDisks.Remove(disk);
             }
 
             if (disksToRemove.Count > 0)
             {
+                _disksChanged = true;   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
                 if (s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombiner] SyncDisksWithGridState: Removed {disksToRemove.Count} disks with no water coverage. {_waterDisks.Count} disks remaining.");
             }
         }
@@ -1679,12 +1778,6 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void SetCustomLiquidType(CustomLiquidType newType)
         {
-            // Ported from Galaxies 0.1.39: a type someone chose (tool, command) replaces seasonal ice and is saved.
-            if (SeasonalIce)
-            {
-                SeasonalIce = false;
-                if (newType == CustomLiquidType) { SaveToAnchor(); return; }
-            }
             ApplyCustomLiquidType(newType, true);
         }
 
@@ -1701,6 +1794,7 @@ namespace VerdantsAscent.Water.Core
             if (_meshRenderer != null && _waterMaterial != null)
             {
                 _meshRenderer.material = _waterMaterial;
+                ToolWaterStencil.OnCombiner(_meshRenderer, transform.position);
             }
 
             // Update damage handler
@@ -1722,8 +1816,11 @@ namespace VerdantsAscent.Water.Core
                     frozen.Thaw();
                     Destroy(frozen);
                 }
+                // 0.2.1093: a thaw re-enabled the combiner's own mesh even for fresh water, which PlacedWaterSheets draws instead
+                // (the combiner mesh stays hidden there, MeshGen's material bind); same rule here, so a thawed pond never shows a
+                // second, stale surface.
                 if (_meshRenderer != null)
-                    _meshRenderer.enabled = true;
+                    _meshRenderer.enabled = !(CustomLiquidType == CustomLiquidType.Water && LiquidType == LiquidType.Water && PlacedWaterSheets.Active);
             }
             else if (newIsSolid && !oldIsSolid)
             {
@@ -2110,6 +2207,7 @@ namespace VerdantsAscent.Water.Core
             Anchor = WaterMeshCombinerAnchor.CreateAnchor(transform.position);
             if (Anchor != null)
             {
+                _anchorMade = true;   // 0.2.1349: when its instance leaves with the zone, the ZDO stays
                 Anchor.LinkToCombiner(this);
                 if (s_verboseLogging)
                 {
@@ -2161,12 +2259,35 @@ namespace VerdantsAscent.Water.Core
             if (ZNet.instance != null && !ZNet.instance.IsServer()) return;
 
             // Create anchor on first save (deferred from GetOrCreateCombinerFor)
-            if (Anchor == null && !_restoredFromPersistence)
+            if (Anchor == null && !_restoredFromPersistence && !_anchorMade)   // 0.2.1349: a restored or already anchored combiner is decided in TrySaveToAnchor
             {
                 EnsureAnchorExists();
             }
 
             SaveToAnchor();
+        }
+
+        // 0.2.1349 (Fire: "i have used v pour at least 3 times ... every time we log back in its broken")
+        // 0.2.1354 (review: a combiner with no anchor instance skipped its save; only a gained disk reached its ZDO): _disksChanged = the disk list or a disk's values differ from the last save.
+        private bool _disksChanged, _anchorMade;
+        private int _lastGainedHash;
+        private ZDOID _anchorZdo = ZDOID.None;
+        internal void NoteAnchorZdo(ZDOID id) => _anchorZdo = id;
+        internal void NoteDisksChanged() => _disksChanged = true;
+
+        // The anchor ZDO when there is no instance here; remembered, so only the first stroke of a combiner scans.
+        private ZDO ResolveAnchorZdo()
+        {
+            if (!_anchorZdo.IsNone())
+            {
+                var known = ZDOMan.instance.GetZDO(_anchorZdo);
+                // 0.2.1354 (review: permanent disk loss): the repair remembers an anchor by SameBody alone; it must pass the guard a fresh scan applies (FindAnchorZdoFor), or a small combiner takes over a bigger anchor.
+                if (known != null && known.IsValid() && WaterMeshCombinerAnchor.MayTakeCombiner(known, this)) return known;
+                _anchorZdo = ZDOID.None;
+            }
+            var found = WaterMeshCombinerAnchor.FindAnchorZdoFor(this);
+            if (found != null) _anchorZdo = found.m_uid;
+            return found;
         }
 
         /// <summary>
@@ -2175,25 +2296,51 @@ namespace VerdantsAscent.Water.Core
         /// 
         /// For rapid placement, prefer QueueDebouncedSave() instead.
         /// </summary>
-        public void SaveToAnchor()
+        public void SaveToAnchor() => TrySaveToAnchor();
+
+        // 0.2.1349 (Fire: same bug): true = an anchor ZDO was written, for WaterPersistence's "Saved N" count.
+        internal bool TrySaveToAnchor()
         {
+            FinishMopSliceNow();   // 0.2.1344: never a half-sampled grid in a save
             // Only the server/host persists water to ZDO anchors.
-            if (ZNet.instance != null && !ZNet.instance.IsServer()) return;
+            if (ZNet.instance != null && !ZNet.instance.IsServer()) return false;
+
+            if (_disksChanged && FiresLogger.DebugEnabled)
+                FiresLogger.LogDebug($"[WaterAnchorRepair] stroke save: group {WaterCombinerCache.GroupIdOf(this)}, centre {transform.position}, anchor null {Anchor == null}, restored {_restoredFromPersistence}, hash {_lastGainedHash}, {_waterDisks.Count} disks");
 
             if (Anchor == null)
             {
-                if (!_restoredFromPersistence)
+                bool hasOrHadAnchor = _restoredFromPersistence || _anchorMade;
+                if (!hasOrHadAnchor)
                 {
                     EnsureAnchorExists();
+                }
+                else if (_disksChanged && ZDOMan.instance != null)
+                {
+                    // A restored combiner has no instance on a dedicated server whether its ZDO exists or not. Its ZDO takes the disks; only with none
+                    // does it get its own anchor (the cache alone never reaches a client).
+                    var zdo = ResolveAnchorZdo();
+                    if (zdo != null)
+                    {
+                        long ticks = WaterMeshCombinerAnchor.SaveCombinerDirect(zdo, this, out int keptInZdo);
+                        _disksChanged = false;
+                        FiresLogger.LogDebug($"[WaterAnchorRepair] stroke saved straight into anchor {zdo.m_uid}: {_waterDisks.Count} disks, {keptInZdo} more kept that only the anchor holds (0.2.1354), heights blanked so peers build from them");
+                        WaterCombinerCache.UpdateCombinerCache(this);
+                        if (keptInZdo == 0) WaterCombinerCache.NoteAnchorSaved(this, ticks);   // 0.2.1354: with disks only the anchor holds, the anchor must read as newer so the next load builds from them
+                        return true;
+                    }
+                    EnsureAnchorExists();
+                    if (Anchor != null) FiresLogger.LogDebug($"[WaterAnchorRepair] restored combiner at {transform.position} had no anchor ZDO: made one for hash {_lastGainedHash}");
+                    else FiresLogger.LogWarning($"[WaterMeshCombiner] SaveToAnchor: no anchor could be made for the restored combiner at {transform.position} ({_waterDisks.Count} disks): clients will not get them after a relog");
                 }
 
                 if (Anchor == null)
                 {
-                    if (!_restoredFromPersistence)
+                    if (!hasOrHadAnchor)
                     {
                         FiresLogger.LogWarning($"[WaterMeshCombiner] SaveToAnchor: No anchor for combiner at {transform.position}. Water will NOT persist!");
                     }
-                    return;
+                    return false;
                 }
             }
 
@@ -2201,7 +2348,8 @@ namespace VerdantsAscent.Water.Core
             {
                 FiresLogger.LogInfo($"[WaterMeshCombiner] SaveToAnchor: Saving {_waterDisks.Count} disks to anchor at {transform.position}");
             }
-            Anchor.SaveToZDO();
+            bool written = Anchor.TrySaveToZDO();
+            if (written) _disksChanged = false;
 
             // Clear dirty row tracking after successful save
             _dirtyRowMin = -1;
@@ -2211,6 +2359,8 @@ namespace VerdantsAscent.Water.Core
             // Also update file-based cache for reliable client-side restoration
             // (ZDO byte arrays may not sync to remote clients reliably)
             WaterCombinerCache.UpdateCombinerCache(this);
+            if (written && Anchor.KeptDisksLastSave) WaterCombinerCache.NoteAnchorSaved(this, Anchor.SavedTicks - 1L);   // 0.2.1354: as the direct save: the anchor reads as newer, so the next load builds from all its disks
+            return written;
         }
 
         #endregion

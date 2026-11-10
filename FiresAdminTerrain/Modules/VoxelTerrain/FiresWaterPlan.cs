@@ -288,6 +288,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        private const int MaxNodeFloats = 16 * 1024 * 1024;   // 0.2.1333: the same per-array bound as WaterCombinerCache.MaxArrayLength
+
         public static FiresWaterPlan Load(BinaryReader br)
         {
             var p = new FiresWaterPlan();
@@ -305,6 +307,9 @@ namespace VerdantsAscent.Terrain.Voxel
                     H = br.ReadInt32(),
                 };
                 int maskLen = br.ReadInt32();
+                // 0.2.1333: a bake can come from the server; a mask holds at most one byte per cell of its own rectangle
+                if (maskLen < 0 || b.W < 0 || b.H < 0 || maskLen > (long)b.W * b.H)
+                    throw new System.IO.InvalidDataException($"water body {b.Id}: mask {maskLen} for {b.W} x {b.H}");
                 b.Mask = maskLen > 0 ? br.ReadBytes(maskLen) : System.Array.Empty<byte>();   // never null: the ocean body ships a zero-length mask
                 b.MinX = br.ReadSingle(); b.MinZ = br.ReadSingle();
                 b.MaxX = br.ReadSingle(); b.MaxZ = br.ReadSingle();
@@ -320,6 +325,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     ToBody = br.ReadInt32(),
                 };
                 int len = br.ReadInt32();
+                if (len < 0 || len > MaxNodeFloats) throw new System.IO.InvalidDataException($"water connection {c.Id}: {len} node values");   // 0.2.1333
                 c.Nodes = new float[len];
                 for (int k = 0; k < len; k++) c.Nodes[k] = br.ReadSingle();
                 c.MinX = br.ReadSingle(); c.MinZ = br.ReadSingle();

@@ -376,9 +376,23 @@ namespace VerdantsAscent.Terrain
             rpc.InvokeRoutedRPC(ZRoutedRpc.Everybody, RpcAsk, pkg);
         }
 
+        private const float WorldgenAskGapSeconds = 5f;
+        private static readonly System.Collections.Generic.Dictionary<long, float> s_lastAsk = new System.Collections.Generic.Dictionary<long, float>();
+
         private static void OnAsk(long sender, ZPackage ask)
         {
-            if (ZNet.instance == null || ask.ReadInt() != AnswerFormat) return;
+            if (ZNet.instance == null) return;
+            // The server answers admins only, at most once per WorldgenAskGapSeconds each (every answer appends a result line);
+            // a client answers the server only.
+            if (ZNet.instance.IsServer())
+            {
+                if (sender != ZNet.GetUID() && !FiresCore.Sync.AdminSyncing.IsAdmin(sender)) { FatNetGuard.Refuse("worldgen test ask", $"{sender} is not an admin"); return; }
+                float now = Time.realtimeSinceStartup;
+                if (s_lastAsk.TryGetValue(sender, out float last) && now - last < WorldgenAskGapSeconds) { FatNetGuard.Refuse("worldgen test ask", $"{sender} asked again within {WorldgenAskGapSeconds:0} s"); return; }
+                s_lastAsk[sender] = now;
+            }
+            else if (!FatNetGuard.FromServer(sender, "worldgen test ask")) return;
+            if (ask.ReadInt() != AnswerFormat) return;
             var from = new Vector3(ask.ReadSingle(), 0f, ask.ReadSingle());
             var facts = Gather(from);
             if (ZNet.instance.IsServer())

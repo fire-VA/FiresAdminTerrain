@@ -266,11 +266,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 if (blob[0] != PreCampInline) return PcSay($"fail: not a pre-camp blob (byte 0x{blob[0]:X2})");
                 byte[] raw = Inflate(blob);
+                if (raw == null) return PcSay("fail: the snapshot was refused (size cap or corrupt)");   // 0.2.1333
                 var touched = new Dictionary<TerrainComp, Heightmap>();
                 int written = 0, unread = 0, ox, oz; float r, cy;
                 using (var rd = new BinaryReader(new MemoryStream(raw)))
                 {
                     ox = rd.ReadInt32(); oz = rd.ReadInt32(); int n = rd.ReadInt32(); r = rd.ReadSingle(); cy = rd.ReadSingle();
+                    // 0.2.1333: this loop reads nothing outside the circle, so a huge n would spin; CapturePreCamp writes n = ceil(r), r <= MaxRadius + margin
+                    if (n < 0 || n > Mathf.CeilToInt(MaxRadius + PreCampMargin) || !(r >= 0f) || r > MaxRadius + PreCampMargin) return PcSay($"fail: snapshot says n {n}, r {r}");
                     for (int j = -n; j <= n; j++)
                         for (int i = -n; i <= n; i++)
                         {
@@ -294,8 +297,93 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static byte[] Inflate(byte[] blob)
         {
-            using (var df = new DeflateStream(new MemoryStream(blob, 1, blob.Length - 1), CompressionMode.Decompress))
-            using (var ms = new MemoryStream()) { df.CopyTo(ms); return ms.ToArray(); }
+            return FatInflate.Deflate(blob, 1, blob.Length - 1, "pre-camp snapshot");   // 0.2.1333: null = refused
+        }
+
+        // ── 0.2.1331: one stamp on the TerrainComp layer (the water tools on heightmap ground) ─────────────────────────────
+        // Vanilla's LevelTerrain takes its delta from m_heights, stale until the delayed Poke lands, so several ops inside that window
+        // stack, oscillate, and under [HeightmapOverride] +/-1000 turn into spikes. WriteRelative shares that stale read. Here each vertex's
+        // ground (height minus deltas) is read once per stroke, while its heightmap is current, and height = ground + delta from then on.
+        internal struct StampCount { public int Lowered, Filled, WouldRaise; public float MaxLowered; }
+        private static readonly Dictionary<TerrainComp, float[]> s_stampGround = new Dictionary<TerrainComp, float[]>();
+        private static readonly List<Heightmap> s_stampMaps = new List<Heightmap>();
+        private static float s_lastStamp;
+        private const float StampIdle = 1f;
+
+        internal static void EndStampStroke() => s_stampGround.Clear();
+
+        // The limits ApplyToHeightmap draws with. A stored delta past them is drawn clamped, and ground + delta would stop being the height.
+        private static System.Reflection.MethodInfo s_coreMin, s_coreMax;
+        private static bool s_coreLimitsBound;
+        private static void DeltaLimits(out float min, out float max)
+        {
+            if (!s_coreLimitsBound)
+            {
+                s_coreLimitsBound = true;
+                var core = Type.GetType("FiresCore.Terrain.HeightmapOverrideLimits, FiresUnifiedCore");   // 0.2.1335: the override is Core's again (1086+); an older Core has none, so vanilla +/-8 m is what is drawn
+                if (core != null) { s_coreMin = AccessTools.Method(core, "Min"); s_coreMax = AccessTools.Method(core, "Max"); }
+            }
+            min = s_coreMin != null ? (float)s_coreMin.Invoke(null, null) : -8f;
+            max = s_coreMax != null ? (float)s_coreMax.Invoke(null, null) : 8f;
+        }
+
+        // Every vertex within `reach` of centre (xz) gets height target(distance, height). raise false: a target above the height is counted,
+        // never applied. Saved, synced and redrawn like every other write here (Commit). Returns the TerrainComps touched.
+        internal static int Stamp(Vector3 centre, float reach, bool raise, Func<float, float, float> target, ref StampCount count)
+        {
+            if (Time.unscaledTime - s_lastStamp > StampIdle) s_stampGround.Clear();
+            s_lastStamp = Time.unscaledTime;
+            DeltaLimits(out float minDelta, out float maxDelta);
+            var touched = new Dictionary<TerrainComp, Heightmap>();
+            s_stampMaps.Clear();
+            Heightmap.FindHeightmap(centre, reach + 1f, s_stampMaps);
+            foreach (var hm in s_stampMaps)
+            {
+                if (hm == null) continue;
+                var tc = hm.GetAndCreateTerrainCompiler();
+                if (tc == null || !Initialized(tc)) continue;
+                var nv = tc.GetComponent<ZNetView>();
+                if (nv == null || !nv.IsValid()) continue;
+                if (!nv.IsOwner()) nv.ClaimOwnership();   // TerrainComp.Save writes only on the owner
+                if (!nv.IsOwner()) continue;
+                int w = Width(tc) + 1;
+                if (!s_stampGround.TryGetValue(tc, out float[] grounds))
+                {
+                    if (hm.m_doLateUpdate != 0) hm.Regenerate();   // someone else's poke is pending: read this stroke's grounds from current heights
+                    grounds = new float[w * w];
+                    for (int i = 0; i < grounds.Length; i++) grounds[i] = float.NaN;
+                    s_stampGround[tc] = grounds;
+                }
+                float[] level = LevelDelta(tc), smooth = SmoothDelta(tc);
+                bool[] mod = ModifiedHeight(tc);
+                hm.WorldToVertex(centre, out int cx, out int cy);
+                int n = Mathf.CeilToInt(reach / hm.m_scale) + 1, half = hm.m_width / 2;
+                Vector3 hp = hm.transform.position;
+                bool any = false;
+                for (int y = Mathf.Max(0, cy - n); y <= Mathf.Min(w - 1, cy + n); y++)
+                    for (int x = Mathf.Max(0, cx - n); x <= Mathf.Min(w - 1, cx + n); x++)
+                    {
+                        float dx = hp.x + (x - half) * hm.m_scale - centre.x, dz = hp.z + (y - half) * hm.m_scale - centre.z;
+                        float d = Mathf.Sqrt(dx * dx + dz * dz);
+                        if (d > reach) continue;
+                        int idx = y * w + x;
+                        if (idx >= level.Length) continue;
+                        float delta = mod[idx] ? level[idx] + smooth[idx] : 0f;
+                        if (float.IsNaN(grounds[idx])) grounds[idx] = hp.y + hm.GetHeight(x, y) - delta;
+                        float height = grounds[idx] + delta;
+                        float want = target(d, height);
+                        if (float.IsNaN(want)) continue;
+                        if (want > height + 0.001f && !raise) { count.WouldRaise++; continue; }
+                        if (Mathf.Abs(want - height) <= 0.001f || (raise && want < height)) continue;
+                        float newDelta = Mathf.Clamp(want - grounds[idx], minDelta, maxDelta);
+                        level[idx] = newDelta; smooth[idx] = 0f; mod[idx] = true;
+                        if (want < height) { count.Lowered++; if (height - want > count.MaxLowered) count.MaxLowered = height - want; }
+                        else count.Filled++;
+                        any = true;
+                    }
+                if (any) touched[tc] = hm;
+            }
+            return Commit(touched, centre, reach);
         }
 
         private static string PcSay(string s)
@@ -358,6 +446,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (s_lastRestored == null) return $"{Tag} fat_precamp_check FAIL: no pre-camp restore this session";
             byte[] raw = Inflate(s_lastRestored);
+            if (raw == null) return $"{Tag} fat_precamp_check FAIL: the last snapshot was refused";   // 0.2.1333
             int cmpH = 0, cmpV = 0, badH = 0, badV = 0, badP = 0; float maxH = 0f, maxV = 0f;
             var dv = new List<float>();
             using (var rd = new BinaryReader(new MemoryStream(raw)))

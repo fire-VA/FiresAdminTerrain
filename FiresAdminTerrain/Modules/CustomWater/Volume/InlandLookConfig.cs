@@ -19,7 +19,7 @@ namespace VerdantsAscent.Water.Core
         private sealed class Look
         {
             internal ConfigEntry<Color> Shallow, Deep;
-            internal ConfigEntry<float> SeeThrough, Turbidity, Ripple, Reflection, Swell;
+            internal ConfigEntry<float> SeeThrough, Turbidity, Ripple, Reflection, Swell, Churn;   // Churn: biomes only (0.2.1092)
         }
 
         private static readonly Look[] s_class = new Look[Classes];
@@ -31,6 +31,8 @@ namespace VerdantsAscent.Water.Core
         private static readonly string[] ClassNames = { null, null, "River", "Stream", "Lake", "Pond", "Swamp", "Frozen", "Hot spring", "Waterfall" };
         // FiresWorldGenBase biome code order
         private static readonly string[] BiomeNames = { "Meadows", "Black Forest", "Swamp", "Mountain", "Plains", "Mistlands", "Ashlands", "Deep North", "Ocean" };
+        // 0.2.1092 (v5 look, [seasons]): per-biome sediment churn along the flow, -1 = keep the global "Churn". Same order as BiomeNames.
+        private static readonly float[] BiomeChurn = { 0.3f, 0.35f, 1.0f, 0.15f, 0.5f, 0.2f, 0.8f, 0.1f, -1f };
 
         // Biome defaults: swamps murky and dirty, mountains/forest clear and glassy (Meadows lakes too), plains warm (with steam,
         // InlandSteam), Mistlands tropical (bright turquoise into deep blue, so a mist-cleared build site is beautiful), Ashlands hot (steam), Deep North icy and clear. Tint alpha = how strongly it applies.
@@ -62,6 +64,8 @@ namespace VerdantsAscent.Water.Core
                 var d = BiomeDefaults[b];
                 s_biome[b] = BindLook(cfg, "Inland look - Biome " + BiomeNames[b], d.tS, d.tD, d.see, d.turb, d.rip, d.refl, d.swell,
                     $"Lakes, ponds and rivers in {BiomeNames[b]}.");
+                s_biome[b].Churn = cfg.Bind("Inland look - Biome " + BiomeNames[b], "Churn", BiomeChurn[b],
+                    new ConfigDescription("Muddy sediment churned along the flow, stronger near the bed and banks. -1 = keep the global.", new AcceptableValueRange<float>(-1f, 2f)));
             }
             // hot-reload, like the global inland keys
             cfg.SettingChanged += (_, args) =>
@@ -124,9 +128,37 @@ namespace VerdantsAscent.Water.Core
             m.SetVectorArray("_ClassLook", s_cP); m.SetVectorArray("_ClassLook2", s_cP2);
             m.SetVectorArray("_BiomeTintS", s_bTS); m.SetVectorArray("_BiomeTintD", s_bTD);
             m.SetVectorArray("_BiomeLook", s_bP); m.SetVectorArray("_BiomeLook2", s_bP2);
+            LogBind(m);
             // Minimum ripple, re-applied by the shader after the multipliers (a biome at 0.5x never drops under the floor)
             var floor = FiresInlandWaterConfig.MinRipple;
             m.SetFloat("_RippleFloor", floor != null ? floor.Value : 0.12f);
+        }
+
+        // 0.2.1090: the largest "Swell multiplier" over every class and biome look (the shader takes the biome's when it is not 1,
+        // else the class's: amp *= max(1 + sx, 0)), so a caller can bound the swell's height anywhere. 1 when nothing is bound.
+        internal static float MaxSwellMultiplier()
+        {
+            float m = 1f;
+            foreach (var l in s_class) if (l?.Swell != null) m = Mathf.Max(m, l.Swell.Value);
+            foreach (var l in s_biome) if (l?.Swell != null) m = Mathf.Max(m, l.Swell.Value);
+            return m;
+        }
+
+        // [WaterLook] one line per bind (when the values change): what was sent, and whether this shader declares the new slots.
+        private static string s_lastBind;
+        private static void LogBind(Material m)
+        {
+            var sb = new System.Text.StringBuilder("[WaterLook] bound _BiomeLook2.y churn [");
+            for (int b = 0; b < Biomes; b++) { if (b > 0) sb.Append(", "); sb.Append(BiomeNames[b]).Append(' ').Append(s_bP2[b].y.ToString("0.00")); }
+            float mm = FiresInlandWaterConfig.MinMurk != null ? FiresInlandWaterConfig.MinMurk.Value : -1f;
+            float ch = FiresInlandWaterConfig.Churn != null ? FiresInlandWaterConfig.Churn.Value : -1f;
+            sb.Append("] (churn + 1, 0 = keep), _MinMurk ").Append(mm.ToString("0.00")).Append(m.HasProperty("_MinMurk") ? "" : " (NOT declared by this shader: skipped)")
+              .Append(", _Churn ").Append(ch.ToString("0.00")).Append(m.HasProperty("_Churn") ? "" : " (NOT declared by this shader: skipped)")
+              .Append(" on '").Append(m.shader != null ? m.shader.name : "?").Append('\'');
+            string line = sb.ToString();
+            if (line == s_lastBind) return;
+            s_lastBind = line;
+            FiresLogger.LogInfo(line);
         }
 
         private static void Pack(Look[] looks, Vector4[] tS, Vector4[] tD, Vector4[] p, Vector4[] p2)
@@ -137,7 +169,9 @@ namespace VerdantsAscent.Water.Core
                 if (l == null) { tS[i] = tD[i] = p[i] = p2[i] = Vector4.zero; continue; }
                 tS[i] = l.Shallow.Value; tD[i] = l.Deep.Value;
                 p[i] = new Vector4(l.SeeThrough.Value, l.Turbidity.Value < 0f ? 0f : l.Turbidity.Value + 1f, l.Ripple.Value - 1f, l.Reflection.Value - 1f);
-                p2[i] = new Vector4(l.Swell.Value - 1f, 0f, 0f, 0f);
+                // y = churn + 1 (0 = keep the global), the Turbidity encoding; zw reserved
+                float churn = l.Churn != null ? l.Churn.Value : -1f;
+                p2[i] = new Vector4(l.Swell.Value - 1f, churn < 0f ? 0f : churn + 1f, 0f, 0f);
             }
         }
     }

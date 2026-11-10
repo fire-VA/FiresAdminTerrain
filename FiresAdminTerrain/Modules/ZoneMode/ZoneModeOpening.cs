@@ -255,6 +255,17 @@ namespace VerdantsAscent.Terrain.Zones
             {
                 string seedPrefab = pkg.ReadString();
                 bool choosingLand = pkg.ReadBool();
+                // A seed is planted by a player standing at the zone, at a hand's pace: refuse a request from far away or a burst.
+                if (!SeedRequestPlausible(sender, zone, out string refusal))
+                {
+                    FatNetGuard.Refuse("seed open", $"{sender}: {refusal}");
+                    var no = new ZPackage();
+                    no.Write(false);
+                    no.Write(zone);
+                    no.Write(refusal);
+                    ZRoutedRpc.instance.InvokeRoutedRPC(sender, RpcSpawnerResult, no);
+                    return;
+                }
                 bool opened = TrySeedOpen(zone, seedPrefab, choosingLand, sender, NameOf(sender), out string message);
                 var result = new ZPackage();
                 result.Write(opened);
@@ -268,6 +279,25 @@ namespace VerdantsAscent.Terrain.Zones
                 ? TryAdminOpen(zone, force, sender, $"admin {NameOf(sender)}")
                 : "[Zones] Permission denied — admin only.";
             ZRoutedRpc.instance.InvokeRoutedRPC(sender, RpcReply, reply);
+        }
+
+        private const float SeedReachMeters = 160f;          // the spawner stands at the zone edge; this is generous
+        private const float SeedRequestGapSeconds = 1.5f;
+        private static readonly Dictionary<long, float> s_lastSeedRequest = new Dictionary<long, float>();
+
+        private static bool SeedRequestPlausible(long sender, Vector2s zone, out string refusal)
+        {
+            refusal = null;
+            float now = Time.realtimeSinceStartup;
+            if (s_lastSeedRequest.TryGetValue(sender, out float last) && now - last < SeedRequestGapSeconds) { refusal = "too many seed requests"; return false; }
+            s_lastSeedRequest[sender] = now;
+            if (sender == ZNet.GetUID()) return true;   // the host's own player
+            var peer = ZNet.instance?.GetPeer(sender);
+            if (peer == null) { refusal = "unknown sender"; return false; }
+            Vector3 centre = ZoneSystem.GetZonePos(zone);
+            if (Vector2.Distance(new Vector2(peer.m_refPos.x, peer.m_refPos.z), new Vector2(centre.x, centre.z)) > SeedReachMeters)
+            { refusal = "too far from that zone"; return false; }
+            return true;
         }
 
         private static bool TrySeedOpen(Vector2s zone, string seedPrefab, bool choosingLand, long actor, string who, out string message)
@@ -361,6 +391,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void RPC_SpawnerResult(long sender, ZPackage pkg)
         {
+            if (!FatNetGuard.FromServer(sender, "seed result")) return;
             bool opened = pkg.ReadBool();
             var zone = pkg.ReadVector2s();
             string message = pkg.ReadString();
@@ -389,9 +420,10 @@ namespace VerdantsAscent.Terrain.Zones
         private static void RPC_ZoneUpdate(long sender, ZPackage pkg)
         {
             if (ZNet.instance == null || ZNet.instance.IsServer()) return;
+            if (!FatNetGuard.FromServer(sender, "zone update")) return;
             int version = pkg.ReadInt();
             byte[] bytes = pkg.ReadByteArray();
-            int count = pkg.ReadInt();
+            int count = FatNetGuard.Count(pkg.ReadInt(), ZoneOpenSet.WordCount * 64, "zone update zones");
             var opened = new List<Vector2s>(count);
             for (int i = 0; i < count; i++) opened.Add(pkg.ReadVector2s());
             List<KeyValuePair<Vector2s, Vector2s>> sources;
@@ -423,6 +455,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void RPC_Reply(long sender, string message)
         {
+            if (!FatNetGuard.FromServer(sender, "zone reply")) return;
             try { Console.instance?.AddString(message); } catch { }
             FiresLogger.LogInfo(message);
         }

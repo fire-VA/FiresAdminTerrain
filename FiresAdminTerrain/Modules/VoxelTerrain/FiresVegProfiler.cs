@@ -97,7 +97,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (ms > s_worstVegMs) s_worstVegMs = ms;
 
             if (ms < SLOW_MS) return;
-            FiresLogger.LogInfo($"[FiresVegPerf] zone took {ms:0.0}ms — {GroundCalls:N0} ground query(ies) " +
+            FiresLogger.LogDebug($"[FiresVegPerf] zone took {ms:0.0}ms — {GroundCalls:N0} ground query(ies) " +
                       $"costing {groundMs:0.0}ms ({(ms > 0.01 ? groundMs / ms * 100.0 : 0):0}% of it), " +
                       $"{VoxelProbes:N0} of them ran a voxel probe.");
         }
@@ -111,7 +111,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             if (s_generated == 0)
             {
-                FiresLogger.LogInfo($"[FiresVegPerf] {s_spawnCalls:N0} SpawnZone call(s), {s_zoneMs:0}ms total, and NOT ONE " +
+                FiresLogger.LogDebug($"[FiresVegPerf] {s_spawnCalls:N0} SpawnZone call(s), {s_zoneMs:0}ms total, and NOT ONE " +
                           "generated a zone — SpawnZone only places locations and vegetation for Ghost/Full mode on an " +
                           "ungenerated zone. A client on a dedicated server is SpawnMode.Client, and a server that loaded " +
                           "an existing world has nothing left to generate. Vegetation cost cannot be measured from this run.");
@@ -119,7 +119,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 return;
             }
 
-            FiresLogger.LogInfo($"[FiresVegPerf] {s_generated:N0} zone(s) generated in {s_zoneMs:0}ms total " +
+            FiresLogger.LogDebug($"[FiresVegPerf] {s_generated:N0} zone(s) generated in {s_zoneMs:0}ms total " +
                       $"({s_zoneMs / System.Math.Max(1, s_spawnCalls):0.0}ms per SpawnZone over {s_spawnCalls:N0} call(s)) — " +
                       $"vegetation {s_vegMs:0}ms ({s_vegMs / System.Math.Max(1, s_vegZones):0.0}ms mean, {s_worstVegMs:0.0}ms worst), " +
                       $"locations {s_locMs:0}ms ({s_locMs / System.Math.Max(1, s_locZones):0.0}ms mean). " +

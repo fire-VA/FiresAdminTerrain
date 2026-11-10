@@ -331,7 +331,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Time.time < s_nextReport || (running == 0 && s_lastRunning == 0)) return;
             s_nextReport = Time.time + ReportSeconds;
             s_lastRunning = running;
-            FiresLogger.LogInfo($"[FiresWaterfall] mist: {running} of {s_groups.Count} fall group(s) running within {FiresVoxelConfig.WaterfallMistRangeMetres:0} m, "
+            FiresLogger.LogDebug($"[FiresWaterfall] mist: {running} of {s_groups.Count} fall group(s) running within {FiresVoxelConfig.WaterfallMistRangeMetres:0} m, "
                 + $"{emitters} emitter(s), {particles} particle(s).");
         }
 

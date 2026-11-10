@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
@@ -36,14 +37,69 @@ namespace VerdantsAscent.Terrain.Voxel
             s_scratch.OriginZ = origin.z;
             s_scratch.HasWater = true;
             VoxelChunkView.BuildSheet(s_scratch, surface);
-            return VoxelChunkView.CopySheetTo(into);
+            long up0 = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1344: the mesh upload, apart from the builder
+            bool any = VoxelChunkView.CopySheetTo(into);
+            UploadTicks += System.Diagnostics.Stopwatch.GetTimestamp() - up0;
+            return any;
+        }
+        internal static long UploadTicks;   // 0.2.1344: PlacedWaterSheets' phase timer, main thread
+
+        // 0.2.1344 (r22: 400+ sheet rebuilds / 10 s, 3.4 s of work, standing): Version moves on a border mirror too, so the 1165 gate let
+        // remeshes through that moved no ground. The signature is a hash of the chunk's density as meshed. Same bytes on the same chunk
+        // object = no ground read can answer differently: no event (no cap tiles dropped, no sheet rebuilt). Any density change fires; a
+        // chunk object's first mesh always fires, also when a reloaded chunk happens to come back at the Version noted for its key.
+        internal static bool GroundSigOn => FiresVoxelConfig.WaterGroundSignature != null && FiresVoxelConfig.WaterGroundSignature.Value;
+        internal static int SkippedSameGround, FiredWindow;
+        private static bool s_sigProof;
+        internal static uint DensityHash(sbyte[] d)
+        {
+            uint h = 2166136261u;
+            for (int i = 0; i < d.Length; i++) { h ^= (byte)d[i]; h *= 16777619u; }
+            return h;
+        }
+        internal static void NoteChunkMeshed(VoxelChunk chunk, int version, bool hasSig, uint sig)
+        {
+            if (!hasSig || !GroundSigOn) { NoteChunkMeshed(chunk.Key, version); return; }
+            if (!chunk.GroundSigSet)
+            {
+                chunk.GroundSigSet = true; chunk.GroundSig = sig;
+                s_notedVersion[chunk.Key] = version;
+                Fired++;
+                NoteChunkMeshed(chunk.Key);
+                return;
+            }
+            if (chunk.GroundSig == sig)
+            {
+                SkippedSameGround++;
+                if (!s_sigProof) { s_sigProof = true; FiresLogger.LogInfo("[WaterTools] a remesh with unchanged ground no longer drops cap tiles or rebuilds placed water (0.2.1344)"); }
+                return;
+            }
+            chunk.GroundSig = sig;
+            NoteChunkMeshed(chunk.Key, version);
         }
 
         // A chunk's view took a new mesh (a carve, a fill, a regenerate): its key, on the main thread, after the apply.
         internal static event Action<Vector3Int> ChunkMeshed;
 
+        // 0.2.1165 (the lead, Fire idle at the homestead: "[WaterTools] water tick ... sheets 265-366 ms, rebuilt 39-77 chunk(s)"
+        // with the disk index kept = no water change): every remesh of a voxel chunk under placed water (trail stamps, paint G, seam
+        // groups, snow refinement) re-dirtied its sheet, and a sheet chunk costs 11-30 ms. Only a change of the chunk's VOXEL DATA
+        // (Version: carve / fill / regenerate) can move the bed the sheet reads; a paint-only remesh keeps the same Version, so it
+        // no longer fires the event.
+        private static readonly Dictionary<Vector3Int, int> s_notedVersion = new Dictionary<Vector3Int, int>();
+        internal static int Fired, SkippedSameVersion;
+        internal static void NoteChunkMeshed(Vector3Int key, int version)
+        {
+            if (s_notedVersion.TryGetValue(key, out int v) && v == version) { SkippedSameVersion++; return; }
+            s_notedVersion[key] = version;
+            if (s_notedVersion.Count > 65536) s_notedVersion.Clear();
+            Fired++;
+            NoteChunkMeshed(key);
+        }
+
         internal static void NoteChunkMeshed(Vector3Int key)
         {
+            FiredWindow++;   // 0.2.1344
             var handlers = ChunkMeshed;
             if (handlers == null) return;
             try { handlers(key); }

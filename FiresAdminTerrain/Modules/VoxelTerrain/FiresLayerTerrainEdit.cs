@@ -23,7 +23,11 @@ namespace VerdantsAscent.Terrain.Voxel
     //   [FiresLayers] terrain op on ... : done, N segment(s) stamped
     internal static class FiresLayerTerrainEdit
     {
-        private const float StampRadius = 2f, StampSpacing = 2f;
+        // 0.2.1068 (Fire: "the redraw is rough"): 1.25 m columns of 1.5 m cylinders (was 2 m / 2 m: 2 m flat terraces on a
+        // slope or falloff edge), and a whole op stamps in ONE frame up to WholeOpSegments, so its chunks remesh once together
+        // instead of in 8-segment slices over many frames.
+        private const float StampRadius = 1.5f, StampSpacing = 1.25f;
+        private const int WholeOpSegments = 384;
         private const float MinStep = 0.05f;
         private const float BedOverlap = 1f;
         private const float MaxRadius = 40f;
@@ -64,6 +68,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 + $"fill, {cut} to cut ({queued} segment(s) queued, {SegmentsPerFrame} a frame), {already} already there, {clamped} held "
                 + $"inside the layer's band, {other} another layer or no surface (left alone)";
             FiresLogger.LogDebug(line);
+            if (queued == 0)
+                FiresLogger.LogDebug($"[WecTerrainBridge] IH {op} at ({center.x:0.0},{center.y:0.0},{center.z:0.0}) r {r:0.#} changed nothing: "
+                    + (other > 0 && filled + cut + already + clamped == 0 ? $"all {other} column(s) on another layer than the aimed {layer.Describe()}"
+                       : already > 0 && filled + cut == 0 ? $"the ground is already at the target ({already} column(s))" : $"{clamped} column(s) held by the layer's band"));
+            else { s_op = op; s_opAt = center; s_opR = r; }
             if (queued > 0) StartPump(line, $"a {KindName(layer)} {op}");
             return line;
         }
@@ -90,7 +99,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // ── The queue (one op at a time; a second op's segments join the same queue) ─────────────────────────────────────────
         private const float Segment = 24f;
-        private const int SegmentsPerFrame = 8;
+        private const int SegmentsPerFrame = 96;
 
         private struct Job
         {
@@ -104,6 +113,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private static string s_undoWhat;
         private static int s_done, s_refused, s_threw;
         private static string s_firstThrow;
+        private static string s_op;
+        private static Vector3 s_opAt;
+        private static float s_opR;
 
         private static int Queue(Vector3 at, float bottom, float top, VoxelBrushMode mode)
         {
@@ -132,7 +144,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 while (s_jobs.Count > 0)
                 {
-                    StampBatch(SegmentsPerFrame);
+                    StampBatch(s_jobs.Count <= WholeOpSegments ? s_jobs.Count : SegmentsPerFrame);
                     if (s_jobs.Count > 0) yield return null;
                 }
             }
@@ -174,6 +186,8 @@ namespace VerdantsAscent.Terrain.Voxel
             FiresLogger.LogDebug($"{(cut > 0 ? head.Substring(0, cut) : head)}: done, {s_done} segment(s) stamped"
                 + (s_refused > 0 ? $", {s_refused} refused (closed zone)" : "")
                 + (s_threw > 0 ? $", {s_threw} THREW (first: {s_firstThrow})" : ""));
+            FiresLogger.LogDebug($"[WecTerrainBridge] IH {s_op ?? "op"} at ({s_opAt.x:0.0},{s_opAt.y:0.0},{s_opAt.z:0.0}) r {s_opR:0.#} -> voxel: {s_done} segment(s) stamped"
+                + (s_refused > 0 ? $", {s_refused} refused (closed zone)" : ""));
             s_done = s_refused = s_threw = 0;
             s_firstThrow = null;
         }

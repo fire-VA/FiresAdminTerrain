@@ -88,6 +88,63 @@ namespace VerdantsAscent.Water.Core
         /// Returns true if solid geometry exists between the player and the water, meaning
         /// the player is in a cave or under terrain and shouldn't be affected by the water above.
         /// </summary>
+        // 0.2.1367 (Fire 11-03: "when we are under the new winter ice swimming as soon as we get under the ice the swim trigger drops off"; log: head -10027 m under
+        // Vedr_IcePlate/static_solid at y 27): the ray read ice lying on the water as a cave roof and set the water level to -10000. Vanilla has no ceiling test at all
+        // (Character.UpdateWater only compares the level with the depth). A collider that is not ground, whose top sits at the water surface, covers the water: the
+        // water is still there. Ground at any height, and anything whose top is well above or below the surface, is still a roof.
+        private const float CoverBelowSurface = 0.75f, CoverAboveSurface = 1.25f, WaterRoofNoteSeconds = 5f;
+        private const float WaterGoneLevel = -9999f;
+
+        // 0.2.1370 (the drops at y 24-28 in the winter audit): vanilla sends -10000 from WaterVolume.OnTriggerExit (the body left the trigger) or OnDestroy (the volume unloaded), and
+        // the log could not tell which. Only built on the throttled Debug path above.
+        private static string WaterGoneCaller()
+        {
+            var trace = new System.Diagnostics.StackTrace(1, false);
+            for (int i = 0; i < trace.FrameCount; i++)
+            {
+                var method = trace.GetFrame(i).GetMethod();
+                if (method != null && method.Name.IndexOf("OnTriggerExit", System.StringComparison.Ordinal) >= 0) return "trigger exit";
+                if (method != null && method.Name.IndexOf("OnDestroy", System.StringComparison.Ordinal) >= 0) return "destroy";
+            }
+            return "unknown caller";
+        }
+
+        private static string WaterGoneBounds(Component liquidObj)
+        {
+            var collider = liquidObj != null ? liquidObj.GetComponentInChildren<Collider>() : null;
+            if (collider == null) return "no collider";
+            Bounds b = collider.bounds;
+            return $"its collider y {b.min.y:0.0}..{b.max.y:0.0}, x {b.min.x:0.0}..{b.max.x:0.0}, z {b.min.z:0.0}..{b.max.z:0.0}, enabled {collider.enabled}";
+        }
+        private static float s_waterGoneNoteAt;
+        private static int s_waterRoofTerrainLayer = -2;
+        private static bool s_coverInfoSaid;
+        private static string s_waterRoofNote;
+        private static float s_waterRoofNoteAt;
+
+        private static bool IsSurfaceCover(RaycastHit hit, float waterSurfaceY)
+        {
+            var key = global::VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.SwimUnderSurfaceIce;
+            if (key != null && !key.Value) return false;
+            if (s_waterRoofTerrainLayer == -2) s_waterRoofTerrainLayer = LayerMask.NameToLayer("terrain");
+            if (hit.collider == null || hit.collider.gameObject.layer == s_waterRoofTerrainLayer) return false;
+            float top = hit.collider.bounds.max.y;
+            return top >= waterSurfaceY - CoverBelowSurface && top <= waterSurfaceY + CoverAboveSurface;
+        }
+
+        private static void NoteWaterRoof(RaycastHit hit, float waterSurfaceY, bool cover)
+        {
+            if (cover && !s_coverInfoSaid) { s_coverInfoSaid = true; FiresLogger.LogInfo("[WaterRoof] ice at the water surface is no longer a cave roof: swimming under it holds (0.2.1367)"); }
+            if (!FiresLogger.DebugEnabled) return;
+            string name = hit.collider != null ? hit.collider.name + "/" + LayerMask.LayerToName(hit.collider.gameObject.layer) : "?";
+            string note = (cover ? "cover " : "roof ") + name;
+            if (note == s_waterRoofNote && Time.unscaledTime < s_waterRoofNoteAt) return;
+            s_waterRoofNote = note;
+            s_waterRoofNoteAt = Time.unscaledTime + WaterRoofNoteSeconds;
+            float top = hit.collider != null ? hit.collider.bounds.max.y : 0f;
+            FiresLogger.LogDebug($"[WaterRoof] {name} over the water path at ({hit.point.x:0.0},{hit.point.y:0.0},{hit.point.z:0.0}), its top {top:0.00}, water {waterSurfaceY:0.00}: {(cover ? "surface cover, the water stands" : "a roof, no water here")} (0.2.1367)");
+        }
+
         private static bool IsTerrainBlockingVertically(Vector3 playerPos, float waterSurfaceY)
         {
             // Initialize layer mask once
@@ -103,8 +160,14 @@ namespace VerdantsAscent.Water.Core
             if (rayDistance <= 0f)
                 return false; // Water is at or below head level, no blocking needed
 
-            if (Physics.Raycast(rayStart, Vector3.up, out RaycastHit hit, rayDistance, s_terrainBlockingLayerMask))
+            long rs = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
+            bool blocked = Physics.Raycast(rayStart, Vector3.up, out RaycastHit hit, rayDistance, s_terrainBlockingLayerMask);
+            global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(4, rs);
+            if (blocked)
             {
+                bool cover = IsSurfaceCover(hit, waterSurfaceY);
+                NoteWaterRoof(hit, waterSurfaceY, cover);
+                if (cover) return false;
                 // Something solid is between us and the water - we're in a cave or under terrain
                 return true;
             }
@@ -119,15 +182,46 @@ namespace VerdantsAscent.Water.Core
         /// <param name="pos">Character position</param>
         /// <param name="isLocalPlayer">True if this is the local player (enables cave detector)</param>
         /// <returns>Water level if found and valid, float.MinValue otherwise</returns>
+        // 0.2.1160 (PERF, lead's profile: the PLAYER alone 19.7 ms/s in FixedUpdate.Character): InLiquid / InWater / IsSwimming /
+        // GetLiquidLevel each ran the four water lookups below, several times per character per step at the same position. The
+        // answer is memoised per (exact position, local flag) for the current physics step / frame: the water can't change inside it.
+        private struct WaterMemo { public Vector3 Pos; public bool Local; public int Frame; public float Fixed; public float Level; }
+        private static readonly WaterMemo[] s_waterMemo = new WaterMemo[32];
+        private static int s_waterMemoNext;
+        internal static int WaterMemoHits, WaterMemoMisses;
         private static float GetValidWaterLevelForCharacter(Vector3 pos, bool isLocalPlayer)
+        {
+            long t0 = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
+            bool miss = false;
+            try
+            {
+                int frame = Time.frameCount; float fixedT = Time.fixedTime;
+                for (int i = 0; i < s_waterMemo.Length; i++)
+                {
+                    ref var m = ref s_waterMemo[i];
+                    if (m.Frame == frame && m.Fixed == fixedT && m.Local == isLocalPlayer && m.Pos == pos) { WaterMemoHits++; return m.Level; }
+                }
+                WaterMemoMisses++; miss = true;
+                float lv = GetValidWaterLevelForCharacterUncached(pos, isLocalPlayer);
+                s_waterMemo[s_waterMemoNext] = new WaterMemo { Pos = pos, Local = isLocalPlayer, Frame = frame, Fixed = fixedT, Level = lv };
+                s_waterMemoNext = (s_waterMemoNext + 1) & 31;
+                return lv;
+            }
+            finally { global::VerdantsAscent.Terrain.Voxel.FatHooks.Stop(global::VerdantsAscent.Terrain.Voxel.FatHooks.Hook.Water, t0, miss, isLocalPlayer); }
+        }
+
+        private static float GetValidWaterLevelForCharacterUncached(Vector3 pos, bool isLocalPlayer)
         {
             float bestWaterLevel = float.MinValue;
 
             // Check legacy custom water
+            long ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();   // 0.2.1196 sub-timers (lead: WaterLiquid 14 ms/s standing still - which lookup?)
             var water = CustomWaterManager.GetWaterAt(pos);
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(0, ws);
             if (water != null)
             {
                 float level = water.GetWaterSurfaceAt(pos);
+                ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(0, ws);
                 if (level > float.MinValue && !IsWaterBlockedFromCharacter(pos, level, isLocalPlayer))
                 {
                     if (level > bestWaterLevel)
@@ -138,10 +232,13 @@ namespace VerdantsAscent.Water.Core
             }
 
             // Check WaterMeshCombiner (terrain-style water)
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
             var combiner = WaterMeshCombiner.GetCombinerAt(pos);
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(1, ws);
             if (combiner != null)
             {
                 float level = combiner.GetWaterSurfaceAt(pos);
+                ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(1, ws);
                 if (level > float.MinValue && !IsWaterBlockedFromCharacter(pos, level, isLocalPlayer))
                 {
                     // For multi-layer water, prefer water that's closer to character
@@ -157,7 +254,9 @@ namespace VerdantsAscent.Water.Core
             // water volumes). These aren't combiners or legacy water, so add
             // their surface here — this is what makes swimming trigger at the
             // top of our custom liquid mesh.
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
             float pourLevel = FiresLiquidWaterPrefab.GetSurfaceAt(pos);
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(2, ws);
             if (pourLevel > float.MinValue && !IsWaterBlockedFromCharacter(pos, pourLevel, isLocalPlayer))
             {
                 if (pourLevel > bestWaterLevel)
@@ -170,7 +269,9 @@ namespace VerdantsAscent.Water.Core
             // them, so reporting there did nothing and generated water stayed
             // unswimmable. Reported here it behaves exactly like a pour: the
             // same blocked-by-geometry test, the same swim thresholds.
-            float genLevel = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
+            float genLevel = GenSurfaceCached(pos);
+            ws = global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(3, ws);
             if (genLevel > -9999f && !IsWaterBlockedFromCharacter(pos, genLevel, isLocalPlayer))
             {
                 if (genLevel > bestWaterLevel)
@@ -178,6 +279,52 @@ namespace VerdantsAscent.Water.Core
             }
 
             return bestWaterLevel;
+        }
+
+        // 0.2.1267 ([fgn] / Fire 10-30 standing fps: WaterLiquid 7.54 ms/s, its generated-water lookup 3.54 ms/s for ~2.5k uncached
+        // calls a second - every character's swim check each FixedUpdate): the generated (river / lake) surface is cached per 2 m cell
+        // for 1 s. It is static terrain-shaped water, so a 1 s-old answer is the same answer. Key "Generated water lookup cache" (A/B).
+        private struct GenEntry { public float Level, At; }
+        private static readonly System.Collections.Generic.Dictionary<long, GenEntry> s_genCache = new System.Collections.Generic.Dictionary<long, GenEntry>();
+        private static int s_genHits, s_genMiss; private static float s_genLogAt;
+        // 0.2.1316 (C10 cache, SAME behaviour): "Generated water lookup cache" was read per call; it is now read once when the entry
+        // exists and re-read on its SettingChanged (per-machine key, not in ConfigSync - a sync write would raise SettingChanged too).
+        // Until the entry is bound (null) the old "null = cache on" answer is kept and the entry is looked for again next call.
+        private static BepInEx.Configuration.ConfigEntry<bool> s_genKeyBound;
+        private static bool s_genKeyOn = true;
+        private static bool GenCacheOn()
+        {
+            if (s_genKeyBound != null) return s_genKeyOn;
+            var key = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.GenWaterCache;
+            if (key == null) return true;
+            s_genKeyBound = key;
+            s_genKeyOn = key.Value;
+            key.SettingChanged += (_, __) =>
+            {
+                s_genKeyOn = key.Value;
+                FiresLogger.LogDebug($"[FatHooks] generated water cache key changed -> {s_genKeyOn}: cached bool refreshed on SettingChanged (0.2.1316)");
+            };
+            FiresLogger.LogDebug($"[FatHooks] generated water cache key read once ({s_genKeyOn}), refreshed on SettingChanged instead of per call (0.2.1316)");
+            return s_genKeyOn;
+        }
+
+        private static float GenSurfaceCached(Vector3 pos)
+        {
+            if (!GenCacheOn()) return VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
+            float now = Time.time;
+            long k = ((long)Mathf.FloorToInt(pos.x * 0.5f) << 32) ^ (uint)Mathf.FloorToInt(pos.z * 0.5f);
+            if (s_genCache.TryGetValue(k, out var e) && now - e.At < 1f) { s_genHits++; return e.Level; }
+            float level = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
+            if (s_genCache.Count > 4096) s_genCache.Clear();
+            s_genCache[k] = new GenEntry { Level = level, At = now };
+            s_genMiss++;
+            if (now >= s_genLogAt)
+            {
+                s_genLogAt = now + 30f;
+                if (s_genHits + s_genMiss > 0) FiresLogger.LogDebug($"[FatHooks] generated water cache last 30 s: {s_genHits} hit(s), {s_genMiss} lookup(s) (0.2.1267)");
+                s_genHits = s_genMiss = 0;
+            }
+            return level;
         }
 
         /// <summary>
@@ -229,9 +376,17 @@ namespace VerdantsAscent.Water.Core
 
         [HarmonyPatch(typeof(Character), nameof(Character.SetLiquidLevel))]
         [HarmonyPrefix]
-        private static bool Character_SetLiquidLevel_CaveGate(Character __instance, float level, LiquidType type)
+        private static bool Character_SetLiquidLevel_CaveGate(Character __instance, float level, LiquidType type, Component liquidObj)
         {
             if (type != LiquidType.Water || __instance == null) return true;
+            // 0.2.1368 proof: who takes the water away from the local player (the ice swim report showed the level -10000, the sender unproven)
+            if (level <= WaterGoneLevel && FiresLogger.DebugEnabled && __instance == Player.m_localPlayer && Time.unscaledTime >= s_waterGoneNoteAt)
+            {
+                s_waterGoneNoteAt = Time.unscaledTime + WaterRoofNoteSeconds;
+                Vector3 at = __instance.transform.position;
+                FiresLogger.LogDebug($"[WaterRoof] water level {level:0} sent to the local player at ({at.x:0.0},{at.y:0.0},{at.z:0.0}) by {(liquidObj != null ? liquidObj.GetType().Name + " " + liquidObj.name : "no sender")} via {WaterGoneCaller()}; {WaterGoneBounds(liquidObj)}; noclip {(global::VerdantsAscent.Terrain.Voxel.FatNoClip.IsOn(__instance))} (0.2.1370)");
+            }
+
             if (VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.WorldKind == VerdantsAscent.Terrain.Voxel.VoxelWorldMode.Vanilla) return true;
             Vector3 pos = __instance.transform.position;
             if (level - pos.y < 1.5f) return true;
@@ -481,6 +636,9 @@ namespace VerdantsAscent.Water.Core
                 // because the old _initialized = true is still set.
                 WaterOperationRPC.ClearCaches();
                 WaterPersistence.ResetInitialized();
+
+                // 0.2.1354 (review: statics surviving logout): the streamer's driver only exists in voxel modes, so the logout event clears them too. After the saves above.
+                VerdantsAscent.Water.Tools.WaterShapingTools.ForgetSession();
 
                 FiresLogger.LogInfo("[CustomWaterPatches] Cleared water combiners and caches on logout");
             }

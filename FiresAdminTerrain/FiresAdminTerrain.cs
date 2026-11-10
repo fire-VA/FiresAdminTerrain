@@ -36,7 +36,7 @@ namespace VerdantsAscent
     // assembly ref), so this attribute is purely load-ordering (FTS Awake
     // before ours, so the bridge is live when we ask) + Thunderstore metadata.
     [BepInDependency("com.Fire.FiresTossinShade", BepInDependency.DependencyFlags.SoftDependency)]
-    [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, "0.2.138")]
+    [BepInDependency(FiresCore.FiresUnifiedCore.PluginGUID, "0.2.816")]   // 0.2.1048: FatHaloSpawns calls Core Surface.Point (0.2.816+)
     // ValheimPerformanceOptimizations replaces vanilla's zone spawn and heightmap render / collision builds outright, which
     // undoes FAT's own terrain pipeline (voxel ground, zone mode, the dedi's off-map refusal). FAT does its own optimizing;
     // It is listed as incompatible, so BepInEx refuses to load FAT beside it.
@@ -45,7 +45,7 @@ namespace VerdantsAscent
     {
         public const string PluginGUID = "com.Fire.FiresAdminTerrain";
         public const string PluginName = "FiresAdminTerrain";
-        public const string PluginVersion = "0.2.1006";
+        public const string PluginVersion = "0.2.1430";   // 0.2.1430 ([worldgen]) + (Fire 11-10 2:58 AM DN: "far terrain ends up with tears in it at some seams"): FarTerrainVanilla sizes its second TerrainLod to a whole number of cells per region (8320 m = 5 x 52 x 32 m at ReachMeters 4096), so vanilla's region meshes meet exactly; 8192 m gave 1632 m meshes 1638.4 m apart = a 6.4 m sky gap along every inner region border. // ([worldgen], Fire's hand test 11-10: a relog 26 m above a flat world's ground fell to death): FatLoginSpawn samples the ground on every call until it answers (it was cached NaN from the first call); unknown ground waits (20 s, then vanilla's own no-ground rule: bed / start, never a drop); a terrain logout point more than 4 m above the ground waits for a collider under it and at the timeout lands on the ground; the post-spawn hold (no gravity, no damage) lasts until a collider is under the player, 10 s at most. 0.2.1429 ([worldgen], Fire: "Yes fix the env box code"; [saddles]' find): the env-box terrain-texture override read m_cornerBiomes as Biome[], but Valheim 1.0 has BiomeSector[], so it never applied. Now BiomeSector[], cloned, forced corners = BiomePaint.PlainSectorFor; Debug line when it applies. Same type fix in BiomeOverlayPainter (that corner path has no caller today). Built on 0.2.1425 (live, rig hash 9D2B65B86ADC). 0.2.1425 ([generator] M22): FarBridge finds Core's far types quietly (Core assembly GetType(name, false)); Core's Far\ moves to EBM 1.2.210. 0.2.1424: FatApi FF-compat members.
         // The oldest FAT whose server-synced config keys match this one's (ConfigSync's MinimumRequiredVersion). Raise it ONLY when a
         // synced key's name, type or meaning changes, never with every build: it forces every player and server to update together.
         internal const string SyncedConfigSince = "0.2.974";   // The synced "VoxelTerrain World" keys moved to "Voxel Terrain - World"
@@ -145,8 +145,13 @@ namespace VerdantsAscent
             PrefabContainer.SetActive(false);
 
             ConfigManager.Instance.Initialize(Config);
+            FatCoreSettingsOwned.Bind(Config);   // 0.2.1335: Core's snow / loot / undo keys, owned here
             VerdantsAscent.Water.Core.FiresLiquidConfig.Bind(Config);   // FiresLiquid look sliders
             VerdantsAscent.Water.Core.FiresInlandWaterConfig.Bind(Config);   // per-layer ripple controls for the inland sheet
+            VerdantsAscent.Terrain.FarForest.FarForest.Bind(Config);   // 0.2.1412 FarLands #2, all keys default off
+            VerdantsAscent.Terrain.Voxel.FarQuilt.BindFarTerrain(Config);   // 0.2.1414 FarLands #3 [Far Terrain], default off
+            VerdantsAscent.Terrain.Voxel.FatFarShade.Bind(Config);   // 0.2.1416 FarLands #8 + #10 [Far Shadows] ([generator]), all keys default off
+            VerdantsAscent.Terrain.FarForest.FarBridge.InitCoreFar(Config);   // 0.2.1415: Core's ImpostorEngine / FarCache / FarLights / FarBuildings bind their keys (owner FAT)
             VerdantsAscent.Water.Core.InlandLakeProbe.Bind(Config);   // Lake reflection (Probe on by default)
             VerdantsAscent.Water.Core.InlandLookConfig.Bind(Config);   // Per class / per biome looks
             VerdantsAscent.Water.Core.InlandSteam.Bind(Config);        // Steam over warm still water (Plains, Ashlands)
@@ -172,9 +177,6 @@ namespace VerdantsAscent
             ConfigManager.Instance.configPresetSaveNow.SettingChanged += (_, __) => SaveNamedPreset();
             ConfigManager.Instance.configServerPreset.SettingChanged += (_, __) => ApplyServerPreset();
 
-            FiresCore.Config.FiresAdminConfigGate.Register(Config,
-                () => ConfigManager.Instance.configAdminOnlyTuning.Value, ConfigManager.IsAdvancedTuning);
-
             configSync = new ConfigSync(PluginGUID)
             {
                 DisplayName = PluginName,
@@ -189,14 +191,19 @@ namespace VerdantsAscent
             configSync.AddConfigEntry(ConfigManager.Instance.configServerPreset);
             configSync.AddConfigEntry(ConfigManager.Instance.configAdminOnlyTuning);
             configSync.AddConfigEntry(ConfigManager.Instance.configHeightCacheResolution);
+            FatCoreSettingsOwned.SyncServerKeys(configSync);   // 0.2.1335: the four [Loot] keys, server-synced as in Core
             configSync.AddConfigEntry(ConfigManager.Instance.configHeightCacheSamplesPerFrame);
             configSync.AddConfigEntry(ConfigManager.Instance.configUseNewTilePersistence);
             VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.RegisterServerAuthority(configSync);
-            VerdantsAscent.Ocean.OceanKit.Bind(Config, configSync);   // The Ocean keys, synced through this sync
+            // 0.2.1338: AFTER every AddConfigEntry. The gate's first SetReadOnly makes FiresConfigVisibility cache each entry's tags; registered earlier, that cache had no
+            // sync tag, MarkAdvanced below rebuilt the descriptions from it, and the server sent 0 FAT configs to every client.
+            FiresCore.Config.FiresAdminConfigGate.Register(Config,
+                () => ConfigManager.Instance.configAdminOnlyTuning.Value, ConfigManager.IsAdvancedTuning);
             // Player-facing config rules, applied after the last Bind (Ocean included). Basics only without
             // Show Advanced, one-line descriptions, built-in lists hidden. The admin gate above keeps IsAdvancedTuning.
             FiresCore.Config.FiresConfigVisibility.MarkAdvanced(Config, d => VerdantsAscent.Managers.FatPlayerFacingConfig.IsPlayerAdvanced(Config, d));
             VerdantsAscent.Managers.FatPlayerFacingConfig.Apply(Config);
+            FatCoreSettingsOwned.LogSyncTags(configSync);   // 0.2.1338
 
             LoadAssets();
 
@@ -570,6 +577,68 @@ namespace VerdantsAscent
                 // shared terrain material's shader (flat ground renders
                 // identical to vanilla by construction).
                 var voxelShader = assetBundle.LoadAsset<Shader>("FiresVoxelHeightmap");
+                // 0.2.1025: the fixed shader ships in its own embedded bundle 'fatvoxelshader' (built by FatVoxelShaderBundleBuilder;
+                // it has a ShadowCaster pass, so voxel chunks reach the camera depth texture and the shadow map - the pale swapped
+                // zones, RenderDoc 10-23). Preferred over adminterrain's copy, which has none. Same shader name, so it is loaded
+                // under the same asset name; the bundle stays loaded for the session.
+                try
+                {
+                    var fixedBundle = GetAssetBundleFromResources("fatvoxelshader");
+                    var fixedShader = fixedBundle != null ? fixedBundle.LoadAsset<Shader>("FiresVoxelHeightmap") : null;
+                    if (fixedShader != null)
+                    {
+                        int passes = fixedShader.passCount;
+                        bool caster = false;
+                        for (int i = 0; i < passes; i++)
+                            if (fixedShader.FindPassTagValue(i, new UnityEngine.Rendering.ShaderTagId("LightMode")).name.Equals("ShadowCaster", StringComparison.OrdinalIgnoreCase)) caster = true;
+                        FiresLogger.LogInfo($"Voxel terrain shader: '{fixedShader.name}' from the fatvoxelshader bundle ({passes} passes, ShadowCaster {(caster ? "present" : "MISSING")}, supported on this GPU {fixedShader.isSupported}; built in a LINEAR project, 0.2.1025); adminterrain's copy not used.");
+                        if (fixedShader.isSupported || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) voxelShader = fixedShader;
+                        else FiresLogger.LogWarning("fatvoxelshader: Custom/FiresVoxelHeightmap is NOT supported on this GPU; keeping adminterrain's copy.");
+                    }
+                    else FiresLogger.LogWarning("fatvoxelshader bundle missing or empty: the voxel skin uses adminterrain's FiresVoxelHeightmap (no ShadowCaster pass: no depth, no shadows).");
+                }
+                catch (Exception ex) { FiresLogger.LogWarning($"fatvoxelshader bundle failed to load ({ex.Message}); using adminterrain's FiresVoxelHeightmap."); }
+                // 0.2.1046 far ring low LOD phase 2: the halo ring's far side draws with Custom/FiresHaloFar (embedded bundle
+                // 'fathalofar', built LINEAR by FatHaloFarBundleBuilder): the view-ray squeeze runs on the GPU, lit by the sun
+                // against the ring's local up, with its own fog. Without it FatHaloSky keeps the phase 1 CPU path.
+                try
+                {
+                    var farBundle = GetAssetBundleFromResources("fathalofar");
+                    var farShader = farBundle != null ? farBundle.LoadAsset<Shader>("FiresHaloFar") : null;
+                    if (farShader != null && (farShader.isSupported || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null))
+                    {
+                        VerdantsAscent.Terrain.Voxel.FatHaloSky.FarShader = farShader;
+                        FiresLogger.LogInfo($"Halo far ring shader: '{farShader.name}' from the fathalofar bundle ({farShader.passCount} pass, supported {farShader.isSupported}).");
+                    }
+                    else FiresLogger.LogWarning($"fathalofar: Custom/FiresHaloFar {(farShader == null ? "missing" : "not supported on this GPU")}; the far ring stays on the CPU path.");
+                }
+                catch (Exception ex) { FiresLogger.LogWarning($"fathalofar bundle failed to load ({ex.Message}); the far ring stays on the CPU path."); }
+                // 0.2.1399: far billboards with their matrices on the GPU (embedded bundle 'fatimpostorgpu', built LINEAR by
+                // FatImpostorGpuBundleBuilder). Without it FarVegImpostors keeps sending matrices each frame.
+                try
+                {
+                    var gpuBundle = GetAssetBundleFromResources("fatimpostorgpu");
+                    var gpuShader = gpuBundle != null ? gpuBundle.LoadAsset<Shader>("FiresImpostorGPU") : null;
+                    if (gpuShader != null && gpuShader.isSupported)
+                    {
+                        VerdantsAscent.Terrain.Voxel.FarVegImpostors.GpuShader = gpuShader;
+                        FiresLogger.LogInfo($"Far billboard GPU shader: '{gpuShader.name}' from the fatimpostorgpu bundle ({gpuShader.passCount} pass, supported {gpuShader.isSupported}).");
+                    }
+                    else FiresLogger.LogInfo($"fatimpostorgpu: Custom/FiresImpostorGPU {(gpuShader == null ? "missing" : "not supported on this GPU")}; far billboards send their matrices each frame.");
+                }
+                catch (Exception ex) { FiresLogger.LogWarning($"fatimpostorgpu bundle failed to load ({ex.Message}); far billboards send their matrices each frame."); }
+                // FarLands #8 + #10 ([generator] 11-08, merged 0.2.1416): far mountain shadows + canopy shade on the sun's shadow mask
+                // (embedded bundle 'fatfarshade', built LINEAR by FatFarShadeBundleBuilder). Without it [Far Shadows] stands down.
+                try
+                {
+                    bool has = Assembly.GetExecutingAssembly().GetManifestResourceNames().Any(n => n.EndsWith("fatfarshade", StringComparison.OrdinalIgnoreCase));
+                    var shadeBundle = has ? GetAssetBundleFromResources("fatfarshade") : null;
+                    var shadeShader = shadeBundle != null ? shadeBundle.LoadAsset<Shader>("FarSunShade") : null;
+                    VerdantsAscent.Terrain.Voxel.FatFarShade.OfferShader(shadeShader, !has ? "this build has no fatfarshade bundle" : shadeShader == null ? "no FarSunShade in the fatfarshade bundle" : null);
+                    if (shadeShader != null) FiresLogger.LogInfo($"Far sun shade shader: '{shadeShader.name}' from the fatfarshade bundle ({shadeShader.passCount} pass, supported {shadeShader.isSupported}).");
+                }
+                catch (Exception ex) { VerdantsAscent.Terrain.Voxel.FatFarShade.OfferShader(null, $"fatfarshade failed to load ({ex.Message})"); }
+                VerdantsAscent.Terrain.Voxel.VoxelZoneLook.VoxelShader = voxelShader;
                 if (voxelShader != null)
                     FiresCore.Materials.TerrainMaterialCache.SetShaderOverride(voxelShader);
                 else

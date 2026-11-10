@@ -152,6 +152,7 @@ namespace VerdantsAscent.Terrain.Zones
                     removed++;
                     if (dryRun) continue;
                     zdo.SetOwner(ZDOMan.GetSessionID());
+                    DisarmRespawn(zdo);
                     ZDOMan.instance.DestroyZDO(zdo);
                 }
             }

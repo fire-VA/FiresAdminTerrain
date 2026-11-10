@@ -66,6 +66,7 @@ namespace VerdantsAscent.Terrain.Zones
         {
             internal readonly HashSet<int> Prefabs = new HashSet<int>();
             internal bool Dungeon;
+            internal BlueprintPieces Blueprint;   // 0.2.1388: an Expand World blueprint location; BiomePaint.LocationPieces.cs
         }
 
         private sealed class SwapTally
@@ -441,12 +442,13 @@ namespace VerdantsAscent.Terrain.Zones
         {
             var parts = PartsOf(zones, instance.m_location);
             var centre = instance.m_position;
-            float reach = Mathf.Max(instance.m_location.m_exteriorRadius, instance.m_location.m_interiorRadius) + LocationMargin;
+            float reach = LocationReach(zones, instance.m_location) + LocationMargin;
             var spillAt = SpillPoint(zones, centre);
             int before = ZDOMan.instance.NrOfObjects();
             long session = ZDOMan.GetSessionID();
             var found = new List<ZDO>();
-            ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(0, 0), found);
+            // 0.2.1388: a location's radius can cross into the next zone, and only this zone was read.
+            ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(1, 0), found);
             int removed = 0, items = 0, lifted = 0;
             foreach (var zdo in found)
             {
@@ -456,6 +458,7 @@ namespace VerdantsAscent.Terrain.Zones
                 bool inside = parts.Dungeon && at.y > InteriorFloorY;
                 if (prefab == PlayerHash || zdo.GetLong(ZDOVars.s_creator) != 0L) continue;
                 if (!inside && (!parts.Prefabs.Contains(prefab) || ZoneModeStartSpots.FlatDistanceSquared(at, centre) > reach * reach)) continue;
+                if (!inside && parts.Blueprint != null && !IsLocationPiece(zones, instance.m_location, centre, at, prefab)) continue;   // 0.2.1388: an admin's own piece beside a shrine stays
                 if (ZoneModeChunkMachines.IsProtected(zdo) || FiresSkyIslands.TrySkylandAt(at, out _)) continue;
                 if (prefab == TombstoneHash || zdo.GetBool(ZDOVars.s_tamed) || (inside && IsItem(prefab)))
                 {
@@ -466,6 +469,7 @@ namespace VerdantsAscent.Terrain.Zones
                     continue;
                 }
                 zdo.SetOwner(session);
+                DisarmRespawn(zdo);
                 items += Spill(zdo, spillAt);
                 ZDOMan.instance.DestroyZDO(zdo);
                 removed++;
@@ -473,7 +477,7 @@ namespace VerdantsAscent.Terrain.Zones
             tally.Objects += removed;
             tally.Items += items;
             tally.Lifted += lifted;
-            FiresLogger.LogInfo($"[BiomePaint] {LocationName(instance.m_location)} in zone ({zone.x},{zone.y}) taken away: {removed} of its object(s) "
+            FiresLogger.LogDebug($"[BiomePaint] {LocationName(instance.m_location)} in zone ({zone.x},{zone.y}) taken away: {removed} of its object(s) "
                 + $"go through DestroyZDO ({before} objects in the world before), {items} chest item(s) dropped at its centre, "
                 + $"{lifted} thing(s) lifted out of its dungeon.");
             if (!instance.m_location.m_clearArea) return;
@@ -488,12 +492,27 @@ namespace VerdantsAscent.Terrain.Zones
             });
         }
 
+        // 0.2.1245: the World Studio's location.remove takes away the same parts the biome swap does.
+        internal static HashSet<int> StudioPartPrefabs(ZoneSystem zones, ZoneSystem.ZoneLocation location, out bool dungeon)
+        {
+            var parts = PartsOf(zones, location);
+            dungeon = parts.Dungeon;
+            return parts.Prefabs;
+        }
+
         private static Parts PartsOf(ZoneSystem zones, ZoneSystem.ZoneLocation location)
         {
-            string name = LocationName(location);
+            string name = VerdantsAscent.Terrain.BcImport.BcRegenCommand.LocName(location);
             if (s_parts.TryGetValue(name, out var parts)) return parts;
             parts = new Parts();
             if (zones.m_locationProxyPrefab != null) parts.Prefabs.Add(Utils.GetPrefabName(zones.m_locationProxyPrefab).GetStableHashCode());
+            parts.Blueprint = ReadBlueprint(name);
+            if (parts.Blueprint != null)
+            {
+                foreach (int prefab in parts.Blueprint.DistanceByPrefab.Keys) parts.Prefabs.Add(prefab);
+                s_parts[name] = parts;
+                return parts;
+            }
             location.m_prefab.Load();
             try
             {

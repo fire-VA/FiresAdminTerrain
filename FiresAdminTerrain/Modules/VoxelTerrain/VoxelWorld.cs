@@ -128,6 +128,17 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryGetView(Vector3Int key, out VoxelChunkView view)
             => s_views.TryGetValue(key, out view);
 
+        // 0.2.1089 ([VoxelSnow]): re-push every live chunk that never got its snow binding. Returns how many; total = live views.
+        private static readonly List<VoxelChunkView> s_rebindTmp = new List<VoxelChunkView>();
+        internal static int RebindSnow(out int total)
+        {
+            s_rebindTmp.Clear();
+            foreach (var v in s_views.Values) if (v != null && !v.SnowBound) s_rebindTmp.Add(v);
+            total = s_views.Count;
+            foreach (var v in s_rebindTmp) v.RefreshBlock();
+            return s_rebindTmp.Count;
+        }
+
         // Live ky extent of a column's chunk stack — the cross-zone Y-range
         // union reads this so a face's quad OWNER always exists (audit §4-1:
         // per-column ranges made owners routinely absent at zone borders).
@@ -341,15 +352,28 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // 0.2.1334: does a mop at this centre reach a water surface at height y? The same layers MopWater masks.
+        internal static bool MopReachesY(Vector3 center, float radius, float y)
+        {
+            MopLayers(center, radius, out int kyLo, out int kyHi);
+            return y >= kyLo * VoxelChunk.CELLS && y < (kyHi + 1) * VoxelChunk.CELLS;
+        }
+
+        // 0.2.1334: the chunks of one column (null when none); read only.
+        internal static List<VoxelChunk> ColumnChunks(Vector2Int column)
+            => s_columns.TryGetValue(column, out var stack) ? stack : null;
+
         // Some loaded chunk holds a mop mask (set by a mop or an imported anchor): until then drawn water skips the lookup.
         internal static volatile bool AnyMops;
 
         // Vmop: mask (or, restore = true, unmask) every column in the disc, in the layers around the mop. The mask
         // persists on the chunk anchors (the mop tail of the edit blob), so a regen, reload, rejoin or peer keeps it.
         // Returns columns changed; wetGen = of those, how many held generated water.
-        public static int MopWater(Vector3 center, float radius, bool restore, out int wetGen)
+        // 0.2.1324 (unmop on lay): captureUndo = false skips this call's own capture, for a caller that already kept the chunks
+        // in the stroke it belongs to (UnmopUnderNewWater: the water stroke's undo step, not a Vmop step).
+        public static int MopWater(Vector3 center, float radius, bool restore, out int wetGen, bool captureUndo = true)
         {
-            FatUndo.BeforeVoxelEdit(restore ? "a Vmop restore stroke" : "a Vmop stroke", center, radius, radius);   // one undo step per stroke
+            if (captureUndo) FatUndo.BeforeVoxelEdit(restore ? "a Vmop restore stroke" : "a Vmop stroke", center, radius, radius);   // one undo step per stroke
             wetGen = 0;
             int total = 0;
             int x0 = Mathf.FloorToInt((center.x - radius) / VoxelChunk.CELLS), x1 = Mathf.FloorToInt((center.x + radius) / VoxelChunk.CELLS);
@@ -369,6 +393,42 @@ namespace VerdantsAscent.Terrain.Voxel
                         VoxelMeshPipeline.EnqueueRemesh(chunk);
                     }
             return total;
+        }
+
+        // 0.2.1324 (unmop on lay; log-proven: Fire's Vriver stroke laid 10 disks but every probe said "DRY: mopped" because 21
+        // earlier Vmop strokes had masked those columns): placing water overrides an earlier mop. Every player water-disk lay
+        // (CustomWaterManager.Place, WaterPlacementTool) clears the mask in the new disk's disc through the same chunk mask,
+        // MarkSaveDirty (the anchor's mop tail: save, reload, peers) and remesh as a Vmop restore. Undo: the chunks are kept in
+        // the OPEN stroke first (BeforeVoxelEdit only adds to the current stroke, first touch wins) and MopWater skips its own
+        // capture, so the water stroke's one undo step lays the blobs back WITH their old mop tail (mask as it was, disks
+        // removed); redo lays the after-blobs (unmopped) and redraws the disks.
+        private static float s_unmopLogAt = -100f;
+        private static bool s_unmopInfoDone;
+
+        internal static int UnmopUnderNewWater(Vector3 center, float radius)
+        {
+            if (!AnyMops || radius <= 0f) return 0;
+            FatUndo.BeforeVoxelEdit("a water lay's unmop", center, radius, radius);   // joins the open water stroke (no step of its own)
+            int cols = MopWater(center, radius, true, out _, captureUndo: false);
+            if (cols <= 0) return 0;
+            int drawn = VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(center, radius);
+            VerdantsAscent.Water.Core.PlacedWaterSheets.MarkDirtyIn(center, radius);
+            VerdantsAscent.Water.Core.PlacedWaterSolids.MarkAllDirty("unmop on lay");
+            if (Time.unscaledTime - s_unmopLogAt > 1f)
+            {
+                s_unmopLogAt = Time.unscaledTime;
+                FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "[FiresWater] unmopped {0} column(s) under new water (disk at {1:0.0},{2:0.0} r {3:0.0}); {4} drawn water bod(ies) rebuilt",
+                    cols, center.x, center.z, radius, drawn));
+            }
+            if (!s_unmopInfoDone)
+            {
+                s_unmopInfoDone = true;
+                FiresLogger.LogInfo(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "[FiresWater] 0.2.1324 unmop on lay: new water cleared {0} mopped column(s) (disk at {1:0.0},{2:0.0} r {3:0.0})",
+                    cols, center.x, center.z, radius));
+            }
+            return cols;
         }
 
         // Is the column at (x, z) mopped in the layer holding height y (or the one under it)?
@@ -528,7 +588,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var chunk = EnsureFullChunk(key);
             if (chunk == null || loaded) return chunk;
             var packed = ReadAnchorEdits(key);
-            if (packed != null) chunk.ImportBrushEdits(Utils.Decompress(packed));
+            if (packed != null) chunk.ImportBrushEdits(FatInflate.Gzip(packed, "voxel edits ZDO"));   // 0.2.1333: null = refused, the import rejects it
             return chunk;
         }
 
@@ -541,7 +601,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (s_chunks.TryGetValue(key, out var chunk) && chunk != null && chunk.Kind == ChunkKind.Full) return chunk.ExportBrushEdits();
             var packed = ReadAnchorEdits(key);
-            return packed != null ? Utils.Decompress(packed) : NoEditsBlob();
+            return (packed != null ? FatInflate.Gzip(packed, "voxel edits ZDO") : null) ?? NoEditsBlob();   // 0.2.1333
         }
 
         /// <summary>Lay a kept blob back on its chunk and save it to the anchor (peers restore from it); dry mops re-show their water.</summary>
@@ -604,7 +664,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         else
                         {
                             var packed = ReadAnchorEdits(key);
-                            raw = packed != null ? Utils.Decompress(packed) : null;
+                            raw = packed != null ? FatInflate.Gzip(packed, "voxel edits ZDO") : null;   // 0.2.1333
                         }
                         if (!VoxelChunk.TryReadEditBounds(raw, out var los, out var his)) continue;
                         for (int lz = 0; lz < cells; lz++)
@@ -751,6 +811,32 @@ namespace VerdantsAscent.Terrain.Voxel
         // > 0 while a V-tool edit runs (VoxelBrushDrag); main thread.
         internal static int VToolScope;
 
+        private const float SeaLine = 30f;
+        private static float s_nextUnderSeaNote;
+
+        // 0.2.1052 (Fire 10-26: the river carve "left the vanilla terrain and then dug our terrain underneath"): with the
+        // voxel module switched off on this peer (0.2.1336: the only case left; every world swaps edited zones, FiresVoxelConfig.Mode) a V-tool edit is
+        // stored but no zone converts, so vanilla's ground stays on top and the carve is invisible. Never silent: a Warning in
+        // the log and a centre message, once per 10 s. The edit itself still lands (whether to refuse it is Fire's call).
+        private static float s_nextUnseenWarn;
+
+        private static void WarnIfUnseen()
+        {
+            if (FiresVoxelConfig.StreamerRuns && (FiresVoxelConfig.WrapsBrushedZones || FiresVoxelConfig.WrapsAllTerrain)) return;
+            if (Time.unscaledTime < s_nextUnseenWarn) return;
+            s_nextUnseenWarn = Time.unscaledTime + 10f;
+            string line = $"[FiresVoxel] V-tool edit stored but NOT shown: the voxel module is switched off on this peer (Voxel enabled / Fires Custom Generation)";
+            FiresLogger.LogWarning(line);   // 0.2.1053: a log line only (the water tools cut vanilla ground themselves now)
+        }
+
+        // 0.2.1053: the water tools' fallback when neither the voxel nor the vanilla cut can land (no heightmap, not voxel).
+        internal static void WarnIfUnseenLog(string why)
+        {
+            if (Time.unscaledTime < s_nextUnseenWarn) return;
+            s_nextUnseenWarn = Time.unscaledTime + 10f;
+            FiresLogger.LogWarning($"[FiresVoxel] V-tool edit NOT shown: {why} (mode {FiresVoxelConfig.Mode})");
+        }
+
         public static string ApplyBrush(Vector3 center, float radius, float height, VoxelBrushShape shape, VoxelBrushMode mode)
         {
             // Players can draw their own little floating terrain that merges with the
@@ -760,8 +846,10 @@ namespace VerdantsAscent.Terrain.Voxel
             // whatever ground a chunk generates, so nothing is doubled or lost). Hoe / IH / WEC terrain ops stay refused there.
             if (VToolScope <= 0 && Zones.ZoneModeRefusals.TerrainEditTouchesClosed(center, radius))
                 return "Refused: the brush reaches into a closed zone of this one-zone-at-a-time world.";
+            if (VToolScope > 0) WarnIfUnseen();
             // One undo step per stroke (FatUndo keeps the touched chunks' edit blobs before the first dab).
             FatUndo.BeforeVoxelEdit($"a V-tool {mode} stroke", center, radius, height);
+            long carveT0 = VoxelMeshPipeline.CarveTiming.On ? Stopwatch.GetTimestamp() : 0L;
 
             // Persist-until-edited: a far-impostor tile is a cached function of
             // the analytic ground — an edit here changes that ground, so drop
@@ -844,12 +932,14 @@ namespace VerdantsAscent.Terrain.Voxel
                                     ZNetScene.instance.Destroy(anchor.gameObject);
                                 }
                                 s_saveDirty.Remove(chunk);
-                                if (chunk.MeshAll) VoxelMeshPipeline.EnqueueRemesh(chunk);
+                                if (chunk.MeshAll) { VoxelMeshPipeline.MarkEditUrgent(chunk.Key); VoxelMeshPipeline.EnqueueRemesh(chunk); }
                                 else DropChunk(key);
                                 VoxelZoneStreamer.RefreshBrushedZone(key);
                                 continue;
                             }
                             MarkSaveDirty(chunk);
+                            VoxelMeshPipeline.MarkEditUrgent(chunk.Key);   // a player edit is never deferred
+                            if (carveT0 != 0L) VoxelMeshPipeline.CarveTiming.Dab(chunk.Key);
                             VoxelMeshPipeline.EnqueueRemesh(chunk);
                             if (mode != VoxelBrushMode.Restore) VoxelZoneStreamer.MarkZoneBrushed(key);
                         }
@@ -872,6 +962,17 @@ namespace VerdantsAscent.Terrain.Voxel
                     FiresLogger.LogWarning($"[FiresVoxel] clutter refresh threw: {ex.Message}");
                 }
             }
+
+            // Fire 10-23: "after a certain point the mesh just breaks and drops you under the world into the ocean". The log showed no
+            // chunk failure: the shaft had reached y 29, under the sea line (30), where the game's ocean (water volume, underwater
+            // camera) starts whatever the voxel ground around it is. One Debug line names it when a carve reaches under it.
+            if (touched > 0 && mode == VoxelBrushMode.Carve && center.y - halfH < SeaLine && Time.time >= s_nextUnderSeaNote && FiresLogger.DebugEnabled)
+            {
+                s_nextUnderSeaNote = Time.time + 10f;
+                FiresLogger.LogDebug($"[FiresVoxel] carve reached y {center.y - halfH:0.0} at ({center.x:0},{center.z:0}), under the sea line ({SeaLine:0}): "
+                    + "the game's ocean (swimming, underwater view) starts there, even inside dry voxel ground.");
+            }
+            if (carveT0 != 0L) VoxelMeshPipeline.CarveTiming.BrushDone((Stopwatch.GetTimestamp() - carveT0) * 1000.0 / Stopwatch.Frequency, seeded);
 
             string shapeTxt = shape == VoxelBrushShape.Cylinder ? $"cyl r={radius:F1} h={height:F1}"
                 : shape == VoxelBrushShape.Cube ? $"cube half={radius:F1}" : $"sphere r={radius:F1}";
@@ -913,6 +1014,14 @@ namespace VerdantsAscent.Terrain.Voxel
         public static bool TryFindSurfaceY(float wx, float wz, float yHint, float range, out float ySurf)
         {
             ySurf = yHint;
+            // A13 ([fgn], halo ring): inside the ring's field the floor is along the ring's up (sideways on HaloFlat's vertical
+            // wall), so a world-Y column scan finds band edges, not the floor. No Y answers it there: "no surface" (callers keep
+            // their own fallback) and one Debug line. Ring-aware callers use TryFindSurfacePoint.
+            if (FatHaloArc.Active && FatHaloArc.TryGetUp(new Vector3(wx, yHint, wz), out _))
+            {
+                if (!s_ringSurfaceNoted) { s_ringSurfaceNoted = true; FiresLogger.LogDebug($"[FatHalo] TryFindSurfaceY asked inside the ring's field at ({wx:0}, {yHint:0}, {wz:0}): no world-Y answer on the ring (callers fall back); ring callers use TryFindSurfacePoint"); }
+                return false;
+            }
             var colKey = new Vector2Int(FloorDiv(Mathf.FloorToInt(wx), 32), FloorDiv(Mathf.FloorToInt(wz), 32));
             if (!s_columns.TryGetValue(colKey, out var stack) || stack == null || stack.Count == 0) return false;
 
@@ -939,6 +1048,30 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
 
+        private static bool s_ringSurfaceNoted;
+
+        /// <summary>A13 ([fgn]): the surface nearest <paramref name="at"/> along the local up (the ring's up in its field, world up
+        /// elsewhere), from the smooth density field, within ±range. point = the floor (solid below, air above along up).</summary>
+        public static bool TryFindSurfacePoint(Vector3 at, float range, out Vector3 point, out Vector3 up)
+        {
+            point = at;
+            if (!FatHaloArc.TryGetUp(at, out up)) up = Vector3.up;
+            float best = float.MaxValue; bool found = false;
+            float prev = 0f; bool hasPrev = false;
+            for (float s = -range; s <= range; s += 0.5f)
+            {
+                if (!TrySampleDensitySmooth(at + up * s, out float d)) { hasPrev = false; continue; }
+                if (hasPrev && prev > 0f && d <= 0f)
+                {
+                    float t = prev / (prev - d);
+                    float cs = s - 0.5f + 0.5f * t;
+                    if (Mathf.Abs(cs) < best) { best = Mathf.Abs(cs); point = at + up * cs; found = true; }
+                }
+                prev = d; hasPrev = true;
+            }
+            return found;
+        }
+
         // (fat_surface_probe): every density-0 crossing in the column between yLo and yHi, sampled as
         // TryFindSurfaceY samples it, as "54.90 up" (solid below, air above: a floor) or "61.20 down" (a ceiling / underside).
         public static string DescribeColumn(float wx, float wz, float yLo, float yHi)
@@ -961,6 +1094,31 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // (Vskin): is the voxel at a world point solid (density > 0)? false when the column is not loaded.
+        /// <summary>
+        /// The density at a world point interpolated from the 8 grid samples around it (> 0 = solid): the same field the
+        /// mesh surface is drawn from. TryIsSolid reads ONE grid point, which can be solid while the surface lies under it.
+        /// False when any of the 8 samples is not loaded.
+        /// </summary>
+        public static bool TrySampleDensitySmooth(Vector3 w, out float density)
+        {
+            density = 0f;
+            int x0 = Mathf.FloorToInt(w.x), y0 = Mathf.FloorToInt(w.y), z0 = Mathf.FloorToInt(w.z);
+            float fx = w.x - x0, fy = w.y - y0, fz = w.z - z0;
+            float sum = 0f;
+            for (int i = 0; i < 8; i++)
+            {
+                int x = x0 + (i & 1), y = y0 + ((i >> 1) & 1), z = z0 + ((i >> 2) & 1);
+                var colKey = new Vector2Int(FloorDiv(x, 32), FloorDiv(z, 32));
+                if (!s_columns.TryGetValue(colKey, out var stack) || stack == null || stack.Count == 0) return false;
+                sbyte d = SampleColumnDensity(stack, x + 0.5f, y, z + 0.5f, out bool ok);
+                if (!ok) return false;
+                float wgt = ((i & 1) != 0 ? fx : 1f - fx) * (((i >> 1) & 1) != 0 ? fy : 1f - fy) * (((i >> 2) & 1) != 0 ? fz : 1f - fz);
+                sum += d * wgt;
+            }
+            density = sum;
+            return true;
+        }
+
         public static bool TryIsSolid(float wx, float wy, float wz, out bool solid)
         {
             solid = false;
@@ -1081,17 +1239,38 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // 0.2.1322 (PLAN_fat_driver_stalls step 1, proof only): view create and paint finish phase timers.
+        private static readonly StallPhaseTimer s_viewCreateTimer = new StallPhaseTimer("[FiresVoxelPipe] view create", 20.0,
+            "new GameObject", "SetParent", "AddComponent view", "layer", "AddComponent filter", "AddComponent renderer", "material+shadow", "AddComponent collider", "mesh+bounds", "register", "paint bind");
+        private static readonly StallPhaseTimer s_paintFinishTimer = new StallPhaseTimer("[FiresVoxelPipe] paint finish", 8.0,
+            "palette", "SetPixels", "Apply upload", "G signature", "remesh G neighbours", "view re-bind", "remesh queue");
+        private static readonly StallPhaseTimer s_paintBeginTimer = new StallPhaseTimer("[FiresVoxelPipe] paint begin", 8.0,
+            "texture create", "pixel buffer", "dry check");
+
         public static VoxelChunkView GetOrCreateView(VoxelChunk chunk)
         {
             if (s_views.TryGetValue(chunk.Key, out var view) && view != null) return view;
+            // 0.2.1322 (PLAN_fat_driver_stalls F2 proof, no behaviour change: view create measured 50-100 ms on 0-vert chunks): a phase
+            // timer per view creation + the gen-0 GC count across it, so a GC or a nested hook inside shows (Debug 10 s, > 20 ms flagged).
+            var vt = s_viewCreateTimer.T; int gc0 = StallPhaseTimer.Gc();
+            vt[0] = StallPhaseTimer.Now();
             var go = new GameObject($"VoxelChunk_{chunk.Key.x}_{chunk.Key.y}_{chunk.Key.z}");
+            vt[1] = StallPhaseTimer.Now();
             go.transform.SetParent(VoxelMeshPipeline.Root, worldPositionStays: true);
+            vt[2] = StallPhaseTimer.Now();
             view = go.AddComponent<VoxelChunkView>();
+            vt[3] = StallPhaseTimer.Now();
             view.Key = chunk.Key;
             view.Init();
+            var it = VoxelChunkView.InitT;
+            for (int i = 1; i <= 6; i++) vt[3 + i] = it[i];   // layer .. mesh + bounds (Init's own stamps; it[0] ~= vt[3])
+            VoxelZoneStreamer.HideEditChunkUntilSwap(chunk);   // 0.2.1334: an edit chunk in a zone about to wrap waits for the swap
             view.RenderSuppressed = chunk.SuppressRenderUntilSwap;
             s_views[chunk.Key] = view;
+            vt[10] = StallPhaseTimer.Now();
             BindOrQueuePaintMask(chunk.Key, view);
+            vt[11] = StallPhaseTimer.Now();
+            s_viewCreateTimer.Note(StallPhaseTimer.Gc() - gc0, $"chunk ({chunk.Key.x},{chunk.Key.y},{chunk.Key.z})");
             return view;
         }
 
@@ -1099,6 +1278,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void Clear()
         {
             s_chunks.Clear();
+            VoxelZoneLook.Clear();
             VoxelChunkAnchor.ClearApplied();
             s_views.Clear();
             while (s_viewDestroyQueue.Count > 0) { var go = s_viewDestroyQueue.Dequeue(); if (go != null) Object.Destroy(go); }
@@ -1128,6 +1308,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static bool PaintCapable =>
             SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null;
+
+        internal static bool PaintColumnPending(Vector2Int colKey) => s_paintDirty.Contains(colKey) || (s_sliceActive && s_sliceKey == colKey);   // 0.2.1346
 
         public static void MarkPaintDirty(Vector2Int colKey)
         {
@@ -1184,6 +1366,13 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void DrainPaintDirtyTimed(float budgetMs)
         {
             if (!PaintCapable) { s_sliceActive = false; return; }
+            if (s_gPending.Count > 0 && Time.unscaledTime >= s_gPendingNext)   // 0.2.1101: G re-mesh cooldowns that ran out
+            {
+                s_gPendingNext = Time.unscaledTime + 0.25f;
+                s_gPendingScratch.Clear();
+                foreach (var kv in s_gPending) if (Time.unscaledTime >= kv.Value) s_gPendingScratch.Add(kv.Key);
+                foreach (var k in s_gPendingScratch) { s_gPending.Remove(k); s_paintDirty.Add(k); }
+            }
             if (!s_sliceActive && s_paintDirty.Count == 0) return;
             s_sliceSw.Restart();
             PaintSliceFrames++;
@@ -1199,13 +1388,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 if (!s_columns.TryGetValue(s_sliceKey, out var st) || st.Count == 0) { s_sliceActive = false; continue; }   // dropped mid-slice
                 ComposePaintRow(s_sliceKey, s_sliceRow);
-                if (++s_sliceRow > 32) { FinishPaintMask(s_sliceKey); s_sliceActive = false; PaintSliceColumns++; }
+                if (++s_sliceRow > 32) { FinishPaintMask(s_sliceKey); s_sliceActive = false; PaintSliceColumns++; VoxelZoneStreamer.NotePaintColumnLanded(s_sliceKey); }   // 0.2.1353: proof, Debug only
             }
         }
 
         private static bool BeginPaintMask(Vector2Int colKey)
         {
             if (!s_columns.TryGetValue(colKey, out var stack) || stack.Count == 0) return false;
+            var bt = s_paintBeginTimer.T; int gc0 = StallPhaseTimer.Gc();   // 0.2.1322 proof only: texture create / pixel buffer / dry check
+            bt[0] = StallPhaseTimer.Now();
             if (!s_paintMasks.TryGetValue(colKey, out var tex) || tex == null)
             {
                 tex = new Texture2D(VoxelLayerPaint.MaskWidth, 33, TextureFormat.RGBA32, mipChain: false)
@@ -1217,10 +1408,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 };
                 s_paintMasks[colKey] = tex;
             }
+            bt[1] = StallPhaseTimer.Now();
             if (s_paintPixels == null) s_paintPixels = new Color[VoxelLayerPaint.MaskWidth * 33];
             s_sliceKey = colKey; s_sliceTex = tex; s_sliceRow = 0; s_sliceActive = true;
             s_sliceZone = new Vector2s(short.MinValue, short.MinValue); s_sliceHm = null;
+            bt[2] = StallPhaseTimer.Now();
             s_sliceDry = Patch_Heightmap_WetMask.IsDryForPaint(colKey.x * 32f, colKey.y * 32f, 32f);
+            bt[3] = StallPhaseTimer.Now();
+            s_paintBeginTimer.Note(StallPhaseTimer.Gc() - gc0, $"column ({colKey.x},{colKey.y})");
             return true;
         }
 
@@ -1240,12 +1435,21 @@ namespace VerdantsAscent.Terrain.Voxel
             var curZone = s_sliceZone;
             Heightmap curHm = s_sliceHm;
             if (curHm == null) curZone = new Vector2s(short.MinValue, short.MinValue);   // none yet, or destroyed since the last slice
+            for (int i = 0; i <= 32; i++)
+                s_paintPixels[j * VoxelLayerPaint.MaskWidth + i] = ComposeTexel(baseX + i, baseZ + j, ref curZone, ref curHm, s_sliceDry);
+            s_sliceZone = curZone; s_sliceHm = curHm;
+        }
+
+        // One ground texel of a column's paint mask (world texel at x, z). 0.2.1157: shared by the column compose and the trail
+        // texel poke (PokeTrailTexels), so a poked texel is exactly what a full compose would write; the walker's predicted trail
+        // G (FatTrailFast overlay) is max-merged in before the wet band, as if the owner's G had already arrived.
+        private static Color ComposeTexel(float wx, float wz, ref Vector2s curZone, ref Heightmap curHm, bool dry)
+        {
             {
-                for (int i = 0; i <= 32; i++)
                 {
                     // +ε probe = the GatherColumns border idiom: a sample on a
                     // zone boundary reads the zone that owns it.
-                    var world = new Vector3(baseX + i, 0f, baseZ + j);
+                    var world = new Vector3(wx, 0f, wz);
                     var probe = new Vector3(world.x + 0.013f, 0f, world.z + 0.013f);
                     var zone = ZoneSystem.GetZone(probe);
                     if (zone.x != curZone.x || zone.y != curZone.y)
@@ -1258,8 +1462,14 @@ namespace VerdantsAscent.Terrain.Voxel
                     {
                         curHm.WorldToVertexMask(world, out int mx, out int my);
                         c = curHm.GetPaintMask(mx, my);
+                        c.g = CutG(curHm, mx, my);   // 0.2.1312: proportional cut over the build-data base G (was 1310 edited G as-is)
                     }
                     else c = Heightmap.m_paintMaskNothing;
+                    if (FatTrailFast.HasOverlay)
+                    {
+                        float og = FatTrailFast.OverlayG(Mathf.RoundToInt(wx), Mathf.RoundToInt(wz));
+                        if (og > c.g) c.g = og;
+                    }
                     // Ashlands must not be all lava with no land: alpha is lava on Ashlands ground. The
                     // heightmap's mask holds the WORLD's biome's alpha (1 everywhere but Ashlands), so ground turned to Ashlands
                     // takes the Ashlands lava rule there (VoxelLayerPaint.AshlandsLava), ground turned away from it takes
@@ -1286,17 +1496,129 @@ namespace VerdantsAscent.Terrain.Voxel
                     // vertex, NOT the dead per-column constant → no rectangles),
                     // same recipe as the quilt/stamp: r=max(r,wet); alpha→wet
                     // except Ashlands (alpha=lava); player paint (g/b) wins.
-                    float wet = s_sliceDry ? 0f : VoxelZoneStreamer.PaintWet01(world.x, world.z);   // dry column (no ZW_PAINT within a zone) = no band
+                    float wet = dry ? 0f : VoxelZoneStreamer.PaintWet01(world.x, world.z);   // dry column (no ZW_PAINT within a zone) = no band
                     if (wet > 0.03f && c.g <= 0.25f && c.b <= 0.25f)
                     {
                         c.r = Mathf.Max(c.r, wet);
                         if (!effAsh)   // the ground's own biome, turned or not
                             c.a = Mathf.Lerp(c.a, wet, wet);
                     }
-                    s_paintPixels[j * VoxelLayerPaint.MaskWidth + i] = c;
+                    return c;
                 }
             }
-            s_sliceZone = curZone; s_sliceHm = curHm;
+        }
+
+        // 0.2.1094 (Fire: "Yes, smooth trench"; shot 538: the Deep North walk trail in blocky 0.5-1 m squares): vanilla's deep-snow
+        // walk trail is Character.m_deepSnowWalkObj = snow_walk.prefab, a TerrainOp with m_paintType 1 (Cultivate), m_paintRadius 1,
+        // stamped every 0.25 m (Player m_deepSnowWalkObjDist). It lands in the paint mask's G channel at vanilla's 1 m texels, so a
+        // 1 m disc rasterises as squares. In a snowy column (Mountain / Deep North at its centre, painted biomes included) G is
+        // blurred twice with a 3x3 tent over the 33 x 33 ground texels; other channels stay exact. The voxel shader sinks the snow
+        // raise along G (_FiresSnowTrench), so the blurred trail is a soft trench. Compose time only.
+        // 0.2.1097 [SnowTrail] why-line: the composed (smoothed) trail G the shader reads at a world point, from the column's mask.
+        // 0.2.1101: the composed paint mask's G at world (x, z), bilinear over the 1 m texels (texel (i, j) = world (col*32 + i, col*32 + j)),
+        // the value the voxel shader reads at the same point. Main thread; the column's pixels are copied once per frame.
+        // 0.2.1310 (Fire's log on 1309 + Core 1061: "paint G 0.591 … walkable 1.00", "depth raw 0.69 m, after path 0.00 m" where
+        // nobody walked): Core 1061 writes its snow amount into the heightmap BASE G, and GetPaintMask = base + edits, so FAT read the
+        // whole snow as a trodden trench (real Deep North voxel ground too: world-gen base G 0.3-0.6). The voxel trail G is now the
+        // TerrainComp's player-edited paint only (m_modifiedPaint set = an op painted it; otherwise 0 = no trench), as 1158 behaved.
+        private static readonly HarmonyLib.AccessTools.FieldRef<TerrainComp, Color[]> TcPaint = HarmonyLib.AccessTools.FieldRefAccess<TerrainComp, Color[]>("m_paintMask");
+        private static readonly HarmonyLib.AccessTools.FieldRef<TerrainComp, bool[]> TcModPaint = HarmonyLib.AccessTools.FieldRefAccess<TerrainComp, bool[]>("m_modifiedPaint");
+        private static readonly HarmonyLib.AccessTools.FieldRef<TerrainComp, int> TcWidth = HarmonyLib.AccessTools.FieldRefAccess<TerrainComp, int>("m_width");
+        private static readonly Dictionary<Heightmap, TerrainComp> s_hmComp = new Dictionary<Heightmap, TerrainComp>();
+        private static int s_hmCompFrame = -1;
+        internal static float EditedG(Heightmap hm, int mx, int my)
+        {
+            if (hm == null) return 0f;
+            if (s_hmCompFrame != Time.frameCount && s_hmComp.Count > 256) { s_hmComp.Clear(); }
+            s_hmCompFrame = Time.frameCount;
+            if (!s_hmComp.TryGetValue(hm, out var tc) || tc == null)
+            {
+                tc = TerrainComp.FindTerrainCompiler(hm.transform.position);
+                if (tc == null) return 0f;   // no comp = nothing edited here (not cached: a comp may appear later)
+                s_hmComp[hm] = tc;
+            }
+            var paint = TcPaint(tc); var mod = TcModPaint(tc);
+            if (paint == null || mod == null) return 0f;
+            int idx = my * (TcWidth(tc) + 1) + mx;
+            if ((uint)idx >= (uint)paint.Length || (uint)idx >= (uint)mod.Length || !mod[idx]) return 0f;
+            float g = paint[idx].g;
+            if (!s_editedGSaid)
+            {
+                s_editedGSaid = true;
+                float bg = hm.GetPaintMask(mx, my).g;
+                FiresLogger.LogDebug($"[SnowTrail] voxel trail G from TerrainComp paint only (base snow G ignored): first edited texel G {g:0.00} (heightmap base+edits {bg:0.00}) (0.2.1310)");
+            }
+            return g;
+        }
+        private static bool s_editedGSaid;
+
+        // 0.2.1312 (Fire 10-31: trails flip filled <-> trodden; the 1310 cut was all-or-nothing on edited G): the cut is
+        // proportional, cut = saturate((editedG - baseG) / (1 - baseG)), baseG = the heightmap's BUILD-DATA base mask G (world
+        // snow, never base+edits). Core 1066 SnowRefill lowers edited G toward base, so the cut closes as it refills. The shader
+        // still cuts with smoothstep(0.46,0.54,G): the trench shows while cut > 0.5 and closes at 0.5 (a gradual close = shader pass).
+        private static readonly System.Reflection.FieldInfo HmBuildData = HarmonyLib.AccessTools.Field(typeof(Heightmap), "m_buildData");
+        private static System.Reflection.FieldInfo s_baseMaskField;
+        internal static float BaseG(Heightmap hm, int mx, int my)
+        {
+            if (hm == null || HmBuildData == null) return 0f;
+            var bd = HmBuildData.GetValue(hm);
+            if (bd == null) return 0f;
+            if (s_baseMaskField == null) s_baseMaskField = HarmonyLib.AccessTools.Field(bd.GetType(), "m_baseMask");
+            if (!(s_baseMaskField?.GetValue(bd) is Color[] bm)) return 0f;
+            int idx = my * (hm.m_width + 1) + mx;
+            return (uint)idx < (uint)bm.Length ? bm[idx].g : 0f;
+        }
+        internal static float CutG(Heightmap hm, int mx, int my) => CutG(hm, mx, my, out _, out _);
+        internal static float CutG(Heightmap hm, int mx, int my, out float e, out float b)
+        {
+            e = EditedG(hm, mx, my); b = 0f;
+            if (e <= 0f) return 0f;
+            b = BaseG(hm, mx, my);
+            return Mathf.Clamp01((e - b) / Mathf.Max(1e-3f, 1f - b));
+        }
+
+        private static readonly Dictionary<Vector2Int, Color32[]> s_gPixels = new Dictionary<Vector2Int, Color32[]>();
+        private static int s_gPixelsFrame = -1;
+        internal static float PaintGAt(float x, float z)
+        {
+            var col = new Vector2Int(Mathf.FloorToInt(x / 32f), Mathf.FloorToInt(z / 32f));
+            return SampleG(PaintPixelsOf(col), col, x, z);
+        }
+
+        // 0.2.1197: the column's composed pixels, this frame's GetPixels32 copy (never written after), so the off-thread G refinement
+        // can hold them as its snapshot. null = no readable mask. Main thread.
+        internal static Color32[] PaintPixelsOf(Vector2Int col)
+        {
+            if (s_gPixelsFrame != Time.frameCount) { s_gPixelsFrame = Time.frameCount; s_gPixels.Clear(); }
+            if (!s_gPixels.TryGetValue(col, out var px))
+            {
+                px = null;
+                if (s_paintMasks.TryGetValue(col, out var tex) && tex != null && tex.isReadable) px = tex.GetPixels32();
+                s_gPixels[col] = px;
+            }
+            return px;
+        }
+
+        // PaintGAt's bilinear read of one column's pixels; pure, any thread.
+        internal static float SampleG(Color32[] px, Vector2Int col, float x, float z)
+        {
+            if (px == null) return 0f;
+            int w = VoxelLayerPaint.MaskWidth;
+            float fx = Mathf.Clamp(x - col.x * 32f, 0f, 32f), fz = Mathf.Clamp(z - col.y * 32f, 0f, 32f);
+            int i0 = Mathf.Min((int)fx, 31), j0 = Mathf.Min((int)fz, 31);
+            float tx = fx - i0, tz = fz - j0;
+            float g00 = px[j0 * w + i0].g, g10 = px[j0 * w + i0 + 1].g, g01 = px[(j0 + 1) * w + i0].g, g11 = px[(j0 + 1) * w + i0 + 1].g;
+            return Mathf.Lerp(Mathf.Lerp(g00, g10, tx), Mathf.Lerp(g01, g11, tx), tz) / 255f;
+        }
+
+        internal static bool TryTrailG(Vector3 p, out float g)
+        {
+            g = 0f;
+            var col = new Vector2Int(Mathf.FloorToInt(p.x / 32f), Mathf.FloorToInt(p.z / 32f));
+            if (!s_paintMasks.TryGetValue(col, out var tex) || tex == null || !tex.isReadable) return false;
+            int i = Mathf.Clamp(Mathf.RoundToInt(p.x - col.x * 32f), 0, 32), j = Mathf.Clamp(Mathf.RoundToInt(p.z - col.y * 32f), 0, 32);
+            g = tex.GetPixel(i, j).g;
+            return true;
         }
 
         private static void FinishPaintMask(Vector2Int colKey)
@@ -1304,9 +1626,17 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!s_columns.TryGetValue(colKey, out var stack) || stack.Count == 0) return;
             var tex = s_sliceTex;
             if (tex == null) return;
+            var ft = s_paintFinishTimer.T; int fgc0 = StallPhaseTimer.Gc();   // 0.2.1322 proof only: palette / SetPixels / Apply upload / G / re-bind / remesh queue
+            ft[0] = StallPhaseTimer.Now();
+            // 0.2.1111 (Fire: "no leveling around you ... a 1 m trench with nearly straight walls"): SmoothTrailChannel (1097: 3x3 max + tent,
+            // a 1 m line grew to ~3 m) is gone. G is composed raw; FatSnowTrail writes it as a distance field whose 0.5 contour IS the
+            // trench wall (1.0 m apart), and the shader cuts at that contour.
             VoxelLayerPaint.FillPalette(s_paintPixels);   // the cave and skyland paint texels beside the ground's
+            ft[1] = StallPhaseTimer.Now();
             tex.SetPixels(s_paintPixels);
+            ft[2] = StallPhaseTimer.Now();
             tex.Apply(false, false);
+            ft[3] = StallPhaseTimer.Now();
 
             // NEAR-FIELD INLAND WATERLINE BAND: DEAD. The uniform is one
             // constant per 32m column and the shader wets EVERY vertex below
@@ -1324,12 +1654,235 @@ namespace VerdantsAscent.Terrain.Voxel
             if (FiresVoxelConfig.LogTimings != null && FiresVoxelConfig.LogTimings.Value)
                 FiresLogger.LogInfo($"[FiresVoxel] paint mask refreshed for column ({colKey.x},{colKey.y}).");
 
+            // 0.2.1101: the G channel (cultivated soil, walk trails, shovel / melt digs) decides which ground triangles the mesh refines
+            // to 0.25 m (VoxelGTessellation), so the cultivated rows and the snow trench have vertices to move. When the set of G cells
+            // changes the column's chunks re-mesh once; otherwise only the texture is re-bound.
+            long sig = GSignature();
+            bool gChanged = !s_gSig.TryGetValue(colKey, out long old) ? sig != 0 : old != sig;
+            // at most one G re-mesh a second per column (a walked trail paints a new cell every metre): a change inside the cooldown
+            // re-queues the column's paint compose, which looks again once the second is up
+            // 0.2.1171 (Fire at base: ~33-41 chunk applies/s standing still, refined chunks ~90-115 ms each): G changes that are
+            // not the local player's own trail (companions/creatures walking, cultivate ops, the refill decaying G) re-mesh a
+            // column at most every 4 s; the column the player stands near keeps the 1 s cooldown (his trench stays responsive).
+            float cool = GCooldown(colKey);
+            ft[4] = StallPhaseTimer.Now();   // G signature + cooldown decision done; RemeshGNeighbours (if any) is the next phase
+            if (gChanged && s_gRemeshAt.TryGetValue(colKey, out float lastAt) && Time.unscaledTime - lastAt < cool)
+            {
+                gChanged = false;
+                s_gPending[colKey] = lastAt + cool;   // look again when the cooldown is up
+                s_gHeld++;
+            }
+            else
+            {
+                s_gSig[colKey] = sig;
+                if (gChanged) { s_gRemeshAt[colKey] = Time.unscaledTime; RemeshGNeighbours(colKey); }
+            }
+            ft[5] = StallPhaseTimer.Now();
+            long rebindTicks = 0, remeshTicks = 0, lap;
             for (int i = 0; i < stack.Count; i++)
                 if (stack[i] != null && s_views.TryGetValue(stack[i].Key, out var view) && view != null)
                 {
+                    lap = StallPhaseTimer.Now();
                     view.ApplyPaintMask(tex);
                     view.SetLocalWaterY(localWaterY);
+                    rebindTicks += StallPhaseTimer.Now() - lap;
+                    if (gChanged)
+                    {
+                        lap = StallPhaseTimer.Now();
+                        VoxelMeshPipeline.EnqueueRemesh(stack[i]);
+                        remeshTicks += StallPhaseTimer.Now() - lap;
+                        if (Time.unscaledTime >= s_gRebindLogAt)
+                        {
+                            s_gRebindLogAt = Time.unscaledTime + 5f;
+                            float trench = FiresVoxelConfig.SnowTrailTrench != null ? FiresVoxelConfig.SnowTrailTrench.Value : 0.85f;
+                            FiresLogger.LogDebug($"[SnowTrail] chunk ({stack[i].Key.x},{stack[i].Key.y},{stack[i].Key.z}) paint re-bound after G change (trench {trench:0.00}); re-meshed for the 0.25 m G refinement");
+                        }
+                    }
                 }
+            ft[6] = ft[5] + rebindTicks; ft[7] = ft[6] + remeshTicks;   // 0.2.1322: the loop's re-bind and remesh-queue shares
+            s_paintFinishTimer.Note(StallPhaseTimer.Gc() - fgc0, $"column ({colKey.x},{colKey.y}) {stack.Count} chunk(s){(gChanged ? " G changed" : "")}");
+        }
+
+        internal static int s_gHeld;
+        private static float GCooldown(Vector2Int colKey)
+        {
+            var p = Player.m_localPlayer;
+            if (p == null) return 4f;
+            Vector3 pos = p.transform.position;
+            float cx = (colKey.x + 0.5f) * 32f - pos.x, cz = (colKey.y + 0.5f) * 32f - pos.z;
+            return cx * cx + cz * cz <= 40f * 40f ? 1f : 4f;
+        }
+
+        private static readonly Dictionary<Vector2Int, long> s_gSig = new Dictionary<Vector2Int, long>();
+        private static readonly Dictionary<Vector2Int, float> s_gRemeshAt = new Dictionary<Vector2Int, float>();
+        private static readonly Dictionary<Vector2Int, float> s_gPending = new Dictionary<Vector2Int, float>();
+        private static readonly List<Vector2Int> s_gPendingScratch = new List<Vector2Int>();
+        private static float s_gPendingNext;
+        private static float s_gRebindLogAt;
+
+        // Which ground texels carry G >= the refinement threshold (a hash of the set; 0 = none).
+        // 0.2.1119 (round #16 mesh_seams, Fire: "the mesh must not break around the trench"): a chunk's mesh rim runs through the
+        // vertices of its cells -1 and 31, so the edges along a column border are built by BOTH chunks, and the cells on the minus
+        // side read the NEIGHBOUR column's G (the split decision and the trench snap). Only the column whose G set changed used to
+        // re-mesh, so the chunk across the border kept the old split/snap of the same shared edge = a T-junction crack along the
+        // column border. Now, when G near a border (3 texels) is or was there, the neighbour column across it re-meshes too.
+        private static readonly Dictionary<Vector2Int, int> s_gBorder = new Dictionary<Vector2Int, int>();
+        private static float s_gNeighbourLogAt;
+
+        private static int GBorderMask()
+        {
+            int w = VoxelLayerPaint.MaskWidth, mask = 0;
+            for (int j = 0; j < 33; j++)
+                for (int i = 0; i < 33; i++)
+                {
+                    if (s_paintPixels[j * w + i].g == 0) continue;
+                    int sx = i <= 2 ? -1 : i >= 30 ? 1 : 0, sz = j <= 2 ? -1 : j >= 30 ? 1 : 0;
+                    if (sx == 0 && sz == 0) continue;
+                    // bits: the 8 neighbour directions; a corner texel also counts for both sides
+                    if (sx != 0) mask |= 1 << Dir(sx, 0);
+                    if (sz != 0) mask |= 1 << Dir(0, sz);
+                    if (sx != 0 && sz != 0) mask |= 1 << Dir(sx, sz);
+                }
+            return mask;
+        }
+
+        private static int Dir(int dx, int dz) => (dz + 1) * 3 + (dx + 1);
+
+        private static void RemeshGNeighbours(Vector2Int colKey)
+        {
+            int now = GBorderMask();
+            s_gBorder.TryGetValue(colKey, out int before);
+            s_gBorder[colKey] = now;
+            int mask = now | before;
+            if (mask == 0) return;
+            int chunks = 0, cols = 0;
+            for (int dz = -1; dz <= 1; dz++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if ((dx == 0 && dz == 0) || (mask & (1 << Dir(dx, dz))) == 0) continue;
+                    if (!s_columns.TryGetValue(new Vector2Int(colKey.x + dx, colKey.y + dz), out var nst) || nst == null) continue;
+                    cols++;
+                    foreach (var ch in nst)
+                        if (ch != null && ch.MeshAll) { VoxelMeshPipeline.EnqueueRemesh(ch); chunks++; }
+                }
+            if (chunks > 0 && Time.unscaledTime >= s_gNeighbourLogAt)
+            {
+                s_gNeighbourLogAt = Time.unscaledTime + 5f;
+                FiresLogger.LogDebug($"[SnowTrail] G change at column ({colKey.x},{colKey.y}) reaches its border: {chunks} chunk(s) in {cols} neighbour column(s) re-meshed too, so the shared rim edges split and snap the same on both sides");
+            }
+        }
+
+        private static long GSignature()
+        {
+            long h = 0;
+            int w = VoxelLayerPaint.MaskWidth;
+            for (int j = 0; j < 33; j++)
+                for (int i = 0; i < 33; i++)
+                    if (s_paintPixels[j * w + i].g >= VoxelGTessellation.GSplit)
+                        unchecked { h = h * 1000003L + (j * 64 + i + 1); }
+            return h;
+        }
+
+        // 0.2.1157 (Fire: trails "almost instant" on the walker's client; TRAIL_LATENCY_PLAN_20261027 4b): re-compose ONLY the world
+        // texels x0..x1, z0..z1 in every column mask that holds them (a texel on a column border sits in both), upload them and
+        // re-bind - a few dozen texels instead of 9 whole columns through the 2 ms/frame compose queue. The column's G signature and
+        // border mask move with it, so a later full compose of the same column sees no G change (no second re-mesh). Returns true
+        // when any texel's G changed; changedCols gets those columns. Main thread.
+        internal static bool PokeTrailTexels(int x0, int z0, int x1, int z1, List<Vector2Int> changedCols)
+        {
+            if (!PaintCapable || x1 < x0 || z1 < z0) return false;
+            bool any = false;
+            int cx0 = FloorDiv(x0 - 1, 32), cx1 = FloorDiv(x1, 32), cz0 = FloorDiv(z0 - 1, 32), cz1 = FloorDiv(z1, 32);
+            for (int cz = cz0; cz <= cz1; cz++)
+                for (int cx = cx0; cx <= cx1; cx++)
+                {
+                    var col = new Vector2Int(cx, cz);
+                    if (!s_columns.TryGetValue(col, out var stack) || stack.Count == 0) continue;
+                    if (!s_paintMasks.TryGetValue(col, out var tex) || tex == null || !tex.isReadable) { s_paintDirty.Add(col); continue; }   // first compose takes the overlay too
+                    int i0 = Mathf.Max(0, x0 - cx * 32), i1 = Mathf.Min(32, x1 - cx * 32);
+                    int j0 = Mathf.Max(0, z0 - cz * 32), j1 = Mathf.Min(32, z1 - cz * 32);
+                    if (i1 < i0 || j1 < j0) continue;
+                    int w = i1 - i0 + 1, h = j1 - j0 + 1;
+                    var before = tex.GetPixels(i0, j0, w, h);
+                    var block = new Color[w * h];
+                    var zone = new Vector2s(short.MinValue, short.MinValue); Heightmap hm = null;
+                    bool dry = Patch_Heightmap_WetMask.IsDryForPaint(cx * 32f, cz * 32f, 32f);
+                    bool changed = false;
+                    for (int j = 0; j < h; j++)
+                        for (int i = 0; i < w; i++)
+                        {
+                            var c = ComposeTexel(cx * 32f + i0 + i, cz * 32f + j0 + j, ref zone, ref hm, dry);
+                            block[j * w + i] = c;
+                            if (Mathf.Abs(c.g - before[j * w + i].g) > 0.5f / 255f) changed = true;
+                        }
+                    tex.SetPixels(i0, j0, w, h, block);
+                    tex.Apply(false, false);
+                    // an in-flight slice of this column would overwrite the poke with rows composed before it: give it the same texels
+                    if (s_sliceActive && s_sliceKey == col)
+                        for (int j = 0; j < h; j++)
+                            for (int i = 0; i < w; i++)
+                                s_paintPixels[(j0 + j) * VoxelLayerPaint.MaskWidth + i0 + i] = block[j * w + i];
+                    if (!changed) continue;
+                    any = true;
+                    changedCols?.Add(col);
+                    s_gPixelsFrame = -1;   // PaintGAt re-reads this frame
+                    var px = tex.GetPixels32();
+                    s_gSig[col] = GSignature32(px);
+                    s_gBorder[col] = GBorderMask32(px);
+                    for (int k = 0; k < stack.Count; k++)
+                        if (stack[k] != null && s_views.TryGetValue(stack[k].Key, out var view) && view != null) view.ApplyPaintMask(tex);
+                }
+            return any;
+        }
+
+        // The chunks a trail stamp over world texels x0..x1, z0..z1 at height y re-meshes: every MeshAll chunk whose column lies within
+        // 4 m of the stamp (1 m bilinear reach + the 1119 rule: a chunk's rim reads 3 texels of the neighbour column's G) and whose
+        // Y range holds y +- 3 m. A stamp touching a column border therefore names the chunks on both sides - one atomic group.
+        internal static void CollectTrailChunks(int x0, int z0, int x1, int z1, float y, List<VoxelChunk> into)
+        {
+            // 0.2.1160 (PERF): the neighbour column only when the stamp is within the 3 texels its rim reads (was 4 m), and the stack
+            // chunk(s) whose Y range holds y +- 1 m (was 3 m) - groups were up to 12 chunks at ~5.7 ms an apply.
+            int cx0 = FloorDiv(x0 - 3, 32), cx1 = FloorDiv(x1 + 3, 32), cz0 = FloorDiv(z0 - 3, 32), cz1 = FloorDiv(z1 + 3, 32);
+            for (int cz = cz0; cz <= cz1; cz++)
+                for (int cx = cx0; cx <= cx1; cx++)
+                {
+                    if (!s_columns.TryGetValue(new Vector2Int(cx, cz), out var stack) || stack == null) continue;
+                    foreach (var ch in stack)
+                    {
+                        if (ch == null || !ch.MeshAll) continue;
+                        float oy = ch.WorldOrigin.y;
+                        if (y < oy - 1f || y > oy + VoxelChunk.CELLS + 1f) continue;
+                        into.Add(ch);
+                    }
+                }
+        }
+
+        private static long GSignature32(Color32[] px)
+        {
+            long h = 0;
+            int w = VoxelLayerPaint.MaskWidth;
+            byte split = (byte)Mathf.CeilToInt(VoxelGTessellation.GSplit * 255f);
+            for (int j = 0; j < 33; j++)
+                for (int i = 0; i < 33; i++)
+                    if (px[j * w + i].g >= split)
+                        unchecked { h = h * 1000003L + (j * 64 + i + 1); }
+            return h;
+        }
+
+        private static int GBorderMask32(Color32[] px)
+        {
+            int w = VoxelLayerPaint.MaskWidth, mask = 0;
+            for (int j = 0; j < 33; j++)
+                for (int i = 0; i < 33; i++)
+                {
+                    if (px[j * w + i].g == 0) continue;
+                    int sx = i <= 2 ? -1 : i >= 30 ? 1 : 0, sz = j <= 2 ? -1 : j >= 30 ? 1 : 0;
+                    if (sx == 0 && sz == 0) continue;
+                    if (sx != 0) mask |= 1 << Dir(sx, 0);
+                    if (sz != 0) mask |= 1 << Dir(0, sz);
+                    if (sx != 0 && sz != 0) mask |= 1 << Dir(sx, sz);
+                }
+            return mask;
         }
 
         private static void DropPaintMask(Vector2Int colKey)

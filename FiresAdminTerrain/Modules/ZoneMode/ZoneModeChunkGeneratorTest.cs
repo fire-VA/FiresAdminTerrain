@@ -875,7 +875,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (rpc == null || rpc == s_rpcHost) return;
             s_rpcHost = rpc;
             rpc.Register(CleanRpc, RPC_Clean);
-            rpc.Register<int>(CleanedRpc, (sender, removed) => s_cleaned = removed);
+            rpc.Register<int>(CleanedRpc, (sender, removed) => { if (FatNetGuard.FromServer(sender, "generator test cleaned")) s_cleaned = removed; });
         }
 
         // Before anything is placed the server removes every marked object from earlier runs, loaded zone or not, and
@@ -933,6 +933,28 @@ namespace VerdantsAscent.Terrain.Zones
             s_spawned.Clear();
             s_machine = null;
             Record($"removed {removed} object(s) this run spawned or had set down");
+        }
+
+        // 0.2.1338 (fat_fuel_grid_test): this test's place + remove route for another test, marked the same way, so the sweep finds a crashed run's machine.
+        internal static Smelter PlaceMarked(GameObject prefab, Vector3 at, Quaternion rotation)
+        {
+            var machine = UnityEngine.Object.Instantiate(prefab, at, rotation);
+            var nview = machine.GetComponent<ZNetView>();
+            Remember(nview != null ? nview.GetZDO() : null);
+            SaveSpawned();
+            return machine.GetComponent<Smelter>();
+        }
+
+        internal static void RemoveMarked(Smelter machine)
+        {
+            var zdo = machine != null ? machine.GetComponent<ZNetView>()?.GetZDO() : null;
+            if (zdo == null) return;
+            if (zdo.IsOwner()) ZoneModeChunkGenerator.EmptyForTest(zdo);
+            var id = zdo.m_uid;
+            Remove(id);
+            s_spawned.Remove(id);
+            s_records.RemoveAll(r => r.StartsWith(Id(id) + RecordSeparator, StringComparison.Ordinal));
+            SaveSpawned();
         }
 
         private static bool Remove(ZDOID id)

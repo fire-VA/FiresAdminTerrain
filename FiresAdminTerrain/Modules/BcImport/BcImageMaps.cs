@@ -351,7 +351,7 @@ namespace VerdantsAscent.Terrain.BcImport
             return false;
         }
 
-        private static bool TryParseBiome(string name, out Heightmap.Biome biome)
+        internal static bool TryParseBiome(string name, out Heightmap.Biome biome)
         {
             string key = SquashName(name);
             foreach (Heightmap.Biome candidate in Enum.GetValues(typeof(Heightmap.Biome)))
@@ -379,7 +379,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 try
                 {
                     if (BepInEx.Bootstrap.Chainloader.PluginInfos.TryGetValue("expand_world_data", out var info) && info?.Instance != null)
-                        s_ewdTryGetBiome = HarmonyLib.AccessTools.Method(info.Instance.GetType().Assembly.GetType("ExpandWorldData.BiomeManager"),
+                        s_ewdTryGetBiome = HarmonyLib.AccessTools.Method(info.Instance.GetType().Assembly.GetType("ExpandWorldData.Biome.BiomeManager") ?? info.Instance.GetType().Assembly.GetType("ExpandWorldData.BiomeManager"),   // 0.2.1389: its namespace since 1.79
                             "TryGetBiome", new[] { typeof(string), typeof(Heightmap.Biome).MakeByRefType() });
                 }
                 catch (Exception) { s_ewdTryGetBiome = null; }

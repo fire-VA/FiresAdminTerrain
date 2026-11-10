@@ -472,6 +472,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public const byte WC_NONE = 0, WC_OCEAN = 1, WC_RIVER = 2, WC_STREAM = 3,
                           WC_LAKE = 4, WC_POND = 5, WC_SWAMP = 6, WC_FROZEN = 7, WC_HOTSPRING = 8;
         private static byte[] _classS;
+        internal static long ClassBytes => _classS != null ? _classS.Length : 0;   // 0.2.1104 [FatRam]
         private static int _classN;
         private static float _classCell;
         private static readonly System.Collections.Generic.List<int> s_cutA = new System.Collections.Generic.List<int>(4096);
@@ -671,6 +672,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // SampleLavaMask (heightmap masks, far quilt, gameplay GetLava)
         // reads this one field.
         private static byte[] _lavaS;
+        internal static long LavaBytes => _lavaS != null ? _lavaS.Length : 0;   // 0.2.1104 [FatRam]
         private static int _lavaN;
         private static float _lavaCell;
 
@@ -1098,9 +1100,11 @@ namespace VerdantsAscent.Terrain.Voxel
             // owner asks — so the mod is safe to drop onto an existing world.
             if (!FiresVoxelConfig.GeneratesTerrain)
             {
-                FiresLogger.LogInfo($"[FiresWorldGen] 'Terrain Mode' = {FiresVoxelConfig.Mode} (this is the GENERATOR gate, a different " +
+                FiresLogger.LogInfo($"[FiresWorldGen] this world's mode = {FiresVoxelConfig.Mode} from its profile (this is the GENERATOR gate, a different " +
                     $"setting from 'World Terrain Mode' = {FiresVoxelConfig.WorldKind}) — the Fires generator runs only in " +
-                    "FullVoxel, so this world keeps VANILLA height, biomes and rivers. Voxel brush tools still work.");
+                    "FullVoxel, so this world keeps " + (BcImport.BcMigratedWorld.Active
+                        ? "the height, biomes, forest and rivers of its converted BetterContinents data (BcImport answers ahead of vanilla), not FAT's generator"
+                        : "VANILLA height, biomes and rivers") + ". Voxel brush tools still work.");   // 0.2.1205 (lead: the old wording was wrong on a BC world)
                 return;
             }
             var mode = FiresVoxelConfig.WorldGenMode?.Value ?? FiresWorldGenMode.Auto;
@@ -4276,13 +4280,18 @@ namespace VerdantsAscent.Terrain.Voxel
             internal bool Faithful;
         }
 
+        // 0.2.1333: ReadCacheFile's limits. The bake and the generator clamp their resolution to 21001 (FiresWorldBake, this file).
+        // A cell is float grid + biome byte + river byte + float water level; the plan's masks and paths follow, sized by the same grid.
+        private const int MaxCacheGrid = 21001, CacheBytesPerCell = 10, DeflateBestRatio = 1032, CachePlanBytesPerCell = 6;
+        private const long CacheHeaderBytes = 64, CachePlanBaseBytes = 256L * 1024 * 1024;
+
         internal static CacheFile ReadCacheFile(string path)
         {
             try
             {
                 if (!File.Exists(path)) return null;
                 using (var fs = File.OpenRead(path))
-                using (var gz = new GZipStream(fs, CompressionMode.Decompress))
+                using (var gz = FatInflate.GzipReader(fs, "world bake", CacheHeaderBytes))   // 0.2.1333: raised below once n is checked
                 using (var br = new BinaryReader(gz))
                 {
                     if (br.ReadUInt32() != MAGIC) return null;
@@ -4290,7 +4299,14 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (ver != FORMAT_VERSION) return null;
                     int n = br.ReadInt32();
                     float half = br.ReadSingle();
-                    if (n < 2 || n > 32768 || half < 1000f) return null;
+                    if (n < 2 || n > MaxCacheGrid || half < 1000f) return null;
+                    // 0.2.1333: the join sync can hand this file over, so n is not trusted: deflate cannot beat about 1032:1, a file too small for its header is refused before the arrays
+                    if ((long)n * n * CacheBytesPerCell / DeflateBestRatio > fs.Length)
+                    {
+                        FiresLogger.LogWarning($"[FiresWorldGen] cache {path} says {n} a side, too large for its {fs.Length} bytes: not read.");
+                        return null;
+                    }
+                    gz.Limit = CacheHeaderBytes + (long)n * n * CacheBytesPerCell + (long)n * n * CachePlanBytesPerCell + CachePlanBaseBytes;
                     var g = new float[n * n];
                     if (!ReadFloatsInChunks(gz, g)) return null;
                     var bm = new byte[n * n];
@@ -4494,8 +4510,11 @@ namespace VerdantsAscent.Terrain.Voxel
 
             // A migrated BetterContinents world owns its heights: that is the terrain its bases were built on,
             // so it answers ahead of FAT's own procedural generator.
-            if (BcImport.BcMigratedWorld.TryGetBaseHeight(wx, wy, ___m_offset0, ___m_offset1, ___m_minMountainDistance,
-                    out float migrated))
+            long t = BcImport.FatGenTiming.Begin();   // 0.2.1209 timer (read-only)
+            bool bc = BcImport.BcMigratedWorld.TryGetBaseHeight(wx, wy, ___m_offset0, ___m_offset1, ___m_minMountainDistance,
+                    out float migrated);
+            BcImport.FatGenTiming.End(BcImport.FatGenTiming.BcBase, t);
+            if (bc)
             {
                 __result = migrated;
                 return false;
@@ -4543,10 +4562,16 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool Prefix(WorldGenerator __instance, float wx, float wy, float oceanLevel, bool waterAlwaysOcean,
             ref Heightmap.Biome __result)
         {
-            if (Zones.ZoneModeGate.TryGateBiome(__instance, wx, wy, oceanLevel, waterAlwaysOcean, ref __result)) return false;
+            long t = BcImport.FatGenTiming.Begin();   // 0.2.1209 timers (read-only)
+            bool gated = Zones.ZoneModeGate.TryGateBiome(__instance, wx, wy, oceanLevel, waterAlwaysOcean, ref __result);
+            BcImport.FatGenTiming.End(BcImport.FatGenTiming.GateBiome, t);
+            if (gated) return false;
 
             // A migrated BetterContinents biome map is authoritative where it paints; None means it does not.
-            if (BcImport.BcMigratedWorld.TryGetBiome(wx, wy, out Heightmap.Biome painted))
+            t = BcImport.FatGenTiming.Begin();
+            bool bcPainted = BcImport.BcMigratedWorld.TryGetBiome(wx, wy, out Heightmap.Biome painted);
+            BcImport.FatGenTiming.End(BcImport.FatGenTiming.BcBiome, t);
+            if (bcPainted)
             {
                 __result = painted;
                 return false;
@@ -4577,8 +4602,10 @@ namespace VerdantsAscent.Terrain.Voxel
             bool preGeneration, bool riverPreDN, ref Color mask, ref float __result, out bool __state)
         {
             __state = true;
-            if (Zones.ZoneModeGate.TryGateBiomeHeight(__instance, biome, wx, wy, preGeneration, riverPreDN, ref mask, ref __result))
-                return false;
+            long t = BcImport.FatGenTiming.Begin();   // 0.2.1209 timer (read-only)
+            bool gated = Zones.ZoneModeGate.TryGateBiomeHeight(__instance, biome, wx, wy, preGeneration, riverPreDN, ref mask, ref __result);
+            BcImport.FatGenTiming.End(BcImport.FatGenTiming.GateHeight, t);
+            if (gated) return false;
             __state = FiresWorldGenBase.Active;
             if (!FiresWorldGenBase.Active) return true;
             // PER-BIOME, because vanilla is per-biome. GetBiomeHeight starts at mask = Color.black and only
@@ -4606,9 +4633,14 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // A converted BetterContinents world gets BC's own biome height (roughmap / Override All) and paint, as BC's
         // postfixes give it (BcWorldGen.ApplyBiomeHeight); then a chunk world's start-cave hill rises from that ground.
-        private static void Postfix(WorldGenerator __instance, Heightmap.Biome biome, float wx, float wy, ref Color mask, ref float __result, bool __state)
+        private static void Postfix(WorldGenerator __instance, Heightmap.Biome biome, float wx, float wy, ref Color mask, ref float __result, bool __state, bool preGeneration, bool riverPreDN)
         {
-            if (!__state) global::VerdantsAscent.Terrain.BcImport.BcMigratedWorld.Generator?.ApplyBiomeHeight(__instance, biome, wx, wy, ref mask, ref __result);
+            if (!__state)
+            {
+                // 0.2.1373: inside a height paint this call is asking the painted biome's own shape (a BC heightmap could otherwise override it away).
+                if (!Zones.BiomePaint.InHeightScope) global::VerdantsAscent.Terrain.BcImport.BcMigratedWorld.Generator?.ApplyBiomeHeight(__instance, biome, wx, wy, ref mask, ref __result);
+                Zones.BiomePaint.ApplyPaintHeight(__instance, wx, wy, preGeneration, riverPreDN, ref mask, ref __result);
+            }
             Zones.ZoneModeStartCave.AddHill(wx, wy, ref __result);
         }
     }

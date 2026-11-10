@@ -100,7 +100,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void Tick()
         {
             var player = Player.m_localPlayer;
-            if (!s_bound || !FatSuperFlat.On || player == null || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) { Hide(); return; }
+            if (!s_bound || !FatSuperFlat.On || FatHaloArc.RingOnly || player == null || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) { Hide(); return; }
             if (!Typing())
             {
                 if (ToggleGridKey.Value.IsDown()) { ShowGrid.Value = !ShowGrid.Value; player.Message(MessageHud.MessageType.Center, ShowGrid.Value ? $"Build grid ON - {Size:0.##} m" : "Build grid OFF"); FiresLogger.LogVerbose($"[FAT] super flat grid: grid {(ShowGrid.Value ? "on" : "off")} ({Size:0.##} m)"); }
@@ -122,8 +122,9 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             else if (s_quad != null && s_quad.activeSelf) s_quad.SetActive(false);
 
-            // snap
-            if (SnapToGrid.Value)
+            // snap - only while the player is placing (1.0.1020: the snap slab is a piece_nonsolid collider, which vanilla's grow
+            // check counts; outside the hammer's place mode there is nothing to snap, so the slab is not there at all)
+            if (SnapToGrid.Value && player.InPlaceMode())
             {
                 Vector3 aim = CursorPoint(player);
                 EnsureAnchor();
@@ -326,6 +327,36 @@ namespace VerdantsAscent.Terrain.Voxel
             s_tex.Apply(false);
             s_mat.mainTexture = s_tex;
             FiresLogger.LogInfo($"[FAT] super flat grid: texture {px} px ({texPerM:0.#} texels/m, {s_tex.mipmapCount} mips max-filtered, on material {s_mat.name} shader {s_mat.shader.name}) for {size:0.##} m cells, line {w:0.###} m, opacity {op:0.##}");
+        }
+
+        // Fire 10-24: "basically anything we plant says needs more room to grow" on super flat. Vanilla Plant.HaveGrowSpace overlaps
+        // the grow radius against Default/static_solid/Default_small/piece/piece_nonsolid, and the snap slab is a solid collider on
+        // piece_nonsolid (it has to be: Piece.GetSnapPoints only finds snap points on piece/piece_nonsolid colliders, and a trigger
+        // would be counted by both queries alike). So for the one grow check the slab's collider is switched off and back on (a
+        // disabled collider leaves physics queries at once). One Debug line the first time it stands aside.
+        private static bool s_growNoted;
+
+        [HarmonyPatch(typeof(Plant), "HaveGrowSpace")]
+        private static class Plant_HaveGrowSpace_IgnoreSnapSlab
+        {
+            [HarmonyPrefix]
+            private static void Prefix(out BoxCollider __state)
+            {
+                __state = null;
+                if (s_anchor == null || !s_anchor.activeInHierarchy) return;
+                var col = s_anchor.GetComponent<BoxCollider>();
+                if (col == null || !col.enabled) return;
+                col.enabled = false;
+                __state = col;
+                if (!s_growNoted) { s_growNoted = true; FiresLogger.LogDebug("[FAT] super flat grid: the build-snap slab stands aside for plant grow-space checks (it is not a plant's neighbour)"); }
+            }
+
+            [HarmonyFinalizer]
+            private static System.Exception Finalizer(System.Exception __exception, BoxCollider __state)
+            {
+                if (__state != null) __state.enabled = true;
+                return __exception;
+            }
         }
 
         private static void EnsureAnchor()

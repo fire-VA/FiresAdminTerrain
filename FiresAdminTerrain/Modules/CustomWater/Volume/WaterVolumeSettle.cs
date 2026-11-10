@@ -98,6 +98,7 @@ namespace VerdantsAscent.Water.Core
             // Direct list add — NOT AddWaterDiskInternal, which would
             // MarkDirty and race the regen timer against our coroutine.
             combiner._waterDisks.Add(disk);
+            combiner._disksChanged = true;   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
             combiner._isSettling = true;
             combiner._needsRegeneration = false;
 
@@ -470,6 +471,7 @@ namespace VerdantsAscent.Water.Core
             combiner.LiquidType = disk.LiquidType;
             combiner.CustomLiquidType = liquid;
             combiner._waterDisks.Add(disk);
+            combiner._disksChanged = true;   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
             combiner._isSettling = true;
             combiner._needsRegeneration = false;
 

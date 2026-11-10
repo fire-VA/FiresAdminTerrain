@@ -51,6 +51,8 @@ namespace VerdantsAscent.Water.Core
         // it from the disk list. Independent key: absent on old anchors
         // reads as false, no version bump needed.
         private static readonly int s_isGelledHash = "va_water_is_gelled".GetStableHashCode();
+        // 0.2.1331 (add-only): UTC ticks of the owner's last SaveToZDO. A ZDO has no saved time of its own (DataRevision is a sync counter).
+        private static readonly int s_savedTicksHash = "va_water_saved_ticks".GetStableHashCode();
 
         // Segment anchor keys (v3)
         private static readonly int s_segmentCountHash = "va_water_segment_count".GetStableHashCode();
@@ -237,7 +239,8 @@ namespace VerdantsAscent.Water.Core
             Vector3 myPos = RealWaterPosition;
             Vector3Int posKey = GetPositionKey(myPos);
 
-            if (s_anchorsByPosition.TryGetValue(posKey, out var existingAnchorByPos) && existingAnchorByPos != null && existingAnchorByPos != this)
+            // 0.2.1349 (Fire: "every time we log back in its broken"): two anchors with different disks at one spot are two water bodies, not a duplicate; neither is destroyed.
+            if (s_anchorsByPosition.TryGetValue(posKey, out var existingAnchorByPos) && existingAnchorByPos != null && existingAnchorByPos != this && IsDuplicateOf(existingAnchorByPos))
             {
                 // Another anchor already exists at this position - this is a DUPLICATE ZDO
                 // Keep the one with more data, destroy this one if it has less
@@ -252,21 +255,37 @@ namespace VerdantsAscent.Water.Core
                 int myDataSize = (myGridData?.Length ?? 0);
                 int otherDataSize = (otherGridData?.Length ?? 0);
 
+                // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): an anchor holding disks no other anchor holds is never destroyed; both then stand.
                 if (otherDataSize >= myDataSize)
                 {
                     // The existing anchor has more or equal data - destroy this one
                     if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Duplicate anchor at position {myPos:F1} (ZDO {zdoId}). " +
                              $"Existing anchor has {otherDataSize} bytes, this has {myDataSize} bytes. Destroying this duplicate.");
-                    _dataLoaded = true;
-                    DestroyPermanently(); // Clear the ZDO data to prevent it from coming back
-                    return;
+                    if (MayDestroyAsDuplicate("duplicate by position", existingAnchorByPos.ZdoDiskCount))
+                    {
+                        _dataLoaded = true;
+                        _destroyWhy = $"duplicate by position of {otherNview?.GetZDO()?.m_uid}";
+                        DestroyPermanently(); // Clear the ZDO data to prevent it from coming back
+                        return;
+                    }
                 }
                 else
                 {
                     // This anchor has more data - destroy the existing one instead
                     if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Duplicate anchor at position {myPos:F1}. " +
                              $"This anchor has {myDataSize} bytes, existing has {otherDataSize} bytes. Destroying existing duplicate.");
-                    existingAnchorByPos.DestroyPermanently();
+                    if (existingAnchorByPos.MayDestroyAsDuplicate("duplicate by position", ZdoDiskCount))
+                    {
+                        existingAnchorByPos._destroyWhy = $"duplicate by position of {zdoId}";
+                        existingAnchorByPos.DestroyPermanently();
+                    }
+                    else if (MayDestroyAsDuplicate("duplicate by position", existingAnchorByPos.ZdoDiskCount))
+                    {
+                        _dataLoaded = true;
+                        _destroyWhy = $"duplicate by position of {otherNview?.GetZDO()?.m_uid}, which holds disks only it has";
+                        DestroyPermanently();
+                        return;
+                    }
                     // Continue with this anchor's initialization
                 }
             }
@@ -292,60 +311,94 @@ namespace VerdantsAscent.Water.Core
                 return;
             }
 
-            // Check for existing combiner at this position
-            foreach (var combiner in WaterMeshCombiner.AllCombiners)
+            // Check for existing combiner for this anchor. 0.2.1349 (Fire: "every time we log back in its broken"): bound by the
+            // disks it holds, since a combiner's centre moves as disks join; an anchor with no disks readable binds by position as before.
+            var combiner = FindCombinerForAnchor(myPos, out bool staleAnchor);
+            if (staleAnchor)
             {
-                if (combiner == null) continue;
-
-                float dist = Vector3.Distance(combiner.transform.position, myPos);
-                if (dist < 2f)
+                // Combiner already has a DIFFERENT anchor holding these same disks - this is a stale anchor
+                // DESTROY THIS STALE ANCHOR - only ONE anchor per combiner!
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Combiner at {combiner.transform.position} already has anchor. This is a STALE anchor - destroying self.");
+                _dataLoaded = true;
+                // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): skipped = this ZDO stands, unlinked; the combiner already draws its disks.
+                if (MayDestroyAsDuplicate("stale at Start", combiner.Anchor != null ? combiner.Anchor.ZdoDiskCount : 0))
                 {
-                    // Combiner already exists at this position
-                    if (combiner.Anchor != null && combiner.Anchor != this)
-                    {
-                        // Combiner already has a DIFFERENT anchor - this is a stale anchor
-                        // DESTROY THIS STALE ANCHOR - only ONE anchor per combiner!
-                        if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Combiner at {combiner.transform.position} already has anchor. This is a STALE anchor - destroying self.");
-                        _dataLoaded = true;
-                        DestroyPermanently();
-                        return;
-                    }
-
-                    // Combiner exists and needs this anchor - link to it
-                    _combiner = combiner;
-                    _combiner.Anchor = this;
-                    _dataLoaded = true;
-                    return;
+                    _destroyWhy = $"stale at Start: combiner at {combiner.transform.position} has anchor {combiner.Anchor?._nview?.GetZDO()?.m_uid} and every disk here is in another anchor";
+                    DestroyPermanently();
                 }
+                return;
+            }
+            if (combiner != null)
+            {
+                // Combiner exists and needs this anchor - link to it
+                _combiner = combiner;
+                _combiner.Anchor = this;
+                _dataLoaded = true;
+                SyncLinkedCombinerFromZdo(WaterCombinerCache.AnchorTicksOf(_combiner));   // 0.2.1331: the bulk restore got here first
+                return;
             }
 
             // CACHE-FIRST RESTORATION (mirrors terrain system)
             // Try file-based cache BEFORE ZDO restoration. The cache is local and
             // always available, while ZDO byte arrays may not have synced to clients yet.
-            var cachedData = WaterCombinerCache.GetCachedDataForPosition(myPos);
+            // 0.2.1349 (Fire: same bug): a group is this anchor's only if it shares its disks; a client's group that lacks disks loses to the newer anchor below.
+            var zdoDisks = ReadZdoDisks(_nview.GetZDO());
+            var cachedData = WaterCombinerCache.GetCachedDataForAnchor(myPos, zdoDisks);
+            // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): the same claim as FindCombinerForAnchor. A bigger anchor may still take a smaller group here (it
+            // grows it), but an anchor under half of a group never does, however new its stamp: it would shrink the group. Disks on the removed list do not count, so a real removal still shrinks.
+            // 0.2.1354 (review: a stale client cache beat a newer smaller anchor): the guard holds only while the anchor is not newer than the group, or other anchors hold the rest of the group (then the group really is a bigger body).
+            if (cachedData != null && cachedData.HasValidData && WaterCombinerCache.AnchorTooSmallFor(cachedData, zdoDisks, out int sharedWithGroup, out int liveInGroup)
+                && (!AnchorNewerThan(cachedData.AnchorSavedTicks) || OtherAnchorsHoldRestOf(cachedData, zdoDisks)))
+            {
+                if (sharedWithGroup >= zdoDisks.Count)
+                {
+                    FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {myPos} ({zdoDisks.Count} disks) not bound to cache group {cachedData.GroupId} ({liveInGroup} disks, shares {sharedWithGroup}): under half, it would shrink the group; its disks are all in the group, so the group stays and this anchor stays unlinked");
+                    if (WaterCombinerCache.GetInstantiatedCombinerForGroup(cachedData.GroupId) == null) WaterCombinerCache.RestoreFromCache(cachedData, null);
+                    _dataLoaded = true;
+                    return;
+                }
+                FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {myPos} ({zdoDisks.Count} disks) not bound to cache group {cachedData.GroupId} ({liveInGroup} disks, shares {sharedWithGroup}): under half, it would shrink the group; it holds other disks too, so it restores on its own");
+                cachedData = null;
+            }
             if (cachedData != null && cachedData.HasValidData)
             {
                 // Check if a combiner for this cache group already exists
                 var existingCombiner = WaterCombinerCache.GetInstantiatedCombinerForGroup(cachedData.GroupId);
-                if (existingCombiner != null)
+                if (existingCombiner != null && (existingCombiner.Anchor == null || existingCombiner.Anchor == this))   // 0.2.1349: never take over another anchor's combiner
                 {
                     _combiner = existingCombiner;
                     if (_combiner.Anchor == null)
                         _combiner.Anchor = this;
                     _dataLoaded = true;
                     if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Linked to existing cached combiner at {myPos}");
+                    SyncLinkedCombinerFromZdo(cachedData.AnchorSavedTicks);   // 0.2.1331
                     return;
                 }
 
-                // Restore from file cache (fast, no ZDO dependency)
-                _dataLoaded = true;
-                _combiner = WaterCombinerCache.RestoreFromCache(cachedData, this);
-                if (_combiner != null)
+                // 0.2.1331: the anchor wins when it was saved after this cache group last matched it; the ZDO restore keeps the group.
+                if (existingCombiner != null)
                 {
-                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Restored from file cache at {myPos} ({cachedData.WaterDiskData?.Length / WaterCombinerCache.WaterCombinerGroupData.DISK_STRIDE ?? 0} disks)");
-                    return;
+                    // 0.2.1349: that group's combiner stands for another anchor: this one restores on its own, in a new group.
                 }
-                // Cache restore failed - fall through to ZDO restoration
+                else if (AnchorNewerThan(cachedData.AnchorSavedTicks))
+                {
+                    _keepCacheGroup = cachedData.GroupId;
+                    FiresLogger.LogDebug($"[WaterCombinerCache] anchor at {myPos} is newer than its cache group {cachedData.GroupId} (saved ticks {SavedTicks} > {cachedData.AnchorSavedTicks}): restoring from the ZDO");
+                }
+                else
+                {
+                    // Restore from file cache (fast, no ZDO dependency)
+                    _dataLoaded = true;
+                    _combiner = WaterCombinerCache.RestoreFromCache(cachedData, this);
+                    if (_combiner != null)
+                    {
+                        if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Start: Restored from file cache at {myPos} ({cachedData.WaterDiskData?.Length / WaterCombinerCache.WaterCombinerGroupData.DISK_STRIDE ?? 0} disks)");
+                        ApplyZdoKinds();   // 0.2.1331: a v2 group's kinds and rounded hashes
+                        return;
+                    }
+                    // Cache restore failed - fall through to ZDO restoration
+                    _dataLoaded = false;   // 0.2.1331: left set, the fallback below never ran
+                }
             }
 
             // Check if we have saved data to restore from ZDO (fallback)
@@ -364,6 +417,108 @@ namespace VerdantsAscent.Water.Core
             }
         }
 
+        // 0.2.1331 (restored rivers read as ponds and terraced). "Newer" compares two values of the anchor's own stamp
+        // (va_water_saved_ticks: what the ZDO holds now, what the cache group last matched), so no two machines' clocks are compared.
+        // An anchor last saved before this build has no stamp: the cache keeps winning there, and only its kinds come from the ZDO.
+        // 0.2.1354 (review: a stale client cache beat a newer smaller anchor): at least half of the group's disks this anchor lacks stand in other anchors this peer can see. Half, not all: a client sees only the zones around it.
+        // Inflates every anchor, so it is asked only of an anchor already found too small and newer.
+        private bool OtherAnchorsHoldRestOf(WaterCombinerCache.WaterCombinerGroupData group, List<WaterDisk> mine)
+        {
+            var elsewhere = new Dictionary<int, List<Vector3>>();
+            var myZdo = _nview.GetZDO();
+            foreach (var scan in ScanAnchors())
+            {
+                if (scan.Zdo.m_uid == myZdo.m_uid || scan.Disks == null) continue;
+                foreach (var d in scan.Disks) WaterPersistence.AddHeld(elsewhere, d.StableHash, d.Position);
+            }
+            var hashes = HashesOf(mine);
+            int rest = 0, held = 0;
+            foreach (var d in WaterCombinerCache.DisksOf(group))
+            {
+                if (hashes.Contains(d.StableHash) || WaterRemovedDisks.Contains(d.StableHash)) continue;
+                rest++;
+                if (WaterPersistence.IsHeld(elsewhere, d.StableHash, d.Position)) held++;
+            }
+            bool holds = rest > 0 && held * 2 >= rest;
+            FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {RealWaterPosition} ({mine.Count} disks) is newer than cache group {group.GroupId} and under half of it: {held} of the {rest} disks it lacks stand in other anchors, so the {(holds ? "group stays" : "anchor wins")} (0.2.1354)");
+            return holds;
+        }
+
+        private int _keepCacheGroup = -1;
+        internal long SavedTicks { get { var z = _nview != null && _nview.IsValid() ? _nview.GetZDO() : null; return z != null ? z.GetLong(s_savedTicksHash, 0L) : 0L; } }
+
+        private bool AnchorNewerThan(long cacheTicks)
+        {
+            long saved = SavedTicks;
+            if (saved <= 0L || saved <= cacheTicks) return false;
+            byte[] blob = _nview.GetZDO().GetByteArray(s_waterDisksHash);
+            return blob != null && blob.Length > 0;   // nothing synced yet = nothing to prefer
+        }
+
+        // A combiner the cache restored before this anchor loaded (cacheTicks -1 = it did not come from the cache: kinds only).
+        private void SyncLinkedCombinerFromZdo(long cacheTicks)
+        {
+            if (cacheTicks < 0L || !AnchorNewerThan(cacheTicks)) { ApplyZdoKinds(); return; }
+            var zdo = _nview.GetZDO();
+            var disks = ReadZdoDisks(zdo);
+            if (disks == null || disks.Count == 0) { ApplyZdoKinds(); return; }
+            _combiner.ReplaceDisksFromAnchor(disks);
+            LoadGridData(zdo);
+            LoadBoundsData(zdo);
+            // 0.2.1336: a direct removal blanks the heights (they still drew the removed disk): the cached ones must not stand in, build from the disks.
+            byte[] surfaceBlob = zdo.GetByteArray(s_surfaceHeightsHash);
+            if (zdo.GetInt(s_segmentCountHash, 0) == 0 && (surfaceBlob == null || surfaceBlob.Length == 0) && !_combiner.IsGelled)
+            {
+                _combiner.ForceRegenerate();
+                WaterCombinerCache.UpdateCombinerCache(_combiner);
+                FiresLogger.LogDebug($"[WaterCombinerCache] anchor at {RealWaterPosition} has disks but no heights (direct removal): rebuilt from {disks.Count} disk(s)");
+                return;
+            }
+            if (zdo.GetInt(s_versionHash, 0) >= 3 && zdo.GetInt(s_segmentCountHash, 0) > 0) RestoreFromSegments(zdo);
+            else { LoadSurfaceHeights(zdo); LoadTerrainHeights(zdo); }
+            var heights = _combiner.GetSurfaceHeights();
+            if (heights != null && heights.Length > 0) _combiner.RestoreFromAnchorData();
+            else _combiner.ForceRegenerate();
+            WaterCombinerCache.UpdateCombinerCache(_combiner);
+            WaterCombinerCache.NoteKinds(_combiner.WaterDisks, "ZDO, newer than the cache");
+        }
+
+        // Disks with no kind yet (a v1/v2 cache group) take kind and exact hash from the ZDO: matched by the float-rounded hash and the
+        // position. Unmatched disks stay Unknown (= pond, as before). The result goes to the cache, as v3 from then on.
+        private void ApplyZdoKinds()
+        {
+            if (_combiner == null) return;
+            var mine = _combiner.WaterDisks;
+            bool any = false;
+            foreach (var d in mine) if (d != null && d.Kind == WaterDiskKind.Unknown) { any = true; break; }
+            if (!any) return;
+            var zdo = _nview != null && _nview.IsValid() ? _nview.GetZDO() : null;
+            var saved = zdo != null ? ReadZdoDisks(zdo) : null;
+            if (saved == null || saved.Count == 0) return;
+            var byRounded = new Dictionary<int, List<WaterDisk>>(saved.Count);
+            foreach (var s in saved)
+            {
+                int rounded = (int)(float)s.StableHash;
+                if (!byRounded.TryGetValue(rounded, out var list)) byRounded[rounded] = list = new List<WaterDisk>(1);
+                list.Add(s);
+            }
+            int matched = 0;
+            foreach (var d in mine)
+            {
+                if (d == null || d.Kind != WaterDiskKind.Unknown || !byRounded.TryGetValue((int)(float)d.StableHash, out var list)) continue;
+                foreach (var s in list)
+                {
+                    if ((s.Position - d.Position).sqrMagnitude > 0.0004f) continue;
+                    d.Kind = s.Kind;
+                    d.RestoreExactHash(s.StableHash);
+                    matched++;
+                    break;
+                }
+            }
+            if (matched > 0) WaterCombinerCache.UpdateCombinerCache(_combiner);
+            WaterCombinerCache.NoteKinds(mine, $"ZDO, {matched} disk(s) matched");
+        }
+
         /// <summary>
         /// Clears static anchor tracking. Call on world unload.
         /// </summary>
@@ -371,6 +526,7 @@ namespace VerdantsAscent.Water.Core
         {
             s_anchorsByZdoId.Clear();
             s_anchorsByPosition.Clear();
+            s_destroySkipWarned.Clear();   // 0.2.1352
         }
 
         private void OnDestroy()
@@ -495,29 +651,39 @@ namespace VerdantsAscent.Water.Core
         /// placed along the combiner's extent. Each segment stores a contiguous range
         /// of grid rows, keeping each ZDO's byte arrays under ~8KB.
         /// </summary>
-        public void SaveToZDO()
+        public void SaveToZDO() => TrySaveToZDO();
+
+        // 0.2.1349 (Fire: "every time we log back in its broken"): true = the ZDO was written, for the "Saved N" count.
+        internal bool TrySaveToZDO()
         {
             if (_nview == null || !_nview.IsValid())
             {
-                return;
+                return false;
             }
 
             if (!_nview.IsOwner())
             {
-                // Not owner - skip save but don't warn (this is expected for clients)
-                return;
+                // 0.2.1349: vanilla hands a persistent ZDO to the peer standing near it (ZDOMan.ReleaseNearbyZDOS), so the server lost this save
+                // silently while a player stood by the water. The server is the only writer: it takes the ZDO for the save.
+                if (ZNet.instance == null || !ZNet.instance.IsServer())
+                {
+                    // Not owner - skip save but don't warn (this is expected for clients)
+                    return false;
+                }
+                _nview.ClaimOwnership();
+                FiresLogger.LogDebug($"[WaterAnchorRepair] server took anchor {_nview.GetZDO()?.m_uid} at {RealWaterPosition} from the near peer for this save");
             }
 
             if (_combiner == null)
             {
                 FiresLogger.LogWarning("[WaterMeshCombinerAnchor] Cannot save - no combiner linked");
-                return;
+                return false;
             }
 
             var zdo = _nview.GetZDO();
             if (zdo == null)
             {
-                return;
+                return false;
             }
 
             try
@@ -525,25 +691,45 @@ namespace VerdantsAscent.Water.Core
                 // Ensure anchor flags are set
                 zdo.Set(s_isAnchorHash, true);
                 zdo.Set(s_versionHash, CURRENT_VERSION);
+                long savedTicks = DateTime.UtcNow.Ticks;   // 0.2.1331
+                zdo.Set(s_savedTicksHash, savedTicks);
+                WaterCombinerCache.NoteAnchorSaved(_combiner, savedTicks);   // our own save never reads as "newer than the cache"
+                // 0.2.1354 (review: permanent disk loss; the reviewed SaveCombinerDirect has the same overwrite here, and this one runs at every world save): disks only this ZDO holds stay.
+                var kept = ZNet.instance != null && ZNet.instance.IsServer() ? ZdoDisksToKeep(zdo, _combiner.WaterDisks) : null;
+                KeptDisksLastSave = kept != null;
 
                 // Store the REAL water position
                 zdo.Set(s_realPositionHash, _combiner.transform.position);
 
                 // Save common properties
-                zdo.Set(s_liquidTypeHash, (int)(_combiner.SeasonalIce ? CustomLiquidType.Water.ToVanillaLiquidType() : _combiner.LiquidType));
-                zdo.Set(s_customLiquidTypeHash, (int)_combiner.SavedCustomLiquidType);   // seasonal ice saves as water
+                zdo.Set(s_liquidTypeHash, (int)_combiner.LiquidType);
+                zdo.Set(s_customLiquidTypeHash, (int)_combiner.SavedCustomLiquidType);   // 0.2.1097: no seasonal ice / biome lava on a body any more (WaterStateField)
                 zdo.Set(s_waveIntensityHash, _combiner.WaveIntensity);
                 // Gelled volumes restore grid-authoritative.
                 zdo.Set(s_isGelledHash, _combiner.IsGelled);
 
                 // CRITICAL: Save water disks FIRST - this is the source of truth
-                SaveWaterDisks(zdo);
+                if (kept != null) WriteDisks(zdo, WithKept(_combiner.WaterDisks, kept));
+                else SaveWaterDisks(zdo);
 
                 // Save grid configuration
                 SaveGridData(zdo);
 
                 // Save bounds
                 SaveBoundsData(zdo);
+
+                // 0.2.1354: this grid does not draw the kept disks, so peers build from the disks, as after SaveCombinerDirect. The bounds must then cover every disk (removals find the anchor by them);
+                // a heights save could not take wider bounds, the grid's origin comes from them. A gelled body's grid stays authoritative: list only.
+                if (kept != null && !_combiner.IsGelled)
+                {
+                    WriteBoundsWithKept(zdo, _combiner.GetCombinedBounds(), kept);
+                    DropSegments(zdo, ZDOMan.GetSessionID());
+                    _segments.Clear();   // they are gone: a later heights save makes new ones
+                    zdo.Set(s_surfaceHeightsHash, new byte[0]);
+                    zdo.Set(s_terrainHeightsHash, new byte[0]);
+                    FiresLogger.LogDebug($"[WaterAnchorRepair] anchor {zdo.m_uid} at {RealWaterPosition}: {_combiner.WaterDisks.Count} disks + {kept.Count} only the anchor holds; kept, heights blanked so peers build from them");
+                    return true;
+                }
 
                 // Determine storage mode: monolithic vs segmented
                 int gridCells = _combiner.GridWidth * _combiner.GridHeight;
@@ -568,10 +754,12 @@ namespace VerdantsAscent.Water.Core
                     zdo.Set(s_segmentCountHash, 0);
                     zdo.Set(s_segmentZdoidsHash, new byte[0]);
                 }
+                return true;
             }
             catch (Exception ex)
             {
                 FiresLogger.LogError($"[WaterMeshCombinerAnchor] Failed to save to ZDO: {ex.Message}");
+                return false;
             }
         }
 
@@ -579,9 +767,70 @@ namespace VerdantsAscent.Water.Core
         /// Saves all water disks to the ZDO.
         /// This preserves the original disk data for proper restoration.
         /// </summary>
-        private void SaveWaterDisks(ZDO zdo)
+        private const int KindBlockMarker = 0x444E494B;   // "KIND"
+
+        private void SaveWaterDisks(ZDO zdo) => WriteDisks(zdo, _combiner.WaterDisks);
+
+        // 0.2.1354 (review: permanent disk loss. R = G1 + d, d also in anchorless G2; the repair strips d from G2; the next G1 save rewrote R without d, and d was nowhere). The disks this ZDO holds that
+        // are neither in the combiner about to write it nor on the removed list. Null = none. Every removal must reach the list before its save (WaterRemovedDisks.NoteRemovedHere), or the disk comes back.
+        internal bool KeptDisksLastSave { get; private set; }
+
+        private static List<WaterDisk> ZdoDisksToKeep(ZDO zdo, IReadOnlyList<WaterDisk> disks)
         {
-            var disks = _combiner.WaterDisks;
+            var saved = ReadZdoDisks(zdo);
+            if (saved == null || saved.Count == 0) return null;
+            var exact = new HashSet<int>();
+            var held = new Dictionary<int, List<Vector3>>();
+            foreach (var d in disks)
+            {
+                if (d == null) continue;
+                exact.Add(d.StableHash);
+                WaterPersistence.AddHeld(held, d.StableHash, d.Position);
+            }
+            List<WaterDisk> keep = null;
+            foreach (var d in saved)
+            {
+                if (d == null || exact.Contains(d.StableHash) || WaterPersistence.IsHeld(held, d.StableHash, d.Position) || WaterRemovedDisks.Contains(d.StableHash)) continue;
+                if (keep == null) keep = new List<WaterDisk>();
+                keep.Add(d);
+            }
+            return keep;
+        }
+
+        private static List<WaterDisk> WithKept(IReadOnlyList<WaterDisk> disks, List<WaterDisk> kept)
+        {
+            var all = new List<WaterDisk>(disks.Count + (kept != null ? kept.Count : 0));
+            all.AddRange(disks);
+            if (kept != null) all.AddRange(kept);
+            return all;
+        }
+
+        private static void WriteBoundsWithKept(ZDO zdo, Bounds bounds, List<WaterDisk> kept)
+        {
+            Vector3 min = bounds.min, max = bounds.max;
+            if (kept != null)
+                foreach (var d in kept)
+                {
+                    min.x = Mathf.Min(min.x, d.Position.x - d.Radius); max.x = Mathf.Max(max.x, d.Position.x + d.Radius);
+                    min.z = Mathf.Min(min.z, d.Position.z - d.Radius); max.z = Mathf.Max(max.z, d.Position.z + d.Radius);
+                }
+            WriteBounds(zdo, min, max);
+        }
+
+        // 0.2.1354 (review: permanent disk loss): FindAnchorZdoFor's guard, for an anchor the combiner already remembers.
+        internal static bool MayTakeCombiner(ZDO zdo, WaterMeshCombiner combiner)
+        {
+            var saved = ReadZdoDisks(zdo);
+            if (saved == null || saved.Count == 0) return true;
+            int shared = SharedCount(saved, HashesOf(combiner.WaterDisks));
+            bool may = SameBody(shared, saved.Count, combiner.WaterDisks.Count) && shared * 2 >= saved.Count;
+            if (!may) FiresLogger.LogDebug($"[WaterAnchorRepair] combiner at {combiner.transform.position} ({combiner.WaterDisks.Count} disks) does not write its remembered anchor {zdo.m_uid} ({saved.Count} disks, shares {shared}): under half of that anchor (0.2.1354)");
+            return may;
+        }
+
+        // 0.2.1336: the disk list writer, shared with the direct removal below.
+        private static void WriteDisks(ZDO zdo, IReadOnlyList<WaterDisk> disks)
+        {
             if (disks == null || disks.Count == 0)
             {
                 zdo.Set(s_waterDisksHash, new byte[0]);
@@ -600,6 +849,10 @@ namespace VerdantsAscent.Water.Core
                 pkg.Write((int)disk.LiquidType);
                 pkg.Write((int)disk.CustomLiquidType);
             }
+            // 0.2.1091 (add-only): the disks' tool kinds (river / pond) as a trailing block after the disk list. Older builds read
+            // exactly `count` disks and never reach it.
+            pkg.Write(KindBlockMarker);
+            foreach (var disk in disks) pkg.Write((byte)disk.Kind);
 
             byte[] data = pkg.GetArray();
             byte[] compressed = CompressData(data);
@@ -733,6 +986,7 @@ namespace VerdantsAscent.Water.Core
                 if (rowCount <= 0) continue;
 
                 // Only save segments that we own (can write ZDO)
+                segment.ClaimForServer();   // 0.2.1349: as in TrySaveToZDO
                 if (segment.IsOwner)
                 {
                     segment.SaveSegmentData(rowStart, rowCount, gridWidth, surfaceHeights, terrainHeights);
@@ -840,7 +1094,7 @@ namespace VerdantsAscent.Water.Core
         /// <summary>
         /// Loads the segment ZDOID list from the primary anchor ZDO.
         /// </summary>
-        private List<ZDOID> LoadSegmentIndex(ZDO primaryZdo)
+        private static List<ZDOID> LoadSegmentIndex(ZDO primaryZdo)
         {
             var result = new List<ZDOID>();
 
@@ -851,6 +1105,12 @@ namespace VerdantsAscent.Water.Core
             {
                 var pkg = new ZPackage(data);
                 int count = pkg.ReadInt();
+                const int BytesPerZdoid = 12;   // 0.2.1333: long + uint
+                if (count < 0 || count * (long)BytesPerZdoid > pkg.Size() - pkg.GetPos())
+                {
+                    FatNetGuard.Refuse("water segment index", $"count {count} with {pkg.Size() - pkg.GetPos()} bytes left; that block is skipped");
+                    return result;
+                }
 
                 for (int i = 0; i < count; i++)
                 {
@@ -1002,29 +1262,28 @@ namespace VerdantsAscent.Water.Core
             if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Starting restoration at {combinerPosition} " +
                 $"(anchor at {transform.position}, ZDO {zdo.m_uid}, version={version})");
 
-            // Check if a combiner already exists at this position
-            foreach (var existingCombiner in WaterMeshCombiner.AllCombiners)
+            // Check if a combiner already exists for this anchor (0.2.1349: by its disks, as in Start)
+            var existingCombiner = FindCombinerForAnchor(combinerPosition, out bool staleAnchor);
+            if (staleAnchor)
             {
-                if (existingCombiner == null) continue;
-
-                float dist = Vector3.Distance(existingCombiner.transform.position, combinerPosition);
-                if (dist < 2f)
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Combiner at {combinerPosition} already has anchor. This is STALE - destroying self.");
+                // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): as in Start.
+                if (MayDestroyAsDuplicate("stale at ZDO restore", existingCombiner != null && existingCombiner.Anchor != null ? existingCombiner.Anchor.ZdoDiskCount : 0))
                 {
-                    if (existingCombiner.Anchor != null && existingCombiner.Anchor != this)
-                    {
-                        if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Combiner at {combinerPosition} already has anchor. This is STALE - destroying self.");
-                        DestroyPermanently();
-                        yield break;
-                    }
-
-                    _combiner = existingCombiner;
-                    if (_combiner.Anchor == null)
-                    {
-                        _combiner.Anchor = this;
-                    }
-                    if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Linked to existing combiner at {combinerPosition}");
-                    yield break;
+                    _destroyWhy = $"stale at ZDO restore: combiner at {existingCombiner?.transform.position} has anchor {existingCombiner?.Anchor?._nview?.GetZDO()?.m_uid} and every disk here is in another anchor";
+                    DestroyPermanently();
                 }
+                yield break;
+            }
+            if (existingCombiner != null)
+            {
+                _combiner = existingCombiner;
+                if (_combiner.Anchor == null)
+                {
+                    _combiner.Anchor = this;
+                }
+                if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] RestoreFromZDOAsync: Linked to existing combiner at {combinerPosition}");
+                yield break;
             }
 
             yield return null;
@@ -1036,6 +1295,7 @@ namespace VerdantsAscent.Water.Core
             _combiner = combinerGO.AddComponent<WaterMeshCombiner>();
             _combiner.Anchor = this;
             _combiner.SetRestoredFromPersistence(true);
+            if (_keepCacheGroup >= 0) WaterCombinerCache.MarkCombinerInstantiated(_keepCacheGroup, _combiner);   // 0.2.1331: the same group, not a second one
 
             // Load common properties
             _combiner.LiquidType = (LiquidType)zdo.GetInt(s_liquidTypeHash, 0);
@@ -1236,11 +1496,23 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         private void LoadWaterDisks(ZDO zdo)
         {
+            var disks = ReadZdoDisks(zdo);
+            // Add all successfully loaded disks in batch
+            if (disks != null && disks.Count > 0)
+            {
+                _combiner.AddWaterDisksBatch(disks, skipRegeneration: true);
+                WaterCombinerCache.NoteKinds(disks, "ZDO");   // 0.2.1331
+            }
+        }
+
+        // 0.2.1331: LoadWaterDisks' reader, split so the kinds can be read without adding disks. Null = nothing readable.
+        private static List<WaterDisk> ReadZdoDisks(ZDO zdo)
+        {
             byte[] compressed = zdo.GetByteArray(s_waterDisksHash);
             if (compressed == null || compressed.Length == 0)
             {
                 // This is normal for water bodies that have been mopped away
-                return;
+                return null;
             }
 
             try
@@ -1249,7 +1521,7 @@ namespace VerdantsAscent.Water.Core
                 if (data == null || data.Length == 0)
                 {
                     FiresLogger.LogWarning("[WaterMeshCombinerAnchor] LoadWaterDisks: Decompressed data is empty");
-                    return;
+                    return null;
                 }
 
                 var pkg = new ZPackage(data);
@@ -1262,7 +1534,7 @@ namespace VerdantsAscent.Water.Core
                 if (count < 0 || count > 10000)
                 {
                     FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Invalid disk count {count}, skipping");
-                    return;
+                    return null;
                 }
 
                 int minBytesPerDisk = 28; // 4+12+4+4+4
@@ -1271,7 +1543,7 @@ namespace VerdantsAscent.Water.Core
                 {
                     FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Data too small for {count} disks " +
                                    $"(need {count * minBytesPerDisk} bytes, have {remainingBytes}). Data may be corrupt or from an older version.");
-                    // Don't return - try to read what we can, the loop will catch individual failures
+                    return null;   // 0.2.1333: count vs remaining bytes, a bad block is skipped (was: read on)
                 }
 
                 var disks = new System.Collections.Generic.List<WaterDisk>(count);
@@ -1302,15 +1574,23 @@ namespace VerdantsAscent.Water.Core
                     }
                 }
 
-                // Add all successfully loaded disks in batch
-                if (disks.Count > 0)
+                // 0.2.1091: the trailing kind block, when this anchor was saved by 0.2.1091+ and every disk was read.
+                if (disks.Count == count && pkg.GetPos() + 4 + count <= pkg.Size())
                 {
-                    _combiner.AddWaterDisksBatch(disks, skipRegeneration: true);
+                    try
+                    {
+                        if (pkg.ReadInt() == KindBlockMarker)
+                            for (int i = 0; i < count; i++) disks[i].Kind = WaterCombinerCache.KindOf(pkg.ReadByte());   // 0.2.1331: an unknown value = Unknown
+                    }
+                    catch (Exception kindEx) { FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: kind block unreadable ({kindEx.Message}); kinds left Unknown (inferred)"); }
                 }
+
+                return disks;
             }
             catch (Exception ex)
             {
                 FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] LoadWaterDisks: Failed to load water disks: {ex.Message}");
+                return null;
             }
         }
 
@@ -1320,53 +1600,77 @@ namespace VerdantsAscent.Water.Core
             if (compressed == null || compressed.Length == 0) return;
 
             byte[] data = DecompressData(compressed);
-            var pkg = new ZPackage(data);
+            if (data == null) return;   // 0.2.1332: refused (size cap)
+            // 0.2.1333: a bad block is skipped, never set: the mesh builder can only make MAX_GRID_SIZE a side (WaterMeshCombiner.MeshGen)
+            try
+            {
+                var pkg = new ZPackage(data);
 
-            int gridWidth = pkg.ReadInt();
-            int gridHeight = pkg.ReadInt();
-            float cellSize = pkg.ReadSingle();
-            float settledLevel = pkg.ReadSingle();
-            bool isPondMode = pkg.ReadBool();
+                int gridWidth = pkg.ReadInt();
+                int gridHeight = pkg.ReadInt();
+                float cellSize = pkg.ReadSingle();
+                float settledLevel = pkg.ReadSingle();
+                bool isPondMode = pkg.ReadBool();
 
-            _combiner.SetGridConfiguration(gridWidth, gridHeight, cellSize, settledLevel, isPondMode);
+                if (gridWidth == 0 && gridHeight == 0) return;   // never generated (mopped-away water saves this): nothing to set, no warning
+
+                if (gridWidth < 1 || gridWidth > WaterMeshCombiner.MAX_GRID_SIZE || gridHeight < 1 || gridHeight > WaterMeshCombiner.MAX_GRID_SIZE
+                    || !(cellSize > 0f) || float.IsInfinity(cellSize) || float.IsNaN(settledLevel) || float.IsInfinity(settledLevel))
+                {
+                    FatNetGuard.Refuse("water grid", $"{gridWidth} x {gridHeight}, cell {cellSize}, level {settledLevel}; that block is skipped");
+                    return;
+                }
+                _combiner.SetGridConfiguration(gridWidth, gridHeight, cellSize, settledLevel, isPondMode);
+            }
+            catch (Exception ex) when (ex is EndOfStreamException || ex is ArgumentException || ex is IndexOutOfRangeException)
+            {
+                FatNetGuard.Refuse("water grid", $"unreadable ({ex.Message}); that block is skipped");
+            }
         }
 
         private void LoadSurfaceHeights(ZDO zdo)
         {
-            byte[] compressed = zdo.GetByteArray(s_surfaceHeightsHash);
-            if (compressed == null || compressed.Length == 0) return;
-
-            byte[] data = DecompressData(compressed);
-            var pkg = new ZPackage(data);
-
-            int count = pkg.ReadInt();
-            float[] heights = new float[count];
-
-            for (int i = 0; i < count; i++)
-            {
-                heights[i] = pkg.ReadSingle();
-            }
-
-            _combiner.SetSurfaceHeights(heights);
+            float[] heights = ReadHeightBlock(zdo.GetByteArray(s_surfaceHeightsHash), "water surface heights");
+            if (heights != null) _combiner.SetSurfaceHeights(heights);
         }
 
         private void LoadTerrainHeights(ZDO zdo)
         {
-            byte[] compressed = zdo.GetByteArray(s_terrainHeightsHash);
-            if (compressed == null || compressed.Length == 0) return;
+            float[] heights = ReadHeightBlock(zdo.GetByteArray(s_terrainHeightsHash), "water terrain heights");
+            if (heights != null) _combiner.SetTerrainHeights(heights);
+        }
+
+        // 0.2.1333: the count is checked against the largest grid and against the bytes left BEFORE the array is allocated. Null = skip the block.
+        private static float[] ReadHeightBlock(byte[] compressed, string what)
+        {
+            if (compressed == null || compressed.Length == 0) return null;
 
             byte[] data = DecompressData(compressed);
-            var pkg = new ZPackage(data);
-
-            int count = pkg.ReadInt();
-            float[] heights = new float[count];
-
-            for (int i = 0; i < count; i++)
+            if (data == null) return null;   // 0.2.1332: refused (size cap)
+            try
             {
-                heights[i] = pkg.ReadSingle();
-            }
+                var pkg = new ZPackage(data);
 
-            _combiner.SetTerrainHeights(heights);
+                int count = pkg.ReadInt();
+                long left = pkg.Size() - pkg.GetPos();
+                if (count < 0 || count > WaterMeshCombiner.MAX_GRID_SIZE * WaterMeshCombiner.MAX_GRID_SIZE || count * (long)sizeof(float) > left)
+                {
+                    FatNetGuard.Refuse(what, $"count {count} with {left} bytes left; that block is skipped");
+                    return null;
+                }
+                float[] heights = new float[count];
+
+                for (int i = 0; i < count; i++)
+                {
+                    heights[i] = pkg.ReadSingle();
+                }
+                return heights;
+            }
+            catch (Exception ex) when (ex is EndOfStreamException || ex is ArgumentException || ex is IndexOutOfRangeException)
+            {
+                FatNetGuard.Refuse(what, $"unreadable ({ex.Message}); that block is skipped");
+                return null;
+            }
         }
 
         private void LoadBoundsData(ZDO zdo)
@@ -1374,11 +1678,18 @@ namespace VerdantsAscent.Water.Core
             byte[] data = zdo.GetByteArray(s_boundsDataHash);
             if (data == null || data.Length == 0) return;
 
-            var pkg = new ZPackage(data);
-            Vector3 min = pkg.ReadVector3();
-            Vector3 max = pkg.ReadVector3();
+            try   // 0.2.1333: a short block is skipped (this runs in a coroutine)
+            {
+                var pkg = new ZPackage(data);
+                Vector3 min = pkg.ReadVector3();
+                Vector3 max = pkg.ReadVector3();
 
-            _combiner.SetBoundsData(min, max);
+                _combiner.SetBoundsData(min, max);
+            }
+            catch (Exception ex) when (ex is EndOfStreamException || ex is ArgumentException || ex is IndexOutOfRangeException)
+            {
+                FatNetGuard.Refuse("water bounds", $"unreadable ({ex.Message}); that block is skipped");
+            }
         }
 
         #endregion
@@ -1399,17 +1710,462 @@ namespace VerdantsAscent.Water.Core
             }
         }
 
-        private static byte[] DecompressData(byte[] compressed)
-        {
-            if (compressed == null || compressed.Length == 0) return compressed;
+        // 0.2.1333: the capped inflate moved to FatInflate (null = refused or corrupt; callers skip that block, the water stays as it was).
+        internal static byte[] DecompressData(byte[] compressed) => FatInflate.Gzip(compressed, "water ZDO");
 
-            using (var input = new MemoryStream(compressed))
-            using (var gzip = new GZipStream(input, CompressionMode.Decompress))
-            using (var output = new MemoryStream())
+        #endregion
+
+        #region Binding and direct saves
+
+        // 0.2.1349 (Fire: "i have used v pour at least 3 times ... every time we log back in its broken"). A dedicated server only makes
+        // instances around its own reference position, so nearly every anchor there has no instance and a restored combiner's Anchor is
+        // null whether or not its ZDO exists. Anchors are therefore told apart by the ZDOs and the disks they hold.
+        internal const float BindDistance = 2f;
+
+        internal sealed class AnchorScan { public ZDO Zdo; public Vector3 Real; public List<WaterDisk> Disks; public Bounds Box; }
+
+        private static readonly List<ZDO> s_scanFound = new List<ZDO>();
+
+        // Every anchor ZDO this peer holds. Skips segments and cleared anchors. Inflates each disk list: load time, or once per combiner.
+        internal static List<AnchorScan> ScanAnchors()
+        {
+            var result = new List<AnchorScan>();
+            if (ZDOMan.instance == null) return result;
+            s_scanFound.Clear();
+            int index = 0;
+            while (!ZDOMan.instance.GetAllZDOsWithPrefabIterative(BASE_PREFAB_NAME, s_scanFound, ref index)) { }
+            foreach (var zdo in s_scanFound)
             {
-                gzip.CopyTo(output);
-                return output.ToArray();
+                if (zdo == null || !zdo.IsValid() || !zdo.GetBool(s_isAnchorHash, false) || zdo.GetBool(WaterSegmentAnchor.s_isSegmentHash, false)) continue;
+                var scan = new AnchorScan { Zdo = zdo, Real = zdo.GetVec3(s_realPositionHash, zdo.GetPosition()), Disks = ReadZdoDisks(zdo) };
+                scan.Box = BoxOf(scan.Disks, scan.Real);
+                result.Add(scan);
             }
+            s_scanFound.Clear();
+            return result;
+        }
+
+        private static Bounds BoxOf(IReadOnlyList<WaterDisk> disks, Vector3 fallback)
+        {
+            var box = new Bounds(fallback, Vector3.zero);
+            if (disks == null) return box;
+            bool first = true;
+            foreach (var d in disks)
+            {
+                if (d == null) continue;
+                var one = new Bounds(new Vector3(d.Position.x, 0f, d.Position.z), new Vector3(d.Radius * 2f, 0f, d.Radius * 2f));
+                if (first) { box = one; first = false; } else box.Encapsulate(one);
+            }
+            return box;
+        }
+
+        internal static bool OverlapXZ(Vector3 minA, Vector3 maxA, Vector3 minB, Vector3 maxB, float margin)
+            => minA.x <= maxB.x + margin && maxA.x >= minB.x - margin && minA.z <= maxB.z + margin && maxA.z >= minB.z - margin;
+
+        // A v1/v2 cache group's hash is float-rounded, so each hash matches in both forms.
+        internal static HashSet<int> HashesOf(IReadOnlyList<WaterDisk> disks)
+        {
+            var set = new HashSet<int>();
+            if (disks == null) return set;
+            foreach (var d in disks)
+                if (d != null) { set.Add(d.StableHash); set.Add((int)(float)d.StableHash); }
+            return set;
+        }
+
+        internal static int SharedCount(IReadOnlyList<WaterDisk> disks, HashSet<int> hashes)
+        {
+            int n = 0;
+            if (disks == null) return 0;
+            foreach (var d in disks)
+                if (d != null && (hashes.Contains(d.StableHash) || hashes.Contains((int)(float)d.StableHash))) n++;
+            return n;
+        }
+
+        // One stray shared disk (hash 1223663459 sits in groups 198 and 386) does not make two bodies one: at least half of the smaller list must match.
+        internal static bool SameBody(int shared, int countA, int countB) => shared > 0 && shared * 2 >= Mathf.Min(countA, countB);
+
+        // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): an anchor binds to a combiner only when they share half of the LARGER list. Under
+        // SameBody a 7-disk anchor bound a 55-disk combiner, and the 55-disk anchor that came next read as stale and was destroyed (group 172; the same at x109 z1132, group 377: 25 / 43).
+        internal static bool BindBody(int shared, int countA, int countB) => shared > 0 && shared * 2 >= Mathf.Max(countA, countB);
+
+        private int ZdoDiskCount
+        {
+            get
+            {
+                var zdo = _nview != null && _nview.IsValid() ? _nview.GetZDO() : null;
+                var list = zdo != null ? ReadZdoDisks(zdo) : null;
+                return list != null ? list.Count : 0;
+            }
+        }
+
+        private string _destroyWhy;
+        private static readonly HashSet<ZDOID> s_destroySkipWarned = new HashSet<ZDOID>();
+
+        // 0.2.1352: false = this anchor holds disks no other anchor this peer can see holds, so destroying it would lose them from every client. A peer only sees the ZDOs of its
+        // own zones, so a client can read a true duplicate as sole holder: it then keeps it, the safe way round. Inflates every anchor, so it is asked only of a destroy candidate.
+        private bool MayDestroyAsDuplicate(string why, int otherCount)
+        {
+            // 0.2.1354 (review: two clients each destroying the other's duplicate): only the server (a host counts) sees every anchor and destroys one; a client leaves it unlinked.
+            if (ZNet.instance == null || !ZNet.instance.IsServer())
+            {
+                FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {RealWaterPosition} not destroyed on this client ({why}): only the server destroys anchors (0.2.1354)");
+                return false;
+            }
+            var zdo = _nview != null && _nview.IsValid() ? _nview.GetZDO() : null;
+            var mine = zdo != null ? ReadZdoDisks(zdo) : null;
+            if (mine == null || mine.Count == 0) return true;
+            var elsewhere = new Dictionary<int, List<Vector3>>();
+            foreach (var scan in ScanAnchors())
+            {
+                if (scan.Zdo.m_uid == zdo.m_uid || scan.Disks == null) continue;
+                foreach (var d in scan.Disks) WaterPersistence.AddHeld(elsewhere, d.StableHash, d.Position);
+            }
+            int onlyHere = 0;
+            foreach (var d in mine)
+                if (!WaterRemovedDisks.Contains(d.StableHash) && !WaterPersistence.IsHeld(elsewhere, d.StableHash, d.Position)) onlyHere++;
+            if (onlyHere == 0) return true;
+            if (s_destroySkipWarned.Add(zdo.m_uid))
+                FiresLogger.LogWarning($"[WaterMeshCombinerAnchor] anchor {zdo.m_uid} at {RealWaterPosition} not destroyed ({why}): it holds {mine.Count} disks, {onlyHere} of them in no other anchor; the anchor it was matched against holds {otherCount}");
+            return false;
+        }
+
+        private bool IsDuplicateOf(WaterMeshCombinerAnchor other)
+        {
+            var mine = ReadZdoDisks(_nview.GetZDO());
+            var otherZdo = other._nview != null && other._nview.IsValid() ? other._nview.GetZDO() : null;
+            var theirs = otherZdo != null ? ReadZdoDisks(otherZdo) : null;
+            if (mine == null || mine.Count == 0 || theirs == null || theirs.Count == 0) return true;   // no disks to compare: position decides, as before
+            bool dup = SameBody(SharedCount(mine, HashesOf(theirs)), mine.Count, theirs.Count);
+            if (!dup) FiresLogger.LogDebug($"[WaterAnchorRepair] anchors at {RealWaterPosition} hold different disks ({mine.Count} / {theirs.Count}): two water bodies, both kept");
+            return dup;
+        }
+
+        // The combiner this anchor stands for. stale = a combiner at this spot already has another anchor holding all of this one's disks (or this one has none to tell by).
+        private WaterMeshCombiner FindCombinerForAnchor(Vector3 myPos, out bool stale)
+        {
+            stale = false;
+            var mine = ReadZdoDisks(_nview.GetZDO());
+            if (mine == null || mine.Count == 0)
+            {
+                foreach (var c in WaterMeshCombiner.AllCombiners)
+                {
+                    if (c == null || Vector3.Distance(c.transform.position, myPos) >= BindDistance) continue;
+                    stale = c.Anchor != null && c.Anchor != this;
+                    return c;
+                }
+                return null;
+            }
+
+            var hashes = HashesOf(mine);
+            var box = BoxOf(mine, myPos);
+            WaterMeshCombiner best = null, coveredBy = null, refused = null;
+            int bestShared = 0, refusedShared = 0;
+            foreach (var c in WaterMeshCombiner.AllCombiners)
+            {
+                if (c == null) continue;
+                if (c.WaterDisks.Count == 0)
+                {
+                    if (best == null && Vector3.Distance(c.transform.position, myPos) < BindDistance && (c.Anchor == null || c.Anchor == this)) best = c;   // waiting for its disks
+                    continue;
+                }
+                var b = c.GetCombinedBounds();
+                if (!OverlapXZ(box.min, box.max, b.min, b.max, BindDistance)) continue;
+                int shared = SharedCount(c.WaterDisks, hashes);
+                // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): half of the larger list.
+                if (shared > bestShared && BindBody(shared, mine.Count, c.WaterDisks.Count)) { best = c; bestShared = shared; }
+                else if (shared > refusedShared) { refused = c; refusedShared = shared; }
+                // All of this anchor's disks are in a combiner that has its own anchor: still the stale case, whatever the sizes (MayDestroyAsDuplicate decides what happens to it).
+                if (shared == mine.Count && c.Anchor != null && c.Anchor != this && Vector3.Distance(c.transform.position, myPos) < BindDistance) coveredBy = c;
+            }
+            if (best == null)
+            {
+                if (coveredBy != null) { stale = true; return coveredBy; }
+                if (refused != null) FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {myPos} ({mine.Count} disks) not bound to combiner at {refused.transform.position} ({refused.WaterDisks.Count} disks): shares {refusedShared}, under half of the larger list");
+                return null;
+            }
+            if (best.Anchor != null && best.Anchor != this)
+            {
+                if (bestShared == mine.Count && Vector3.Distance(best.transform.position, myPos) < BindDistance) { stale = true; return best; }
+                FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {myPos} ({mine.Count} disks) shares {bestShared} with a combiner that has its own anchor: restores on its own");
+                return null;
+            }
+            FiresLogger.LogDebug($"[WaterAnchorRepair] anchor at {myPos} bound to combiner at {best.transform.position} by {bestShared}/{mine.Count} disk(s)");
+            return best;
+        }
+
+        // Server: the ZDO of this combiner's anchor when it has no instance here. Null = it has none: only then may a new one be made.
+        internal static ZDO FindAnchorZdoFor(WaterMeshCombiner combiner)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var disks = combiner.WaterDisks;
+            var hashes = HashesOf(disks);
+            var cb = combiner.GetCombinedBounds();
+            ZDO best = null;
+            int bestShared = 0, scanned = 0;
+            foreach (var scan in ScanAnchors())
+            {
+                scanned++;
+                if (scan.Disks == null || scan.Disks.Count == 0)
+                {
+                    float dx = scan.Real.x - combiner.transform.position.x, dz = scan.Real.z - combiner.transform.position.z;
+                    if (best == null && dx * dx + dz * dz < BindDistance * BindDistance && Mathf.Abs(scan.Real.y - combiner.transform.position.y) <= PositionKeyHeightBand) best = scan.Zdo;
+                    continue;
+                }
+                if (!OverlapXZ(scan.Box.min, scan.Box.max, cb.min, cb.max, BindDistance)) continue;
+                int shared = SharedCount(scan.Disks, hashes);
+                // 0.2.1352: a small overlapping combiner's stroke must not overwrite a bigger anchor with its short list.
+                if (shared > bestShared && SameBody(shared, scan.Disks.Count, disks.Count) && shared * 2 >= scan.Disks.Count) { best = scan.Zdo; bestShared = shared; }
+            }
+            FiresLogger.LogDebug($"[WaterAnchorRepair] anchor scan for combiner at {combiner.transform.position}: {(best != null ? $"found {best.m_uid} sharing {bestShared} disk(s)" : "none")} of {scanned} anchors, {sw.ElapsedMilliseconds} ms");
+            return best;
+        }
+
+        // Server: a stroke's disks go into the anchor ZDO with no instance (as RemoveDisksDirect). Heights are blanked as there: peers rebuild from the disks.
+        internal static long SaveCombinerDirect(ZDO zdo, WaterMeshCombiner combiner, out int keptCount)
+        {
+            long me = ZDOMan.GetSessionID();
+            var kept = ZdoDisksToKeep(zdo, combiner.WaterDisks);   // 0.2.1354 (review: permanent disk loss)
+            keptCount = kept != null ? kept.Count : 0;
+            var instance = ZNetScene.instance != null ? ZNetScene.instance.FindInstance(zdo) : null;
+            zdo.SetOwner(me);
+            long ticks = Math.Max(DateTime.UtcNow.Ticks, zdo.GetLong(s_savedTicksHash, 0L) + 1L);
+            zdo.Set(s_versionHash, CURRENT_VERSION);
+            zdo.Set(s_savedTicksHash, ticks);
+            zdo.Set(s_realPositionHash, combiner.transform.position);
+            zdo.Set(s_liquidTypeHash, (int)combiner.LiquidType);
+            zdo.Set(s_customLiquidTypeHash, (int)combiner.SavedCustomLiquidType);
+            zdo.Set(s_waveIntensityHash, combiner.WaveIntensity);
+            zdo.Set(s_isGelledHash, combiner.IsGelled);
+            WriteDisks(zdo, WithKept(combiner.WaterDisks, kept));
+            WriteGrid(zdo, combiner.GridWidth, combiner.GridHeight, combiner.CellSize, combiner.SettledWaterLevel, combiner.IsPondMode);
+            // Removals use these bounds to find the anchor, so they cover every disk it holds. A gelled body keeps its grid's bounds.
+            WriteBoundsWithKept(zdo, combiner.GetCombinedBounds(), combiner.IsGelled ? null : kept);
+            if (!combiner.IsGelled)
+            {
+                DropSegments(zdo, me);
+                zdo.Set(s_surfaceHeightsHash, new byte[0]);
+                zdo.Set(s_terrainHeightsHash, new byte[0]);
+            }
+            if (instance == null) zdo.SetOwner(0L);   // vanilla hands it to whoever comes near
+            return ticks;
+        }
+
+        // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"). Server, world load: cached disks no anchor holds join this group's anchor ZDO, as
+        // SaveCombinerDirect does for a stroke. Heights are blanked (a gelled body's grid stays), so each peer builds from the disks. Returns the new stamp.
+        internal static long WriteBackDisks(AnchorScan scan, List<WaterDisk> added, WaterCombinerCache.WaterCombinerGroupData group)
+        {
+            var zdo = scan.Zdo;
+            long me = ZDOMan.GetSessionID();
+            var instance = ZNetScene.instance != null ? ZNetScene.instance.FindInstance(zdo) : null;
+            zdo.SetOwner(me);
+            long ticks = Math.Max(Math.Max(DateTime.UtcNow.Ticks, zdo.GetLong(s_savedTicksHash, 0L) + 1L), group.AnchorSavedTicks + 1L);
+            if (scan.Disks == null || scan.Disks.Count == 0)
+            {
+                // An anchor with no disks readable has nothing of its own to keep.
+                scan.Disks = new List<WaterDisk>(added.Count);
+                zdo.Set(s_isAnchorHash, true);
+                zdo.Set(s_liquidTypeHash, group.LiquidType);
+                zdo.Set(s_customLiquidTypeHash, group.CustomLiquidType);
+                zdo.Set(s_waveIntensityHash, group.WaveIntensity);
+            }
+            scan.Disks.AddRange(added);
+            scan.Box = BoxOf(scan.Disks, scan.Real);
+            zdo.Set(s_versionHash, CURRENT_VERSION);
+            zdo.Set(s_savedTicksHash, ticks);
+            zdo.Set(s_realPositionHash, group.CenterPosition);
+            WriteDisks(zdo, scan.Disks);
+            if (!zdo.GetBool(s_isGelledHash, false) && !group.IsGelled)
+            {
+                DropSegments(zdo, me);
+                zdo.Set(s_surfaceHeightsHash, new byte[0]);
+                zdo.Set(s_terrainHeightsHash, new byte[0]);
+                WriteGrid(zdo, group.GridWidth, group.GridHeight, group.CellSize, group.SettledWaterLevel, group.IsPondMode);
+            }
+            // Removals use these bounds to find the anchor, so they must cover every disk it now holds.
+            WriteBounds(zdo,
+                new Vector3(Mathf.Min(scan.Box.min.x, group.BoundsMin.x), group.BoundsMin.y, Mathf.Min(scan.Box.min.z, group.BoundsMin.z)),
+                new Vector3(Mathf.Max(scan.Box.max.x, group.BoundsMax.x), group.BoundsMax.y, Mathf.Max(scan.Box.max.z, group.BoundsMax.z)));
+            if (instance == null) zdo.SetOwner(0L);   // vanilla hands it to whoever comes near
+            return ticks;
+        }
+
+        // Server, world load: a new anchor ZDO for a saved group that has none. No instance: the ZDO waits in its sector like any
+        // anchor in an unloaded zone and spawns for whoever comes near. No heights, so each peer builds from the disks.
+        internal static ZDO CreateAnchorZdoForGroup(WaterCombinerCache.WaterCombinerGroupData group, List<WaterDisk> disks, long ticks)
+        {
+            if (ZNetScene.instance == null || ZDOMan.instance == null) return null;
+            var prefab = FindPrefab();
+            var view = prefab != null ? prefab.GetComponent<ZNetView>() : null;
+            if (view == null) return null;
+            if (!view.m_persistent)
+            {
+                FiresLogger.LogWarning($"[WaterAnchorRepair] the {prefab.name} prefab is not persistent: no anchor made for group {group.GroupId}");
+                return null;
+            }
+            Vector3 c = group.CenterPosition;
+            int prefabHash = prefab.name.GetStableHashCode();
+            var zdo = ZDOMan.instance.CreateNewZDO(new Vector3(c.x, ANCHOR_HIDDEN_Y, c.z), prefabHash);
+            zdo.Persistent = view.m_persistent;
+            zdo.Type = view.m_type;
+            zdo.Distant = view.m_distant;
+            zdo.SetPrefab(prefabHash);
+            zdo.SetRotation(Quaternion.identity);
+            zdo.Set(s_isAnchorHash, true);
+            zdo.Set(s_versionHash, CURRENT_VERSION);
+            zdo.Set(s_savedTicksHash, ticks);
+            zdo.Set(s_realPositionHash, c);
+            zdo.Set(s_liquidTypeHash, group.LiquidType);
+            zdo.Set(s_customLiquidTypeHash, group.CustomLiquidType);
+            zdo.Set(s_waveIntensityHash, group.WaveIntensity);
+            zdo.Set(s_isGelledHash, group.IsGelled);
+            WriteDisks(zdo, disks);
+            WriteGrid(zdo, group.GridWidth, group.GridHeight, group.CellSize, group.SettledWaterLevel, group.IsPondMode);
+            WriteBounds(zdo, group.BoundsMin, group.BoundsMax);
+            zdo.Set(s_segmentCountHash, 0);
+            zdo.Set(s_segmentZdoidsHash, new byte[0]);
+            zdo.SetOwner(0L);   // vanilla hands it to whoever comes near
+            return zdo;
+        }
+
+        private static void WriteGrid(ZDO zdo, int width, int height, float cell, float settled, bool pond)
+        {
+            var pkg = new ZPackage();
+            pkg.Write(width);
+            pkg.Write(height);
+            pkg.Write(cell);
+            pkg.Write(settled);
+            pkg.Write(pond);
+            zdo.Set(s_gridDataHash, CompressData(pkg.GetArray()));
+        }
+
+        private static void WriteBounds(ZDO zdo, Vector3 min, Vector3 max)
+        {
+            var pkg = new ZPackage();
+            pkg.Write(min);
+            pkg.Write(max);
+            zdo.Set(s_boundsDataHash, pkg.GetArray());
+        }
+
+        // fat_river_check: what this peer holds around a spot, so a relog can be proven. A client holds the ZDOs of the zones around it, a server all of them.
+        internal static void DescribeNear(Vector3 at, float radius, System.Text.StringBuilder sb)
+        {
+            int anchors = 0, anchorDisks = 0, reaching = 0, combiners = 0;
+            var held = new HashSet<int>();
+            foreach (var c in WaterMeshCombiner.AllCombiners)
+            {
+                if (c == null) continue;
+                var b = c.GetCombinedBounds();
+                if (!OverlapXZ(new Vector3(at.x - radius, 0f, at.z - radius), new Vector3(at.x + radius, 0f, at.z + radius), b.min, b.max, 0f)) continue;
+                combiners++;
+                foreach (var d in c.WaterDisks)
+                {
+                    if (d == null) continue;
+                    held.Add(d.StableHash);
+                    held.Add((int)(float)d.StableHash);
+                    float dx = d.Position.x - at.x, dz = d.Position.z - at.z;
+                    if (dx * dx + dz * dz <= radius * radius) reaching++;
+                }
+            }
+            int missing = 0;
+            foreach (var scan in ScanAnchors())
+            {
+                float rx = scan.Real.x - at.x, rz = scan.Real.z - at.z;
+                bool near = rx * rx + rz * rz <= radius * radius;
+                if (scan.Disks != null)
+                    foreach (var d in scan.Disks)
+                    {
+                        float dx = d.Position.x - at.x, dz = d.Position.z - at.z;
+                        if (dx * dx + dz * dz > radius * radius) continue;
+                        near = true;
+                        anchorDisks++;
+                        if (!held.Contains(d.StableHash) && !held.Contains((int)(float)d.StableHash)) missing++;
+                    }
+                if (near) anchors++;
+            }
+            sb.Append($"\n  water anchors: {anchors} anchor ZDO(s) near holding {anchorDisks} disk(s) here; {combiners} combiner(s) near drawing {reaching} disk(s) here; {missing} anchor disk(s) NOT in a combiner on this peer");
+        }
+
+        #endregion
+
+        #region Direct Removal
+
+        // 0.2.1336: takes disks out of anchor ZDOs with or without an instance. Server only. Anchors are found by prefab (the disk's
+        // zone is not enough: the anchor sits at its combiner's position, the disk anywhere in its bounds, which the ZDO holds uncompressed,
+        // so only anchors that can hold a disk are inflated). Non-gelled heights are blanked, since they still draw the removed disk; the
+        // next peer to load it rebuilds from the disks. A gelled body's grid is authoritative and stays, as on the loaded path.
+        internal static void RemoveDisksDirect(Dictionary<int, Vector3?> hashes, out int anchors, out int disks, out int destroyed)
+        {
+            anchors = disks = destroyed = 0;
+            if (ZDOMan.instance == null || ZNet.instance == null || !ZNet.instance.IsServer() || hashes.Count == 0) return;
+            bool anyUnknown = false;
+            foreach (var at in hashes.Values) if (!at.HasValue) { anyUnknown = true; break; }
+
+            var found = new List<ZDO>();
+            int index = 0;
+            while (!ZDOMan.instance.GetAllZDOsWithPrefabIterative(BASE_PREFAB_NAME, found, ref index)) { }
+            long me = ZDOMan.GetSessionID();
+            foreach (var zdo in found)
+            {
+                if (zdo == null || !zdo.IsValid() || !zdo.GetBool(s_isAnchorHash, false)) continue;
+                if (!anyUnknown && !BoundsCanHold(zdo, hashes)) continue;
+                var list = ReadZdoDisks(zdo);
+                if (list == null) continue;
+                int taken = list.RemoveAll(d => hashes.ContainsKey(d.StableHash));
+                if (taken == 0) continue;
+                anchors++;
+                disks += taken;
+                var instance = ZNetScene.instance != null ? ZNetScene.instance.FindInstance(zdo) : null;
+                zdo.SetOwner(me);
+                bool gelled = zdo.GetBool(s_isGelledHash, false);
+                if (list.Count == 0 || !gelled) DropSegments(zdo, me);
+                if (list.Count == 0)
+                {
+                    destroyed++;
+                    if (instance != null) ZNetScene.instance.Destroy(instance.gameObject);
+                    else ZDOMan.instance.DestroyZDO(zdo);
+                    continue;
+                }
+                WriteDisks(zdo, list);
+                if (!gelled)
+                {
+                    zdo.Set(s_surfaceHeightsHash, new byte[0]);
+                    zdo.Set(s_terrainHeightsHash, new byte[0]);
+                }
+                // Past the old stamp even if this machine's clock is behind the last writer's: "newer" compares this anchor's own stamps.
+                zdo.Set(s_savedTicksHash, Math.Max(DateTime.UtcNow.Ticks, zdo.GetLong(s_savedTicksHash, 0L) + 1L));
+                if (instance == null) zdo.SetOwner(0L);   // vanilla hands it to whoever comes near
+            }
+        }
+
+        private static bool BoundsCanHold(ZDO zdo, Dictionary<int, Vector3?> hashes)
+        {
+            byte[] raw = zdo.GetByteArray(s_boundsDataHash);
+            if (raw == null || raw.Length < 24) return true;   // no bounds: it has to be opened
+            var pkg = new ZPackage(raw);
+            Vector3 min = pkg.ReadVector3(), max = pkg.ReadVector3();
+            const float Margin = 1f;
+            foreach (var at in hashes.Values)
+            {
+                Vector3 p = at.Value;
+                if (p.x >= min.x - Margin && p.x <= max.x + Margin && p.z >= min.z - Margin && p.z <= max.z + Margin) return true;
+            }
+            return false;
+        }
+
+        private static void DropSegments(ZDO zdo, long me)
+        {
+            foreach (var id in LoadSegmentIndex(zdo))
+            {
+                if (id.IsNone()) continue;
+                var seg = ZDOMan.instance.GetZDO(id);
+                if (seg == null) continue;
+                var instance = ZNetScene.instance != null ? ZNetScene.instance.FindInstance(seg) : null;
+                seg.SetOwner(me);
+                if (instance != null) ZNetScene.instance.Destroy(instance.gameObject);
+                else ZDOMan.instance.DestroyZDO(seg);
+            }
+            zdo.Set(s_segmentCountHash, 0);
+            zdo.Set(s_segmentZdoidsHash, new byte[0]);
         }
 
         #endregion
@@ -1424,7 +2180,8 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void DestroyPermanently()
         {
-            if (WaterMeshCombiner.s_verboseLogging) FiresLogger.LogInfo($"[WaterMeshCombinerAnchor] Permanently destroying anchor at {transform.position}");
+            // 0.2.1352 (Fire: "theres basically no river mesh that doesnt end up broken on relog"): every destroy says what and why (was verbose-only).
+            if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[WaterMeshCombinerAnchor] permanently destroying anchor {_nview?.GetZDO()?.m_uid} at {RealWaterPosition} holding {ZdoDiskCount} disks: {_destroyWhy ?? "asked by its combiner or a clear command"}");
 
             // Destroy all segment anchors first
             DestroyAllSegments();

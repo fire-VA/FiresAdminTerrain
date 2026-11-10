@@ -143,7 +143,7 @@ namespace VerdantsAscent.Terrain.BcImport
             if (net == null || peer?.m_rpc == null) return;
             if (net.IsServer())
             {
-                peer.m_rpc.Register<ZPackage>(RpcHave, (rpc, pkg) => s_clientHolds[rpc] = ReadIds(pkg));
+                peer.m_rpc.Register<ZPackage>(RpcHave, (rpc, pkg) => s_clientHolds[rpc] = ReadIds(pkg, rpc));
                 peer.m_rpc.Register<bool>(RpcBakeRead, (rpc, done) => s_bakeReads[rpc] = done);
                 peer.m_rpc.Register<ZPackage>(PeerInfoRpc, (rpc, pkg) => HoldPeerInfoOrAdmit(net, rpc, pkg));
                 return;
@@ -176,8 +176,23 @@ namespace VerdantsAscent.Terrain.BcImport
                 return;
             }
             var clock = System.Diagnostics.Stopwatch.StartNew();
+            BiomeGridSync.LastLoadMs = BiomeGridSync.LastSectorsMs = -1;   // 0.2.1317: FAT's own share of this PeerInfo (below)
+            Voxel.BakePreload.LastTakeMs = -1;
             RunPeerInfo(net, rpc, peerInfo);
             long readMs = Voxel.BakePreload.AdoptedReadMs;
+            // 0.2.1317 ([BcImport] PeerInfo ~580 ms in the biome grid sectors): split the clock so FAT's own ms shows apart from
+            // vanilla's and other mods' PeerInfo work, and say why the bake read-ahead was not adopted. Diagnostic only, no
+            // behaviour change; the work stays on the main thread in this build.
+            if (FiresLogger.DebugEnabled)
+            {
+                long total = clock.ElapsedMilliseconds, load = BiomeGridSync.LastLoadMs, sectors = BiomeGridSync.LastSectorsMs, take = Voxel.BakePreload.LastTakeMs;
+                long fat = Math.Max(0, load) + Math.Max(0, sectors) + Math.Max(0, take);
+                FiresLogger.LogDebug($"[BcImport] join PeerInfo split: total {total:N0} ms = FAT biome grid load {(load >= 0 ? load.ToString("N0") + " ms" : "not run")}"
+                    + $" + biome grid sectors {(sectors >= 0 ? sectors.ToString("N0") + " ms (GenerateSectors on the server's grid)" : "not run")}"
+                    + $" + bake take {(take >= 0 ? take.ToString("N0") + " ms (TakeFor incl. any wait)" : "not called")}"
+                    + $" (FAT measured {fat:N0} ms) + the rest {Math.Max(0, total - fat):N0} ms (vanilla PeerInfo, other mods, FAT world-gen init outside these parts)"
+                    + (readMs >= 0 ? "; preload adopted" : $"; preload NOT adopted because {Voxel.BakePreload.NotAdoptedWhy}") + " (0.2.1317)");
+            }
             FiresLogger.LogInfo(readMs >= 0
                 ? $"[BcImport] join: adopted the preloaded world in {clock.ElapsedMilliseconds:N0} ms (the server's PeerInfo on the "
                     + $"main thread; the terrain cache was read on a worker in {readMs:N0} ms while the loading screen ran)."
@@ -192,6 +207,9 @@ namespace VerdantsAscent.Terrain.BcImport
         private static void ReadBakeAhead(ServerAnswer answer, string id)
         {
             if (answer == ServerAnswer.Data && ReadsBakeAhead) Voxel.BakePreload.Start(s_answerPaths[(int)Item.Bake] ?? CachePath(id, Item.Bake));
+            else Voxel.BakePreload.NotAdoptedWhy = answer != ServerAnswer.Data   // 0.2.1317: why no read-ahead started
+                ? $"no read-ahead started: the server's bake answer was {answer}, not Data"
+                : "no read-ahead started: \"Bake read-ahead\" is off";
             ZRpc server = s_server;
             if (server != null && ZNet.instance != null) ZNet.instance.StartCoroutine(ReportBakeReadWhenDone(server));
         }
@@ -644,8 +662,17 @@ namespace VerdantsAscent.Terrain.BcImport
             else JoinSyncScreen.Clear();
         }
 
+        // 0.2.1336: ids name files in the cache folder, and what the server sends is not trusted with a path: exactly the Hex form.
+        private static bool IsId(string id)
+        {
+            if (id == null || id.Length != IdHexChars) return false;
+            foreach (char c in id) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            return true;
+        }
+
         private static void OnCached(Item item, string id)
         {
+            if (!IsId(id)) { FatNetGuard.Refuse("join sync cached", $"bad id for {NameOf(item)}"); SetAnswer(item, ServerAnswer.Failed, null); ShowWhatLoadsNext(); return; }
             string path = CachePath(id, item);
             // The id may be this game's OWN world cache (a firesgen_*.bin it generated or loaded before),
             // offered in the held list by BcLocalCaches. It is used where it lies: no download, nothing written to bcsync.
@@ -674,6 +701,7 @@ namespace VerdantsAscent.Terrain.BcImport
         private static void OnStart(Item item, string id, int length)
         {
             ClosePart(true);
+            if (!IsId(id) || length <= 0) { FatNetGuard.Refuse("join sync start", $"bad id or length {length} for {NameOf(item)}"); SetAnswer(item, ServerAnswer.Failed, null); ShowWhatLoadsNext(); return; }
             Directory.CreateDirectory(CacheFolder);
             s_receivingItem = item;
             s_receivingId = id;
@@ -718,6 +746,15 @@ namespace VerdantsAscent.Terrain.BcImport
                 s_receiveFrames++;
             }
             byte[] bytes = pkg.GetArray();
+            if (bytes.Length > s_expected - s_received)   // 0.2.1336: never past the announced size
+            {
+                FatNetGuard.Refuse("join sync packet", $"{bytes.Length} bytes past {s_received} of {s_expected}");
+                Item over = s_receivingItem;
+                ClosePart(true);
+                SetAnswer(over, ServerAnswer.Failed, null);
+                ShowWhatLoadsNext();
+                return;
+            }
             s_part.Write(bytes, 0, bytes.Length);
             s_partHash.TransformBlock(bytes, 0, bytes.Length, null, 0);
             s_received += bytes.Length;
@@ -726,7 +763,7 @@ namespace VerdantsAscent.Terrain.BcImport
                     Time.realtimeSinceStartup - s_receiveStartedAt);
             if (s_expected > 0 && s_received * ProgressSteps >= s_nextProgressStep * (long)s_expected && s_received < s_expected)
             {
-                FiresLogger.LogInfo($"[BcImport] join sync: {s_received / BytesPerMegabyte:0.#} of {s_expected / BytesPerMegabyte:0.#} MB.");
+                FiresLogger.LogDebug($"[BcImport] join sync: {s_received / BytesPerMegabyte:0.#} of {s_expected / BytesPerMegabyte:0.#} MB.");
                 s_nextProgressStep = (int)((long)s_received * ProgressSteps / s_expected) + 1;
             }
             if (s_received >= s_expected) FinishPart();
@@ -791,11 +828,25 @@ namespace VerdantsAscent.Terrain.BcImport
             return pkg;
         }
 
-        private static HashSet<string> ReadIds(ZPackage pkg)
+        // 0.2.1336: from a client: the count against the package (a string takes at least a byte); a malformed list = empty (that client is sent everything).
+        private static HashSet<string> ReadIds(ZPackage pkg, ZRpc rpc)
         {
             var ids = new HashSet<string>();
-            int count = pkg.ReadInt();
-            for (int i = 0; i < count; i++) ids.Add(pkg.ReadString());
+            try
+            {
+                int count = pkg.ReadInt();
+                if (count < 0 || count > pkg.Size() - pkg.GetPos())
+                {
+                    FatNetGuard.Refuse("join sync held list", $"count {count} from {Describe(rpc)}");
+                    return ids;
+                }
+                for (int i = 0; i < count; i++) ids.Add(pkg.ReadString());
+            }
+            catch (Exception ex) when (ex is EndOfStreamException || ex is ArgumentException || ex is IndexOutOfRangeException)
+            {
+                FatNetGuard.Refuse("join sync held list", $"unreadable from {Describe(rpc)}: {ex.Message}");
+                ids.Clear();
+            }
             return ids;
         }
 

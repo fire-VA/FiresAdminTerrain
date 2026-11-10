@@ -96,6 +96,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float s_nextMaintain;
         private static (float, float, float, float) s_builtWith = (-1f, -1f, -1f, -1f);
         private static bool s_failedDraw;
+        private const float FloorPebbleCap = 0.08f;   // about one small rock per 12 m2 of cave floor
+        private static double s_pebblesBefore; private static int s_pebblesAfter; private static float s_nextPebbleLog;
 
         private static readonly (Heightmap.Biome Biome, string Key, string Layers)[] Defaults =
         {
@@ -179,6 +181,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     int count = batch.Matrices.Count;
                     try
                     {
+                        VerdantsAscent.Terrain.FatPerfCensus.InstancedCalls += (count + MaxInstancesPerDraw - 1) / MaxInstancesPerDraw;
                         for (int start = 0; start < count; start += MaxInstancesPerDraw)
                             Graphics.RenderMeshInstanced(in rp, batch.Part.Mesh, batch.Part.SubMesh, batch.Matrices,
                                 Mathf.Min(MaxInstancesPerDraw, count - start), start);
@@ -261,6 +264,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         }
                     }
 
+            if (s_pebblesAfter > 0 && Time.unscaledTime >= s_nextPebbleLog)
+            {
+                s_nextPebbleLog = Time.unscaledTime + 30f;
+                Vector2s pz = ZoneSystem.GetZone(origin);
+                FiresLogger.LogDebug($"[FiresVoxel] cave pebbles near zone ({pz.x},{pz.y}): {s_pebblesBefore:0} before the cap -> {s_pebblesAfter} placed (cap {FloorPebbleCap} per m2, 0.2.1079)");
+                s_pebblesBefore = 0; s_pebblesAfter = 0;
+            }
             if (clutter.Count > 0)
             {
                 foreach (var batch in s_batchByPart.Values) clutter.Batches.Add(batch);
@@ -284,8 +294,16 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var layer = layers[l];
                 if (layer.On != on) continue;
-                float expected = layer.PerSquareMetre * density * areaShare;
+                // 0.2.1079 (Fire: "we dont need so many tiny rocks in caves"): floor pebbles were 2.0-2.6 per m2 (a carpet); capped
+                // to a sparse scatter of FloorPebbleCap per m2 whatever the cfg says. Bones, roots and ice keep their own rates.
+                float perM2 = on == CaveSurface.Floor && layer.PerSquareMetre > FloorPebbleCap ? FloorPebbleCap : layer.PerSquareMetre;
+                float expected = perM2 * density * areaShare;
                 int count = Mathf.FloorToInt(expected) + (rng.Next() < expected - Mathf.Floor(expected) ? 1 : 0);
+                if (on == CaveSurface.Floor && layer.PerSquareMetre > FloorPebbleCap)
+                {
+                    s_pebblesBefore += layer.PerSquareMetre * density * areaShare;
+                    s_pebblesAfter += count;
+                }
                 for (int i = 0; i < count; i++)
                 {
                     var start = local + tangent * (rng.Next() - 0.5f) + bitangent * (rng.Next() - 0.5f);
@@ -462,7 +480,7 @@ namespace VerdantsAscent.Terrain.Voxel
             var biome = s_columnBiome[column];
             if ((int)biome == -1)
             {
-                biome = FiresCaveBiome.RegionBiome(origin.x + x, origin.z + z, WorldGenerator.instance.GetBiome(origin.x + x, origin.z + z));   // the cave region's biome
+                biome = FiresCaveBiome.RegionBiome(origin.x + x, origin.z + z, FatSuperFlat.WorldBiome(origin.x + x, origin.z + z));   // the cave region's biome
                 s_columnBiome[column] = biome;
             }
             return biome;

@@ -67,6 +67,7 @@ namespace VerdantsAscent.Water.Tools
 
         private static void OnReply(long sender, string result)
         {
+            if (!FatNetGuard.FromServer(sender, "water cleanup reply")) return;
             foreach (var l in result.Split('\n')) global::Console.instance?.AddString(l);
         }
 

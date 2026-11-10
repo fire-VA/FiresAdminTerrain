@@ -110,13 +110,13 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool IsOnIsland(Vector3 point)
             => TryBottomAt(point.x, point.z, out float bottom) && point.y > bottom - IslandContactMargin;
 
-        internal static bool IsOnZoneSkyland(Vector3 point) => Zones.ZoneModeRegistry.ModeActive && IsOnIsland(point);
+        internal static bool IsOnZoneSkyland(Vector3 point) => Zones.ZoneModeSkylands.Driven && IsOnIsland(point);
 
         // The top of the zone skyland a point stands on or over, from the island's shape rather than its colliders.
         internal static bool TrySkylandTopAt(Vector3 point, out float top)
         {
             top = 0f;
-            if (!Zones.ZoneModeRegistry.ModeActive || !Enabled || !s_index.TryGetValue(CellKey(point.x, point.z), out var list))
+            if (!Zones.ZoneModeSkylands.Driven || !Enabled || !s_index.TryGetValue(CellKey(point.x, point.z), out var list))
                 return false;
             foreach (int k in list)
             {
@@ -370,6 +370,29 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         internal static float SkylandRadius(int index) => s_islands[index].R;
+
+        // 0.2.1074: the island's TOP at a column from island math alone (no voxel chunk needed): what vanilla vegetation is
+        // placed on when the zone generates before the island's chunks exist (super flat, where the ground under it stays bare).
+        internal static bool TryTopAt(float wx, float wz, out float top)
+        {
+            top = float.NaN;
+            if (!Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
+            foreach (int k in list)
+            {
+                var isl = s_islands[k];
+                float sx = wx - isl.OffX, sz = wz - isl.OffZ;
+                if (!Covers(in isl, sx, sz)) continue;
+                float t;
+                if (IsSkyland(isl.Kind))
+                {
+                    if (!SkylandColumn(in isl, sx, sz, out t, out float b, out float side) || !SolidSpan(t, b, side, out _, out t)) continue;
+                }
+                else t = TopAt(in isl, sx, sz);
+                t += isl.OffY;
+                if (float.IsNaN(top) || t > top) top = t;
+            }
+            return !float.IsNaN(top);
+        }
 
         // For FiresTerrainLayers: the island whose body a point is in or on, with that column's solid span (the voxels'
         // own: carved top, rounded rim) and the island's id. A point counts from Margin under the underside to Margin over the
@@ -631,6 +654,22 @@ namespace VerdantsAscent.Terrain.Voxel
             return point.y < TopAt(in isl, point.x, point.z) + DressingHeadroom && point.y > isl.Bot - DressingBelowBottom;
         }
 
+        // 0.2.1079 (Fire: dressing "laid out to a standard size before the variation is carved"; shot 492: a perfect circle of
+        // rim props around an oblong skyland): the island's REAL edge at angle a, from the shaped column itself. Marches in
+        // from the disc radius R until the column is solid (the same SkylandColumn + SolidSpan the voxels are built from).
+        // 0 when the island has no solid column along that ray.
+        private static float EdgeRadius(in Island isl, float a)
+        {
+            float cx = Mathf.Cos(a), cz = Mathf.Sin(a);
+            for (float r = isl.R * 0.999f; r > 1f; r -= 0.5f)
+            {
+                float x = isl.X + cx * r, z = isl.Z + cz * r;
+                if (SkylandColumn(in isl, x, z, out float t, out float b, out float side) && SolidSpan(t, b, side, out _, out _))
+                    return r;
+            }
+            return 0f;
+        }
+
         private static void CollectRimVines(in Island isl, SkylandPalette palette, List<Vector3> pos, List<Quaternion> rot,
             List<string> name, List<Vector3> scale)
         {
@@ -645,8 +684,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 float size = 1.2f + Hash(k, 97, hseed, 197) * 0.9f;
                 float stretch = 1.1f + Hash(k, 101, hseed, 199) * 0.9f;
                 float cx = Mathf.Cos(a), cz = Mathf.Sin(a);
-                if (!RimTop(in isl, isl.X + cx * isl.R * 0.995f, isl.Z + cz * isl.R * 0.995f, -cx, -cz, out float rimTop)) continue;
-                pos.Add(new Vector3(isl.X + cx * (isl.R + 0.15f), rimTop - 0.15f - VineTopAbovePivot * size * stretch, isl.Z + cz * (isl.R + 0.15f)));
+                // 0.2.1079: hang from the SHAPED edge at this angle, not the disc radius R.
+                float edge = EdgeRadius(in isl, a);
+                if (edge <= 0f) continue;
+                if (!RimTop(in isl, isl.X + cx * edge * 0.995f, isl.Z + cz * edge * 0.995f, -cx, -cz, out float rimTop)) continue;
+                pos.Add(new Vector3(isl.X + cx * (edge + 0.15f), rimTop - 0.15f - VineTopAbovePivot * size * stretch, isl.Z + cz * (edge + 0.15f)));
                 rot.Add(Quaternion.LookRotation(new Vector3(-cx, 0f, -cz)) * Quaternion.Euler(0f, (Hash(k, 103, hseed, 211) - 0.5f) * 16f, 0f));
                 name.Add(palette.Vines);
                 scale.Add(new Vector3(size, size * stretch, size));
@@ -684,7 +726,9 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 float a = (k + Hash(k, 13, hseed, 113) * 0.7f) * (Mathf.PI * 2f / rimCount);
                 float rr = 0.90f + Hash(k, 17, hseed, 117) * 0.06f;
-                float px = isl.X + Mathf.Cos(a) * rr * isl.R, pz = isl.Z + Mathf.Sin(a) * rr * isl.R;
+                float edgeR = EdgeRadius(in isl, a);   // 0.2.1079: the shaped edge at this angle, not the disc radius
+                if (edgeR <= 0f) continue;
+                float px = isl.X + Mathf.Cos(a) * rr * edgeR, pz = isl.Z + Mathf.Sin(a) * rr * edgeR;
                 if (InPondOrRill(in isl, px, pz)) continue;
                 if (Hash(k, 19, hseed, 119) < RimBareShare) continue;
                 if (!DressingTop(in isl, px, pz, out float top)) continue;
@@ -1005,6 +1049,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float FarMaxCell = 4f;
         private const int FarMaxCells = 3000;
         private const float FarWaterUvPerMetre = 1f / 64f;
+        internal static int s_farCellsTrimmed;   // 0.2.1099: far water cells dropped at the shore (not all four corners wet)
 
         // Rings crowd toward the rim, where the belly drops away steeply.
         private static float FarRingRadius(int ring) => 1f - Mathf.Pow(1f - (float)ring / FarRings, 1.6f);
@@ -1090,6 +1135,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     float wx = x0 + i * step + isl.OffX, wz = z0 + j * step + isl.OffZ;
                     if (!IslandWaterAt(in isl, wx + step * 0.5f, wz + step * 0.5f, out float centre)) continue;
+                    // 0.2.1099 (Fire shot 556: a flat stepped pale sheet far outside the pond bowl): a far cell whose corner lay
+                    // outside the water stood at the cell's level, so every shore cell hung a whole 1.5-4 m quad over the grass.
+                    // Only cells with water at all four corners are drawn; the near sheet carries the true shoreline.
+                    if (!IslandWaterAt(in isl, wx, wz, out _) || !IslandWaterAt(in isl, wx + step, wz, out _)
+                        || !IslandWaterAt(in isl, wx, wz + step, out _) || !IslandWaterAt(in isl, wx + step, wz + step, out _))
+                    {
+                        s_farCellsTrimmed++;
+                        continue;
+                    }
                     int b = verts.Count;
                     AddFarWaterCorner(in isl, verts, uvs, wx, wz, centre);
                     AddFarWaterCorner(in isl, verts, uvs, wx + step, wz, centre);
@@ -1115,7 +1169,12 @@ namespace VerdantsAscent.Terrain.Voxel
             mesh.SetTangents(tangents);
             mesh.SetColors(colours);
             mesh.SetUVs(0, uvs);
-            mesh.SetUVs(1, new List<Vector2>(new Vector2[verts.Count]));
+            // 0.2.1099: UV2.x is the water depth the inland shader keys its opacity off; zeros drew the far water as a pale,
+            // see-through "white slab" (most visible on the steep outlet rill). Each corner now carries the island's own depth.
+            var depths = new List<Vector2>(verts.Count);
+            foreach (var v in verts)
+                depths.Add(new Vector2(WaterSurfaceAt(v.x, v.z, out _, out float d) ? d : 0.7f, 0f));
+            mesh.SetUVs(1, depths);
             mesh.SetTriangles(tris, 0, calculateBounds: true);
             return true;
         }

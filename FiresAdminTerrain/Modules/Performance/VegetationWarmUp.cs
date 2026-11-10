@@ -72,6 +72,12 @@ namespace VerdantsAscent.Terrain.Performance
         private static long WarmOne(GameObject prefab, ref int failed)
         {
             var clock = Stopwatch.StartNew();
+            // 0.2.1394: RandomFlyingBird.Awake threw NullReferenceException under this Instantiate (smoke_781 dedi log; likely no ZDO with m_forceDisableInit). Unity logs it, the catch below never sees it. Not warmed.
+            if (prefab.GetComponentInChildren<RandomFlyingBird>(true) != null)
+            {
+                FiresLogger.LogDebug($"[FiresVeg] not warming '{prefab.name}': RandomFlyingBird Awake throws without a network object");
+                return 0;
+            }
             GameObject instance = null;
             ZNetView.m_forceDisableInit = true;
             try { instance = Object.Instantiate(prefab, WarmPosition, Quaternion.identity); }

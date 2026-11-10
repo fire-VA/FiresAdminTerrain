@@ -18,6 +18,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private const int SurfaceCacheVersion = 1;
         private const uint SurfaceCacheMagic = 0x46535246;   // "FSRF"
         private const string SurfaceCachePrefix = "_surface_";
+        private const long SurfaceHeaderMax = 256;   // 0.2.1333: magic, version, key, n, sizes, reps (under 80 bytes)
+        private const int MaxSurfaceZones = 8192;    // 0.2.1333: a side of the 64 m zone grid; well past the largest world's halfN * 2 + 1
 
         // A client loading the downloaded world cache still rebuilt this reconcile (~6 GB of private
         // memory): the server's finished surface cache goes to joining clients through the join sync too (BcJoinSync, item
@@ -51,7 +53,7 @@ namespace VerdantsAscent.Terrain.Voxel
             try
             {
                 using (var fs = File.OpenRead(path))
-                using (var gz = new GZipStream(fs, CompressionMode.Decompress))
+                using (var gz = FatInflate.GzipReader(fs, "water surface cache", SurfaceHeaderMax))   // 0.2.1333
                 using (var r = new BinaryReader(gz))
                     return r.ReadUInt32() == SurfaceCacheMagic && r.ReadInt32() == SurfaceCacheVersion && r.ReadUInt64() == key && r.ReadInt32() == n;
             }
@@ -86,7 +88,7 @@ namespace VerdantsAscent.Terrain.Voxel
             try
             {
                 using (var fs = File.OpenRead(path))
-                using (var gz = new GZipStream(fs, CompressionMode.Decompress))
+                using (var gz = FatInflate.GzipReader(fs, "water surface cache", SurfaceHeaderMax))   // 0.2.1333
                 using (var r = new BinaryReader(gz))
                     return r.ReadUInt32() == SurfaceCacheMagic && r.ReadInt32() == SurfaceCacheVersion && r.ReadUInt64() == key && r.ReadInt32() == n;
             }
@@ -156,7 +158,7 @@ namespace VerdantsAscent.Terrain.Voxel
             try
             {
                 using (var fs = File.OpenRead(path))
-                using (var gz = new GZipStream(fs, CompressionMode.Decompress))
+                using (var gz = FatInflate.GzipReader(fs, "water surface cache", SurfaceHeaderMax))   // 0.2.1333: raised below once the sizes are checked
                 using (var r = new BinaryReader(gz))
                 {
                     if (r.ReadUInt32() != SurfaceCacheMagic || r.ReadInt32() != SurfaceCacheVersion || r.ReadUInt64() != key || r.ReadInt32() != n) return false;
@@ -165,10 +167,19 @@ namespace VerdantsAscent.Terrain.Voxel
                     int zoneN = r.ReadInt32(), zoneHalfN = r.ReadInt32();
                     var reps = new int[7];
                     for (int i = 0; i < reps.Length; i++) reps[i] = r.ReadInt32();
-                    var surf = ReadShorts(r);
-                    var cls = ReadBytes(r);
-                    var shoreD = ReadBytes(r);
-                    var zone = ReadBytes(r);
+                    // 0.2.1333: this file can be the server's (join sync). Each grid is derived from n (n2 <= n), so nothing above n is real.
+                    if (surfN < 1 || surfN > n || classN < 1 || classN > n || zoneN < 0 || zoneN > MaxSurfaceZones)
+                    {
+                        FatNetGuard.Refuse("water surface cache", $"grids {surfN} / {classN} / {zoneN} for a world of {n}; rebuilding");
+                        return false;
+                    }
+                    long surfCells = (long)surfN * surfN, classCells = (long)classN * classN, zoneCells = (long)zoneN * zoneN;
+                    long shoreCells = Math.Max(surfCells, classCells);
+                    gz.Limit = SurfaceHeaderMax + surfCells * sizeof(short) + classCells + shoreCells + zoneCells + 4 * sizeof(int);
+                    var surf = ReadShorts(r, surfCells);
+                    var cls = ReadBytes(r, classCells);
+                    var shoreD = ReadBytes(r, shoreCells);
+                    var zone = ReadBytes(r, zoneCells);
                     if (surf == null || cls == null) return false;
                     _surfS = surf; _surfN = surfN; _surfCell = surfCell;
                     _classS = cls; _classN = classN; _classCell = classCell;
@@ -235,10 +246,11 @@ namespace VerdantsAscent.Terrain.Voxel
             if (a != null) w.Write(a);
         }
 
-        private static byte[] ReadBytes(BinaryReader r)
+        private static byte[] ReadBytes(BinaryReader r, long max)
         {
             int len = r.ReadInt32();
             if (len < 0) return null;
+            if (len > max) throw new InvalidDataException($"array of {len} past its grid's {max}");   // 0.2.1333: TryLoadSurface rebuilds
             var a = new byte[len];
             int got = 0;
             while (got < len) { int k = r.Read(a, got, Math.Min(CacheChunk, len - got)); if (k <= 0) throw new EndOfStreamException(); got += k; }
@@ -257,10 +269,11 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        private static short[] ReadShorts(BinaryReader r)
+        private static short[] ReadShorts(BinaryReader r, long max)
         {
             int len = r.ReadInt32();
             if (len < 0) return null;
+            if (len > max) throw new InvalidDataException($"array of {len} past its grid's {max}");   // 0.2.1333: TryLoadSurface rebuilds
             var a = new short[len];
             var buf = new byte[CacheChunk * 2];
             for (int i = 0; i < len; i += CacheChunk)

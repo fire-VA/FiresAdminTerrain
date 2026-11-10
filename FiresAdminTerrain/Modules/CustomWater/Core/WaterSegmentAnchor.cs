@@ -155,6 +155,12 @@ namespace VerdantsAscent.Water.Core
         /// <param name="gridWidth">Grid width (columns per row)</param>
         /// <param name="surfaceHeights">Full surface heights array from combiner</param>
         /// <param name="terrainHeights">Full terrain heights array from combiner</param>
+        // 0.2.1349 (Fire: "every time we log back in its broken"): a near peer owns this ZDO; the server is the only writer.
+        internal void ClaimForServer()
+        {
+            if (_nview != null && _nview.IsValid() && ZNet.instance != null && ZNet.instance.IsServer()) _nview.ClaimOwnership();
+        }
+
         public void SaveSegmentData(int rowStart, int rowCount, int gridWidth,
             float[] surfaceHeights, float[] terrainHeights)
         {
@@ -206,14 +212,14 @@ namespace VerdantsAscent.Water.Core
             rowStart = zdo.GetInt(s_segmentRowStartHash, 0);
             rowCount = zdo.GetInt(s_segmentRowCountHash, 0);
 
-            if (rowCount <= 0 || gridWidth <= 0) return false;
+            if (!RowRangeOk(rowStart, rowCount, gridWidth)) return false;   // 0.2.1333
 
             // Load surface heights
             byte[] surfaceCompressed = zdo.GetByteArray(s_segmentSurfaceHash);
             if (surfaceCompressed != null && surfaceCompressed.Length > 0 && surfaceHeights != null)
             {
                 byte[] surfaceData = DecompressData(surfaceCompressed);
-                UnpackRowRange(surfaceData, surfaceHeights, rowStart, rowCount, gridWidth);
+                if (surfaceData != null) UnpackRowRange(surfaceData, surfaceHeights, rowStart, rowCount, gridWidth);
             }
 
             // Load terrain heights
@@ -221,7 +227,7 @@ namespace VerdantsAscent.Water.Core
             if (terrainCompressed != null && terrainCompressed.Length > 0 && terrainHeights != null)
             {
                 byte[] terrainData = DecompressData(terrainCompressed);
-                UnpackRowRange(terrainData, terrainHeights, rowStart, rowCount, gridWidth);
+                if (terrainData != null) UnpackRowRange(terrainData, terrainHeights, rowStart, rowCount, gridWidth);
             }
 
             return true;
@@ -242,14 +248,14 @@ namespace VerdantsAscent.Water.Core
             rowStart = zdo.GetInt(s_segmentRowStartHash, 0);
             rowCount = zdo.GetInt(s_segmentRowCountHash, 0);
 
-            if (rowCount <= 0 || gridWidth <= 0) return false;
+            if (!RowRangeOk(rowStart, rowCount, gridWidth)) return false;   // 0.2.1333
 
             // Load surface heights
             byte[] surfaceCompressed = zdo.GetByteArray(s_segmentSurfaceHash);
             if (surfaceCompressed != null && surfaceCompressed.Length > 0 && surfaceHeights != null)
             {
                 byte[] surfaceData = DecompressData(surfaceCompressed);
-                UnpackRowRange(surfaceData, surfaceHeights, rowStart, rowCount, gridWidth);
+                if (surfaceData != null) UnpackRowRange(surfaceData, surfaceHeights, rowStart, rowCount, gridWidth);
             }
 
             // Load terrain heights
@@ -257,7 +263,7 @@ namespace VerdantsAscent.Water.Core
             if (terrainCompressed != null && terrainCompressed.Length > 0 && terrainHeights != null)
             {
                 byte[] terrainData = DecompressData(terrainCompressed);
-                UnpackRowRange(terrainData, terrainHeights, rowStart, rowCount, gridWidth);
+                if (terrainData != null) UnpackRowRange(terrainData, terrainHeights, rowStart, rowCount, gridWidth);
             }
 
             return true;
@@ -293,12 +299,11 @@ namespace VerdantsAscent.Water.Core
         {
             if (data == null || data.Length == 0 || fullArray == null) return;
 
-            int startIdx = rowStart * gridWidth;
-            int count = rowCount * gridWidth;
-
-            // Clamp to array bounds
-            if (startIdx + count > fullArray.Length)
-                count = fullArray.Length - startIdx;
+            if (!RowRangeOk(rowStart, rowCount, gridWidth)) return;   // 0.2.1333
+            long startLong = (long)rowStart * gridWidth;   // 0.2.1333: long, a wide row range cannot wrap
+            if (startLong >= fullArray.Length) return;
+            int startIdx = (int)startLong;
+            int count = (int)Math.Min((long)rowCount * gridWidth, fullArray.Length - startLong);   // clamp to array bounds (a segment can outlive a resize)
             if (count <= 0) return;
 
             int bytesToCopy = count * 4;
@@ -326,17 +331,17 @@ namespace VerdantsAscent.Water.Core
             }
         }
 
-        private static byte[] DecompressData(byte[] compressed)
-        {
-            if (compressed == null || compressed.Length == 0) return compressed;
+        // 0.2.1333: this was a second, uncapped copy of the inflate; these rows come from a ZDO.
+        private static byte[] DecompressData(byte[] compressed) => FatInflate.Gzip(compressed, "water segment ZDO");
 
-            using (var input = new MemoryStream(compressed))
-            using (var gzip = new GZipStream(input, CompressionMode.Decompress))
-            using (var output = new MemoryStream())
-            {
-                gzip.CopyTo(output);
-                return output.ToArray();
-            }
+        // 0.2.1333: rows from a ZDO, checked before use. A grid is at most MAX_GRID_SIZE a side (a segment is never wider than that).
+        private static bool RowRangeOk(int rowStart, int rowCount, int gridWidth)
+        {
+            if (rowCount == 0 || gridWidth <= 0) return false;   // nothing stored: the old quiet answer
+            if (rowStart >= 0 && rowStart < WaterMeshCombiner.MAX_GRID_SIZE && rowCount > 0 && rowCount <= WaterMeshCombiner.MAX_GRID_SIZE
+                && gridWidth <= WaterMeshCombiner.MAX_GRID_SIZE) return true;
+            FatNetGuard.Refuse("water segment rows", $"start {rowStart}, count {rowCount}, width {gridWidth}; that block is skipped");
+            return false;
         }
 
         #endregion

@@ -334,6 +334,11 @@ namespace VerdantsAscent.Water.Tools
                 sizeDesc = $"r={radius:F1}m (Circle)";
             }
 
+            // 0.2.1324 (unmop on lay): placed water overrides an earlier Vmop in its disc (a shape: its half-diagonal).
+            if (stableHash != 0)
+                VerdantsAscent.Terrain.Voxel.VoxelWorld.UnmopUnderNewWater(position,
+                    hasRect && shape != WaterDiskShape.Circle ? 0.5f * Mathf.Sqrt(shapeWidth * shapeWidth + shapeLength * shapeLength) : radius);
+
             if (stableHash != 0)
             {
                 string liquidName = hasCustomType ? customLiquidType.GetDisplayName() : (isTar ? "tar" : "water");
@@ -1167,6 +1172,7 @@ namespace VerdantsAscent.Water.Tools
             {
                 if (combiner != null)
                 {
+                    combiner.NoteDisksChanged();   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
                     combiner.ForceRegenerate();
                 }
             }
@@ -1368,6 +1374,8 @@ namespace VerdantsAscent.Water.Tools
             {
                 // Same type - just add the new disk without touching the liquid type
                 existingCombiner.AddWaterDisk(disk);
+                VerdantsAscent.Terrain.Voxel.VoxelWorld.UnmopUnderNewWater(position,
+                    hasRect && shape != WaterDiskShape.Circle ? 0.5f * Mathf.Sqrt(shapeWidth * shapeWidth + shapeLength * shapeLength) : radius);   // 0.2.1324 (unmop on lay)
 
                 Console.instance.Print($"Extended {liquidType.GetDisplayName()}: {sizeDesc}, depth={maxDepth:F1}m at Y={position.y:F2}m");
                 return true;
@@ -1375,6 +1383,9 @@ namespace VerdantsAscent.Water.Tools
 
             // Create via RPC for multiplayer sync
             int stableHash = WaterOperationRPC.RequestCreateWaterWithCustomType(position, disk, liquidType);
+            if (stableHash != 0)
+                VerdantsAscent.Terrain.Voxel.VoxelWorld.UnmopUnderNewWater(position,
+                    hasRect && shape != WaterDiskShape.Circle ? 0.5f * Mathf.Sqrt(shapeWidth * shapeWidth + shapeLength * shapeLength) : radius);   // 0.2.1324 (unmop on lay)
 
             if (stableHash != 0)
             {

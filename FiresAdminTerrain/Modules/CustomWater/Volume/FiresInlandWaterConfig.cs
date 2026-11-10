@@ -31,6 +31,8 @@ namespace VerdantsAscent.Water.Core
         private const string S7 = P + " 7 Foam and churn";
         private const string S8 = P + " 8 Optical";
         private const string S9 = P + " 9 Underwater";
+        private const string S10 = P + " 10 Ice look";
+        public static ConfigEntry<float> IceInnerTiling, IceInnerWeight, IceNearFade;   // 0.2.1411
 
         public static ConfigEntry<Color> ShallowColor, DeepColor, FoamColor, ReflTint, SpecColor, UwTint;
 
@@ -39,6 +41,7 @@ namespace VerdantsAscent.Water.Core
         // floors no preset or slider can go under - a minimum shallow opacity and a minimum ripple, so even 0 m reads as water.
         public static ConfigEntry<float> MinShallowVisibility, MinRipple;
         public static ConfigEntry<float> Turbidity, ShoreChurn, ShoreChurnDepth, ShoreBlend;   // Core 0.2.314+ shader dials
+        public static ConfigEntry<float> MinMurk, Churn;   // 0.2.1092 (v5 look, [seasons]): _MinMurk floor, _Churn global sediment churn
         public static ConfigEntry<float> UwAirAlphaMax, UwAirTint;   // Core 0.2.319 underside-from-air dials
 
         public static ConfigEntry<float> BumpTiling, DetailTiling, GlobalScale, DetailRotate, TileBreak,
@@ -55,6 +58,8 @@ namespace VerdantsAscent.Water.Core
 
         public static ConfigEntry<float> SwellAmp, SwellLength, SwellSpeed, SwellShoreCalm, SwellShoreFloor, BigWaveDepth, BigWaveAmp, BigWaveLength, BigWaveDrift;
         public static ConfigEntry<bool> BigWaves;
+        public static ConfigEntry<bool> FloatingExtras;   // 0.2.1092, default OFF
+        public static ConfigEntry<float> LilyHeightOffset;   // 0.2.1094 (Fire: "lillies could still get bumped up a tiny bit"), metres above the swell crest
         private static bool? s_bigLogged;   // null = not logged yet, so the FIRST apply logs too (OFF included)
 
         public static ConfigEntry<float> EdgeFoamDepth, EdgeFoamOpacity, EdgeFoamTiling, EdgeFoamScroll,
@@ -90,11 +95,11 @@ namespace VerdantsAscent.Water.Core
             UwTint = cfg.Bind(S1, "Underwater Tint", new Color(0.10f, 0.30f, 0.38f, 1f),
                 "What the world turns when the camera is under the surface.");
 
-            ClearDepth = F(cfg, S2, "See-through depth (m)", 3.0f, 0.1f, 40f,
+            ClearDepth = F(cfg, S2, "See-through depth (m)", 1.5f, 0.1f, 40f,
                 "Metres of water it takes to reach the deep tint and full opacity. LOW = murky, HIGH = clear.");
-            MinOpacity = F(cfg, S2, "Shallow opacity", 0.35f, 0f, 1f,
+            MinOpacity = F(cfg, S2, "Shallow opacity", 0.45f, 0f, 1f,
                 "Opacity where the column is nearly nothing. Lower values make the shallows look clear and then jump to the deep colour over a short depth.");
-            MinShallowVisibility = F(cfg, S2, "Minimum shallow visibility", 0.15f, 0.05f, 1f,
+            MinShallowVisibility = F(cfg, S2, "Minimum shallow visibility", 0.30f, 0.05f, 1f,
                 "The floor under Shallow opacity: shallows are never fully clear, so you can always tell there is water. Raise it if a tuning makes the edge vanish.");
             MaxOpacity = F(cfg, S2, "Deep opacity", 0.90f, 0f, 1f,
                 "Opacity at full clarity depth.");
@@ -103,8 +108,12 @@ namespace VerdantsAscent.Water.Core
             // The depth blend should blend and churn a bit, not be completely clear at the
             // shoreline: Core 0.2.314's per-pixel shore dials; on an older Core the shader lacks them and they
             // are skipped (HasProperty).
-            Turbidity = F(cfg, S2, "Turbidity", 0.3f, 0f, 1f,
+            Turbidity = F(cfg, S2, "Turbidity", 0.35f, 0f, 1f,
                 "Sediment murk: at 1 the clear depth is a quarter, the shallow opacity floor rises to 0.6 and the tint leans 35% toward the deep tint. 0 = the old clear look.");
+            MinMurk = F(cfg, S2, "Minimum murk", 0.05f, 0f, 1f,
+                "The least murk any water has, in every biome (the shader uses the larger of this and the biome's turbidity).");
+            Churn = F(cfg, S2, "Churn", 0.3f, 0f, 2f,
+                "Muddy sediment churned along the flow, stronger near the bed and banks. A biome's own Churn wins where it is set.");
             ShoreChurn = F(cfg, S2, "Shore churn", 0.35f, 0f, 1f,
                 "How much the shallow band's depth wobbles with the flow (moving noise along the shore). 0 = a still band.");
             ShoreChurnDepth = F(cfg, S2, "Shore churn depth (m)", 0.35f, 0f, 2f,
@@ -198,6 +207,14 @@ namespace VerdantsAscent.Water.Core
                 "How much swell survives at the very waterline. 0 stops it dead at the lip; higher keeps the edge waxing and waning.");
             // Larger, deeper bodies get bigger waves: a SCALE on top of the calm values
             // above. Per point: body size (the sheet's wet share, set by FAT per sheet) x depth / "Big-water full depth". 0 = the calm swell.
+            // 0.2.1092 (Fire: vanilla lilies stay the default; extras only behind one switch so he can A/B).
+            FloatingExtras = cfg.Bind(P + " 10 Water life", "Floating extras", false,
+                "OFF (default): vanilla water lilies only. ON: flowered lilies, duckweed and small floating leaves on calm water (needs their assets; the log says '[WaterLife] floating extras' and whether they loaded).");
+            LilyHeightOffset = F(cfg, P + " 10 Water life", "Lily height offset (m)", 0.07f, 0f, 0.5f,
+                "How far water lilies sit above the highest swell crest. Raise it if pads dip into the swelling water; lower it if they float.");
+            WaterStateField.BindConfig(cfg, P + " 11 Water state");   // 0.2.1097: per-column ice / lava / crust
+            LilyHeightOffset.SettingChanged += (_, __) => { if (ClutterSystem.instance != null) ClutterSystem.instance.ClearAll(); };   // live nudge: the batches rebuild at the new height
+            FiresLogger.LogInfo($"[WaterLife] floating extras: {(FloatingExtras.Value ? "on" : "off")}{(FloatingExtras.Value ? " - no runtime-loadable flowered lily / duckweed / leaf asset in any loaded bundle (needs a Unity bundle build); nothing extra is placed" : " (vanilla lilies only)")}");
             BigWaves = cfg.Bind(S6, "Big-water waves", false,
                 "OFF (default): every lake and pond uses the swell above. ON: the bigger and deeper the water, the closer its swell, wavelength and surface drift get to the big-water values below (crater lakes move like the sea; shallow and small water stays calm, no eddy foam).");
             BigWaveDepth = F(cfg, S6, "Big-water full depth (m)", 6f, 0.5f, 40f, "Water this deep (in a big body) gets the full big-water swell.");
@@ -239,6 +256,13 @@ namespace VerdantsAscent.Water.Core
             UwAlphaMin = F(cfg, S9, "Underwater alpha (shallow)", 0.45f, 0f, 1f, "Opacity of the surface seen from below in shallow water.");
             UwAlphaMax = F(cfg, S9, "Underwater alpha (deep)", 0.85f, 0f, 1f, "Opacity of the surface seen from below in deep water.");
 
+            // 0.2.1411 (Fire 11-08: "looks like tv static from a normal distance"): the ice inner layer (bubbles / cracks / veins) was
+            // too dense and contrasty up close. Old look = 0.35 / 1 / 0. Weight and near fade need Core's FiresInlandWater v12 bundle;
+            // with an older one only the tiling applies (the others are skipped by HasProperty).
+            IceInnerTiling = F(cfg, S10, "Ice inner tiling (per m)", 0.18f, 0.02f, 2f, "Repeats per metre of the bubbles and veins under the ice. Lower = fewer, bigger veins. Old look 0.35.");
+            IceInnerWeight = F(cfg, S10, "Ice inner weight", 0.5f, 0f, 1f, "How strongly the bubbles and veins show. Old look 1.");
+            IceNearFade = F(cfg, S10, "Ice inner near fade (m)", 6f, 0f, 30f, "Veins fade out closer than this (fully gone at a quarter of it). 0 = off (old look).");
+
             cfg.SettingChanged += (_, args) =>
             {
                 var sec = args?.ChangedSetting?.Definition?.Section;
@@ -267,12 +291,18 @@ namespace VerdantsAscent.Water.Core
             SetF(m, "_MaxOpacity", MaxOpacity);
             SetF(m, "_EdgeSoftness", EdgeSoftness);
             SetF(m, "_Turbidity", Turbidity);
+            SetF(m, "_MinMurk", MinMurk);
+            SetF(m, "_Churn", Churn);
             SetF(m, "_ShoreChurn", ShoreChurn);
             SetF(m, "_ShoreChurnDepth", ShoreChurnDepth);
             SetF(m, "_ShoreBlend", ShoreBlend);
             SetF(m, "_SeaFade", SeaFade);
             SetF(m, "_UwAirAlphaMax", UwAirAlphaMax);
             SetF(m, "_UwAirTint", UwAirTint);
+
+            SetF(m, "_FiresIceInnerTiling", IceInnerTiling);   // 0.2.1411
+            SetF(m, "_FiresIceInnerWeight", IceInnerWeight);
+            SetF(m, "_FiresIceNearFade", IceNearFade);
 
             SetF(m, "_BumpTiling", BumpTiling);
             SetF(m, "_DetailTiling", DetailTiling);

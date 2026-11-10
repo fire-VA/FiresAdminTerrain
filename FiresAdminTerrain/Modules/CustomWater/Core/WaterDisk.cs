@@ -3,6 +3,11 @@ using UnityEngine;
 
 namespace VerdantsAscent.Water.Core
 {
+    // 0.2.1091: what laid a fresh-water disk. River disks (Vriver dabs, the river chain carve) get the bank cap in
+    // PlacedWaterField; Pond disks (Vpour, Vpool, Vpond, Vlake, bowls, plunge pools, WaterSheets, brushes) keep their level.
+    // Unknown = laid before 0.2.1091 (no tag saved): WaterSheets infers it per combiner (disks at different levels = river).
+    public enum WaterDiskKind : byte { Unknown = 0, River = 1, Pond = 2 }
+
     /// <summary>
     /// Shape of a water disk (circle, square, or rectangle).
     /// Matches Infinity Hammer ruler shapes.
@@ -80,6 +85,9 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public int StableHash { get; private set; }
 
+        // 0.2.1331: a v2 cache kept this hash as a float (rounded above 2^24); the anchor's exact value replaces it on restore.
+        internal void RestoreExactHash(int exact) => StableHash = exact;
+
         /// <summary>
         /// World position of the disk center.
         /// Y component is the water SURFACE level at this point.
@@ -126,6 +134,9 @@ namespace VerdantsAscent.Water.Core
         /// Takes precedence over <see cref="LiquidType"/> when set to a non-vanilla value.
         /// </summary>
         public CustomLiquidType CustomLiquidType { get; set; }
+
+        /// <summary>0.2.1091: the tool kind (river or pond); add-only, serialized as a trailing v3 byte.</summary>
+        public WaterDiskKind Kind { get; set; }
 
         /// <summary>
         /// ZDO ID for persistence (0 if not persisted yet).
@@ -202,6 +213,16 @@ namespace VerdantsAscent.Water.Core
             float halfW = Width * 0.5f;
             float halfL = Length * 0.5f;
             Radius = Mathf.Sqrt(halfW * halfW + halfL * halfL);
+        }
+
+        public bool LiesInsideRing(Vector3 center, float ringRadius)
+        {
+            // 0.2.1334 (Vmop): the WHOLE footprint inside a horizontal ring (not just the centre); a square / rectangle by its far corner.
+            float dx = Mathf.Abs(Position.x - center.x), dz = Mathf.Abs(Position.z - center.z);
+            if (Shape == WaterDiskShape.Circle) return Mathf.Sqrt(dx * dx + dz * dz) + Radius <= ringRadius;
+            GetHalfExtents(out float hw, out float hl);
+            dx += hw; dz += hl;
+            return dx * dx + dz * dz <= ringRadius * ringRadius;
         }
 
         /// <summary>
@@ -357,7 +378,8 @@ namespace VerdantsAscent.Water.Core
                 CustomLiquidType = CustomLiquidType,
                 Shape = Shape,
                 Width = Width,
-                Length = Length
+                Length = Length,
+                Kind = Kind
             };
         }
 
@@ -382,6 +404,8 @@ namespace VerdantsAscent.Water.Core
                 writer.Write((int)Shape);
                 writer.Write(Width);
                 writer.Write(Length);
+                // v3 (0.2.1091): the tool kind; older readers stop before it
+                writer.Write((byte)Kind);
                 return ms.ToArray();
             }
         }
@@ -421,11 +445,16 @@ namespace VerdantsAscent.Water.Core
                     length = reader.ReadSingle();
                 }
 
+                // v3 (0.2.1091): the tool kind if present
+                WaterDiskKind kind = WaterDiskKind.Unknown;
+                if (ms.Position < ms.Length) kind = (WaterDiskKind)reader.ReadByte();
+
                 var disk = new WaterDisk(new Vector3(x, y, z), radius, maxDepth, liquidType, stableHash);
                 disk.CustomLiquidType = customType;
                 disk.Shape = shape;
                 disk.Width = width;
                 disk.Length = length;
+                disk.Kind = kind;
                 return disk;
             }
         }

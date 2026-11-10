@@ -312,6 +312,7 @@ namespace VerdantsAscent.Utilities
 
         // Debug logging flag - set to true to diagnose terrain issues
         private static bool _debugTerrainPatches = false; // Disabled after successful fix
+        private static bool _saidOverrideActive;   // 0.2.1429: the one Info line per session
 
         /// <summary>
         /// PREFIX patch on RebuildRenderMesh to modify corner biomes BEFORE the mesh is built.
@@ -404,17 +405,21 @@ namespace VerdantsAscent.Utilities
 
             try
             {
-                // Get the corner biomes array
-                var cornerBiomes = _cornerBiomesField.GetValue(__instance) as Heightmap.Biome[];
-                if (cornerBiomes == null || cornerBiomes.Length < 4)
+                // 0.2.1429 ([worldgen], [saddles]' find, Fire: "Yes fix the env box code"): in Valheim 1.0 m_cornerBiomes is BiomeSector[] (Heightmap.cs:105), not
+                // Biome[], so the old "as Heightmap.Biome[]" was always null and this override never applied. Each corner is now a sector: a forced corner gets the
+                // shared plain sector of the forced biome (BiomePaint.PlainSectorFor). The array is CLONED first: vanilla assigns m_cornerBiomes = m_buildData.m_cornerBiomes
+                // (Heightmap.cs:449), so writing into it in place would also rewrite the builder's cached build.
+                var shared = _cornerBiomesField.GetValue(__instance) as BiomeSector[];
+                if (shared == null || shared.Length < 4)
                 {
-                    if (_debugTerrainPatches) FiresLogger.LogWarning("[EnvBoxPatches] PREFIX: cornerBiomes array is null or too small");
+                    FiresLogger.LogDebug($"[EnvBoxPatches] corner override skipped at {hmPos}: m_cornerBiomes is {(shared == null ? "not a BiomeSector[] (" + (_cornerBiomesField.GetValue(__instance)?.GetType().Name ?? "null") + ")" : "shorter than 4")}");
                     return;
                 }
+                var cornerBiomes = (BiomeSector[])shared.Clone();
 
                 if (_debugTerrainPatches)
                 {
-                    FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Original corners: [{cornerBiomes[0]}, {cornerBiomes[1]}, {cornerBiomes[2]}, {cornerBiomes[3]}]");
+                    FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Original corners: [{cornerBiomes[0]?.Biome}, {cornerBiomes[1]?.Biome}, {cornerBiomes[2]?.Biome}, {cornerBiomes[3]?.Biome}]");
                 }
 
                 // Pre-compute corner positions (XZ only - Y doesn't matter for terrain)
@@ -446,20 +451,20 @@ namespace VerdantsAscent.Utilities
                     FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: Corner containment: c0={c0Inside}, c1={c1Inside}, c2={c2Inside}, c3={c3Inside}");
                 }
 
-                if (c0Inside) { cornerBiomes[0] = forcedBiome; anyChanged = true; }
-                if (c1Inside) { cornerBiomes[1] = forcedBiome; anyChanged = true; }
-                if (c2Inside) { cornerBiomes[2] = forcedBiome; anyChanged = true; }
-                if (c3Inside) { cornerBiomes[3] = forcedBiome; anyChanged = true; }
+                var forcedSector = VerdantsAscent.Terrain.Zones.BiomePaint.PlainSectorFor(forcedBiome);
+                int changed = 0;
+                if (c0Inside && cornerBiomes[0]?.Biome != forcedBiome) { cornerBiomes[0] = forcedSector; anyChanged = true; changed++; }
+                if (c1Inside && cornerBiomes[1]?.Biome != forcedBiome) { cornerBiomes[1] = forcedSector; anyChanged = true; changed++; }
+                if (c2Inside && cornerBiomes[2]?.Biome != forcedBiome) { cornerBiomes[2] = forcedSector; anyChanged = true; changed++; }
+                if (c3Inside && cornerBiomes[3]?.Biome != forcedBiome) { cornerBiomes[3] = forcedSector; anyChanged = true; changed++; }
 
                 if (anyChanged)
                 {
                     _cornerBiomesField.SetValue(__instance, cornerBiomes);
                     _modifiedHeightmaps.Add(__instance.GetInstanceID());
-
-                    if (_debugTerrainPatches)
-                    {
-                        FiresLogger.LogInfo($"[EnvBoxPatches] PREFIX: SET corners to [{cornerBiomes[0]}, {cornerBiomes[1]}, {cornerBiomes[2]}, {cornerBiomes[3]}]");
-                    }
+                    // Info once a session (Fire's default level sees it); every heightmap after that at Debug
+                    if (!_saidOverrideActive) { _saidOverrideActive = true; FiresLogger.LogInfo($"[EnvBoxPatches] env box terrain override active (first applied at {hmPos.x:F0},{hmPos.z:F0}, {forcedBiome})"); }
+                    FiresLogger.LogDebug($"[EnvBoxPatches] env box corner override applied: heightmap at ({hmPos.x:F0}, {hmPos.z:F0}), {changed} corner(s) set to {forcedBiome}; corners now [{cornerBiomes[0]?.Biome}, {cornerBiomes[1]?.Biome}, {cornerBiomes[2]?.Biome}, {cornerBiomes[3]?.Biome}]");
                 }
                 else
                 {

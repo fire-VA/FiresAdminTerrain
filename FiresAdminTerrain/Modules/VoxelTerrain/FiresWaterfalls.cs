@@ -55,13 +55,26 @@ namespace VerdantsAscent.Terrain.Voxel
         // The least outward offset a curtain row may take at world height y so it hangs in front of the terrain: 0 at
         // a vertical face, more where the face bulges out below the lip, and negative when terrain fills the whole
         // reach at that height, which is where the water lands.
-        internal delegate float OutwardProfile(Vector3 basePos, Vector3 outward, float y);
+        // 0.2.1321 (Fire x266 z1114, sheets hanging in the lip plane under an overhang): two-sided. `above` is the offset the
+        // row above took; `landed` = the face at y stands out more than ProbeStep in front of it (the water meets the terrain
+        // within one step of where it fell to); `inward` = the face lies behind the lip (an overhang) and the offset is that
+        // face + clearance, negative or under ProbeClearance, and must not be pushed out by the lip curl.
+        internal delegate float OutwardProfile(Vector3 basePos, Vector3 outward, float y, float above, out bool landed, out bool inward);
 
         private const float ProbeStep = 0.5f;
         private const float ProbeReach = 12f;
         private const float ProbeClearance = 0.35f;
         private const float MinFallLength = 2f;
         private static readonly List<float> s_rowOut = new List<float>(32);
+        // 0.2.1321: per (column, row) whether the profile followed a face behind the lip, and the probe's last face distance.
+        private static readonly List<bool> s_inward = new List<bool>(4096);
+        private static float s_lastFace = float.NaN;
+        // 0.2.1321: a lip more than this from BOTH neighbours (along the outward march) is a mis-probe and takes their mean.
+        private const float LipJumpReject = 0.5f;
+        private static readonly float[] LipProbeDepths = { 0.1f, 0.3f, 0.6f };
+        private static readonly List<float> s_lipAt = new List<float>(128);
+        private static readonly List<Vector3> s_lipFrom = new List<Vector3>(128);
+        private static readonly List<Vector3> s_lipDir = new List<Vector3>(128);
 
         private const int MistQueue = 3010;
         private const string BundleName = "fireswaterfall";
@@ -421,15 +434,67 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float OpenEdgeFar = 1e4f;
 
         internal static bool AppendCurtain(List<Column> columns, Vector3 outward, float lipOut, float fadeLength, float seed,
-            OutwardProfile profile = null, bool approach = true)
+            OutwardProfile profile = null, bool approach = true, bool placed = false)
         {
-            if (FatSuperFlat.On) return false;   // No falls at the real world's cliffs on super flat
+            // No falls at the real world's cliffs on super flat. 0.2.1071 (Fire: "v fall doesnt do shit"): falls the PLAYER placed
+            // (Vfall, water-tool sheet falls) are always drawn; the guard was refusing every one of them on super flat.
+            if (FatSuperFlat.On && !placed) return false;
             bool openStart = OpenStart, openEnd = OpenEnd;
             float acrossStart = AcrossStart;
             OpenStart = OpenEnd = false;
             AcrossStart = float.NaN;
             int n = columns.Count;
             if (n < 2) return false;
+            // 0.2.1190 (Fire: "they are placing waterfalls about 2m in front of the ledges they should be at"): terrain-aware
+            // curtains (a profile is given) snap each column onto the REAL lip and hang flush (LipFlushOut), instead of the
+            // cell edge + EdgeLipOut (1 m) + the row curl, which put the top of the sheet 1-2 m out in front of the face.
+            if (profile != null && lipOut > LipFlushOut)
+            {
+                // 0.2.1321: measure every lip first (NaN = none found), reject a lip that jumps > LipJumpReject from BOTH
+                // neighbours (the one-height probe zigzagged ~1.4 m column to column, log-proven), then move the columns.
+                s_lipAt.Clear(); s_lipFrom.Clear(); s_lipDir.Clear();
+                int lipSteps = 0;
+                for (int c = 0; c < n; c++)
+                {
+                    var column = columns[c];
+                    Vector3 dir = column.Outward.sqrMagnitude > 0.01f ? column.Outward : outward;
+                    bool ok = SnapToLip(column.Base, dir, column.LipY, out _, out int steps, out float at, out Vector3 from);
+                    lipSteps += steps;
+                    s_lipAt.Add(ok ? at : float.NaN); s_lipFrom.Add(from); s_lipDir.Add(dir);
+                }
+                int rejected = 0;
+                for (int c = 1; c < n - 1; c++)
+                {
+                    float a = s_lipAt[c - 1], m = s_lipAt[c], b = s_lipAt[c + 1];
+                    if (float.IsNaN(a) || float.IsNaN(m) || float.IsNaN(b)) continue;
+                    if (Mathf.Abs(m - a) > LipJumpReject && Mathf.Abs(m - b) > LipJumpReject)
+                    {
+                        s_lipAt[c] = (a + b) * 0.5f;
+                        rejected++;
+                    }
+                }
+                for (int c = 0; c < n; c++)
+                {
+                    if (float.IsNaN(s_lipAt[c])) continue;
+                    var column = columns[c];
+                    Vector3 dir = s_lipDir[c], from = s_lipFrom[c];
+                    Vector3 lip = new Vector3(from.x + dir.x * s_lipAt[c], column.LipY, from.z + dir.z * s_lipAt[c]);
+                    float moved = new Vector2(column.Base.x + dir.x * lipOut - lip.x, column.Base.z + dir.z * lipOut - lip.z).magnitude;
+                    NoteLip(column.Base, lip, lipSteps / n, moved, lipOut);
+                    column.Base = new Vector3(lip.x, column.Base.y, lip.z);
+                    columns[c] = column;
+                }
+                if (rejected > 0)
+                {
+                    if (!s_lipRejectProof) { s_lipRejectProof = true; FiresLogger.LogInfo("[Waterfall] lips from the median of 3 probe heights; a lip jumping > 0.5 m from both neighbours takes their mean (0.2.1321)"); }
+                    if (FiresLogger.DebugEnabled && Time.realtimeSinceStartup >= s_nextLipRejectLog)
+                    {
+                        s_nextLipRejectLog = Time.realtimeSinceStartup + 2f;
+                        FiresLogger.LogDebug($"[Waterfall] curtain at ({columns[0].Base.x:0.0},{columns[0].Base.z:0.0}): {rejected} of {n} lip(s) rejected (jumped > {LipJumpReject:0.0} m from both neighbours), replaced by the neighbours' mean (0.2.1321)");
+                    }
+                }
+                lipOut = LipFlushOut;
+            }
             float longest = 0f;
             foreach (var column in columns) longest = Mathf.Max(longest, column.FallLength);
             if (longest <= 0.5f) return false;
@@ -453,7 +518,7 @@ namespace VerdantsAscent.Terrain.Voxel
             float thickness = Mathf.Min(Thickness, Mathf.Max(width, MinThickness));
 
             s_rear.Clear(); s_thick.Clear(); s_fallen.Clear(); s_dirs.Clear(); s_lengths.Clear(); s_plunges.Clear();
-            s_lipY.Clear(); s_landed.Clear(); s_offsets.Clear();
+            s_lipY.Clear(); s_landed.Clear(); s_offsets.Clear(); s_inward.Clear();
             bool anyLanded = false;
             Vector3 lipSum = Vector3.zero, footSum = Vector3.zero, dirSum = Vector3.zero;
 
@@ -495,10 +560,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int r = 0; r < rows; r++)
                 {
                     float f = s_rows[r];
-                    if (f < 0f || profile == null) { s_offsets.Add(0f); continue; }
-                    float outAt = profile(column.Base, dir, lipY - f * stretch);
-                    if (outAt < 0f) outAt = last;
+                    if (f < 0f || profile == null) { s_offsets.Add(0f); s_inward.Add(false); continue; }
+                    // 0.2.1321: two-sided profile; a landed row keeps the offset above it (as before).
+                    float outAt = profile(column.Base, dir, lipY - f * stretch, last, out bool hit, out bool inw);
+                    if (hit) { outAt = last; inw = s_inward.Count > 0 && r > 0 && s_inward[s_inward.Count - 1]; }
                     s_offsets.Add(outAt);
+                    s_inward.Add(inw);
                     last = outAt;
                 }
             }
@@ -533,12 +600,24 @@ namespace VerdantsAscent.Terrain.Voxel
                         continue;
                     }
                     float fall = f * stretch;
-                    float offset = Mathf.Max(lipOut + Curl * (1f - Mathf.Exp(-fall / CurlLength)), s_offsets[c * rows + r]);
+                    int oi = c * rows + r;
+                    float curled = lipOut + Curl * (1f - Mathf.Exp(-fall / CurlLength));
+                    // 0.2.1321: a row under an overhang follows the face behind the lip (its offset may be negative); the
+                    // curl only ever pushes an outward-face row out.
+                    float offset = profile != null && s_inward[oi] ? s_offsets[oi] : Mathf.Max(curled, s_offsets[oi]);
                     s_rear.Add(new Vector3(column.Base.x + dir.x * offset, lipY - fall, column.Base.z + dir.z * offset));
-                    s_thick.Add(SlabThickness(thickness, fall, length, closesOnGround));
+                    float slab = SlabThickness(thickness, fall, length, closesOnGround);
+                    // 0.2.1321: the front opens no further than the free space measured in front of this row.
+                    if (profile != null && slab > 0f)
+                    {
+                        float free = FreeAhead(column.Base, dir, lipY - fall, offset, slab);
+                        if (free < slab) { slab = free; s_clamped++; }
+                    }
+                    s_thick.Add(slab);
                     s_fallen.Add(fall);
                 }
             }
+            if (profile != null) ProbeShape(columns, rows, lipOut);   // 0.2.1321
             LastShape = new ShapeReport
             {
                 Columns = n, Rows = rows, Approach = approach, RawLipSpread = rawLipSpread, RawLengthSpread = rawLengthSpread,
@@ -712,8 +791,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (profile == null || f < 0f) { s_rowOut.Add(0f); continue; }
                 if (landed) { s_rowOut.Add(s_rowOut[r - 1]); continue; }
                 float fall = Mathf.Min(f, column.FallLength);
-                float outAt = profile(column.Base, dir, column.LipY - fall);
-                if (outAt < 0f)
+                float above = r > 0 ? s_rowOut[r - 1] : 0f;
+                float outAt = profile(column.Base, dir, column.LipY - fall, above, out bool hit, out _);   // 0.2.1321: two-sided
+                if (hit)
                 {
                     landed = true;
                     length = Mathf.Min(length, fall);
@@ -725,16 +805,159 @@ namespace VerdantsAscent.Terrain.Voxel
             return length;
         }
 
-        // The default profile: marches outward from the lip at height y until it leaves the terrain, reading voxel
-        // density where a chunk holds it and the heightmap ground elsewhere.
-        internal static float TerrainProfile(Vector3 basePos, Vector3 outward, float y)
+        // The default profile, reading voxel density where a chunk holds it and the heightmap ground elsewhere.
+        // 0.2.1321 (Fire x266 z1114: sheets hung in the lip plane off an overhang over a pit and folded into panels; the old
+        // march went only OUTWARD, so under an overhang its first probe was air and every row returned 0; a row landed
+        // only after ProbeReach = 12 m of solid): two-sided. Solid at the lip plane -> march outward to the first air,
+        // offset = face + clearance. Air at the lip plane -> march INWARD up to LipReach to the first solid, offset = that
+        // face + clearance (negative under an overhang). A row lands when its face stands more than ProbeStep in front of
+        // the row above (the water meets solid within one step of where it fell to), or the whole outward reach is solid.
+        internal static float TerrainProfile(Vector3 basePos, Vector3 outward, float y, float above, out bool landed, out bool inward)
         {
-            for (float d = 0f; d <= ProbeReach; d += ProbeStep)
+            landed = false; inward = false; s_lastFace = float.NaN;
+            float offset;
+            if (SolidAt(basePos.x, y, basePos.z))
             {
-                if (!SolidAt(basePos.x + outward.x * d, y, basePos.z + outward.z * d))
-                    return d <= 0f ? 0f : d + ProbeClearance;
+                float face = float.NaN;
+                for (float d = ProbeStep; d <= ProbeReach; d += ProbeStep)
+                    if (!SolidAt(basePos.x + outward.x * d, y, basePos.z + outward.z * d)) { face = d; break; }
+                if (float.IsNaN(face)) { landed = true; return above; }
+                s_lastFace = face;
+                offset = face + ProbeClearance;
             }
-            return -1f;
+            else
+            {
+                float face = float.NaN;
+                for (float d = LipStep; d <= LipReach; d += LipStep)
+                    if (SolidAt(basePos.x - outward.x * d, y, basePos.z - outward.z * d)) { face = -(d - LipStep * 0.5f); break; }
+                if (float.IsNaN(face))
+                {
+                    // Nothing behind the lip within reach: free fall, straight down from the row above (or the lip plane).
+                    if (above < 0f) { inward = true; return above; }
+                    return 0f;
+                }
+                s_lastFace = face;
+                offset = face + ProbeClearance;
+                // A face within one LipStep of the lip plane is the plain vertical cliff: it keeps the lip curl as before.
+                inward = face < -LipStep;
+            }
+            if (offset > above + ProbeStep)
+            {
+                landed = true;
+                return above;
+            }
+            return offset;
+        }
+
+        // 0.2.1321: free space in front of a curtain row (rear face at `offset`), up to `want`: the slab front opens no further.
+        private static float FreeAhead(Vector3 basePos, Vector3 dir, float y, float offset, float want)
+        {
+            const float step = 0.25f;
+            for (float d = step; d <= want + 1e-3f; d += step)
+                if (SolidAt(basePos.x + dir.x * (offset + d), y, basePos.z + dir.z * (offset + d)))
+                    return Mathf.Max(0f, d - step);
+            return want;
+        }
+        private static int s_clamped;
+
+        // 0.2.1190: the sheet's top edge sits this far past the real lip (a few cm, so it never starts inside the rock).
+        private const float LipFlushOut = 0.05f;
+        private const float LipStep = 0.25f, LipReach = 3f, LipDepthReach = 4f;
+
+        // The real ledge lip along `dir` from `start` (a column on the water side): the ground under the water is found by
+        // stepping down from the water level, then the march goes outward in LipStep steps while the ground stays at that
+        // level; the last step still on it is the lip. False (keep the old origin) when no ground or no edge is found.
+        // 0.2.1321: measured at three probe heights (bed - 0.1 / 0.3 / 0.6 m) and the MEDIAN taken (two found = their mean);
+        // the single bed - 0.3 m probe zigzagged ~1.4 m between neighbouring columns (log-proven). `at` is the distance
+        // along dir from `from` for the caller's neighbour check.
+        internal static bool SnapToLip(Vector3 start, Vector3 dir, float lipY, out Vector3 lip, out int steps, out float at, out Vector3 from)
+        {
+            lip = start; steps = 0; at = float.NaN;
+            // Start a little upstream of the given base (it sits on the cell edge), so the march begins over the bed.
+            from = new Vector3(start.x - dir.x * 0.5f, 0f, start.z - dir.z * 0.5f);
+            float bed = float.NaN;
+            for (float dy = 0.05f; dy <= LipDepthReach; dy += LipStep)
+                if (SolidAt(from.x, lipY - dy, from.z)) { bed = lipY - dy; break; }
+            if (float.IsNaN(bed)) return false;
+            float a0 = float.NaN, a1 = float.NaN, a2 = float.NaN;
+            for (int p = 0; p < LipProbeDepths.Length; p++)
+            {
+                float probeY = bed - LipProbeDepths[p];
+                float last = -1f;
+                for (float d = 0f; d <= LipReach; d += LipStep)
+                {
+                    steps++;
+                    if (SolidAt(from.x + dir.x * d, probeY, from.z + dir.z * d)) last = d;
+                    else if (last >= 0f) break;
+                }
+                if (last < 0f || last >= LipReach) continue;
+                float edge = last + LipStep * 0.5f;   // the face lies between the last solid and the first open step
+                if (p == 0) a0 = edge; else if (p == 1) a1 = edge; else a2 = edge;
+            }
+            int found = (float.IsNaN(a0) ? 0 : 1) + (float.IsNaN(a1) ? 0 : 1) + (float.IsNaN(a2) ? 0 : 1);
+            if (found == 0) return false;
+            if (found == 3) at = Mathf.Max(Mathf.Min(a0, a1), Mathf.Min(Mathf.Max(a0, a1), a2));
+            else if (found == 2) at = ((float.IsNaN(a0) ? 0f : a0) + (float.IsNaN(a1) ? 0f : a1) + (float.IsNaN(a2) ? 0f : a2)) * 0.5f;
+            else at = float.IsNaN(a0) ? (float.IsNaN(a1) ? a2 : a1) : a0;
+            lip = new Vector3(from.x + dir.x * at, lipY, from.z + dir.z * at);
+            return true;
+        }
+
+        // 0.2.1321: Debug shape probe ("Waterfall shape probe radius", 0 = off): every column of the curtain just shaped
+        // within the radius of the local player logs its lip, fall length and per row height / offset / landed / face.
+        private static float s_nextProbeLog;
+        private static bool s_lipRejectProof, s_shapeProof;
+        private static float s_nextLipRejectLog;
+        private static void ProbeShape(List<Column> columns, int rows, float lipOut)
+        {
+            if (!s_shapeProof)
+            {
+                s_shapeProof = true;
+                FiresLogger.LogInfo("[Waterfall] curtains follow the face on both sides of the lip (overhangs inward), land within one step, slab front clamped to free space (0.2.1321)");
+            }
+            if (s_clamped > 0 && FiresLogger.DebugEnabled && Time.realtimeSinceStartup >= s_nextProbeLog + 0.5f)
+                FiresLogger.LogDebug($"[Waterfall] {s_clamped} slab row(s) clamped to measured free space in front (0.2.1321)");
+            s_clamped = 0;
+            float radius = FiresVoxelConfig.WaterfallShapeProbeMetres;
+            if (radius <= 0f || !FiresLogger.DebugEnabled || Player.m_localPlayer == null) return;
+            if (Time.realtimeSinceStartup < s_nextProbeLog) return;
+            Vector3 me = Player.m_localPlayer.transform.position;
+            var sb = new System.Text.StringBuilder(1024);
+            int logged = 0;
+            for (int c = 0; c < columns.Count && logged < 64; c++)
+            {
+                Vector3 b = columns[c].Base;
+                if (new Vector2(b.x - me.x, b.z - me.z).sqrMagnitude > radius * radius) continue;
+                logged++;
+                sb.Clear();
+                sb.Append($"[Waterfall] shape probe col {c}/{columns.Count} lip ({b.x:0.00},{b.z:0.00}) lipY {s_lipY[c]:0.00} (raw {columns[c].LipY:0.00}) fall {s_lengths[c]:0.00} (raw {columns[c].FallLength:0.00}) landed {s_landed[c]} lipOut {lipOut:0.00} dir ({s_dirs[c].x:0.00},{s_dirs[c].z:0.00}) rows:");
+                float above = 0f;
+                for (int r = 0; r < rows; r++)
+                {
+                    int i = c * rows + r;
+                    if (s_fallen[i] < 0f) continue;
+                    float y = s_lipY[c] - s_fallen[i];
+                    float o = TerrainProfile(b, s_dirs[c], y, above, out bool hit, out bool inw);
+                    float face = s_lastFace;
+                    above = hit ? above : o;
+                    Vector3 p = s_rear[s_rear.Count - columns.Count * rows + i];
+                    float drawn = Vector2.Dot(new Vector2(p.x - b.x, p.z - b.z), new Vector2(s_dirs[c].x, s_dirs[c].z));
+                    sb.Append($" [y {y:0.00} off {drawn:0.00} prof {o:0.00} face {(float.IsNaN(face) ? "-" : face.ToString("0.00"))} {(inw ? "in" : "out")}{(hit ? " LANDED" : "")} thick {s_thick[s_thick.Count - columns.Count * rows + i]:0.00}]");
+                }
+                sb.Append(" (0.2.1321)");
+                FiresLogger.LogDebug(sb.ToString());
+            }
+            if (logged > 0) s_nextProbeLog = Time.realtimeSinceStartup + 1f;
+        }
+
+        private static readonly HashSet<long> s_lipNoted = new HashSet<long>();
+        private static void NoteLip(Vector3 oldBase, Vector3 lip, int steps, float moved, float oldLipOut)
+        {
+            if (!FiresLogger.DebugEnabled) return;
+            long key = ((long)Mathf.RoundToInt(oldBase.x) << 32) ^ (uint)Mathf.RoundToInt(oldBase.z);
+            if (!s_lipNoted.Add(key) || s_lipNoted.Count > 4096) return;
+            FiresLogger.LogDebug($"[Waterfall] fall at ({oldBase.x:0.0},{oldBase.z:0.0}): lip found at ({lip.x:0.0},{lip.z:0.0}) after {steps} steps, moved {moved:0.00} m from the old origin " +
+                                 $"(old offset reason: column base on the water cell edge + EdgeLipOut {oldLipOut:0.0} m, not the real face) (0.2.1190)");
         }
 
         private static bool SolidAt(float x, float y, float z)

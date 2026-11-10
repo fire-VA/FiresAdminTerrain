@@ -75,6 +75,17 @@ namespace VerdantsAscent.Terrain
         private static Stroke s_stroke;
         private static bool s_laying;
 
+        // 0.2.1354 (review: statics surviving logout): a stroke open at logout would close in the next session and record a step made of that world's chunks. Called from WaterShapingTools.ForgetSession.
+        internal static void ForgetSession()
+        {
+            s_stroke = null;
+            s_recent.Clear();
+            s_scope = 0;
+            s_scopeWhat = null;
+            s_late = 0;
+            s_laying = false;
+        }
+
         private static Stroke Current()
         {
             if (s_stroke == null) s_stroke = new Stroke { What = s_scopeWhat ?? "a terrain edit" };
@@ -149,6 +160,21 @@ namespace VerdantsAscent.Terrain
             catch (Exception ex) { Debug.LogWarning($"[FatUndo] water disk note threw: {ex.Message}"); }
         }
 
+        // The box round a stroke's chunks (the undo flash, FatUndoFlash.cs).
+        private static Bounds ChunkBounds(IEnumerable<Vector3Int> keys)
+        {
+            int cells = VoxelChunk.CELLS;
+            bool any = false;
+            var b = new Bounds();
+            foreach (var k in keys)
+            {
+                var kb = new Bounds();
+                kb.SetMinMax(new Vector3(k.x * cells, k.y * cells, k.z * cells), new Vector3((k.x + 1) * cells, (k.y + 1) * cells, (k.z + 1) * cells));
+                if (!any) { b = kb; any = true; } else b.Encapsulate(kb);
+            }
+            return b;
+        }
+
         private static Vector3Int KeyOf(Vector3 p)
         {
             int cells = VoxelChunk.CELLS;
@@ -158,6 +184,7 @@ namespace VerdantsAscent.Terrain
         private static void CloseIdleStroke()
         {
             if (s_stroke == null || Time.unscaledTime - s_stroke.LastDab < StrokeIdleSeconds) return;
+            if (VerdantsAscent.Water.Tools.WaterShapingTools.RiverFinishPending) return;   // 0.2.1348: a river's fill and falls land in its own step (the finish is capped)
             var stroke = s_stroke;
             s_stroke = null;
             var before = new Dictionary<Vector3Int, ChunkState>();
@@ -182,7 +209,7 @@ namespace VerdantsAscent.Terrain
             string what = disks.Count > 0 ? $"{stroke.What} ({before.Count} chunk(s), {disks.Count} water disk(s))" : $"{stroke.What} ({before.Count} chunk(s))";
             if (gone.Count > 0 || ice.Count > 0 || pours.Count > 0)
                 what = $"{stroke.What} ({before.Count} chunk(s), {disks.Count} water disk(s) drawn, {gone.Count} removed, {ice.Count} ice/snow sheet(s), {pours.Count} liquid pour(s))";
-            Record(what, () => Lay(before, disks, false) + LayMore(gone, ice, false) + LayPours(pours, false),
+            Record(what, ChunkBounds(before.Count > 0 ? (IEnumerable<Vector3Int>)before.Keys : stroke.Before.Keys), () => Lay(before, disks, false) + LayMore(gone, ice, false) + LayPours(pours, false),
                          () => Lay(after, disks, true) + LayMore(gone, ice, true) + LayPours(pours, true));
             // Late water (a pool laid once its bed shows) still joins this step: the lambdas above read the same list.
             s_recent.Add(new Closed { Keys = new HashSet<Vector3Int>(stroke.Before.Keys), Disks = disks, What = what, At = Time.unscaledTime });

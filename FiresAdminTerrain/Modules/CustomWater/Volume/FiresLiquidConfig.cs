@@ -18,6 +18,8 @@ namespace VerdantsAscent.Water.Core
         // a healthy world it's just noisy Warning+stack spam on every unload.
         public static ConfigEntry<bool> Diagnostics;
 
+        public static ConfigEntry<bool> RiverChainLakes;
+
         public static ConfigEntry<Color> ColorTop, ColorBottom, ColorShallow, SurfaceColor, FoamColor,
             AbsorbExtinction, MurkColor;
         public static ConfigEntry<float> Turbidity, TurbidityDepth, TurbChurn;
@@ -39,6 +41,10 @@ namespace VerdantsAscent.Water.Core
             Diagnostics = cfg.Bind("01 - General", "03 Verbose pour tracing", false,   // formerly [FiresLiquid Diagnostics] Verbose pour tracing
                 "Dev-only: trace custom-water pour spawn/destroy/ZDO-reset lifecycle (noisy Warning+stack). Off = quiet.");
             FatConfigRetire.Move(cfg, "FiresLiquid Diagnostics", "Verbose pour tracing", Diagnostics);
+
+            // 0.2.1053 (Fire 10-26: "Lakes on a toggle"): the River tool's click chain digs a lake at its start and end only when on.
+            RiverChainLakes = cfg.Bind("Water Tools", "River chain lakes", false,
+                "River tool click chain (click = start, Shift+click = spine point, click = end): also dig a lake at the start and end points. Off = the river only.");
 
             // TUNED FOR POND DEPTH, NOT OCEAN DEPTH. Everything the shader does
             // with colour scales with the water column: absorption runs

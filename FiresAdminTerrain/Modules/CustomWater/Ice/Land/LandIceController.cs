@@ -38,6 +38,7 @@ namespace VerdantsAscent.Water.Core
         #region Constants
 
         private const float CELL_SIZE = 0.25f;
+        private const int GridExtra = 1;   // 0.2.1336: the grid's cells past the bounds
         private const float BLEND_DISTANCE = 2.0f;
         private const float GRID_PADDING = 2.5f;
         private const float ICE_TERRAIN_OFFSET = 0.10f;
@@ -418,23 +419,16 @@ namespace VerdantsAscent.Water.Core
 
             _noiseSeed = noiseSeed;
 
-            if (gridData != null && gridData.Length >= 24)
-            {
-                _gridWidth = BitConverter.ToInt32(gridData, 0);
-                _gridHeight = BitConverter.ToInt32(gridData, 4);
-                _boundsMinX = BitConverter.ToSingle(gridData, 8);
-                _boundsMinZ = BitConverter.ToSingle(gridData, 12);
-                _boundsMaxX = BitConverter.ToSingle(gridData, 16);
-                _boundsMaxZ = BitConverter.ToSingle(gridData, 20);
-            }
-            else
+            // 0.2.1336: range-checked before anything is allocated; a bad block is skipped and the grid comes from the footprints.
+            if (!IceGridCheck.Read(gridData, CELL_SIZE, GridExtra, "land ice", out _gridWidth, out _gridHeight, out _boundsMinX, out _boundsMinZ, out _boundsMaxX, out _boundsMaxZ))
             {
                 RecalcBounds();
+                if (!IceGridCheck.Fits(_boundsMinX, _boundsMinZ, _boundsMaxX, _boundsMaxZ, CELL_SIZE, GridExtra, "land ice footprints")) return;
                 _gridWidth = Mathf.CeilToInt((_boundsMaxX - _boundsMinX) / CELL_SIZE) + 1;
                 _gridHeight = Mathf.CeilToInt((_boundsMaxZ - _boundsMinZ) / CELL_SIZE) + 1;
             }
 
-            if (heightData != null && heightData.Length == _gridWidth * _gridHeight * 4)
+            if (heightData != null && heightData.Length == _gridWidth * (long)_gridHeight * 4L)
             {
                 _heights = new float[_gridWidth * _gridHeight];
                 Buffer.BlockCopy(heightData, 0, _heights, 0, heightData.Length);
@@ -898,6 +892,8 @@ namespace VerdantsAscent.Water.Core
 
             _iceCollider = _iceGO.AddComponent<MeshCollider>();
             _iceCollider.convex = false;
+            VanillaIce.OptIn(_iceCollider);   // 0.2.1095: vanilla slippery ice (layer static_solid + SlipperyIce); FAT's home-made slide is gone
+            VanillaIce.AddSnap(_iceCollider);   // 0.2.1095: plus a snap collider on layer piece for Infinity Hammer
         }
 
         private void DisableFloatingPhysics()
@@ -1150,6 +1146,7 @@ namespace VerdantsAscent.Water.Core
             {
                 _iceCollider.sharedMesh = null;
                 _iceCollider.sharedMesh = _colliderMesh;
+                VanillaIce.SyncSnap(_iceCollider);
             }
         }
 

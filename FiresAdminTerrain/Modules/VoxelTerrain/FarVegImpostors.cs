@@ -81,6 +81,7 @@ namespace VerdantsAscent.Terrain.Voxel
             public float Height;              // how tall it stands, for picking which species are worth drawing
             public Mesh Quad;          // crossed quads sized to the prefab (main thread)
             public Material Mat;       // baked billboard, instancing on (main thread)
+            public Material GpuMat;    // 0.2.1399: the same sheet on Custom/FiresImpostorGPU (matrices from a GPU buffer); null without that shader
             public volatile bool Broken;
         }
 
@@ -97,6 +98,26 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float SlopeProbe = 8.485f;      // the (+6,+6) probe BuildTile walks
 
         private static Species[] s_species = new Species[0];
+
+        // 0.2.1047 (halo far ring phase 3, FatHaloFarTrees): the baked billboards of the tallest species of a biome, for the
+        // far side of the ring. Only species whose bake is done (quad + material on the main thread) and not broken.
+        internal static int BakedSpeciesFor(Heightmap.Biome biome, int max, List<(string prefab, Mesh quad, Texture tex, float height)> into)
+        {
+            into.Clear();
+            var all = s_species;
+            var hits = new List<Species>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                var sp = all[i];
+                if (sp == null || sp.Broken || sp.Quad == null || sp.Mat == null || sp.Mat.mainTexture == null) continue;
+                if ((sp.Biomes & biome) != 0) hits.Add(sp);
+            }
+            hits.Sort((a, b) => (b.Height * b.Density).CompareTo(a.Height * a.Density));
+            for (int i = 0; i < hits.Count && into.Count < max; i++) into.Add((hits[i].Prefab, hits[i].Quad, hits[i].Mat.mainTexture, hits[i].Height));
+            return into.Count;
+        }
+
+        internal static int SpeciesCount => s_species.Length;
 
         // Every vegetation entry the game will actually place, tall enough to read at a kilometre, kept to the dominant
         // few per biome. Runs once, on the main thread, before the bake.
@@ -144,9 +165,9 @@ namespace VerdantsAscent.Terrain.Voxel
             if (kept.Count == 0) return false;
 
             s_species = kept.ToArray();
-            s_chunks = new List<Matrix4x4[]>[s_species.Length];
-            s_chunkCounts = new List<int>[s_species.Length];
-            s_flat = new List<Matrix4x4>[s_species.Length];
+            s_chunks = new List<Matrix4x4[]>[s_species.Length * Slots];
+            s_chunkCounts = new List<int>[s_species.Length * Slots];
+            s_flat = new List<Matrix4x4>[s_species.Length * Slots];
             s_byBiome.Clear();
             foreach (var biome in s_biomes)
             {
@@ -168,7 +189,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly List<Species> s_perBiome = new List<Species>();
         private static readonly Dictionary<Heightmap.Biome, int[]> s_byBiome = new Dictionary<Heightmap.Biome, int[]>();
 
-        private static float PrefabHeight(GameObject prefab)
+        internal static float PrefabHeight(GameObject prefab)   // 0.2.1412: internal, FarForest kinds reuse it
         {
             float low = float.MaxValue, high = float.MinValue;
             foreach (var renderer in prefab.GetComponentsInChildren<Renderer>(true))
@@ -203,6 +224,87 @@ namespace VerdantsAscent.Terrain.Voxel
         // s_chunkCounts holds the live instance count per chunk. Rebuilding no
         // longer allocates (the old `new Matrix4x4[n]` per rebuild churned GC
         // on every camera turn — a real stutter source).
+        // 0.2.1372 (log on 1371: the draw is 75 ms/s, FAT's largest cost; 126 calls, 120,000 instances a frame, the whole circle, half of it behind the camera): each species keeps its
+        // batches per direction around the player, plus one always-drawn slot for near tiles, and a frame replays only the directions the camera can see.
+        // Indexed species * Slots + slot. Only the main camera renders in world (RENDER CAMERAS: 1 enabled), billboards cast no shadows.
+        private const int Sectors = 12, AlwaysSlot = Sectors, Slots = Sectors + 1;
+        private const float AlwaysDrawMeters = 1000f;    // nearer than this, a tile spans too wide an angle to sort by direction
+        // Added to the half view angle: half a sector 15, a tile's width at AlwaysDrawMeters 5.2, the camera up to one tile diagonal (181 m) from where the batches were built 10.3,
+        // and one frame of a fast turn 12 (the camera moves after this runs).
+        private const float ViewMarginDegrees = 43f;
+        private const float ViewMarginCameraMeters = 220f;   // further from the batches (a free camera), every direction draws
+        private const float SteepCos = 0.5f;                 // looking more than 60 degrees up or down, every direction draws
+        private static readonly bool[] s_sectorOn = new bool[Sectors];
+        private static readonly Vector2[] s_sectorDir = MakeSectorDirs();
+        private static Vector2 s_batchPos;
+        private static bool s_sectorsSaid;
+        private static int s_splitSectorsOn;
+
+        private static Vector2[] MakeSectorDirs()
+        {
+            var dirs = new Vector2[Sectors];
+            for (int i = 0; i < Sectors; i++)
+            {
+                float a = (i + 0.5f) * Mathf.PI * 2f / Sectors;
+                dirs[i] = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+            }
+            return dirs;
+        }
+
+        private static int SectorOf(float dx, float dz)
+        {
+            float a = Mathf.Atan2(dz, dx);
+            if (a < 0f) a += Mathf.PI * 2f;
+            return Mathf.Clamp((int)(a / (Mathf.PI * 2f) * Sectors), 0, Sectors - 1);
+        }
+
+        // 0.2.1396 (lead: are all 78,270 in view?): each slot keeps the world box of its instances, and a frame also tests that box against the camera's view, widened by FrustumTurnDegrees.
+        // Billboards cast no shadows, so nothing outside the view matters. The sectors above stay as they are; this only removes more.
+        private const float FrustumTurnDegrees = 12f;   // one frame of a fast turn: the camera moves after this runs
+        private static readonly Vector3[] s_slotMin = new Vector3[Slots], s_slotMax = new Vector3[Slots];
+        private static readonly bool[] s_slotInView = new bool[Slots];
+        private static readonly Plane[] s_viewPlanes = new Plane[6];
+
+        private static void TestSlotsInView(Camera cam)
+        {
+            var key = FiresVoxelConfig.ImpostorFrustumCull;
+            if (key != null && !key.Value) { for (int i = 0; i < Slots; i++) s_slotInView[i] = true; return; }
+            float vHalf = Mathf.Min(cam.fieldOfView * 0.5f + FrustumTurnDegrees, 85f);
+            float hHalf = Mathf.Min(Mathf.Atan(Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * cam.aspect) * Mathf.Rad2Deg + FrustumTurnDegrees, 85f);
+            float aspect = Mathf.Tan(hHalf * Mathf.Deg2Rad) / Mathf.Tan(vHalf * Mathf.Deg2Rad);
+            GeometryUtility.CalculateFrustumPlanes(Matrix4x4.Perspective(vHalf * 2f, aspect, 0.1f, 20000f) * cam.worldToCameraMatrix, s_viewPlanes);
+            for (int i = 0; i < Slots; i++)
+            {
+                if (s_slotMin[i].x > s_slotMax[i].x) { s_slotInView[i] = false; continue; }   // empty
+                var box = new Bounds(); box.SetMinMax(s_slotMin[i], s_slotMax[i]);
+                s_slotInView[i] = GeometryUtility.TestPlanesAABB(s_viewPlanes, box);
+            }
+        }
+
+        // Which directions this frame replays. Returns how many.
+        private static int PickSectors(Camera cam, Vector3 forward, Vector2 fwd)
+        {
+            float cosPitch = new Vector2(forward.x, forward.z).magnitude;
+            Vector3 c = cam.transform.position;
+            float mx = c.x - s_batchPos.x, mz = c.z - s_batchPos.y;
+            bool all = cosPitch < SteepCos || mx * mx + mz * mz > ViewMarginCameraMeters * ViewMarginCameraMeters;
+            float cosLimit = -1f;
+            if (!all)
+            {
+                float tanSide = Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * cam.aspect / cosPitch;
+                float half = Mathf.Atan(tanSide) * Mathf.Rad2Deg + ViewMarginDegrees;
+                if (half >= 180f) all = true; else cosLimit = Mathf.Cos(half * Mathf.Deg2Rad);
+            }
+            int on = 0;
+            for (int i = 0; i < Sectors; i++)
+            {
+                bool draw = all || Vector2.Dot(fwd, s_sectorDir[i]) >= cosLimit;
+                s_sectorOn[i] = draw;
+                if (draw) on++;
+            }
+            return on;
+        }
+
         private static List<Matrix4x4[]>[] s_chunks = new List<Matrix4x4[]>[0];
         private static List<int>[] s_chunkCounts = new List<int>[0];
         private static List<Matrix4x4>[] s_flat = new List<Matrix4x4>[0];
@@ -258,6 +360,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             if (!BakeBillboards()) { DrainDone(); return; }
             EnsureWorker();
+            long split0 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             Vector3 pp = player.transform.position;
             int ptx = Mathf.FloorToInt(pp.x / TILE), ptz = Mathf.FloorToInt(pp.z / TILE);
@@ -323,13 +426,24 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 }
                 if (!s_buildQueue.IsEmpty) s_wake.Set();
+                s_splitScans++;
             }
+            long split1 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             DrainDone();
+            long split2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             // LRU: over the cap, drop the tiles farthest from the player.
             int tileCap = TileCapFor(radius, fwdRadius);
-            if (s_tiles.Count > tileCap) EvictFarTiles(ptx, ptz, tileCap);
+            // 0.2.1371 (Fire's stand test, 1370 split: 0 rebuilds at 1,738 tiles, one every frame at 1,854+, cap 1,792): over the cap with every tile inside the keep ring, nothing can
+            // be dropped, yet the pass walked every tile and marked the batches dirty each frame, 2.3 ms a frame. What it can drop only changes when the player's tile or the tile count does.
+            var evictKey = FiresVoxelConfig.ImpostorRebuildOnChange;
+            bool evictOnChange = evictKey == null || evictKey.Value;
+            if (s_tiles.Count > tileCap && (!evictOnChange || ptx != s_evictTx || ptz != s_evictTz || s_tiles.Count != s_evictCount))
+            {
+                EvictFarTiles(ptx, ptz, tileCap, evictOnChange);
+                s_evictTx = ptx; s_evictTz = ptz; s_evictCount = s_tiles.Count;
+            }
 
             // Rebuild the draw batches on a tile crossing OR when the camera has
             // turned enough that the forward cone points somewhere new (~12°).
@@ -337,16 +451,24 @@ namespace VerdantsAscent.Terrain.Voxel
             if (curTile != s_lastBatchTile) { s_lastBatchTile = curTile; s_batchesDirty = true; }
             if (Vector2.Dot(fwd, s_lastBatchFwd) < 0.978f) { s_lastBatchFwd = fwd; s_batchesDirty = true; }
 
-            if (s_batchesDirty) RebuildBatches(pp, fwd, radius, fwdRadius);
+            if (s_batchesDirty) { RebuildBatches(pp, fwd, radius, fwdRadius); s_splitRebuilds++; }
+            long split3 = System.Diagnostics.Stopwatch.GetTimestamp();
+            int drawCalls = 0, drawInstances = 0;
+            int sectorsOn = PickSectors(cam, f3, fwd);
+            TestSlotsInView(cam);   // 0.2.1396
 
-            // Per-frame: just replay the cached instanced batches. No culling,
-            // no copies — 16-tri billboards are trivial on the GPU and the
-            // stable batch means turning the camera costs nothing.
-            for (int si = 0; si < s_species.Length; si++)
+            // 0.2.1399: GPU resident. The matrices went to the graphics card at the last rebuild; a frame only names what to draw.
+            if (GpuDrawn(ref drawCalls, ref drawInstances)) { s_splitSectorsOn += sectorsOn; NoteSplit(split0, split1, split2, split3, System.Diagnostics.Stopwatch.GetTimestamp(), drawCalls, drawInstances); return; }
+
+            // Per-frame: replay the cached instanced batches the camera can see (0.2.1372). No copies of our own.
+            for (int idx = 0; idx < s_chunks.Length; idx++)
             {
-                var sp = s_species[si];
-                var chunks = s_chunks[si];
-                var counts = s_chunkCounts[si];
+                int slot = idx % Slots;
+                if (slot != AlwaysSlot && !s_sectorOn[slot]) continue;
+                if (!s_slotInView[slot]) continue;   // 0.2.1396
+                var sp = s_species[idx / Slots];
+                var chunks = s_chunks[idx];
+                var counts = s_chunkCounts[idx];
                 if (sp.Broken || sp.Quad == null || sp.Mat == null || chunks == null || counts == null) continue;
                 for (int c = 0; c < counts.Count; c++)
                 {
@@ -359,6 +481,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         // second time from whatever ambient probe state the instanced
                         // path is carrying - which Unity does not define for
                         // DrawMeshInstanced without a probe provider.
+                        VerdantsAscent.Terrain.FatPerfCensus.InstancedCalls++;
+                        drawCalls++; drawInstances += n;
                         Graphics.DrawMeshInstanced(sp.Quad, 0, sp.Mat, chunks[c], n, null,
                             UnityEngine.Rendering.ShadowCastingMode.Off, false, DefaultDrawLayer, null,
                             UnityEngine.Rendering.LightProbeUsage.Off);
@@ -372,9 +496,145 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
 
+            s_splitSectorsOn += sectorsOn;
+            NoteSplit(split0, split1, split2, split3, System.Diagnostics.Stopwatch.GetTimestamp(), drawCalls, drawInstances);
+
             // (30s impostor stats + fwd-probe retired — they solved the
             // bare-distant-terrain investigation; re-add from git history if
             // the treeline coverage regresses)
+        }
+
+        // ── 0.2.1399 GPU resident instances (lead, mud3 split: "draw 587.1 ms / 10 s, 115 calls, 68,448 instances a frame") ──
+        // DrawMeshInstanced copies every chunk's Matrix4x4[] into the command buffer on every call, so the CPU paid ~4 MB of
+        // copies a frame for trees that had not moved. Key "Impostor GPU resident instances" (default on): each species x
+        // direction slot's matrices go into one GraphicsBuffer when the batches rebuild, and a frame draws each visible slot with
+        // one DrawMeshInstancedProcedural on Custom/FiresImpostorGPU (Custom/FiresImpostor with the matrix read from that buffer,
+        // the rest line for line). Same sector and view gates, same matrices, same sheets. No such shader, no compute support,
+        // or a draw that throws: the old path, one line saying why.
+        internal static Shader GpuShader;   // FiresAdminTerrain sets it from the embedded 'fatimpostorgpu' bundle
+        private static GraphicsBuffer[] s_gpuBuf = new GraphicsBuffer[0];
+        private static int[] s_gpuCount = new int[0];
+        private static MaterialPropertyBlock[] s_gpuMpb = new MaterialPropertyBlock[0];
+        private static bool s_gpuUploaded, s_gpuFailed; private static string s_gpuSaid;
+        private static readonly int s_matricesId = Shader.PropertyToID("_FatImpostorMatrices");
+
+        private static bool GpuWanted()
+        {
+            var key = FiresVoxelConfig.ImpostorGpuResident;
+            if (key != null && !key.Value) { SayGpu("OFF (key 'Impostor GPU resident instances'): matrices sent each frame, the old way"); return false; }
+            if (s_gpuFailed) return false;
+            if (GpuShader == null) { SayGpu("not available: the fatimpostorgpu shader did not load; matrices sent each frame, the old way"); return false; }
+            if (!SystemInfo.supportsComputeShaders) { SayGpu("not available: this GPU has no structured buffers; matrices sent each frame, the old way"); return false; }
+            SayGpu("ON: far billboard matrices stay on the graphics card, uploaded only when the batches rebuild");
+            return true;
+        }
+
+        private static void SayGpu(string what)
+        {
+            if (s_gpuSaid == what) return;   // each state change once
+            s_gpuSaid = what;
+            FiresLogger.LogInfo($"[FiresVoxel] far billboards GPU resident instances {what} (0.2.1399)");
+        }
+
+        // From RebuildBatches, after the flat lists are final.
+        private static void UploadGpu()
+        {
+            s_gpuUploaded = false;
+            if (!GpuWanted()) { ReleaseGpu(); return; }
+            try
+            {
+                int n = s_flat.Length;
+                if (s_gpuBuf.Length != n) { ReleaseGpu(); s_gpuBuf = new GraphicsBuffer[n]; s_gpuCount = new int[n]; s_gpuMpb = new MaterialPropertyBlock[n]; }
+                for (int idx = 0; idx < n; idx++)
+                {
+                    var flat = s_flat[idx];
+                    int count = flat != null ? flat.Count : 0;
+                    s_gpuCount[idx] = count;
+                    if (count == 0) continue;
+                    var buf = s_gpuBuf[idx];
+                    if (buf == null || buf.count < count)
+                    {
+                        buf?.Release();
+                        buf = s_gpuBuf[idx] = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Mathf.NextPowerOfTwo(Mathf.Max(count, 64)), 64);
+                    }
+                    buf.SetData(flat, 0, 0, count);
+                    var mpb = s_gpuMpb[idx] ?? (s_gpuMpb[idx] = new MaterialPropertyBlock());
+                    mpb.SetBuffer(s_matricesId, buf);
+                }
+                s_gpuUploaded = true;
+            }
+            catch (System.Exception ex) { GpuFail("upload", ex); }
+        }
+
+        private static void GpuFail(string where, System.Exception ex)
+        {
+            s_gpuFailed = true; s_gpuUploaded = false;
+            ReleaseGpu();
+            s_batchesDirty = true;   // the old path's chunks are always built; this just refreshes them
+            FiresLogger.LogWarning($"[FiresVoxel] far billboards GPU resident instances failed at {where} ({ex.Message}); back to sending matrices each frame for this session (0.2.1399)");
+        }
+
+        private static void ReleaseGpu()
+        {
+            for (int i = 0; i < s_gpuBuf.Length; i++) { s_gpuBuf[i]?.Release(); s_gpuBuf[i] = null; }
+        }
+
+        // True when this frame was drawn from the GPU buffers.
+        private static bool GpuDrawn(ref int drawCalls, ref int drawInstances)
+        {
+            if (!s_gpuUploaded || s_gpuBuf.Length != s_chunks.Length) return false;
+            var key = FiresVoxelConfig.ImpostorGpuResident;
+            if (key != null && !key.Value) return false;   // turned off since the last rebuild (MarkDirty rebuilds next frame)
+            try
+            {
+                for (int idx = 0; idx < s_gpuBuf.Length; idx++)
+                {
+                    int n = s_gpuCount[idx];
+                    if (n <= 0 || s_gpuBuf[idx] == null) continue;
+                    int slot = idx % Slots;
+                    if (slot != AlwaysSlot && !s_sectorOn[slot]) continue;
+                    if (!s_slotInView[slot]) continue;
+                    var sp = s_species[idx / Slots];
+                    if (sp.Broken || sp.Quad == null || sp.GpuMat == null) continue;
+                    var box = new Bounds(); box.SetMinMax(s_slotMin[slot], s_slotMax[slot]);
+                    VerdantsAscent.Terrain.FatPerfCensus.InstancedCalls++;
+                    drawCalls++; drawInstances += n;
+                    Graphics.DrawMeshInstancedProcedural(sp.Quad, 0, sp.GpuMat, box, n, s_gpuMpb[idx],
+                        UnityEngine.Rendering.ShadowCastingMode.Off, false, DefaultDrawLayer, null,
+                        UnityEngine.Rendering.LightProbeUsage.Off);
+                }
+                return true;
+            }
+            catch (System.Exception ex) { GpuFail("draw", ex); return false; }
+        }
+
+        // 0.2.1370 (winter audit: this Tick costs 80 ms/s near Raven's Rest with no split): where the time goes, before any fix. Debug only, every 10 s.
+        private const float SplitLogSeconds = 10f;
+        private static readonly long[] s_splitTicks = new long[4], s_splitWorst = new long[4];
+        private static int s_splitFrames, s_splitScans, s_splitRebuilds, s_splitDrawCalls, s_splitDrawInstances;
+        private static float s_splitLogAt;
+
+        private static void NoteSplit(long t0, long t1, long t2, long t3, long t4, int drawCalls, int drawInstances)
+        {
+            if (!FiresLogger.DebugEnabled) return;
+            AddSplit(0, t1 - t0); AddSplit(1, t2 - t1); AddSplit(2, t3 - t2); AddSplit(3, t4 - t3);
+            s_splitFrames++; s_splitDrawCalls += drawCalls; s_splitDrawInstances += drawInstances;
+            float now = Time.realtimeSinceStartup;
+            if (now < s_splitLogAt) return;
+            if (s_splitLogAt > 0f && s_splitFrames > 0)
+            {
+                double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                FiresLogger.LogDebug($"[FarVegImpostors] Tick last {SplitLogSeconds:0} s over {s_splitFrames} frame(s), ms total / worst one frame: scan {s_splitTicks[0] * toMs:0.0} / {s_splitWorst[0] * toMs:0.0} ({s_splitScans} scan(s)); drain {s_splitTicks[1] * toMs:0.0} / {s_splitWorst[1] * toMs:0.0}; rebuild {s_splitTicks[2] * toMs:0.0} / {s_splitWorst[2] * toMs:0.0} ({s_splitRebuilds} rebuild(s)); draw {s_splitTicks[3] * toMs:0.0} / {s_splitWorst[3] * toMs:0.0} ({s_splitDrawCalls / s_splitFrames} call(s), {s_splitDrawInstances / s_splitFrames} instance(s) a frame of {s_drawnInst} in the batches, {s_splitSectorsOn / s_splitFrames} of {Sectors} directions); tiles {s_tiles.Count}, {s_splitEvictPasses} evict pass(es), {s_splitEvicted} dropped (0.2.1372)");
+            }
+            for (int i = 0; i < 4; i++) { s_splitTicks[i] = 0; s_splitWorst[i] = 0; }
+            s_splitFrames = s_splitScans = s_splitRebuilds = s_splitDrawCalls = s_splitDrawInstances = s_splitEvictPasses = s_splitEvicted = s_splitSectorsOn = 0;
+            s_splitLogAt = now + SplitLogSeconds;
+        }
+
+        private static void AddSplit(int i, long ticks)
+        {
+            s_splitTicks[i] += ticks;
+            if (ticks > s_splitWorst[i]) s_splitWorst[i] = ticks;
         }
 
         // Terrain edit → the overlapping tile's placement is stale. Drop it;
@@ -397,7 +657,10 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private static readonly List<Vector2Int> s_evict = new List<Vector2Int>();
-        private static void EvictFarTiles(int ptx, int ptz, int tileCap)
+        private static int s_evictTx = int.MinValue, s_evictTz = int.MinValue, s_evictCount = -1;
+        private static int s_splitEvictPasses, s_splitEvicted;
+
+        private static void EvictFarTiles(int ptx, int ptz, int tileCap, bool dirtyOnlyIfDropped)
         {
             s_evict.Clear();
             int overflow = s_tiles.Count - tileCap;
@@ -414,8 +677,10 @@ namespace VerdantsAscent.Terrain.Voxel
             s_evict.Sort((a, b) =>
                 Mathf.Max(Mathf.Abs(b.x - ptx), Mathf.Abs(b.y - ptz))
                     .CompareTo(Mathf.Max(Mathf.Abs(a.x - ptx), Mathf.Abs(a.y - ptz))));
-            for (int i = 0; i < s_evict.Count && i < overflow; i++) s_tiles.Remove(s_evict[i]);
-            s_batchesDirty = true;
+            int dropped = 0;
+            for (int i = 0; i < s_evict.Count && i < overflow; i++) { s_tiles.Remove(s_evict[i]); dropped++; }
+            s_splitEvictPasses++; s_splitEvicted += dropped;
+            if (dropped > 0 || !dirtyOnlyIfDropped) s_batchesDirty = true;
         }
 
         // CONE_COS = cos(~62°): a ~124° forward wedge gets the extended reach.
@@ -433,9 +698,15 @@ namespace VerdantsAscent.Terrain.Voxel
             float near2 = nearEdge * nearEdge;
             float near2All = radius * radius, far2 = fwdRadius * fwdRadius;
 
-            for (int si = 0; si < s_species.Length; si++)
-                (s_flat[si] ?? (s_flat[si] = new List<Matrix4x4>(8192))).Clear();
+            for (int idx = 0; idx < s_flat.Length; idx++)
+                (s_flat[idx] ?? (s_flat[idx] = new List<Matrix4x4>(256))).Clear();
+            var skipKey = FiresVoxelConfig.ImpostorSkipBehindCamera;
+            bool bySector = skipKey == null || skipKey.Value;
+            float always2 = AlwaysDrawMeters * AlwaysDrawMeters;
+            s_batchPos = new Vector2(pp.x, pp.z);
+            if (bySector && !s_sectorsSaid) { s_sectorsSaid = true; FiresLogger.LogInfo("[FiresVoxel] far billboards draw only the directions the camera can see (0.2.1372)"); }
 
+            for (int i = 0; i < Slots; i++) { s_slotMin[i] = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue); s_slotMax[i] = new Vector3(float.MinValue, float.MinValue, float.MinValue); }
             int bandNear = 0, bandMid = 0, bandFar = 0;   // 0-1km / 1-2km / 2km+ verify
             foreach (var kv in s_tiles)
             {
@@ -455,10 +726,25 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (ddx * fwd.x * inv + ddz * fwd.y * inv < CONE_COS) continue;
                 }
                 int tileCount = 0;
+                int tileSlot = !bySector || d2 < always2 ? AlwaysSlot : SectorOf(ddx, ddz);
                 for (int si = 0; si < s_species.Length; si++)
                 {
                     var arr = tile.PerSpecies[si];
-                    if (arr != null && arr.Length > 0) { s_flat[si].AddRange(arr); tileCount += arr.Length; }
+                    if (arr != null && arr.Length > 0)
+                    {
+                        s_flat[si * Slots + tileSlot].AddRange(arr); tileCount += arr.Length;
+                        // 0.2.1396: the box holds every instance's whole quad at its largest scale (1.35), with room for the shader turning it
+                        var q = s_species[si].Quad;
+                        float pad = q != null ? (q.bounds.center.magnitude + q.bounds.extents.magnitude) * 1.35f + 2f : 100f;
+                        Vector3 mn = s_slotMin[tileSlot], mx = s_slotMax[tileSlot];
+                        for (int a = 0; a < arr.Length; a++)
+                        {
+                            float x = arr[a].m03, y = arr[a].m13, z = arr[a].m23;
+                            if (x - pad < mn.x) mn.x = x - pad; if (y - pad < mn.y) mn.y = y - pad; if (z - pad < mn.z) mn.z = z - pad;
+                            if (x + pad > mx.x) mx.x = x + pad; if (y + pad > mx.y) mx.y = y + pad; if (z + pad > mx.z) mx.z = z + pad;
+                        }
+                        s_slotMin[tileSlot] = mn; s_slotMax[tileSlot] = mx;
+                    }
                 }
                 if (d2 < 1_000_000f) bandNear += tileCount;
                 else if (d2 < 4_000_000f) bandMid += tileCount;
@@ -467,25 +753,31 @@ namespace VerdantsAscent.Terrain.Voxel
             s_bandNear = bandNear; s_bandMid = bandMid; s_bandFar = bandFar;
 
             int total = 0;
-            for (int si = 0; si < s_species.Length; si++)
+            for (int idx = 0; idx < s_flat.Length; idx++)
             {
-                var list = s_chunks[si] ?? (s_chunks[si] = new List<Matrix4x4[]>());
-                var counts = s_chunkCounts[si] ?? (s_chunkCounts[si] = new List<int>());
+                var list = s_chunks[idx] ?? (s_chunks[idx] = new List<Matrix4x4[]>());
+                var counts = s_chunkCounts[idx] ?? (s_chunkCounts[idx] = new List<int>());
                 counts.Clear();
-                var flat = s_flat[si];
+                var flat = s_flat[idx];
                 int ci = 0;
                 for (int off = 0; off < flat.Count; off += BATCH, ci++)
                 {
                     int n = Mathf.Min(BATCH, flat.Count - off);
                     Matrix4x4[] arr;
-                    if (ci < list.Count) arr = list[ci];             // reuse pooled array
-                    else { arr = new Matrix4x4[BATCH]; list.Add(arr); }
+                    // Reuse the pooled array when it fits. 0.2.1372: sized to need, since most species in most directions hold far fewer than a full batch.
+                    if (ci < list.Count && list[ci].Length >= n) arr = list[ci];
+                    else
+                    {
+                        arr = new Matrix4x4[Mathf.Min(BATCH, Mathf.NextPowerOfTwo(Mathf.Max(n, 64)))];
+                        if (ci < list.Count) list[ci] = arr; else list.Add(arr);
+                    }
                     flat.CopyTo(off, arr, 0, n);
                     counts.Add(n);
                 }
                 total += flat.Count;
             }
             s_drawnInst = total;
+            UploadGpu();   // 0.2.1399
         }
 
         // ── background worker: pure sampling → matrices ──
@@ -537,6 +829,47 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         private static bool WorldReady => FiresWorldGenBase.Active ? FiresWorldGenBase.GridReady : s_gen != null;
+
+        // ── 0.2.1415 FarLands bridge ([lead] 11-08): this placement, fed to Core's impostor engine by FarForest.FarBridge until
+        // the vanilla replay (#2) takes over. Same species and the same pure BuildTile; nothing here draws. ─────────────────────
+        internal struct BridgeTree { public int Species; public Vector3 Pos; public float Yaw, Scale; }
+
+        // Main thread: the species (no bake) and the world handle the worker reads.
+        internal static bool EnsureBridgeSpecies()
+        {
+            s_gen = WorldGenerator.instance;
+            if (s_species.Length == 0 && !BuildSpecies()) return false;
+            return true;
+        }
+        internal static bool BridgeWorldReady => WorldReady && !FatSuperFlat.On;
+        internal static string SpeciesPrefab(int si) => si >= 0 && si < s_species.Length ? s_species[si].Prefab : null;
+        internal static float SpeciesHeight(int si) => si >= 0 && si < s_species.Length ? s_species[si].Height : 0f;
+
+        // Any thread: the trees of one 512 m cell (4 x 4 of this file's 128 m tiles), the same positions the billboards use.
+        internal static void BuildBridgeCell(int cx, int cz, List<BridgeTree> into)
+        {
+            const int per = 4;   // 512 / TILE
+            for (int tz = 0; tz < per; tz++)
+                for (int tx = 0; tx < per; tx++)
+                {
+                    var tile = BuildTile(new Vector2Int(cx * per + tx, cz * per + tz));
+                    if (!tile.Any) continue;
+                    for (int si = 0; si < tile.PerSpecies.Length; si++)
+                    {
+                        var arr = tile.PerSpecies[si];
+                        if (arr == null) continue;
+                        for (int i = 0; i < arr.Length; i++)
+                        {
+                            var m = arr[i];
+                            // Plain math (no native Matrix calls off the main thread): uniform scale = |column 0|, yaw from the
+                            // forward column (BuildTile only rotates about Y).
+                            float sc = new Vector3(m.m00, m.m10, m.m20).magnitude;
+                            float yaw = Mathf.Atan2(m.m02, m.m22) * Mathf.Rad2Deg;
+                            into.Add(new BridgeTree { Species = si, Pos = new Vector3(m.m03, m.m13, m.m23), Yaw = yaw < 0f ? yaw + 360f : yaw, Scale = sc });
+                        }
+                    }
+                }
+        }
 
         [ThreadStatic] private static List<Matrix4x4>[] t_build;
 
@@ -750,6 +1083,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         sp.Mat = new Material(shader) { mainTexture = tex };
                         if (sp.Mat.HasProperty("_Cutoff")) sp.Mat.SetFloat("_Cutoff", BakeCutoff);
                         sp.Mat.enableInstancing = true;
+                        if (GpuShader != null) { sp.GpuMat = new Material(GpuShader) { mainTexture = tex }; if (sp.GpuMat.HasProperty("_Cutoff")) sp.GpuMat.SetFloat("_Cutoff", BakeCutoff); }   // 0.2.1399
 
                         // Crossed quads sized to the baked frame (square, side =
                         // 2*half), pivot at the prefab's base so y sits on ground.

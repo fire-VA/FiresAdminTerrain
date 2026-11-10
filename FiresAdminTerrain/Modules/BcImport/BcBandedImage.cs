@@ -54,18 +54,34 @@ namespace VerdantsAscent.Terrain.BcImport
                     RowsPerBand = reader.ReadInt32(),
                     Bands = reader.ReadInt32(),
                 };
+                CheckLayout(layout, data.Length - reader.BaseStream.Position);   // 0.2.1333: before anything is allocated from it
                 layout.BandLengths = new int[layout.Bands];
                 layout.BandStarts = new int[layout.Bands];
                 for (int band = 0; band < layout.Bands; band++) layout.BandLengths[band] = reader.ReadInt32();
-                int start = (int)reader.BaseStream.Position;
+                long start = reader.BaseStream.Position;   // 0.2.1333: long + negative lengths refused, so a band cannot wrap
                 for (int band = 0; band < layout.Bands; band++)
                 {
-                    layout.BandStarts[band] = start;
+                    if (layout.BandLengths[band] < 0 || start + layout.BandLengths[band] > data.Length)
+                        throw new InvalidDataException($"a banded map image's band {band} does not fit");
+                    layout.BandStarts[band] = (int)start;
                     start += layout.BandLengths[band];
                 }
                 if (start != data.Length) throw new InvalidDataException("a banded map image is cut short or has bytes left over");
                 return layout;
             }
+        }
+
+        // 0.2.1333: this image can come from the server (BcJoinSync). Encode writes only what FiresPng.ReadLayout accepts.
+        private static void CheckLayout(Layout l, long bytesLeft)
+        {
+            bool ok = l.Width >= 1 && l.Width <= VerdantsAscent.Terrain.Voxel.FiresPng.MaxImageSide
+                && l.Height >= 1 && l.Height <= VerdantsAscent.Terrain.Voxel.FiresPng.MaxImageSide
+                && (l.BitDepth == 8 || l.BitDepth == 16) && l.Channels >= 1 && l.Channels <= 4
+                && l.RowsPerBand >= 1 && l.Bands == (l.Height + (long)l.RowsPerBand - 1) / l.RowsPerBand
+                && l.Bands * (long)sizeof(int) <= bytesLeft;
+            if (!ok) throw new InvalidDataException($"a banded map image says {l.Width} x {l.Height}, {l.BitDepth} bit, {l.Channels} channels, {l.Bands} bands of {l.RowsPerBand}");
+            long rowBytes = l.Width * (long)l.BytesPerPixel;
+            if (rowBytes * l.Height > int.MaxValue) throw new InvalidDataException($"a banded map image of {l.Width} x {l.Height} is too large");
         }
 
         // The PNG's rows re-stored in bands, then read back and compared with the PNG byte for byte: null when any row differs.
@@ -104,8 +120,8 @@ namespace VerdantsAscent.Terrain.BcImport
             int first = band * layout.RowsPerBand;
             int rows = Math.Min(layout.RowsPerBand, layout.Height - first);
             var filtered = Scratch(ref t_filtered, rows * stride);
-            using (var inflater = new DeflateStream(new MemoryStream(data, layout.BandStarts[band], layout.BandLengths[band], false),
-                CompressionMode.Decompress))
+            using (var inflater = FatInflate.DeflateReader(new MemoryStream(data, layout.BandStarts[band], layout.BandLengths[band], false),
+                "banded map band", rows * (long)stride))   // 0.2.1333: limit = this band's exact size
                 ReadFully(inflater, filtered, rows * stride);
             var above = Scratch(ref t_above, rowBytes);
             var row = Scratch(ref t_row, rowBytes);

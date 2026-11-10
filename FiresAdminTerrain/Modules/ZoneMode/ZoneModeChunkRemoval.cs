@@ -105,6 +105,8 @@ namespace VerdantsAscent.Terrain.Zones
         // Everybody includes the sender, so the server drops its own copy through here as well.
         private static void RPC_DropVoxels(long sender, ZPackage pkg)
         {
+            // Only the server drops a zone's chunks (it sends this to everybody, itself included).
+            if (!FatNetGuard.FromServer(sender, "chunk remover drop")) return;
             var zone = pkg.ReadVector2s();
             var host = FiresAdminTerrain.Instance;
             if (host == null) return;

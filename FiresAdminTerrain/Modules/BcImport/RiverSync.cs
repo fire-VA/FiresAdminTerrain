@@ -27,6 +27,8 @@ namespace VerdantsAscent.Terrain.BcImport
         private const int StreamsPass = 1;
         private const int StateWords = 4;
         private const int FloatsPerRiver = 10;
+        private const int BytesPerLake = 2 * sizeof(float);
+        private const float MaxRiverValue = 1000000f;   // 0.2.1336: past any world FAT makes (and rejects infinity)
         private const int MaxLakes = 100000;
         private const int MaxRiversPerPass = 1000000;
         private const double KilobytesPerByte = 1d / 1024d;
@@ -252,7 +254,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 int version = reader.ReadInt32();
                 if (version != FormatVersion) throw new InvalidDataException($"river list format {version}, this build reads {FormatVersion}");
                 var parsed = new Parsed { RiverSeed = reader.ReadInt32(), StreamSeed = reader.ReadInt32() };
-                int lakes = CountIn(reader, MaxLakes, "lakes");
+                int lakes = CountIn(reader, MaxLakes, "lakes", BytesPerLake);
                 parsed.Lakes = new List<Vector2>(lakes);
                 for (int i = 0; i < lakes; i++) parsed.Lakes.Add(new Vector2(reader.ReadSingle(), reader.ReadSingle()));
                 int passes = reader.ReadInt32();
@@ -262,11 +264,11 @@ namespace VerdantsAscent.Terrain.BcImport
                 {
                     var pass = new Pass { Rule = reader.ReadInt32(), State = new int[StateWords] };
                     for (int w = 0; w < StateWords; w++) pass.State[w] = reader.ReadInt32();
-                    int rivers = CountIn(reader, MaxRiversPerPass, "rivers");
+                    int rivers = CountIn(reader, MaxRiversPerPass, "rivers", FloatsPerRiver * sizeof(float));
                     pass.Rivers = new List<WorldGenerator.River>(rivers);
                     for (int r = 0; r < rivers; r++)
                     {
-                        pass.Rivers.Add(new WorldGenerator.River
+                        var river = new WorldGenerator.River
                         {
                             p0 = new Vector2(reader.ReadSingle(), reader.ReadSingle()),
                             p1 = new Vector2(reader.ReadSingle(), reader.ReadSingle()),
@@ -275,7 +277,12 @@ namespace VerdantsAscent.Terrain.BcImport
                             widthMax = reader.ReadSingle(),
                             curveWidth = reader.ReadSingle(),
                             curveWavelength = reader.ReadSingle(),
-                        });
+                        };
+                        // 0.2.1336: RenderRivers walks these, so a wild value is refused here (the caller's catch: this client searches for its own)
+                        if (!Sane(river.p0.x) || !Sane(river.p0.y) || !Sane(river.p1.x) || !Sane(river.p1.y) || !Sane(river.center.x) || !Sane(river.center.y)
+                            || !Sane(river.widthMin) || !Sane(river.widthMax) || !Sane(river.curveWidth) || !Sane(river.curveWavelength))
+                            throw new InvalidDataException($"river {r} has a value out of range");
+                        pass.Rivers.Add(river);
                     }
                     parsed.Passes.Add(pass);
                 }
@@ -285,12 +292,16 @@ namespace VerdantsAscent.Terrain.BcImport
             }
         }
 
-        private static int CountIn(BinaryReader reader, int limit, string what)
+        // 0.2.1336: the count must also fit the bytes left, before the list is allocated.
+        private static int CountIn(BinaryReader reader, int limit, string what, int bytesEach)
         {
             int count = reader.ReadInt32();
-            if (count < 0 || count > limit) throw new InvalidDataException($"{count} {what}");
+            long left = reader.BaseStream.Length - reader.BaseStream.Position;
+            if (count < 0 || count > limit || count * (long)bytesEach > left) throw new InvalidDataException($"{count} {what} with {left} bytes left");
             return count;
         }
+
+        private static bool Sane(float v) => !float.IsNaN(v) && Mathf.Abs(v) <= MaxRiverValue;
 
         // ── The river grid's checksum ───────────────────────────────────────
         // Every cell and point in the grid's own order: the same RenderRivers calls on the same lists build the same

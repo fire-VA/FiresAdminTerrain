@@ -28,7 +28,10 @@ namespace VerdantsAscent.Terrain.Voxel
         private static int s_active = -1;   // the shaft index the camera is under, -1 = none
         private static readonly List<MeshRenderer> s_blocked = new List<MeshRenderer>();
         private static MaterialPropertyBlock s_mpb;
-        private static readonly MaterialPropertyBlock s_own = new MaterialPropertyBlock();
+        // 0.2.1206 ([visual], Norger kit S0: a static initializer here ran on the game's HeightmapBuilder thread -> 'CreateImpl can only be called
+        // from the main thread' -> TypeInitializationException, the type dead for the session): created on first (main-thread) use instead.
+        private static MaterialPropertyBlock s_own_;
+        private static MaterialPropertyBlock s_own { get { if (s_own_ == null) { s_own_ = new MaterialPropertyBlock(); FatMainThreadInit.Note("FatShaftUnderwater"); } return s_own_; } }
         private static GameObject s_disc;
         private static bool s_logged;
 

@@ -128,6 +128,7 @@ namespace VerdantsAscent.Water.Core
 
             _overlayMeshFilter = _overlayGO.AddComponent<MeshFilter>();
             _overlayRenderer = _overlayGO.AddComponent<MeshRenderer>();
+            _overlayRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;   // 0.2.1093: a see-through water/overlay surface never casts a shadow (Fire shot 537: phantom shadow bar on the snow)
 
             if (_waterMaterial != null)
                 _overlayRenderer.material = _waterMaterial;

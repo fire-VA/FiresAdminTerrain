@@ -925,6 +925,7 @@ namespace VerdantsAscent.Water.Core
             _snowMeshFilter = _snowGO.AddComponent<MeshFilter>();
             _snowMeshFilter.sharedMesh = _snowMesh;
             _snowRenderer = _snowGO.AddComponent<MeshRenderer>();
+            _snowRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;   // 0.2.1093: a see-through water/overlay surface never casts a shadow (Fire shot 537: phantom shadow bar on the snow)
             if (_snowMaterial != null) _snowRenderer.material = _snowMaterial;
 
             // Rigidbody only to suppress any vanilla physics nudges on the root.

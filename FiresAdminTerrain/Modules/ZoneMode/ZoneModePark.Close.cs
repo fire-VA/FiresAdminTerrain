@@ -230,18 +230,24 @@ namespace VerdantsAscent.Terrain.Zones
             return parked;
         }
 
+        // Bounds for what one drop message may name (a close is a handful of zones; a zone rarely holds more than a few
+        // thousand persistent objects).
+        private const int MaxParkDropZones = 1024;
+        private const int MaxParkDropObjectsPerZone = 200000;
+
         // Client side of the drop (the server already dropped its own copies).
         internal static void RPC_ParkDrop(long sender, ZPackage pkg)
         {
             var zdoMan = ZDOMan.instance;
             if (zdoMan == null || (ZNet.instance != null && ZNet.instance.IsServer())) return;
-            int zones = pkg.ReadInt();
+            if (!FatNetGuard.FromServer(sender, "park drop")) return;
+            int zones = FatNetGuard.Count(pkg.ReadInt(), MaxParkDropZones, "park drop zones");
             int dropped = 0;
             for (int z = 0; z < zones; z++)
             {
                 var zone = new Vector2s(pkg.ReadInt(), pkg.ReadInt());
-                int count = pkg.ReadInt();
-                var list = new List<ZDO>(count);
+                int count = FatNetGuard.Count(pkg.ReadInt(), MaxParkDropObjectsPerZone, "park drop objects");
+                var list = new List<ZDO>();
                 for (int i = 0; i < count; i++)
                 {
                     var zdo = zdoMan.GetZDO(pkg.ReadZDOID());

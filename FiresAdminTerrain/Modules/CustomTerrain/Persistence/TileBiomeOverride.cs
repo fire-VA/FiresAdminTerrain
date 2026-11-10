@@ -44,9 +44,14 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             private static bool Prefix(Vector3 point, ref Heightmap.Biome __result)
             {
-                if (!TryGetTileBiome(point, out var biome)) return true;
-                __result = biome;
-                return false;
+                try
+                {
+                    if (!TryGetTileBiome(point, out var biome)) return true;
+                    __result = biome;
+                    return false;
+                
+                }
+                catch (System.Exception e) { VerdantsAscent.Terrain.Zones.FatBiomeResolver.NoteThrow("TileBiomeOverride GetBiome prefix", point, e); throw; }   // 0.2.1201
             }
         }
 

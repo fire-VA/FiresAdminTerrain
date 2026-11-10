@@ -58,6 +58,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static ConfigEntry<SavedObjectsMode> s_mode;
         private static ZNet s_reportedFor;
         private static ZNet s_refusedFor;
+        private static int s_keptPlayerBuilt;   // 0.2.1404
 
         internal static void Bind(ConfigFile cfg)
         {
@@ -68,7 +69,7 @@ namespace VerdantsAscent.Terrain.Zones
                 + "(default): one line at world load counts them and nothing is changed. List: also logs each object's prefab and "
                 + "position. Remove (server only): destroys every object whose position is more than 1500 m past the world's edge "
                 + "(12000 m from the centre on a vanilla-size world; the world's own size on an Expand World Size or converted "
-                + "BetterContinents world). The dedi's own parked zones (past 100,000 m) are refused and cleared whatever this says), "
+                + "BetterContinents world), except anything a player built or placed, which always stays. The dedi's own parked zones (past 100,000 m) are refused and cleared whatever this says), "
                 + "logging each; nothing inside the map is ever touched.");
             FatConfigRetire.Move(cfg, "09 - Off-map objects", OldKey, s_mode);
             FatConfigRetire.Move(cfg, "10 - Off-map objects", OldKey, s_mode);
@@ -125,20 +126,30 @@ namespace VerdantsAscent.Terrain.Zones
             // file (ZoneModePark.PurgeFromSave). Everything else off the map still follows the cfg.
             bool remove = mode == SavedObjectsMode.Remove;
             var purge = new List<ZDO>();
+            s_keptPlayerBuilt = 0;
             foreach (var zdo in offMap)
             {
                 bool zoneCtrl = zdo.GetPrefab() == ZoneCtrlHash;
                 // Automatically only the parked grid's controllers (past ParkingMetres); anything else only with Remove.
                 bool parked = zoneCtrl && IsParked(zdo);
                 bool goes = FiresCore.Lifecycle.FiresMod.IsDedicatedServer && parked || remove;
+                // 0.2.1404 (lead 11-07: placed content 15-22 km out on Verdant's Ascent DN): Remove never takes anything a player
+                // built or placed (vanilla s_creator set); it stays, with one Warning naming it.
+                long creator = zdo.GetLong(ZDOVars.s_creator, 0L);
+                if (goes && !parked && creator != 0L) { goes = false; s_keptPlayerBuilt++; }
                 if (goes) purge.Add(zdo);
-                if (!goes && mode == SavedObjectsMode.Off) continue;
                 Vector3 p = zdo.GetPosition();
-                string line = string.Format(CultureInfo.InvariantCulture, "[FiresZones] off-map {0} {1} at ({2:0.0}, {3:0.0}, {4:0.0}), sector {5}, owner {6}",
-                    goes ? "REMOVED" : "object", PrefabName(zdo), p.x, p.y, p.z, zdo.GetSectorIndex().Sector, zdo.GetOwner());
+                // 0.2.1403 (log sweep 11-07: 19 real objects past 12 km on a BC world, Off logged no positions): distance and creator
+                // say whether it is BC land past the edge, a location placed out there, or something a player built.
+                string line = string.Format(CultureInfo.InvariantCulture, "[FiresZones] off-map {0} {1} at ({2:0.0}, {3:0.0}, {4:0.0}), {5:0} m from the centre, sector {6}, owner {7}, creator {8}",
+                    goes ? "REMOVED" : "object", PrefabName(zdo), p.x, p.y, p.z, new Vector2(p.x, p.z).magnitude, zdo.GetSectorIndex().Sector, zdo.GetOwner(), zdo.GetLong(ZDOVars.s_creator, 0L));
+                if (!goes && mode == SavedObjectsMode.Off) { if (!zoneCtrl) FiresLogger.LogDebug(line); continue; }
                 if (zoneCtrl && !remove) FiresLogger.LogDebug(line);
                 else FiresLogger.LogInfo(line);
             }
+            if (s_keptPlayerBuilt > 0)
+                FiresLogger.LogWarning($"[FiresZones] Remove left {s_keptPlayerBuilt} off-map object(s) in place: a player built or placed them (creator set), "
+                    + "and Remove never destroys a player's work. Each is listed above with its creator (0.2.1404).");
             if (purge.Count == 0) return;
             int purged = ZoneModePark.PurgeFromSave(purge);
             string removed = $"[FiresZones] removed {purged}/{purge.Count} saved object(s) beyond the world edge from the world AND its "

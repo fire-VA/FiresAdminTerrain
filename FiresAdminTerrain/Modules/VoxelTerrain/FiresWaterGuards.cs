@@ -33,8 +33,12 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly AccessTools.FieldRef<ZDOMan, Dictionary<ZDOID, ZDO>> ObjectsByIdRef =
             AccessTools.FieldRefAccess<ZDOMan, Dictionary<ZDOID, ZDO>>("m_objectsByID");
 
-        private static bool[] s_mask;
+        // 0.2.1104 (overnight #6, RAM): the resident mask is one BIT per cell (was bool[] = one byte per cell, ~1 MB at the
+        // 1024 grid). Same answers: bit i is exactly the old mask[i]; the deflated file/handshake bytes are unchanged.
+        private static byte[] s_mask;
         private static byte[] s_packed;
+        internal static long ResidentBytes => s_mask != null ? s_mask.Length : 0;
+        internal static long DenseBytes => s_mask != null ? (long)Res * Res : 0;
         private static bool s_known;
         private static int s_cells;
         private static int s_builds;
@@ -52,7 +56,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool IsGuarded(int index)
         {
             var mask = s_mask;
-            return mask != null && mask[index];
+            return mask != null && (mask[index >> 3] & (1 << (index & 7))) != 0;
         }
 
         internal static string Describe()
@@ -190,7 +194,10 @@ namespace VerdantsAscent.Terrain.Voxel
             float room2 = radius * radius;
             for (int z = z0; z <= z1; z++)
                 for (int x = x0; x <= x1; x++)
-                    if (mask[z * Res + x]) room2 = Mathf.Min(room2, DistanceSquaredToCell(wx, wz, x, z));
+                {
+                    int i = z * Res + x;
+                    if ((mask[i >> 3] & (1 << (i & 7))) != 0) room2 = Mathf.Min(room2, DistanceSquaredToCell(wx, wz, x, z));
+                }
             return Mathf.Sqrt(room2);
         }
 
@@ -207,22 +214,14 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        private static bool[] Unpack(byte[] packed)
+        private static byte[] Unpack(byte[] packed)
         {
-            var bits = new byte[(Res * Res + 7) / 8];
-            using (var input = new DeflateStream(new MemoryStream(packed), CompressionMode.Decompress))
-            {
-                int read = 0;
-                while (read < bits.Length)
-                {
-                    int got = input.Read(bits, read, bits.Length - read);
-                    if (got <= 0) throw new InvalidDataException($"water guards end after {read} of {bits.Length} bytes");
-                    read += got;
-                }
-            }
-            var mask = new bool[Res * Res];
-            for (int i = 0; i < mask.Length; i++) mask[i] = (bits[i >> 3] & (1 << (i & 7))) != 0;
-            return mask;
+            // 0.2.1333: the handshake carries this block from the server; the limit is the mask's exact size
+            int expected = (Res * Res + 7) / 8;
+            var bits = FatInflate.Deflate(packed, 0, packed != null ? packed.Length : 0, "water guards", expected);
+            if (bits == null || bits.Length != expected)
+                throw new InvalidDataException($"water guards hold {(bits != null ? bits.Length : -1)} of {expected} bytes");
+            return bits;   // 0.2.1104: kept as bits (the resident mask); bit i == the old bool mask[i]
         }
 
         private static void Adopt(byte[] packed, int builds, int locations)
@@ -232,7 +231,8 @@ namespace VerdantsAscent.Terrain.Voxel
             s_builds = builds;
             s_locations = locations;
             s_cells = 0;
-            foreach (bool guarded in s_mask) if (guarded) s_cells++;
+            int total = Res * Res;
+            for (int i = 0; i < total; i++) if ((s_mask[i >> 3] & (1 << (i & 7))) != 0) s_cells++;
             uint hash = HashOffset;
             foreach (byte b in packed) hash = (hash ^ b) * HashPrime;
             s_hash = unchecked((int)hash);

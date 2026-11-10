@@ -19,13 +19,33 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float HoldMaxSeconds = 45f;
         private static readonly Dictionary<int, float> s_heldSince = new Dictionary<int, float>();
         private static readonly HashSet<int> s_capped = new HashSet<int>();   // let go at the cap: not held again
+        private static bool s_skipSaid;
 
         [HarmonyPatch(typeof(Character), nameof(Character.CustomFixedUpdate))]
         private static class Patch_Character_HoldOnUnsolidSkyland
         {
             private static bool Prefix(Character __instance)
             {
+                long t0 = FatHooks.Start();
+                bool run = true;
+                try { run = Hold(__instance); }
+                finally { FatHooks.Stop(FatHooks.Hook.SkylandHold, t0, !run, __instance == Player.m_localPlayer); }
+                return run;
+            }
+
+            private static bool Hold(Character __instance)
+            {
                 ReportIslandChunks();
+                // 0.2.1369 (winter audit: 0.45 ms/s, 18k calls/17 s on a world with no skylands): nothing can be held with no island and no voxel ground. Voxel worlds keep the
+                // full path below, because its zone-solid test stamps the swap time other callers read.
+                var skipKey = FiresVoxelConfig.SkylandHoldSkipNoIslands;
+                if ((skipKey == null || skipKey.Value) && s_heldSince.Count == 0 && !FiresSkyIslands.Enabled && VoxelWorld.ChunkCount <= 0)
+                {
+                    if (!s_skipSaid) { s_skipSaid = true; FiresLogger.LogInfo("[FiresSkyIslands] no skylands and no voxel ground on this world: the character hold answers at once (0.2.1369)"); }
+                    return true;
+                }
+                // 0.2.1107: timed only. Its common path is already a few dictionary lookups (the zone-solid test runs first and has a
+                // side effect - the lazy swap timestamp other callers read - so no earlier exit is added here: same behaviour).
                 if (__instance == null || __instance.m_nview == null || !__instance.m_nview.IsValid() || !__instance.m_nview.IsOwner()) return true;
                 Vector3 p = __instance.transform.position;
                 int id = __instance.GetInstanceID();
@@ -84,6 +104,11 @@ namespace VerdantsAscent.Terrain.Voxel
             if (now < s_nextIslandReport) return;
             s_nextIslandReport = now + IslandReportSeconds;
             int restored = VoxelChunk.IslandChunksRestored, generated = VoxelChunk.IslandChunksGenerated;
+            // 0.2.1069 (Fire 10-26, SuperFlatSkyCaves): on super flat, say where the nearest island is every report, so
+            // "0 island chunks" is read as "none within the wrap radius", not "islands never generate".
+            if (FatSuperFlat.On && FiresSkyIslands.Enabled && Player.m_localPlayer != null
+                && FiresSkyIslands.TryNearest(Player.m_localPlayer.transform.position, out float nx, out float nz, out float ntop, out float nd))
+                FiresLogger.LogDebug($"[FiresSkyIslands] super flat: island chunks built {restored + generated} (nearest island at ({nx:0},{nz:0}) top y {ntop:0}, {nd:0} m away; islands build when their zone wraps, ~{FiresVoxelConfig.WrapKeepRadius?.Value ?? 128f:0}-{VoxelZoneStreamer.GovernorRadius:0} m)");
             if (restored == s_lastRestored && generated == s_lastGenerated) return;
             s_lastRestored = restored;
             s_lastGenerated = generated;

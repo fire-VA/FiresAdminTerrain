@@ -132,17 +132,53 @@ namespace VerdantsAscent.Water.Core
                 && VerdantsAscent.Terrain.Voxel.GenWaterField.TryWaterSurfaceSmooth(x, z, out float level, out float depth)
                 && level > SeaSheetGate && depth >= minDepth)
             {
+                // 0.2.1097: only open generated water (no slush, crust or lava: WaterStateField) has fish, lilies and water life.
+                if (!FatLava.GenPureWaterAt(x, z, level)) { surface = bed = 0f; return false; }
+                if (!LifeGround(x, z, level, level - depth)) { surface = bed = 0f; return false; }
                 surface = level;
                 bed = level - depth;
                 return true;
             }
             surface = bed = 0f;
             if (!SolidGround(x, z, out float ground)) return false;
+            // 0.2.1091: placed fresh water from PlacedWaterField, the surface the drawn sheet is built from (no swim waves), so lilies,
+            // vass, fish spawns, the wet bed and the shore band all sit on the water you see.
+            if (PlacedWaterField.TrySurface(x, z, ground - 0.5f, ground + 40f, PlacedWaterField.Consumer.Wet, out float ps, out float fieldBed)
+                && ps - ground >= minDepth && (includeSea || ps > SeaSheetGate) && LifeGround(x, z, ps, float.IsNaN(fieldBed) ? ground : fieldBed, ground))
+            {
+                surface = ps;
+                bed = ground;
+                return true;
+            }
             float s = SurfaceAt(new Vector3(x, ground + BedProbeLift, z));
             if (s <= NoWater || s - ground < minDepth || (!includeSea && s <= SeaSheetGate)) return false;
             surface = s;
             bed = ground;
             return true;
+        }
+
+        // 0.2.1097 (Fire, shots 551/552: "waterlillies and vass can float in the air when they think water is at that level"): the
+        // water fields carried a river's upper level over a drop (a gully beside a fall) where no sheet is drawn - the sheet builders'
+        // crest / lip guards cull those columns - so life stood on air. Life (lilies, vass, reeds, underwater clutter, fish spawns, the
+        // wet bed) now also needs the REAL solid ground under the surface to match the water's own bed: refused when the ground is
+        // above the surface (no drawn water, A), or more than 0.5 m below the field's bed and over 2 m under the surface (a drop: the
+        // bed the field assumed is not there, B). Main thread only (a ray); elsewhere the field answer stands.
+        private static int s_lifeNoSurface, s_lifeTooDeep;
+        private static float s_lifeLogAt;
+        private static bool LifeGround(float x, float z, float surface, float fieldBed, float knownGround = float.NaN)
+        {
+            if (!VerdantsAscent.Water.Tools.WaterSheets.IsMainThread) return true;
+            float g = knownGround;
+            if (float.IsNaN(g) && !SolidGround(x, z, out g)) return true;
+            bool ok = true;
+            if (g > surface + 0.1f) { s_lifeNoSurface++; ok = false; }
+            else if (g < fieldBed - 0.5f && surface - g > 2f) { s_lifeTooDeep++; ok = false; }
+            if (!ok && Time.unscaledTime >= s_lifeLogAt)
+            {
+                s_lifeLogAt = Time.unscaledTime + 30f;
+                FiresLogger.LogInfo($"[WaterLife] refused {s_lifeNoSurface + s_lifeTooDeep} instance(s): no drawn surface {s_lifeNoSurface} / bed too deep (a drop: ground under the water's bed) {s_lifeTooDeep} (last at {x:0.0},{z:0.0}: surface {surface:0.00}, field bed {fieldBed:0.00}, solid ground {g:0.00})");
+            }
+            return ok;
         }
 
         // The top solid surface at (x, z) as vanilla's ZoneSystem.GetSolidHeight finds it, but ignoring trigger colliders.
@@ -222,6 +258,7 @@ namespace VerdantsAscent.Water.Core
     {
         private const float SeaSheetGate = 30.3f;
         private const float MinDepth = 1f;
+        private const float ShallowSlack = 1f;
         private static readonly System.Collections.Generic.Dictionary<GameObject, bool> s_isFish = new System.Collections.Generic.Dictionary<GameObject, bool>();
         private static bool s_logged;
 
@@ -255,14 +292,14 @@ namespace VerdantsAscent.Water.Core
             if (__result) return;
             if (!TryInlandWater(spawnPoint, out float surface, out float bed))
             {
-                SayOnce("dry|" + spawn.m_name, $"[FiresWater] inland fish check: {spawn.m_name} refused at ({spawnPoint.x:0}, {spawnPoint.y:0.0}, "
+                SayOnce("dry|" + spawn.m_name, $"[WaterLife] inland fish check: {spawn.m_name} refused at ({spawnPoint.x:0}, {spawnPoint.y:0.0}, "
                     + $"{spawnPoint.z:0}): no FAT inland water >= {MinDepth:0} m there (first such point).");
                 return;
             }
             string refusal = Refusal(spawn, spawnPoint, surface, bed);
             if (refusal != null)
             {
-                SayOnce("why|" + spawn.m_name + "|" + refusal.Split(' ')[0], $"[FiresWater] inland fish check: {spawn.m_name} refused at "
+                SayOnce("why|" + spawn.m_name + "|" + refusal.Split(' ')[0], $"[WaterLife] inland fish check: {spawn.m_name} refused at "
                     + $"({spawnPoint.x:0}, {spawnPoint.z:0}), surface {surface:0.0}, depth {surface - bed:0.0}: {refusal}.");
                 return;
             }
@@ -270,7 +307,7 @@ namespace VerdantsAscent.Water.Core
             __result = true;
             if (s_logged) return;
             s_logged = true;
-            FiresLogger.LogDebug($"[FiresWater] {spawn.m_name} spawns in inland water at ({spawnPoint.x:0}, {spawnPoint.z:0}): "
+            FiresLogger.LogDebug($"[WaterLife] {spawn.m_name} spawns in inland water at ({spawnPoint.x:0}, {spawnPoint.z:0}): "
                 + $"surface {surface:0.0}, depth {surface - bed:0.0} (first of this session).");
         }
 
@@ -279,6 +316,7 @@ namespace VerdantsAscent.Water.Core
         // it. Last, any water over the ground point vanilla found.
         internal static bool TryInlandWater(Vector3 p, out float surface, out float bed)
         {
+            PlacedWaterField.Note(PlacedWaterField.Consumer.Fish);   // 0.2.1091: TryWaterAt below answers placed water from the field
             if (FatWaterChecks.TryWaterAt(p.x, p.z, MinDepth, false, out surface, out bed)) return true;
             surface = FatWaterChecks.SurfaceAt(p);
             bed = p.y;
@@ -295,9 +333,14 @@ namespace VerdantsAscent.Water.Core
             if ((spawn.m_biome & biome) == Heightmap.Biome.None) return $"biome {biome} not in {spawn.m_biome}";
             if ((spawn.m_biomeArea & area) == 0) return $"area {area} not in {spawn.m_biomeArea}";
             if (ZoneSystem.instance.IsBlocked(p)) return "blocked (a piece or object over the point)";
+            // 0.2.1086 (Fire: "do not ... spawn the fish"): a placed river is carved ~1.9 m deep and Fish2's band is -5..-2 (2-5 m),
+            // so every river point was refused (log: "Fish2 refused at (78, 597), depth 1.9: altitude -1.9 outside -5..-2") and the
+            // only fish spawned in one deep pool 110 m away. Inland water takes the band's shallow end ShallowSlack metres higher
+            // (never above MinDepth: TryInlandWater already needs 1 m of water).
             float alt = bed - surface;
-            if (alt < spawn.m_minAltitude || alt > spawn.m_maxAltitude)
-                return $"altitude {alt:0.0} outside {spawn.m_minAltitude:0.##}..{spawn.m_maxAltitude:0.##}";
+            float maxAlt = spawn.m_maxAltitude + ShallowSlack;
+            if (alt < spawn.m_minAltitude || alt > maxAlt)
+                return $"altitude {alt:0.0} outside {spawn.m_minAltitude:0.##}..{maxAlt:0.##}";
             if (spawn.m_minDistanceFromCenter > 0f || spawn.m_maxDistanceFromCenter > 0f)
             {
                 float d = Utils.LengthXZ(p);
@@ -343,6 +386,24 @@ namespace VerdantsAscent.Water.Core
         internal static readonly AccessTools.FieldRef<Fish, float> FishLevel = AccessTools.FieldRefAccess<Fish, float>("m_inWater");
         internal static readonly AccessTools.FieldRef<Floating, float> FloatLevel = AccessTools.FieldRefAccess<Floating, float>("m_waterLevel");
 
+        // 0.2.1171 (Fire at base: FixedUpdate.Fish 12.6 + Float 10.1 ms/s): vanilla WaterVolume hands every fish/floater a level
+        // each update, and RaiseToFatWater + Feed asked CustomWaterManager.GetWaterLevelAt for the same object again each time.
+        // One answer per object per frame (re-asked only if it moved > 0.25 m), in a fixed hashed array: no allocation.
+        private const int MemoSlots = 4096;
+        private static readonly int[] s_mId = new int[MemoSlots], s_mFrame = new int[MemoSlots];
+        private static readonly Vector3[] s_mPos = new Vector3[MemoSlots];
+        private static readonly float[] s_mSurf = new float[MemoSlots];
+        internal static long MemoHits, MemoMisses;
+        private static float SurfaceMemo(Component c, Vector3 p)
+        {
+            int id = c.GetInstanceID(), slot = (id & 0x7fffffff) % MemoSlots, f = Time.frameCount;
+            if (s_mId[slot] == id && s_mFrame[slot] == f && (s_mPos[slot] - p).sqrMagnitude < 0.0625f) { MemoHits++; return s_mSurf[slot]; }
+            MemoMisses++;
+            float s = global::VerdantsAscent.Water.Core.CustomWaterManager.GetWaterLevelAt(p);
+            s_mId[slot] = id; s_mFrame[slot] = f; s_mPos[slot] = p; s_mSurf[slot] = s;
+            return s;
+        }
+
         internal static void Feed(Fish fish) => Feed(fish, fish, FishLevel(fish));
 
         internal static void Feed(Floating floating) => Feed(floating, floating, FloatLevel(floating));
@@ -365,7 +426,7 @@ namespace VerdantsAscent.Water.Core
             // A fish resting on a tool pond's floor never makes a physics trigger contact, so read
             // the generated sheet AND tool water (WaterMeshCombiner disks), through the same reader the
             // player's swim patches use.
-            float surface = global::VerdantsAscent.Water.Core.CustomWaterManager.GetWaterLevelAt(p);
+            float surface = SurfaceMemo(c, p);
             // An object vanilla
             // already gave a level (the zone-wide ocean WaterVolume, sea + tide) was left to vanilla. FAT water standing
             // higher than that level now wins, so a pond above sea level is the water an inland fish or drop is in.
@@ -393,7 +454,7 @@ namespace VerdantsAscent.Water.Core
             float now = Time.realtimeSinceStartup;
             if (s_reportAt < 0f) { s_reportAt = now + 60f; return; }
             if (now < s_reportAt) return;
-            FiresLogger.LogInfo($"[FatFloaterFeed] last minute: {s_skipped} feed(s) skipped (asleep, not in FAT water), {s_fedCalls} fed (awake), {s_fed.Count} in FAT water (Sleeping floaters skip the water feed = ON)");
+            FiresLogger.LogDebug($"[FatFloaterFeed] last minute: {s_skipped} feed(s) skipped (asleep, not in FAT water), {s_fedCalls} fed (awake), {s_fed.Count} in FAT water; surface memo {MemoHits} hit(s) / {MemoMisses} miss(es) (0.2.1171: one water lookup per fish/floater per frame)"); MemoHits = MemoMisses = 0;
             s_skipped = 0; s_fedCalls = 0; s_reportAt = now + 60f;
         }
 
@@ -404,7 +465,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (c == null) return level;
             Vector3 p = c.transform.position;
-            float surface = global::VerdantsAscent.Water.Core.CustomWaterManager.GetWaterLevelAt(p);
+            float surface = SurfaceMemo(c, p);
             return surface > NoWater && surface > level + LevelEpsilon && p.y < surface + AboveSurface ? surface : level;
         }
 

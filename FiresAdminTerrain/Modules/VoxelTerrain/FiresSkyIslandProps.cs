@@ -18,6 +18,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly List<string> s_name = new List<string>(96);
         private static readonly HashSet<string> s_missing = new HashSet<string>();
         private static bool s_loggedFirst;
+        private static int s_lastSkipped;
 
         internal static void OnPlaceVegetation(Vector2s zoneID, Vector3 zoneCenterPos,
             ZoneSystem.SpawnMode mode, List<GameObject> spawnedObjects)
@@ -27,6 +28,11 @@ namespace VerdantsAscent.Terrain.Voxel
             if (Zones.BiomePaint.Regrowing) return;   // a painted circle re-grows its ground only; the zone's props stand
             FiresSkyIslands.CollectProps(zoneCenterPos.x - 32f, zoneCenterPos.z - 32f,
                 zoneCenterPos.x + 32f, zoneCenterPos.z + 32f, s_pos, s_rot, s_name);
+            if (FiresSkyIslands.s_skippedSkylandProps != s_lastSkipped)
+            {
+                s_lastSkipped = FiresSkyIslands.s_skippedSkylandProps;
+                FiresLogger.LogDebug($"[FiresSkyIslands] disc-ring props: skylands skipped in zone ({zoneID.x},{zoneID.y}) ({s_lastSkipped} so far); skylands get only their shaped dressing (0.2.1079)");
+            }
             if (s_pos.Count == 0) return;
             int placed = 0;
             for (int i = 0; i < s_pos.Count; i++)

@@ -42,7 +42,7 @@ namespace VerdantsAscent.Terrain.Persistence
         // for its family to pick the right glyph and colour.
         public static readonly string[] NativeToolNames =
         {
-            "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel",
+            "Vcarve", "Vfill", "Vdelete", "Vcube", "Vsphere", "Vlevel", "Vramp",
             "Vriver", "Vpour", "Vpool", "Vfall", "Vmop",
         };
 

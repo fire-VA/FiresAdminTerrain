@@ -108,26 +108,117 @@ namespace VerdantsAscent.Terrain.Voxel
     internal static class Patch_Attack_SpawnOnHitTerrain_VoxelDig
     {
         private const float DigRadius = 1.0f;
+        private static readonly Collider[] s_rockHits = new Collider[16];
+        private static float s_rockLogAt;
 
-        private static bool Prefix(Vector3 hitPoint, GameObject prefab, ref GameObject __result)
+        private static bool NearRock(Vector3 p, out string name)
         {
+            name = null;
+            int n = Physics.OverlapSphereNonAlloc(p, 0.6f, s_rockHits, ~0, QueryTriggerInteraction.Ignore);
+            for (int i = 0; i < n; i++)
+            {
+                var col = s_rockHits[i];
+                if (col == null) continue;
+                var go = col.GetComponentInParent<MineRock5>() as Component ?? col.GetComponentInParent<MineRock>() as Component
+                         ?? col.GetComponentInParent<Destructible>() as Component;
+                if (go == null) continue;
+                name = Utils.GetPrefabName(go.gameObject);
+                return true;
+            }
+            return false;
+        }
+
+        private static bool Prefix(Vector3 hitPoint, GameObject prefab, Character character, ref GameObject __result)
+        {
+            bool mine = character != null && character == Player.m_localPlayer;
+            long t0 = mine ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            // 0.2.1111 (Fire: "we don't want it leveling an area in a 2 m circle"): a snow shovel's terrain hit on voxel ground was this
+            // r 1.0 voxel carve (a 2 m sphere). The shovel moves snow only (FatShovelPatch): no carve, no vanilla dig.
+            if (character is Humanoid hu && FatShovelPatch.IsSnowShovel(hu.GetCurrentWeapon(), out string sw) && FatSnowTrail.VoxelWorldHere(hitPoint))
+            {
+                __result = null;
+                if (mine) FatPlayerAttackGuard.DigLine(hitPoint, $"snow shovel ({sw}): snow only, no ground carve", t0);
+                return false;
+            }
+            bool run = PrefixBody(hitPoint, prefab, ref __result, out string why);
+            if (mine) FatPlayerAttackGuard.DigLine(hitPoint, run ? "vanilla dig (" + why + ")" : why, t0);
+            return run;
+        }
+
+        private static bool PrefixBody(Vector3 hitPoint, GameObject prefab, ref GameObject __result, out string why)
+        {
+            why = "voxel off or no prefab";
             if (FiresVoxelConfig.Enabled == null || !FiresVoxelConfig.Enabled.Value || prefab == null) return true;
             var modifier = prefab.GetComponentInChildren<TerrainModifier>();
             var op = prefab.GetComponentInChildren<TerrainOp>();
-            if (modifier == null && op == null) return true;
-            if (Zones.ZoneModeRefusals.TerrainEditTouchesClosed(hitPoint, DigRadius)) return true;
+            if (modifier == null && op == null) { why = "no terrain op on the prefab"; return true; }
+            if (Zones.ZoneModeRefusals.TerrainEditTouchesClosed(hitPoint, DigRadius)) { why = "touches a closed zone"; return true; }
 
             bool onVoxel = VoxelWorld.TrySampleSurfaceY(hitPoint.x, hitPoint.z, hitPoint.y + 3f, hitPoint.y - 3f, out _, out bool solid)
                 || solid;
-            if (!onVoxel && !(FiresVoxelConfig.StreamerRuns && FiresVoxelConfig.WrapsBrushedZones)) return true;
+            if (!onVoxel && !(FiresVoxelConfig.StreamerRuns && FiresVoxelConfig.WrapsBrushedZones)) { why = "not voxel ground"; return true; }
 
             __result = null;
+            // 0.2.1083 (a companion's 86 pickaxe hits on an iron vein did no damage): a hit within 0.6 m of a mine rock /
+            // destructible is meant for the rock, not the ground under or around it; don't dig there.
+            if (NearRock(hitPoint, out string rock))
+            {
+                if (FiresLogger.DebugEnabled && Time.unscaledTime >= s_rockLogAt) { s_rockLogAt = Time.unscaledTime + 10f; FiresLogger.LogDebug($"[FiresVoxel] pick hit near {rock} at ({hitPoint.x:0.0},{hitPoint.y:0.0},{hitPoint.z:0.0}): terrain dig skipped, the hit belongs to the rock"); }
+                why = "near " + rock + ": skipped"; return false;
+            }
             if (modifier != null && (!PrivateArea.CheckAccess(hitPoint, modifier.GetRadius()) || Location.IsInsideNoBuildLocation(hitPoint)))
-                return false;
+            { Note("too hard: a ward or no-build area", hitPoint); why = "ward or no-build: refused"; return false; }
             if (op != null && (!PrivateArea.CheckAccess(hitPoint, op.GetRadius()) || Location.IsInsideNoBuildLocation(hitPoint)))
-                return false;
-            VoxelWorld.ApplyBrush(hitPoint, DigRadius, 0f, VoxelBrushShape.Sphere, VoxelBrushMode.Carve);
-            return false;
+            { Note("too hard: a ward or no-build area", hitPoint); why = "ward or no-build: refused"; return false; }
+            string result = VoxelWorld.ApplyBrush(hitPoint, DigRadius, 0f, VoxelBrushShape.Sphere, VoxelBrushMode.Carve);
+            if (result != null && result.StartsWith("Refused", System.StringComparison.Ordinal))
+            {
+                Note($"too hard: {result}", hitPoint);
+                why = "carve refused: " + result; return false;
+            }
+            PlayDigFeedback(hitPoint, op, modifier);
+            why = "carved r " + DigRadius.ToString("0.0") + " m"; return false;
+        }
+
+        // 0.2.1065 (Fire: "a pickaxe on voxel terrain should make the normal terrain sound and give off the same fx"). Vanilla's
+        // dig sound, stone-break FX and the stone drop come from the spawned op's OnPlaced (TerrainOp.cs:40-48,
+        // TerrainModifier.cs:106-113), not from the swing. The voxel carve above replaces that spawn, so only the weapon's own
+        // hit-terrain clank was left (Attack.cs:1114) - the "too hard" sound. After a carve that landed, the op's own
+        // placed effects and drop run here, at the hit point, the way OnPlaced runs them (the max-depth check is a heightmap
+        // rule, so it is not applied to voxel ground).
+        private static void PlayDigFeedback(Vector3 at, TerrainOp op, TerrainModifier modifier)
+        {
+            EffectList fx = op != null ? op.m_onPlacedEffect : modifier?.m_onPlacedEffect;
+            GameObject drop = op != null ? op.m_spawnOnPlaced : modifier?.m_spawnOnPlaced;
+            float chance = op != null ? op.m_chanceToSpawn : modifier != null ? modifier.m_chanceToSpawn : 0f;
+            int max = op != null ? op.m_maxSpawned : modifier != null ? modifier.m_maxSpawned : 1;
+            fx?.Create(at, Quaternion.identity);
+            if (drop != null && Random.value <= chance)
+            {
+                var go = Object.Instantiate(drop, at + Vector3.up * 0.5f + (Vector3)(Random.insideUnitCircle * 0.2f), Quaternion.identity);
+                var item = go.GetComponent<ItemDrop>();
+                if (item != null) item.m_itemData.m_stack = Random.Range(1, max + 1);
+                var body = go.GetComponent<Rigidbody>();
+                if (body != null) body.linearVelocity = Vector3.up * 4f;
+            }
+            Note($"normal terrain FX ({EffectNames(fx)}{(drop != null ? ", drop " + drop.name : "")})", at);
+        }
+
+        private static string EffectNames(EffectList fx)
+        {
+            if (fx?.m_effectPrefabs == null || fx.m_effectPrefabs.Length == 0) return "none";
+            var names = new List<string>();
+            foreach (var e in fx.m_effectPrefabs) if (e?.m_prefab != null) names.Add(e.m_prefab.name);
+            return string.Join(", ", names);
+        }
+
+        private static float s_nextNote;
+
+        private static void Note(string what, Vector3 at)
+        {
+            if (!FiresLogger.DebugEnabled || Time.unscaledTime < s_nextNote) return;
+            s_nextNote = Time.unscaledTime + 30f;
+            FiresLogger.LogDebug($"[FiresVoxel] pick hit on voxel: {what} at ({at.x:0.0}, {at.y:0.0}, {at.z:0.0})");
         }
     }
 
@@ -287,6 +378,9 @@ namespace VerdantsAscent.Terrain.Voxel
             if (VoxelOnlyMode.Active || VoxelZoneStreamer.IsZoneSolid(ZoneSystem.GetZone(p)))
             {
                 TimerRef(__instance) = 0f;   // vanilla's timer contract (NPCs re-check every 5 s)
+                // 0.2.1036 HaloFlat (ring only): there is no floor and no column to rescue onto - a body that left the ring's
+                // field (out through the shell, off a band edge) goes back onto the ring's inside face.
+                if (FatHaloArc.RingOnly && FatHaloArc.Active) { FatHaloArc.RescueOffRing(__instance, p); return false; }
                 if (__instance.IsPlayer() && LiftIfEmbedded(__instance, p)) return false;
                 VoidRescue(__instance, p);
                 return false;
@@ -385,9 +479,32 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool Embedded(Vector3 p)
             => VoxelWorld.TryIsSolid(p.x, p.y + 1.1f, p.z, out bool chest) && chest && VoxelWorld.TryIsSolid(p.x, p.y + 0.4f, p.z, out bool knee) && knee;
 
+        // Fire 10-23: "i glitch back to the surface every time i enter the terrain now" - he stood in a tunnel he had just
+        // carved and was lifted 3.6 m again and again. The density probe reads the voxel grid point nearest each sample
+        // (rounded y), and on a carved floor or wall that grid point is still solid while the surface (and the collider)
+        // sits between grid points. So "inside solid" is now the INTERPOLATED density (the same field the mesh surface is
+        // drawn from) at knee and chest; a collider test cannot replace it (mesh colliders are shells: a body buried deep
+        // in rock overlaps none). Standing in carved air never lifts; one Debug line (at most every 10 s) names a grid
+        // probe the smooth field disagreed with.
+        private static float s_nextProbeOnlyNote;
+
+        private static bool SmoothSolid(Vector3 p, float up)
+            => VoxelWorld.TrySampleDensitySmooth(new Vector3(p.x, p.y + up, p.z), out float d) && d > 0f;
+
         private static bool LiftIfEmbedded(Character c, Vector3 p)
         {
             if (!Embedded(p)) return false;
+            if (!SmoothSolid(p, 1.1f) || !SmoothSolid(p, 0.4f))
+            {
+                if (Time.time >= s_nextProbeOnlyNote)
+                {
+                    s_nextProbeOnlyNote = Time.time + 10f;
+                    VoxelWorld.TrySampleDensitySmooth(p + Vector3.up * 0.4f, out float dk);
+                    VoxelWorld.TrySampleDensitySmooth(p + Vector3.up * 1.1f, out float dc);
+                    FiresLogger.LogDebug($"[FiresVoxel] {c.m_name} at ({p.x:0.0}, {p.y:0.0}, {p.z:0.0}): the grid probe reads solid at knee and chest, the surface field does not (knee {dk:0.0}, chest {dc:0.0}; > 0 = solid): carved or open space, not lifted (0.2.1013).");
+                }
+                return false;
+            }
             for (float y = p.y + 0.5f; y < p.y + 200f; y += 0.5f)
             {
                 if (!VoxelWorld.TryIsSolid(p.x, y, p.z, out bool s0) || s0) continue;
@@ -401,6 +518,27 @@ namespace VerdantsAscent.Terrain.Voxel
                 return true;
             }
             return false;
+        }
+
+        // 0.2.1049 A13 ([fgn] files for [worldgen], halo ring): LiftIfEmbedded scans world +Y, and inside the ring's field the
+        // UnderWorldCheck hook returns before it (FatVanillaHooks), so a player loaded INSIDE the ring's shell was never lifted.
+        // The ring version: the same smooth-density knee/chest test and the same "2 m of air over a solid floor" rule, measured
+        // along the ring's up (toward the axis), at most 30 m. Called from that hook, players only, field only.
+        internal static void RingLiftIfEmbedded(Character c, Vector3 p, Vector3 up)
+        {
+            if (c == null || !c.IsPlayer()) return;
+            bool Solid(Vector3 w) => VoxelWorld.TrySampleDensitySmooth(w, out float d) && d > 0f;
+            if (!Solid(p + up * 0.4f) || !Solid(p + up * 1.1f)) return;
+            for (float s = 0.5f; s < 30f; s += 0.5f)
+            {
+                Vector3 at = p + up * s;
+                if (Solid(at) || Solid(at + up * 1f) || Solid(at + up * 1.9f) || !Solid(at - up * 0.5f)) continue;
+                Vector3 to = at + up * 0.1f;
+                c.transform.position = to;
+                var rb = c.GetComponent<Rigidbody>(); if (rb != null) { rb.position = to; rb.linearVelocity = Vector3.zero; }
+                FiresLogger.LogDebug($"[FatHalo] {c.m_name} was inside the ring's shell at ({p.x:0.0}, {p.y:0.0}, {p.z:0.0}): lifted {s + 0.1f:0.0} m along the ring's up to the first open floor");
+                return;
+            }
         }
 
         private static void VoidRescue(Character c, Vector3 p)
@@ -735,6 +873,8 @@ namespace VerdantsAscent.Terrain.Voxel
     [HarmonyPatch(typeof(ZoneSystem), nameof(ZoneSystem.GetGroundData))]
     internal static class Patch_ZoneSystem_GetGroundData_VoxelOnly
     {
+        private static int s_islandMathItems;      // 0.2.1074: super-flat island vegetation answered from island math
+        private static float s_islandMathNextLog;
         // What the voxel surface WILL be at (x,z) once the chunks generate,
         // derived from the same inputs the generator uses. Only the gen-water
         // bed re-carve moves the surface — caves carve strictly below it — so
@@ -860,7 +1000,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     hsh = (uint)(Mathf.FloorToInt(p.x) * 374761393) ^ (uint)(Mathf.FloorToInt(p.z) * 668265263);
                     hsh ^= hsh >> 13; hsh *= 1274126177u; hsh ^= hsh >> 16;
                 }
-                if ((hsh & 1023) >= 307)   // ~70% of items return to the ground
+                // 0.2.1070: on super flat the ground stays bare, so every item stays on the island (FatSuperFlat.IslandItemsOnly).
+                if ((hsh & 1023) >= 307 && !FatSuperFlat.On)   // ~70% of items return to the ground
                 {
                     if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, baseG + 6f, h - 200f, out float gs, out _)) vs = gs;
                     else voxel = false;    // ground column not in yet — predicted surface below
@@ -873,6 +1014,31 @@ namespace VerdantsAscent.Terrain.Voxel
             // terrain arrives underneath — the bouncing veg. The voxel surface
             // is the heightmap minus the gen-water bed carve, so predict that
             // and place on the height the terrain is ABOUT to have.
+            // 0.2.1074 (Fire: islands on super flat "missing most of their vegetation"): a zone under an island generates
+            // (and places vegetation) before the island's voxel chunks exist, so the probe found no island and every item got
+            // the flat ground's height, which the super-flat island-only gate then refused (dedi: "4 vegetation item(s)" for
+            // the 118 m island at (751,1325)). On super flat the ground stays bare, so the item goes on the island's own top,
+            // from island math, with a real normal from the same math.
+            if (isle && !zoneWorld && FatSuperFlat.On && (!voxel || vs <= FiresWorldProfile.SuperFlatHeight + 12f)
+                && FiresSkyIslands.TryTopAt(p.x, p.z, out float islandTop))
+            {
+                p.y = islandTop;
+                float tx0 = FiresSkyIslands.TryTopAt(p.x - 1f, p.z, out float a0) ? a0 : islandTop;
+                float tx1 = FiresSkyIslands.TryTopAt(p.x + 1f, p.z, out float a1) ? a1 : islandTop;
+                float tz0 = FiresSkyIslands.TryTopAt(p.x, p.z - 1f, out float b0) ? b0 : islandTop;
+                float tz1 = FiresSkyIslands.TryTopAt(p.x, p.z + 1f, out float b1) ? b1 : islandTop;
+                normal = new Vector3(tx0 - tx1, 2f, tz0 - tz1).normalized;
+                biome = hm.GetBiome(p);
+                biomeArea = Heightmap.BiomeArea.Median;
+                hmap = hm;
+                s_islandMathItems++;
+                if (Time.realtimeSinceStartup >= s_islandMathNextLog)
+                {
+                    s_islandMathNextLog = Time.realtimeSinceStartup + 30f;
+                    FiresLogger.LogDebug($"[FiresSkyIslands] super flat: vegetation on island tops from island math: {s_islandMathItems} point(s) so far (last at ({p.x:0},{p.y:0},{p.z:0}), {biome})");
+                }
+                return false;
+            }
             p.y = voxel ? vs : PredictedSurface(p.x, p.z, h);
             // A wrapped voxel column already carries any location pad (baked in
             // GatherColumns); when the column isn't in yet, add the pad to the
@@ -932,11 +1098,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 && !FiresWorldGenBase.TryGetGenGround(p.x, p.z, out h))
                 return false;
             if (VoxelWorld.TrySampleSurfaceY(p.x, p.z, h + 24f, h - 200f, out float vs, out _))
-            { y = vs; return true; }   // wrapped column already carries the pad
+            { y = vs; LastBranch = "voxel surface"; return true; }   // wrapped column already carries the pad
+            LastBranch = "predicted generator surface";
             y = Patch_ZoneSystem_GetGroundData_VoxelOnly.PredictedSurface(p.x, p.z, h);
-            if (FiresLocationPads.TrySample(p.x, p.z, y, out float lpy)) y = lpy;
+            if (FiresLocationPads.TrySample(p.x, p.z, y, out float lpy)) { y = lpy; LastBranch = "location pad"; }
             return true;
         }
+
+        // 0.2.1061: which branch answered the last Sample on this thread (the resting-lift guard's proof line names it).
+        [System.ThreadStatic] internal static string LastBranch;
     }
 
     // ExpandWorldData's BiomeHeat.GetLava prefix reads hm.m_renderMesh
@@ -951,6 +1121,8 @@ namespace VerdantsAscent.Terrain.Voxel
     {
         internal static bool GetLava(Vector3 worldPos, ref float __result)
         {
+            // 0.2.1095: on an Ashlands skyland's top its own pools (FiresSkyIslands.IslandLavaAt), never the ground's answer below.
+            if (FiresSkyIslands.TryIslandBiomeAt(worldPos, out _)) { __result = FiresSkyIslands.IslandLavaAt(worldPos); return false; }
             if (!FiresWorldGenBase.Active) return true;
             __result = FiresWorldGenBase.SampleLavaMask(worldPos.x, worldPos.z).a;
             return false;
@@ -963,6 +1135,7 @@ namespace VerdantsAscent.Terrain.Voxel
     {
         private static bool Prefix(Vector3 worldPos, float lavaValue, ref bool __result)
         {
+            if (FiresSkyIslands.TryIslandBiomeAt(worldPos, out _)) { __result = FiresSkyIslands.IslandLavaAt(worldPos) > lavaValue; return false; }   // 0.2.1095: islands answer for themselves
             if (!FiresWorldGenBase.Active) return true;
             __result = FiresWorldGenBase.SampleLavaMask(worldPos.x, worldPos.z).a > lavaValue;
             return false;

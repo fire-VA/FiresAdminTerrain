@@ -24,7 +24,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // The column mask: 33 ground texels, a copy of the last one (so the ground's u = 1 edge still reads it), the palette.
         internal const int MaskWidth = 36;
-        private const int MaskHeight = 33, PaletteX = 34, PaletteGrowRow = 0, PaletteBareRow = 3;
+        private const int MaskHeight = 33, PaletteX = 34, PaletteGrowRow = 0, PaletteBareRow = 3, PaletteLavaRow = 2;   // 0.2.1095: row 2 = m_paintMaskNothing (alpha 1)
         private const float GroundU = 33f / MaskWidth;
 
         private const byte LayerGround = 0, LayerCave = 1, LayerIsland = 2;
@@ -158,9 +158,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // blends instead of stepping per vertex / mask texel.
         internal static float TurnedWeight(in BiomePaint.Circle circle, float wx, float wz)
         {
-            float dx = wx - circle.X, dz = wz - circle.Z;
             float feather = Mathf.Clamp(circle.R * 0.25f, 1f, 4f);
-            return Mathf.Clamp01((circle.R - Mathf.Sqrt(dx * dx + dz * dz)) / feather);
+            return Mathf.Clamp01(circle.Rim(wx, wz, feather) / feather);
         }
 
         // ── render (VoxelChunkView.ApplyBuffers, client) ─────────────────────────────────────────────────────────────────
@@ -197,6 +196,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 if ((paint >> 4) != 0) colors[i] = Heightmap.GetBiomeColor(BiomeOf(paint >> 4));
                 float wet = Mathf.Max(WetAt(v.y, i < waterlines.Count ? waterlines[i].x : 0f), SheetWetAt(origin, v));
                 uvs[i] = PaletteUv(paint & 0x0F, IsAshlands(colors[i]), wet);
+                // 0.2.1095 (Fire: "sky islands need lava"): an unpainted vertex on an Ashlands skyland's top in a lava pool points
+                // at the palette's plain "nothing" texel (row PaletteLavaRow: the mask's alpha 1 = lava on Ashlands-coloured ground),
+                // so the shader's own lava (paint alpha x ash core) glows there; the bare row beside it keeps the rest as rock.
+                if (s_layers[i] == LayerIsland && (paint & 0x0F) == None && IsAshlands(colors[i])
+                    && FiresSkyIslands.IslandLavaAt(new Vector3(v.x, v.y, v.z)) > 0.5f)
+                    uvs[i] = new Vector2((PaletteX + 0.5f) / MaskWidth, (PaletteLavaRow + 0.5f) / MaskHeight);
             }
         }
 

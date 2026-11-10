@@ -105,11 +105,58 @@ namespace VerdantsAscent.Terrain.Voxel
             return null;
         }
 
+        // 0.2.1334 (Fire: a mask left the disks in place, so a redraw stacked levels): a disk wholly inside the ring is REMOVED through
+        // the server path (WaterOperationRPC.RequestRemoveWater, by exact hash); this runs inside DispatchNow's undo scope, so
+        // FatUndo's WaterRemove_Undo keeps the disk (Serialize carries Kind) in this stroke's one step: undo re-lays, redo removes.
+        // A disk only partly inside stays, with the ring's mask over that part. Where no Full chunk holds the columns (heightmap
+        // ground) the mask cannot land: a partial disk there stays WHOLE and wet, logged below. Generated water keeps the mask.
+        private static readonly List<VerdantsAscent.Water.Core.WaterDisk> s_mopPartial = new List<VerdantsAscent.Water.Core.WaterDisk>();
+        private static readonly HashSet<int> s_mopPartialMasked = new HashSet<int>(), s_mopPartialUnmasked = new HashSet<int>();
+        private static int s_mopRemoved, s_mopColumns, s_mopDabs;
+        private static float s_mopLastDab;
+        private static bool s_mopInfoDone;
+
+        private static void NoteMopDisks(Vector3 pos, float r, int cols)
+        {
+            if (s_mopDabs > 0 && Time.unscaledTime - s_mopLastDab > 0.5f) FlushMopStroke();
+            s_mopPartial.Clear();
+            s_mopRemoved += VerdantsAscent.Water.Core.WaterOperationRPC.RequestRemoveWaterWhollyInside(pos, r, s_mopPartial, y => VoxelWorld.MopReachesY(pos, r, y));
+            foreach (var disk in s_mopPartial)
+            {
+                // The middle of the overlap, on the line between the two centres: masked there = the mask landed on this disk.
+                Vector3 toDisk = disk.Position - pos; toDisk.y = 0f;
+                float overlap = r - disk.GetEdgeDistance(pos);
+                Vector3 at = pos + (toDisk.sqrMagnitude > 0.0001f ? toDisk.normalized * Mathf.Max(0f, r - overlap * 0.5f) : Vector3.zero);
+                bool masked = VoxelWorld.IsMoppedAt(at.x, disk.Position.y, at.z);
+                (masked ? s_mopPartialMasked : s_mopPartialUnmasked).Add(disk.StableHash);
+            }
+            foreach (int hash in s_mopPartialMasked) s_mopPartialUnmasked.Remove(hash);
+            s_mopColumns += cols;
+            s_mopDabs++;
+            s_mopLastDab = Time.unscaledTime;
+            if (!s_mopInfoDone && s_mopRemoved > 0)
+            {
+                s_mopInfoDone = true;
+                FiresLogger.LogInfo("[Vmop] deletes placed disks wholly inside its ring (undo re-lays them); partly covered disks stay under the mask");
+            }
+        }
+
+        private static void FlushMopStroke()
+        {
+            if (s_mopDabs == 0) return;
+            FiresLogger.LogDebug($"[Vmop] stroke: {s_mopDabs} dab(s), disks removed {s_mopRemoved}, disks partial (masked) {s_mopPartialMasked.Count}, "
+                + $"disks partial with NO mask (no voxel chunk here, they stay whole) {s_mopPartialUnmasked.Count}, columns masked {s_mopColumns}");
+            s_mopRemoved = s_mopColumns = s_mopDabs = 0;
+            s_mopPartialMasked.Clear();
+            s_mopPartialUnmasked.Clear();
+        }
+
         private void EndPressIfDue()
         {
             if (!s_pressing || Time.realtimeSinceStartup < s_pressUntil) return;
             s_pressing = false;
             _strokeActive = false;
+            FlushMopStroke();
             FiresLogger.LogInfo(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                 "[FiresVoxel] virtual press: {0} at ({1:0.00},{2:0.00},{3:0.00}) for {4:0.0} s -> {5} dab(s)",
                 s_pressTool, s_pressCursor.x, s_pressCursor.y, s_pressCursor.z, s_pressSeconds, s_pressDabs));
@@ -379,7 +426,10 @@ namespace VerdantsAscent.Terrain.Voxel
             RegisterLevelVerify();
             VoxelPaintCommand.Register();   // va_voxel_paint (FDT's pads)
             FatTerrainSnapshot.RegisterCommand();   // fat_snapshot_test (camp terrain snapshots)
-            FatTerrainSnapshot.RegisterResidueCommand(); FatTerrainSnapshot.RegisterPreCampCheck(); FiresWorldGenBase.RegisterPackAbCommand();   // fat_camp_residue_clear
+            VerdantsAscent.Terrain.Testing.FatBlackPaintTest.Register();   // 0.2.1378
+            VerdantsAscent.Terrain.HeightmapSnow.FatTrailFieldTest.Register();   // 0.2.1288 fat_trail_field_test
+            VerdantsAscent.Terrain.HeightmapSnow.FatZonePaintDump.Register();   // 0.2.1306 fat_zone_paint_dump
+            FatTerrainSnapshot.RegisterResidueCommand(); FatTerrainSnapshot.RegisterPreCampCheck(); FiresWorldGenBase.RegisterPackAbCommand(); FatStudioRoundtrip.Register(); global::VerdantsAscent.Terrain.Studio.FatStudioTerrain.RegisterCommand(); global::VerdantsAscent.Terrain.Studio.FatStudioLocations.RegisterCommand(); global::VerdantsAscent.Terrain.Studio.FatStudioWaterTest.RegisterCommand();   // fat_camp_residue_clear, fat_studio_terrain_test (0.2.1242)
             new Terminal.ConsoleCommand(LevelCommand,
                 "<x> <z> <sizeX> <sizeZ> <y|auto> [depth: ignored since 0.2.807] [skirt=auto] - level a rectangular pad to y with the V-tool brush, sloped edges, any height (admin)",
                 args =>
@@ -966,15 +1016,57 @@ namespace VerdantsAscent.Terrain.Voxel
         private GameObject _gizmoCube;
         private GameObject _gizmoSphere;
 
+        // 0.2.1087 (FDT: a 1,290 ms VoxelBrushDrag.Update): any Update over SlowUpdateMs logs (Debug, at most one line per 2 s)
+        // its time split into the queue pumps and the tool part, so the next slow frame names its stage.
+        private const double SlowUpdateMs = 30.0;
+        private static readonly long[] s_updMarks = new long[9];
+        private static float s_updNextLine;
+
+        private static void UpdMark(int i) => s_updMarks[i] = System.Diagnostics.Stopwatch.GetTimestamp();
+
         private void Update()
         {
+            UpdMark(0);
+            try { UpdateBody(); }
+            finally
+            {
+                long end = System.Diagnostics.Stopwatch.GetTimestamp();
+                double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency, ms = (end - s_updMarks[0]) * f;
+                if (ms >= SlowUpdateMs && FiresLogger.DebugEnabled && Time.unscaledTime >= s_updNextLine)
+                {
+                    s_updNextLine = Time.unscaledTime + 2f;
+                    string[] names = { "water tick", "level", "tests+heal", "skin", "river carve", "layer paint", "islands map", "tool" };
+                    var sb = new System.Text.StringBuilder($"[FiresVoxel] slow V-tool update {ms:F0} ms:");
+                    for (int i = 1; i <= 8; i++)
+                    {
+                        long a = s_updMarks[i - 1], b = i < 8 ? s_updMarks[i] : end;
+                        if (a == 0 || b < a) continue;
+                        double st = (b - a) * f;
+                        if (st >= 1.0) sb.Append($" {names[i - 1]} {st:F0} ms;");
+                    }
+                    FiresLogger.LogDebug(sb.ToString());
+                }
+                System.Array.Clear(s_updMarks, 0, s_updMarks.Length);
+            }
+        }
+
+        private void UpdateBody()
+        {
             WaterShapingTools.Tick();
+            UpdMark(1);
             PumpLevel();   // a level's queued cylinders finish even if the tool is put away
+            UpdMark(2);
             TickTestCommands();   // delayed fat_level_verify, fat_goto's exact landing
             TickBorderHeal();   // chunk-border heal after a pad / ramp
+            UpdMark(3);
             PumpSkin();    // Vskin's queued shell stamps
+            UpdMark(4);
+            WaterToolDriver.PumpRiver();   // 0.2.1087: a Vriver click-mode carve, a time-budgeted slice per frame
+            UpdMark(5);
             VoxelLayerPaint.Pump();   // a cave's or a skyland's queued paint
+            UpdMark(6);
             FiresMinimapIslands.Tick();   // the map's skylands follow the island set
+            UpdMark(7);
             TickGate();    // EVERY frame, so the release that clears it is seen
             EndPressIfDue();
             bool virtualPress = Pressing;
@@ -993,8 +1085,8 @@ namespace VerdantsAscent.Terrain.Voxel
             // The stroke framework keys its drivers by the hammer piece's name; a stroke ends when its tool changes.
             RegisterTerrainDrivers();
             WaterToolDriver.Register();   // Vpour / Vriver / Vpool / Vpond (WaterToolDriver.cs)
-            string piece = player != null && player.m_buildPieces != null && player.m_buildPieces.GetSelectedPiece() != null
-                ? player.m_buildPieces.GetSelectedPiece().m_name : null;
+            var selectedPiece = player != null && player.m_buildPieces != null ? player.m_buildPieces.GetSelectedPiece() : null;   // 0.2.1058 (audit T5): read once
+            string piece = selectedPiece != null ? selectedPiece.m_name : null;
             EndStrokeIfToolChanged(piece);
 
             // The build menu already hides these from non-admins, but menu
@@ -1010,6 +1102,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             if (tool != Tool.Pond && !IsWaterTool(tool)) PondTool.Hide();
+            if (tool != Tool.Fall) ToolFalls.HidePreview();   // 0.2.1086: the Vfall ghost shows only while Vfall is held
             if (tool == Tool.None || refused
                 || (FiresVoxelConfig.Enabled != null && !FiresVoxelConfig.Enabled.Value))
             {
@@ -1028,6 +1121,7 @@ namespace VerdantsAscent.Terrain.Voxel
             else if (!TileBrush.TryGetPointerWorldPosition(out cursor))
             {
                 PondTool.Hide();
+                ToolFalls.HidePreview();
                 SetGizmo(Tool.None, Vector3.zero, false);
                 if (VerdantsAscent.Terrain.FatInput.PrimaryHeld) Blocked(tool, "the crosshair hits no ground within 600 m");
                 return;
@@ -1074,8 +1168,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // held, it repeats faster the longer it is held, so 100 m is a couple of seconds, not 200 presses.
                 float step = VerdantsAscent.Terrain.FatInput.ShiftHeld ? LevelFineStep : LEVEL_OFFSET_STEP;
                 float before = s_levelOffset;
-                int dir = VerdantsAscent.Terrain.FatInput.Key(KeyCode.PageUp) ? 1 : VerdantsAscent.Terrain.FatInput.Key(KeyCode.PageDown) ? -1 : 0;
-                if (VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.PageUp) || VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.PageDown))
+                int dir = VerdantsAscent.Terrain.FatInput.Key(GhostUp) ? 1 : VerdantsAscent.Terrain.FatInput.Key(GhostDown) ? -1 : 0;
+                if (VerdantsAscent.Terrain.FatInput.KeyDown(GhostUp) || VerdantsAscent.Terrain.FatInput.KeyDown(GhostDown))
                 {
                     s_levelOffset += dir * step;
                     s_levelHeldSince = Time.unscaledTime;
@@ -1092,8 +1186,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             else if (tool == Tool.Cylinder)
             {
-                if (VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.PageUp)) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight + 1f, -24f, 24f);
-                if (VerdantsAscent.Terrain.FatInput.KeyDown(KeyCode.PageDown)) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight - 1f, -24f, 24f);
+                if (VerdantsAscent.Terrain.FatInput.KeyDown(GhostUp)) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight + 1f, -24f, 24f);
+                if (VerdantsAscent.Terrain.FatInput.KeyDown(GhostDown)) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight - 1f, -24f, 24f);
                 if (s_heightWheelNotches != 0f) VoxelToolPieces.CylHeight = Mathf.Clamp(VoxelToolPieces.CylHeight + s_heightWheelNotches, -24f, 24f);
             }
             // The water tools' PgUp/PgDn, previews and clicks are their stroke drivers' (WaterToolDriver.cs).
@@ -1105,11 +1199,46 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             else if (tool == Tool.Fall || tool == Tool.Mop)
             {
-                // Lines-only ring of the fall's width at the cursor (LeftAlt + click removes falls in it).
+                // Lines-only ring of the fall's width at the cursor (vanilla Remove = middle mouse removes falls in it).
                 s_cylRadius = VoxelToolPieces.ToolRadius;
                 s_cylSignedHeight = LevelGhostThickness;
                 SetGizmo(Tool.Cylinder, cursor, true);
                 UpdateHintRay(tool, cursor);
+                if (tool == Tool.Fall)
+                {
+                    // 0.2.1086 (Fire: "v fall should show an actual ghost preview of what the fall will look like so we can position it"):
+                    // the fall the click would lay (spillway ring, see-through curtain down to the landing, pool ring), from the
+                    // same plan as the click; red spillway ring and no curtain when the click would be refused.
+                    Vector3 ghostView = GameCamera.instance != null ? GameCamera.instance.transform.forward
+                        : Player.m_localPlayer != null ? Player.m_localPlayer.transform.forward : Vector3.forward;
+                    ToolFalls.Preview(cursor, ghostView, VoxelToolPieces.ToolRadius, SharedLineMat());
+                }
+                if (tool == Tool.Fall && ZInput.GetButtonDown("Remove"))
+                {
+                    // 0.2.1072 ([lead] + [visual] review): remove uses the build tools' own Remove input (vanilla middle mouse), not a
+                    // modifier (LeftAlt broke our key rules, Ctrl is vanilla crouch); Numpad 7/9 undo/redo through the shared history.
+                    string removed = ToolFalls.RemoveNear(cursor, VoxelToolPieces.ToolRadius);
+                    FiresLogger.LogDebug(removed);
+                    FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "[FiresWaterfall] Vfall Remove at ({0:0.0},{1:0.0},{2:0.0}) r {3:0.0}: {4}", cursor.x, cursor.y, cursor.z, VoxelToolPieces.ToolRadius, removed));
+                    if (player != null) player.Message(MessageHud.MessageType.TopLeft, removed.Contains(" removed ") ? "Waterfall removed" : "No waterfall here to remove", 0, null);
+                }
+                if (tool == Tool.Mop && ZInput.GetButtonDown("Remove"))
+                {
+                    // 0.2.1073 (our key rules: no Alt): Vmop's RESTORE is the build tools' Remove input (vanilla middle mouse) on the
+                    // ring, as Vfall's remove; it was LeftAlt + drag. One press = one ring restored.
+                    float rr = VoxelToolPieces.ToolRadius;
+                    int cols = VoxelWorld.MopWater(cursor, rr, true, out _);
+                    int drawn = VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(cursor, rr);
+                    VerdantsAscent.Water.Core.PlacedWaterSheets.MarkDirtyIn(cursor, rr);   // 0.2.1097: the drawn sheet comes back at once
+                    VerdantsAscent.Water.Core.PlacedWaterSolids.MarkAllDirty("brush drag");
+                    if (ClutterSystem.instance != null) ClutterSystem.instance.ResetGrass(cursor, rr + 2f);
+                    FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "[FiresWater] Vmop restore (Remove) at ({0:0.0},{1:0.0},{2:0.0}) r={3:0.0}: {4} column(s) unmopped, {5} drawn water bod(ies) rebuilt",
+                        cursor.x, cursor.y, cursor.z, rr, cols, drawn));
+                    // 0.2.1334: Restore only lifts masks; a disk the mop deleted is not a mask, it comes back with undo.
+                    if (player != null) player.Message(MessageHud.MessageType.TopLeft, (cols > 0 ? "Mopped water restored" : "Nothing mopped here to restore") + ". Deleted water comes back with undo", 0, null);
+                }
             }
             else if (tool == Tool.Level)
             {
@@ -1138,6 +1267,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!VerdantsAscent.Terrain.FatInput.PrimaryHeld && !virtualPress)
             {
                 _strokeActive = false;
+                FlushMopStroke();   // 0.2.1334
                 _armAfterRelease = false;   // selecting-click released — a fresh press now carves
                 return;
             }
@@ -1426,8 +1556,16 @@ namespace VerdantsAscent.Terrain.Voxel
                         // A radius tool that removes generated or drawn water
                         // permanently: one persisted mask for both kinds (VoxelWorld.MopWater); drawn water rebuilds
                         // around it at once here, and on the other peers when the chunk anchor arrives.
+                        // 0.2.1073: a mop stroke only mops (restore moved to the Remove input; Alt is not ours to use).
+                        carveMod = false;
                         float r = VoxelToolPieces.ToolRadius;
                         int cols = VoxelWorld.MopWater(pos, r, carveMod, out int wetGen);
+                        NoteMopDisks(pos, r, cols);   // 0.2.1334: whole disks in the ring are deleted, not stacked under a mask
+                        // 0.2.1073 (Fire: "vmop doesnt work on waterfalls"): MopWater only masks water columns + drawn water; a Vfall is a
+                        // separate per-chunk record (ToolFalls), so the falls whose lip is in the ring go too (curtain, mist and its pool
+                        // follow the record). Same stroke, same chunk records, so one Numpad 7 brings them back.
+                        string fallsGone = ToolFalls.RemoveNear(pos, r);
+                        if (fallsGone.Contains(" removed ")) FiresLogger.LogDebug("[FiresWater] Vmop over falls: " + fallsGone);
                         int drawn = VerdantsAscent.Water.Core.WaterMeshCombiner.RefreshMopsIn(pos, r);
                         // An old cave pool's pour stayed under Vmop, so a mop also removes
                         // the FiresLiquidWater pours in its ring. A restore never deletes them.
@@ -1437,15 +1575,33 @@ namespace VerdantsAscent.Terrain.Voxel
                                 ? "[FiresWater] mop restore at ({0:0.0},{1:0.0},{2:0.0}) r={3:0.0}: {4} column(s) unmopped, {6} drawn water bod(ies) rebuilt; recorded"
                                 : "[FiresWater] mop at ({0:0.0},{1:0.0},{2:0.0}) r={3:0.0}: removed {5} generated column(s), {6} drawn water bod(ies) rebuilt dry; recorded {4} column(s)",
                             pos.x, pos.y, pos.z, r, cols, wetGen, drawn));
+                        // 0.2.1097 (Fire, shot 550: "vmop still doesnt work to precision clean water that spills over"): the mop only
+                        // reached the DRAWN placed sheet through a remesh of the voxel chunks the mask changed (MopColumns marks Full
+                        // chunks only; the sheet chunk of the water's own layer may not be one of them), so a spill could keep its old
+                        // sheet. Now every drawn sheet chunk, the walk colliders and the clutter over the ring rebuild at once, and the
+                        // field (PlacedWaterField: IsMoppedAt over the water's layer and its neighbours) answers dry there to every
+                        // consumer (sheet, level / swim, life, nav, state).
+                        int sheets = VerdantsAscent.Water.Core.PlacedWaterSheets.MarkDirtyIn(pos, r);
+                        VerdantsAscent.Water.Core.PlacedWaterSolids.MarkAllDirty("brush drag");
+                        if (ClutterSystem.instance != null) ClutterSystem.instance.ResetGrass(pos, r + 2f);
+                        FiresLogger.LogInfo(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "[Vmop] {0} {1} column(s) in ring r {2:0.0} at {3:0.0},{4:0.0} (y {5:0.0}; disks touched {6}, drawn sheet chunk(s) rebuilt {7}, generated wet {8})",
+                            carveMod ? "restored" : "cleared", cols, r, pos.x, pos.z, pos.y, drawn, sheets, wetGen));
                         break;
                     }
                     case Tool.Fall:
                     {
                         Vector3 view = GameCamera.instance != null ? GameCamera.instance.transform.forward
                             : Player.m_localPlayer != null ? Player.m_localPlayer.transform.forward : Vector3.forward;
-                        string line = carveMod ? ToolFalls.RemoveNear(pos, VoxelToolPieces.ToolRadius)
-                            : ToolFalls.Place(pos, view, VoxelToolPieces.ToolRadius);
+                        // 0.2.1072: a click only places; remove is vanilla's Remove input (see the Fall preview), Numpad 7 undoes.
+                        string line = ToolFalls.Place(pos, view, VoxelToolPieces.ToolRadius);
                         FiresLogger.LogDebug(line);
+                        // 0.2.1072: one line per Vfall click with the outcome (placed / removed / refused and why).
+                        FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "[FiresWaterfall] Vfall click at ({0:0.0},{1:0.0},{2:0.0}) r {3:0.0}{4}: {5}", pos.x, pos.y, pos.z, VoxelToolPieces.ToolRadius,
+                            "",
+                            line.Contains(" refused: ") ? "refused (" + line.Substring(line.IndexOf(" refused: ") + 10) + ")"
+                                : line.Contains(" removed ") ? "removed" : "placed (" + line + ")"));
                         // A refusal says why on screen too: a fall needs a lip, a drop and ground below.
                         if (line.Contains(" refused: ") && Player.m_localPlayer != null && !s_pressing)
                             Player.m_localPlayer.Message(MessageHud.MessageType.Center, line.Substring(line.IndexOf(" refused: ") + 10), 0, null, false);
@@ -1544,6 +1700,7 @@ namespace VerdantsAscent.Terrain.Voxel
             switch (piece.m_name)
             {
                 case "Vcarve":
+                    return Tool.Sphere;   // a sphere at the aim point (CarveSphereDriver)
                 case "Vfill":
                 case "Vdelete":
                     return Tool.Cylinder;
@@ -1555,6 +1712,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     return Tool.Level;
                 case "Vskin":
                     return Tool.Skin;   // a stroke driver (VoxelBrushDrag.Strokes.cs)
+                case "Vramp":
+                    return Tool.Skin;   // 0.2.1057: a stroke driver too (VoxelRamp.cs)
                 case "Vfall":
                     return Tool.Fall;
                 case "Vmop":

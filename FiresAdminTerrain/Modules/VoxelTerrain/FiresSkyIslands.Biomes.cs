@@ -53,6 +53,11 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static Heightmap.Biome RollSkylandBiome(in Island isl)
         {
+            // 0.2.1077: on super flat the 2D GetBiome is forced to Meadows (the island isn't registered yet when it rolls), so
+            // 12 of 14 skylands came out Meadows; the world's own biome there is what a normal world plans.
+            // 0.2.1079: 1077's WorldBiome still answered Meadows for all 7 skylands on SuperFlatSkyCaves2 (the super-flat field). Fire:
+            // "varied biomes like the VA world": on super flat every skyland takes the seeded pick from the 7 land biomes.
+            if (FatSuperFlat.On) return SkylandLandBiomes[(int)(Hash(0, 0, isl.Variety, BiomePickSalt) * SkylandLandBiomes.Length)];
             var planned = PlannedBiomeAt(isl.X, isl.Z);
             bool plannedLand = planned != Heightmap.Biome.None && planned != Heightmap.Biome.Ocean
                                && planned != Heightmap.Biome.DeepNorth;
@@ -62,29 +67,118 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static Heightmap.Biome SkylandBiome(int index) => s_islands[index].Biome;
 
+        // 0.2.1096 (Fire: "our flat worlds no locations logic screwed us on skyland and cave location placement"; SFSC2 dedi:
+        // "location site no" x10 vs "yes" x2, every Ashlands island "no"): a pond island never got a site, 30 % failed the chance,
+        // and an island narrower than every site's reach got none. Now: pond islands take a site on dry ground (TryDrySite already
+        // finds it), the chance is the cfg ("Skyland location chance" / "... on super flat", 1.0 there), and an island too narrow for
+        // the weighted pick takes the palette's smallest site when it fits the island's whole heart. Still rolled per world seed +
+        // island (Variety), so every peer agrees. Tally for the [Locations] line.
+        internal static int SitesYes, SitesNoChance, SitesNoRoom, SitesNoDry, SitesNoPondDry, SitesPondIslands;
+        internal static int SkylandCount() { int n = 0; foreach (var i in s_islands) if (IsSkyland(i.Kind)) n++; return n; }
+        private static float SiteChance()
+        {
+            var c = FatSuperFlat.On ? FiresVoxelConfig.SkylandSiteChanceSuperFlat : FiresVoxelConfig.SkylandSiteChance;
+            return c != null ? c.Value : SkylandSiteChance;
+        }
+
+        // 0.2.1137 [SkySite] (Fire: "fit more islands"): the 1137 rule for one island: a pond island takes a site on the dry ground
+        // above its pond (DeriveWaters never maps a pond island, so the 1096 roller refused all 5 on SFSC3), and an island too
+        // narrow for every palette site takes a mini site ('Skyland mini sites'). A new world (SkySites3) uses it on every island; an
+        // existing world only on the islands the server switched to it (FatLocationReplan: no generated zone under them yet).
+        internal static int SitesMini, SitesPondDry, SitesRule3Islands;
+        private static bool UsesSiteRule3(in Island isl)
+        {
+            var p = FiresWorldProfile.Current;
+            if (p == null) return false;
+            if (p.SkySites3) return true;
+            // Existing worlds: only islands the server already recorded (FatLocationReplan decides them at a session's start, once the
+            // generated-zone set is loaded, and they take the rule from the NEXT load on, so no island changes shape mid-session).
+            return p.SiteIslands3.Contains(isl.Variety);
+        }
+
+        // 0.2.1137: every skyland with no site, for FatLocationReplan's decision (Variety, world centre, radius).
+        internal static List<(int variety, float x, float z, float r)> SkylandsWithoutSite()
+        {
+            var list = new List<(int, float, float, float)>();
+            foreach (var isl in s_islands)
+                if (IsSkyland(isl.Kind) && isl.Site <= 0) list.Add((isl.Variety, WorldX(in isl), WorldZ(in isl), isl.R));
+            return list;
+        }
+
+        private static void Say(in Island isl, string what)
+        {
+            if (!Zones.FatLocationReplan.SiteLogOn) return;
+            FiresLogger.LogDebug($"[SkySite] island {isl.Variety} ({WorldX(in isl):0},{WorldZ(in isl):0}) {isl.Biome}: {what}");
+        }
+
         private static void RollSkylandSite(ref Island isl)
         {
-            if (isl.PondLvl > 0f || Hash(0, 0, isl.Variety, SiteChanceSalt) >= SkylandSiteChance) return;
+            if (isl.PondLvl > 0f) SitesPondIslands++;
+            bool rule3 = UsesSiteRule3(in isl);
+            if (rule3) SitesRule3Islands++;
+            if (isl.PondLvl > 0f && isl.Waters == null && !rule3) { SitesNoPondDry++; Say(in isl, "skipped: pond with no water map (pre-1137 rule)"); return; }
+            if (Hash(0, 0, isl.Variety, SiteChanceSalt) >= SiteChance()) { SitesNoChance++; Say(in isl, "skipped: chance"); return; }
             var sites = PaletteOf(isl.Biome).Sites;
-            float room = (isl.Shape != null ? isl.Shape.HeartWidth : isl.R) * SiteRoomShare;
+            float heartWidth = isl.Shape != null ? isl.Shape.HeartWidth : isl.R;
+            float room = heartWidth * SiteRoomShare;
             int total = 0;
             foreach (var site in sites) if (site.Reach <= room) total += site.Weight;
-            if (total == 0) return;
-            int roll = (int)(Hash(0, 0, isl.Variety, SitePickSalt) * total);
-            int pick = 0;
-            for (; pick < sites.Length; pick++)
+            float reachCap = float.MaxValue;
+            int pick = -1;
+            SkylandSite chosen = default;
+            string kind = "normal";
+            if (total == 0)
             {
-                if (sites[pick].Reach > room) continue;
-                roll -= sites[pick].Weight;
-                if (roll < 0) break;
+                int smallest = -1;
+                for (int s = 0; s < sites.Length; s++) if (smallest < 0 || sites[s].Reach < sites[smallest].Reach) smallest = s;
+                // 0.2.1102 (SFSC3: "skyland sites 7 of 25 (room 13)"): HeartWidth is the widest bone's RADIUS, and the smallest
+                // palette site's Reach (its clear radius + the 4 m ease-back) is ~10 m, so every island with a heart under ~10 m
+                // got none. On a world made on 0.2.1102+ (FiresWorldProfile.SkySites2) the smallest site is taken whenever its
+                // flat footprint fits the heart, and its ease-back is clamped to the heart. Older worlds keep the 1096 rule, so
+                // islands already built never change shape. 0.2.1137: an island on the 1137 rule takes it too.
+                bool newRule = rule3 || (FiresWorldProfile.Current != null && FiresWorldProfile.Current.SkySites2);
+                bool smallestFits = smallest >= 0 && (sites[smallest].Reach <= heartWidth || (newRule && sites[smallest].Flat + 1f <= heartWidth));
+                if (smallestFits)
+                {
+                    if (sites[smallest].Reach > heartWidth) reachCap = heartWidth;
+                    room = Mathf.Max(heartWidth, sites[smallest].Reach);
+                    total = sites[smallest].Weight;
+                }
+                else if (rule3 && TryMiniSite(in isl, heartWidth, out int mini, out chosen))
+                {
+                    // 0.2.1137: a mini site (a runestone, a waymarker) when no palette site fits the island's heart.
+                    pick = sites.Length + mini;
+                    reachCap = heartWidth;
+                    room = Mathf.Max(heartWidth, chosen.Reach);
+                    kind = "mini";
+                }
+                else { SitesNoRoom++; Say(in isl, $"skipped: no room (heart {heartWidth:0.0} m{(rule3 ? ", no mini site fits" : "")})"); return; }
             }
-            if (pick >= sites.Length) return;
-            var chosen = sites[pick];
+            if (pick < 0)
+            {
+                int roll = (int)(Hash(0, 0, isl.Variety, SitePickSalt) * total);
+                pick = 0;
+                for (; pick < sites.Length; pick++)
+                {
+                    if (sites[pick].Reach > room) continue;
+                    roll -= sites[pick].Weight;
+                    if (roll < 0) break;
+                }
+                if (pick >= sites.Length) { SitesNoRoom++; Say(in isl, "skipped: no room"); return; }
+                chosen = sites[pick];
+            }
             float drift = (room - chosen.Reach) * SiteDrift * Hash(0, 0, isl.Variety, SiteDriftSalt);
             float bearing = Hash(0, 0, isl.Variety, SiteBearingSalt) * Mathf.PI * 2f;
             var anchor = isl.Shape != null ? isl.Shape.Heart : new Vector2(isl.X, isl.Z);
             var spot = anchor + new Vector2(Mathf.Cos(bearing), Mathf.Sin(bearing)) * drift;
-            if (isl.Waters != null && !TryDrySite(in isl, room, chosen.Reach, out spot)) return;
+            if (isl.Waters != null && !TryDrySite(in isl, room, chosen.Reach, out spot)) { SitesNoDry++; Say(in isl, "skipped: no dry spot"); return; }
+            if (rule3 && isl.PondLvl > 0f && isl.Waters == null)
+            {
+                if (!TryPondDrySite(in isl, Mathf.Min(chosen.Reach, reachCap), out spot)) { SitesNoPondDry++; Say(in isl, "skipped: no dry ground above the pond"); return; }
+                SitesPondDry++;
+                kind = kind == "mini" ? "pond+mini" : "pond";
+            }
+            if (kind.EndsWith("mini")) SitesMini++;
             isl.SiteX = spot.x;
             isl.SiteZ = spot.y;
             float level = NaturalTopAt(in isl, isl.SiteX, isl.SiteZ);
@@ -95,10 +189,102 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             isl.SiteY = level / (SiteLevelSamples + 1);
             isl.SiteFlat = chosen.Flat;
-            isl.SiteReach = chosen.Reach;
+            isl.SiteReach = Mathf.Min(chosen.Reach, reachCap);   // 0.2.1102: a narrow island eases back within its heart
             isl.SiteClear = chosen.Clear;
             isl.SiteYaw = Mathf.Floor(Hash(0, 0, isl.Variety, SiteYawSalt) * 16f) * 22.5f;
             isl.Site = pick + 1;
+            SitesYes++;
+            Say(in isl, $"site {chosen.Location} ({kind}{(rule3 ? ", 1137 rule" : "")}) at ({isl.SiteX:0},{isl.SiteZ:0}), flat {isl.SiteFlat:0.0} m, reach {isl.SiteReach:0.0} m");
+        }
+
+        // ── 0.2.1137: mini sites + the pond-aware dry site ─────────────────────────────────────────────────────────
+        private static string s_miniParsedFrom;
+        private static readonly Dictionary<Heightmap.Biome, List<SkylandSite>> s_mini = new Dictionary<Heightmap.Biome, List<SkylandSite>>();
+
+        private static List<SkylandSite> MiniSitesOf(Heightmap.Biome biome)
+        {
+            string cfg = FiresVoxelConfig.SkylandMiniSites != null ? FiresVoxelConfig.SkylandMiniSites.Value : "";
+            if (!ReferenceEquals(cfg, s_miniParsedFrom) && cfg != s_miniParsedFrom)
+            {
+                s_miniParsedFrom = cfg;
+                s_mini.Clear();
+                foreach (var entry in (cfg ?? "").Split(','))
+                {
+                    var parts = entry.Split(':');
+                    if (parts.Length != 4) continue;
+                    if (!System.Enum.TryParse(parts[0].Trim(), true, out Heightmap.Biome b)) continue;
+                    if (!float.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float clear)) continue;
+                    if (!float.TryParse(parts[3].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float flat)) continue;
+                    if (!s_mini.TryGetValue(b, out var list)) s_mini[b] = list = new List<SkylandSite>();
+                    list.Add(Site(parts[1].Trim(), 1, Mathf.Max(1f, clear), flat));
+                }
+            }
+            return s_mini.TryGetValue(biome, out var found) ? found : null;
+        }
+
+        // A mini site whose flat footprint fits the island's heart; seeded pick among those that fit.
+        private static bool TryMiniSite(in Island isl, float heartWidth, out int index, out SkylandSite site)
+        {
+            index = -1;
+            site = default;
+            var list = MiniSitesOf(isl.Biome);
+            if (list == null || list.Count == 0) return false;
+            var fits = new List<int>();
+            for (int i = 0; i < list.Count; i++) if (list[i].Flat + 1f <= heartWidth) fits.Add(i);
+            if (fits.Count == 0) return false;
+            index = fits[Mathf.Min(fits.Count - 1, (int)(Hash(0, 0, isl.Variety, SitePickSalt) * fits.Count))];
+            site = list[index];
+            return true;
+        }
+
+        // The location of a site index past the palette: a mini site.
+        private static bool TrySiteAt(Heightmap.Biome biome, int site, out SkylandSite found)
+        {
+            found = default;
+            var sites = PaletteOf(biome).Sites;
+            if (site <= 0) return false;
+            if (site - 1 < sites.Length) { found = sites[site - 1]; return true; }
+            var mini = MiniSitesOf(biome);
+            int m = site - 1 - sites.Length;
+            if (mini == null || m < 0 || m >= mini.Count) return false;
+            found = mini[m];
+            return true;
+        }
+
+        // A pond island (DeriveWaters maps none): dry ground standing PondDryLift above the pond, clear of the pond's circle and its
+        // rill by the site's reach + a gap, inside the island's shape. Seeded spiral from the heart, the same on every peer.
+        private const float PondDryLift = 1.5f;
+        private static bool TryPondDrySite(in Island isl, float reach, out Vector2 site)
+        {
+            var heart = isl.Shape != null ? isl.Shape.Heart : new Vector2(isl.X, isl.Z);
+            float turn = Hash(0, 0, isl.Variety, SiteBearingSalt + 11) * Mathf.PI * 2f;
+            float spread = (isl.Shape != null ? isl.Shape.HeartWidth : isl.R) * 1.2f + isl.PondR;
+            const int tries = 48;
+            for (int k = 0; k < tries; k++)
+            {
+                float a = turn + k * 2.3999632f;
+                float d = spread * Mathf.Sqrt((k + 0.5f) / tries);
+                site = heart + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * d;
+                float dx = site.x - isl.PondX, dz = site.y - isl.PondZ;
+                if (Mathf.Sqrt(dx * dx + dz * dz) - isl.PondR < reach + 2f) continue;
+                if (!float.IsNaN(isl.RillAng) && isl.RillLen > 0f)
+                {
+                    float rx = Mathf.Cos(isl.RillAng), rz = Mathf.Sin(isl.RillAng);
+                    float along = Mathf.Clamp(dx * rx + dz * rz, 0f, isl.RillLen);
+                    float ex = dx - rx * along, ez = dz - rz * along;
+                    if (Mathf.Sqrt(ex * ex + ez * ez) < reach + 2f) continue;
+                }
+                if (isl.Shape != null && isl.Shape.Sample(site.x, site.y, out float width) > 1f - (reach + 2f) / Mathf.Max(1f, width)) continue;
+                bool dry = NaturalTopAt(in isl, site.x, site.y) > isl.PondLvl + PondDryLift;
+                for (int s = 0; dry && s < 4; s++)
+                {
+                    float sa = s * Mathf.PI * 0.5f;
+                    dry = NaturalTopAt(in isl, site.x + Mathf.Cos(sa) * reach * 0.7f, site.y + Mathf.Sin(sa) * reach * 0.7f) > isl.PondLvl + PondDryLift;
+                }
+                if (dry) return true;
+            }
+            site = default;
+            return false;
         }
 
         // The location a skyland holds, where it stands and how it turns, and the seed its random parts roll from.
@@ -110,7 +296,8 @@ namespace VerdantsAscent.Terrain.Voxel
             rotation = Quaternion.identity;
             seed = isl.Variety;
             if (!IsSkyland(isl.Kind) || isl.Site <= 0) return false;
-            location = PaletteOf(isl.Biome).Sites[isl.Site - 1].Location;
+            if (!TrySiteAt(isl.Biome, isl.Site, out var siteDef)) return false;   // 0.2.1137: past the palette = a mini site
+            location = siteDef.Location;
             position = new Vector3(isl.SiteX + isl.OffX, isl.SiteY + isl.OffY, isl.SiteZ + isl.OffZ);
             rotation = Quaternion.Euler(0f, isl.SiteYaw, 0f);
             return true;
@@ -137,12 +324,29 @@ namespace VerdantsAscent.Terrain.Voxel
             return h;
         }
 
+        // 0.2.1075 (add-only contract for FTS): the biome of ANY floating island covering a point near its height band, on every world
+        // type: a skyland answers its own biome (TrySkylandBiomeAt); a lattice island answers the world's own biome at x,z (ocean ->
+        // Meadows), the same its content gets on super flat (FatSuperFlat.WorldBiome). False when no island covers the point or the
+        // point is not within BandSlack of the island's top..bottom.
+        private const float BandSlack = 6f;
+        internal static bool TryIslandBiomeAt(Vector3 point, out Heightmap.Biome biome)
+        {
+            biome = Heightmap.Biome.None;
+            if (!Enabled || !IslandAt(point.x, point.z)) return false;
+            if (!TryTopAt(point.x, point.z, out float top) || !TryBottomAt(point.x, point.z, out float bottom)) return false;
+            if (point.y > top + BandSlack || point.y < bottom - BandSlack) return false;
+            if (TrySkylandBiomeAt(point, out biome) && biome != Heightmap.Biome.None) return true;
+            biome = FatSuperFlat.WorldBiome(point.x, point.z);
+            if (biome == Heightmap.Biome.Ocean || biome == Heightmap.Biome.None) biome = Heightmap.Biome.Meadows;
+            return true;
+        }
+
         // The biome of the skyland a point stands on (or is inside). Runs on hot vanilla paths (Heightmap.GetBiome),
         // so it is one cell lookup and never a scan.
         internal static bool TrySkylandBiomeAt(Vector3 point, out Heightmap.Biome biome)
         {
             biome = Heightmap.Biome.None;
-            if (!Zones.ZoneModeRegistry.ModeActive || !Enabled || !s_index.TryGetValue(CellKey(point.x, point.z), out var list))
+            if (!Zones.ZoneModeSkylands.Driven || !Enabled || !s_index.TryGetValue(CellKey(point.x, point.z), out var list))
                 return false;
             foreach (int k in list)
             {
@@ -161,7 +365,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // pixSize metres each, centred on the world origin as vanilla's map). Returns the pixels stamped.
         internal static int StampSkylands(Color32[] pixels, int size, float pixSize, System.Func<Heightmap.Biome, Color32> colorOf)
         {
-            if (!Zones.ZoneModeRegistry.ModeActive || !Enabled) return 0;
+            if (!Zones.ZoneModeSkylands.Driven || !Enabled) return 0;
             int half = size / 2, stamped = 0;
             float hp = pixSize * 0.5f;
             foreach (var isl in s_islands)
@@ -188,7 +392,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool TrySkylandBiomeOver(float wx, float wz, out Heightmap.Biome biome)
         {
             biome = Heightmap.Biome.None;
-            if (!Zones.ZoneModeRegistry.ModeActive || !Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
+            if (!Zones.ZoneModeSkylands.Driven || !Enabled || !s_index.TryGetValue(CellKey(wx, wz), out var list)) return false;
             foreach (int k in list)
             {
                 var isl = s_islands[k];
@@ -203,7 +407,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static Heightmap.Biome SkylandBiomesOver(Vector3 center, float halfSize)
         {
             var biomes = Heightmap.Biome.None;
-            if (!Enabled || !Zones.ZoneModeRegistry.ModeActive) return biomes;
+            if (!Enabled || !Zones.ZoneModeSkylands.Driven) return biomes;
             float x0 = center.x - halfSize, x1 = center.x + halfSize, z0 = center.z - halfSize, z1 = center.z + halfSize;
             int i0 = Mathf.FloorToInt(x0 / INDEX_CELL), i1 = Mathf.FloorToInt(x1 / INDEX_CELL);
             int j0 = Mathf.FloorToInt(z0 / INDEX_CELL), j1 = Mathf.FloorToInt(z1 / INDEX_CELL);
@@ -604,6 +808,97 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (palette.Vines != null) yield return palette.Vines;
                 if (palette.Centerpiece != null) yield return palette.Centerpiece;
                 foreach (var remains in palette.Remains) yield return remains;
+            }
+        }
+        // ── 0.2.1095: Ashlands skyland lava + the island mesh biome proof ([IslandPaint]) ─────────────────────────────────
+        // Fire (live 1093): "ashlands sky islands are still drawing the biome paint on the ground and not on the islands ... sky
+        // islands need lava". The island's terrain now wears its own biome (VoxelZoneStreamer's skylandBiome gate), and an Ashlands
+        // skyland's top grows lava pools and veins: two octaves of Perlin noise on world x,z (the same answer on every peer), only on
+        // the top skin (within LavaTopSkin of the island's top), never on its sides or underside. VoxelLayerPaint draws it through the
+        // palette (alpha 1 = lava on Ashlands-coloured vertices) and Heightmap.IsLava / GetLava answer it for damage. Visual + damage
+        // only: nothing saved, no heights.
+        private const float LavaTopSkin = 1.5f;
+        private const float LavaLo = 0.58f, LavaHi = 0.66f;
+
+        // 0..1 lava at a point ON an Ashlands skyland's top; 0 anywhere else (ground, other biomes, the sides).
+        internal static float IslandLavaAt(Vector3 p)
+        {
+            if (!Enabled || !TrySkylandBiomeAt(p, out var biome) || biome != Heightmap.Biome.AshLands) return 0f;
+            if (!TryTopAt(p.x, p.z, out float top) || p.y < top - LavaTopSkin) return 0f;
+            float n = Mathf.PerlinNoise(p.x * 0.031f + 517.3f, p.z * 0.031f + 211.9f) * 0.7f
+                    + Mathf.PerlinNoise(p.x * 0.113f + 91.7f, p.z * 0.113f + 377.1f) * 0.3f;
+            return Mathf.Clamp01((n - LavaLo) / (LavaHi - LavaLo));
+        }
+
+        // From VoxelZoneStreamer when a skyland-band chunk is generated: once per island, which biome its mesh wears and what the
+        // ground under it keeps (proof that nothing transfers either way), with the island's lava cell count over a 2 m grid.
+        private static readonly HashSet<uint> s_paintSaid = new HashSet<uint>();
+        internal static void NoteIslandMeshBiome(int kx, int kz, float chunkBottom, float[] ground, Color32[] groundBiome)
+        {
+            float cx = kx * 32f + 16f, cz = kz * 32f + 16f;
+            if (!s_index.TryGetValue(CellKey(cx, cz), out var list)) return;
+            foreach (int k in list)
+            {
+                var isl = s_islands[k];
+                if (!IsSkyland(isl.Kind) || !Covers(in isl, cx - isl.OffX, cz - isl.OffZ)) continue;
+                uint id = IslandHash(isl);
+                lock (s_paintSaid) { if (!s_paintSaid.Add(id)) return; }
+                int mid = (VoxelChunk.CELLS / 2 + 1) + VoxelChunk.SAMPLES * (VoxelChunk.CELLS / 2 + 1);
+                var g = mid < groundBiome.Length ? groundBiome[mid] : default;
+                string groundName = BiomeOfColour(g);
+                int lava = 0;
+                if (isl.Biome == Heightmap.Biome.AshLands)
+                    for (float x = cx - 16f; x < cx + 16f; x += 2f)
+                        for (float z = cz - 16f; z < cz + 16f; z += 2f)
+                            if (TryTopAt(x, z, out float t) && IslandLavaAt(new Vector3(x, t, z)) > 0.5f) lava++;
+                FiresLogger.LogInfo($"[IslandPaint] island {id:x8} ({isl.Biome}): island mesh biome {isl.Biome} (was {groundName} through 0.2.1094: the ground's colour), "
+                    + (isl.Biome == Heightmap.Biome.AshLands ? $"lava cells {lava} on island (2 m grid, chunk ({kx},{kz})), " : "")
+                    + $"ground under island biome {groundName} (no transfer)");
+                return;
+            }
+        }
+
+        private static string BiomeOfColour(Color32 c)
+        {
+            foreach (Heightmap.Biome b in System.Enum.GetValues(typeof(Heightmap.Biome)))
+            {
+                if (b == Heightmap.Biome.None || b == Heightmap.Biome.All) continue;
+                var bc = Heightmap.GetBiomeColor(b);
+                if (bc.r == c.r && bc.g == c.g && bc.b == c.b && bc.a == c.a) return b.ToString();
+            }
+            return $"blend({c.r},{c.g},{c.b},{c.a})";
+        }
+        // Lava damage on an Ashlands skyland. Vanilla's Character.UpdateLava (1.0.15 Character.cs:573-600) only heats a character
+        // when WorldGenerator.IsAshlands(x, z) (the ground's biome below, not the island's), its GetGroundData heightmap is not null
+        // (the ray hits the island's voxel collider: no Heightmap) and nothing non-heightmap is underfoot (the island again). So
+        // an island's lava never burned. After vanilla's step, a character on an Ashlands skyland's top over one of its pools gets
+        // vanilla's own heat build-up (proximity x dt x m_heatBuildupBase x height factor x (1 - heat resistance)); vanilla's
+        // UpdateHeatDamage turns it into damage as on Ashlands ground.
+        [HarmonyLib.HarmonyPatch(typeof(Character), "UpdateLava")]
+        private static class IslandLavaHeat
+        {
+            private static readonly HarmonyLib.AccessTools.FieldRef<Character, float> Heat = HarmonyLib.AccessTools.FieldRefAccess<Character, float>("m_lavaHeatLevel");
+            private static readonly HarmonyLib.AccessTools.FieldRef<Character, float> Timer = HarmonyLib.AccessTools.FieldRefAccess<Character, float>("m_lavaTimer");
+            private static readonly HarmonyLib.AccessTools.FieldRef<Character, float> MinMask = HarmonyLib.AccessTools.FieldRefAccess<Character, float>("m_minLavaMaskThreshold");
+            private static float s_logAt;
+
+            private static void Postfix(Character __instance, float dt)
+            {
+                if (__instance == null || !Enabled) return;
+                var p = __instance.transform.position;
+                if (!TrySkylandBiomeAt(p, out var biome) || biome != Heightmap.Biome.AshLands || !TryTopAt(p.x, p.z, out float top)) return;
+                float above = p.y - top;
+                if (above < -LavaTopSkin || above > __instance.m_lavaAirDamageHeight) return;
+                float lava = IslandLavaAt(new Vector3(p.x, top, p.z));
+                if (lava <= MinMask(__instance)) return;
+                float height = (__instance.m_lavaAirDamageHeight - Mathf.Max(0f, above)) / __instance.m_lavaAirDamageHeight;
+                Heat(__instance) += lava * dt * __instance.m_heatBuildupBase * height * (1f - __instance.GetEquipmentHeatResistanceModifier());
+                Timer(__instance) = 0f;
+                if (__instance.IsPlayer() && FiresLogger.DebugEnabled && Time.unscaledTime >= s_logAt)
+                {
+                    s_logAt = Time.unscaledTime + 10f;
+                    FiresLogger.LogDebug($"[IslandPaint] lava heat on an Ashlands skyland at ({p.x:0.0},{p.z:0.0}): pool {lava:0.00}, {above:0.0} m over the top, heat {Heat(__instance):0.00}");
+                }
             }
         }
     }

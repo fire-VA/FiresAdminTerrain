@@ -323,9 +323,15 @@ namespace VerdantsAscent.Water.Core
         /// don't want it: SetCustomLiquidType flips the WHOLE combiner's
         /// material, which is the exact bug we're avoiding now).
         /// </summary>
+        // 0.2.1091: the tool kind the next CreateDiskOfType stamps on its disk (the river tools set River around their call);
+        // every other caller lays a Pond. Reset after each use. Main thread.
+        internal static WaterDiskKind NextKind = WaterDiskKind.Pond;
+
         public static WaterDisk CreateDiskOfType(Vector3 position, float radius, float maxDepth, CustomLiquidType liquid)
         {
             var disk = new WaterDisk(position, radius, maxDepth, liquid);
+            disk.Kind = NextKind;
+            NextKind = WaterDiskKind.Pond;
             Place(disk);
             FiresLogger.LogVerbose($"[CustomWaterManager] Created {liquid} disk at {position}, radius={radius}");
             return disk;
@@ -342,9 +348,12 @@ namespace VerdantsAscent.Water.Core
             if (ZNet.instance == null || ZRoutedRpc.instance == null)
             {
                 WaterMeshCombiner.GetOrCreateCombinerFor(disk);
+                VerdantsAscent.Terrain.Voxel.VoxelWorld.UnmopUnderNewWater(disk.Position, disk.Radius);   // 0.2.1324 (unmop on lay)
                 return;
             }
             WaterOperationRPC.RequestCreateWaterWithCustomType(disk.Position, disk, disk.CustomLiquidType);
+            // 0.2.1324 (unmop on lay): placed water overrides an earlier Vmop in its disc (VoxelWorld.UnmopUnderNewWater).
+            VerdantsAscent.Terrain.Voxel.VoxelWorld.UnmopUnderNewWater(disk.Position, disk.Radius);
         }
 
         #endregion
@@ -472,6 +481,7 @@ namespace VerdantsAscent.Water.Core
             {
                 if (combiner != null)
                 {
+                    foreach (var disk in combiner.WaterDisks) WaterRemovedDisks.NoteRemovedHere(disk);   // 0.2.1354 (review: permanent disk loss)
                     combiner.DestroyPermanently();
                     count++;
                 }
@@ -524,6 +534,7 @@ namespace VerdantsAscent.Water.Core
             {
                 if (combiner != null)
                 {
+                    foreach (var disk in combiner.WaterDisks) WaterRemovedDisks.NoteRemovedHere(disk);   // 0.2.1354 (review: permanent disk loss)
                     combiner.DestroyPermanently();
                     count++;
                 }

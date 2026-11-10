@@ -58,6 +58,7 @@ namespace VerdantsAscent.Water.Core
             public float SettledWaterLevel;
             public float MinDiskY;
             public float MaxDiskY;
+            public bool SkipMesh;   // 0.2.1091: placed fresh water: surface + depths only, no grid mesh (PlacedWaterSheets draws it)
 
             // Wave parameters
             public float WaveIntensity;
@@ -196,6 +197,7 @@ namespace VerdantsAscent.Water.Core
                 CenterChannelDepth = 0.05f,
                 CenterChannelRadiusFraction = 0.3f,
                 SurfaceSmoothPasses = 3,
+                SkipMesh = combiner != null && combiner.IsPlacedFreshWater,
                 SmoothStrength = 0.35f,
                 IsPondMode = isPondMode,
                 SettledWaterLevel = settledWaterLevel,
@@ -302,7 +304,7 @@ namespace VerdantsAscent.Water.Core
             }
 
             // Step 5: Build mesh data
-            BuildMeshData(input, surfaceHeights, waterDepths, output);
+            if (!input.SkipMesh) BuildMeshData(input, surfaceHeights, waterDepths, output);
 
             output.SurfaceHeights = surfaceHeights;
             output.WaterDepths = waterDepths;

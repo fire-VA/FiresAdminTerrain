@@ -191,8 +191,11 @@ namespace VerdantsAscent.Terrain.Voxel
             s_gaeaBaked = false;
             var profile = s_pendingProfile;
             s_pendingProfile = null;
+            // Runs on every New World Done, the panel-failed-to-build case included (ReadOptions sets s_newName before it
+            // checks s_container), so a deleted world's leftovers never reach a new world made here.
             FiresWorldRecords.ClearLeftovers(name);
             if (profile == null) return;
+            profile.WorldUid = world.m_uid;   // 0.2.1327: the profile names its world; a later same-name world's load rejects it
             if (profile.Write(name))
                 FiresLogger.LogInfo($"[FiresWorldGen] new world '{name}' profiled: {profile.Describe()}.");
             if (!profile.ZoneMode) return;
@@ -202,6 +205,30 @@ namespace VerdantsAscent.Terrain.Voxel
             else
                 FiresLogger.LogError($"[FiresZones] could not write the zone registry for '{name}' — it will load as a normal world. "
                     + "Delete the world and create it again.");
+        }
+
+        // 0.2.1327 (Fire 10-31, audit): vanilla's world delete (World.RemoveWorld, from the world list's Remove) leaves FAT's
+        // records behind, and a new world under the same name could pick them up. Removing them with the world is the
+        // same file set New World clears. Only once the save is really gone (a failed delete keeps the world and its records).
+        [HarmonyPatch(typeof(World), nameof(World.RemoveWorld))]
+        [HarmonyPostfix]
+        private static void ClearRecordsOnWorldDelete(string name)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(name)) return;
+                if (World.HaveWorld(name))
+                {
+                    FiresLogger.LogDebug($"[FiresWorldGen] '{name}' still exists after the world delete: its records are kept.");
+                    return;
+                }
+                FiresLogger.LogDebug($"[FiresWorldGen] world '{name}' deleted: removing its FAT records (ClearLeftovers).");
+                FiresWorldRecords.ClearLeftovers(name);
+            }
+            catch (System.Exception ex)
+            {
+                FiresLogger.LogWarning($"[FiresWorldGen] could not remove the records of deleted world '{name}': {ex.Message}");
+            }
         }
 
         // ── Building the rows ───────────────────────────────────────────────
@@ -425,7 +452,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static int DefaultTerrainChoice()
         {
-            if ((FiresVoxelConfig.TerrainMode?.Value ?? FiresTerrainMode.Off) != FiresTerrainMode.FullVoxel) return HeightmapChoice;
+            if (!FiresVoxelConfig.LegacyConfigFullVoxel) return HeightmapChoice;   // 0.2.1336: only an old cfg's preselect; the row is the choice
             return (FiresVoxelConfig.WorldMode?.Value ?? VoxelWorldMode.VoxelWrap) == VoxelWorldMode.VoxelOnly ? FullVoxelChoice : VoxelWrapChoice;
         }
 
@@ -443,6 +470,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static FiresWorldProfile ChosenFromRows() => new FiresWorldProfile
         {
+            SkySites2 = true,   // 0.2.1102: a world made on the New World screen takes the new skyland site rule
+            SkySites3 = true,   // 0.2.1137: and the pond-aware / mini site rule
             Generator = s_generator.value == FiresGenerator ? ProfileGenerator.Fires : ProfileGenerator.Vanilla,
             Terrain = TerrainByChoice[Mathf.Clamp(s_terrain.value, 0, TerrainByChoice.Length - 1)],
             ZoneMode = s_oneZoneAtATime != null && s_oneZoneAtATime.isOn,

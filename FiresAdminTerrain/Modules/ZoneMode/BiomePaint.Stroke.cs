@@ -87,8 +87,13 @@ namespace VerdantsAscent.Terrain.Zones
             var seen = new HashSet<Vector2s>();
             foreach (var c in circles)
             {
-                area += Mathf.PI * c.R * c.R;   // overlaps counted twice: an upper bound, the fit test decides
+                area += c.Outline != null ? c.Outline.Area : Mathf.PI * c.R * c.R;   // overlaps counted twice: an upper bound, the fit test decides
                 foreach (var z in ZonesOf(c)) if (seen.Add(z)) zones.Add(z);
+            }
+            if (circles[0].Brush == Brush.Custom)
+            {
+                int swappedOut = SwapOutLocations(zs, circles, zones);
+                if (swappedOut > 0) FiresLogger.LogInfo($"[BiomePaint] {label}: {swappedOut} old location(s) taken away; the new ground's follow (0.2.1374).");
             }
             var measured = new LocationDensity();
             yield return MeasureLocationDensity(zs, generator, ground, res, measured);
@@ -156,8 +161,7 @@ namespace VerdantsAscent.Terrain.Zones
         {
             foreach (var c in circles)
             {
-                float dx = at.x - c.X, dz = at.z - c.Z;
-                if (Mathf.Sqrt(dx * dx + dz * dz) + r <= c.R) return true;
+                if (c.Rim(at.x, at.z, r) >= r) return true;   // 0.2.1375: a drawn outline's rim as well
             }
             return false;
         }

@@ -344,15 +344,28 @@ namespace VerdantsAscent.Terrain.Zones
                 s_sizeRefusal = string.Format(System.Globalization.CultureInfo.InvariantCulture,
                     "This world reaches {0:0} m from its centre; one zone at a time supports worlds up to {1:0} m. It plays as a normal world.",
                     Voxel.FatWorldSize.EdgeRadius, gridReach);
-                FiresLogger.LogWarning($"[FiresZones] '{world.m_name}': {s_sizeRefusal} ({Voxel.FatWorldSize.Describe()}; "
-                    + $"{(File.Exists(path) ? $"{file} left untouched" : "no zone registry")}.)");
+                // 0.2.1404 (log sweep 11-07): a big world that was never zone mode is an expected state (Info); a Warning only when
+                // it has a zone registry, i.e. it WAS one zone at a time and no longer is.
+                string sizeLine = $"[FiresZones] '{world.m_name}': {s_sizeRefusal} ({Voxel.FatWorldSize.Describe()}; "
+                    + $"{(File.Exists(path) ? $"{file} left untouched" : "no zone registry")}.)";
+                if (File.Exists(path)) FiresLogger.LogWarning(sizeLine);
+                else FiresLogger.LogInfo(sizeLine);
+                return;
+            }
+            // 0.2.1033 (Fire 10-24 "the ring wasnt there"): the rig dedi launches with -fireszones, so HaloFlat was created as a
+            // one-zone-at-a-time world ("gate active ... 9 open zone(s)") and every zone of the ring 4.8 km out stayed closed sea:
+            // no voxel ground was ever built there. HaloFlat is never zone-mode, and a registry it already got is left unread.
+            if (Voxel.FatHaloArc.IsHaloFlatWorld(world.m_name))
+            {
+                FiresLogger.LogInfo($"[FiresZones] '{world.m_name}' is the HaloFlat ring world: never one zone at a time"
+                    + (File.Exists(path) ? $" ({file} left unread)." : "."));
                 return;
             }
             bool profiled = Voxel.FiresWorldProfile.Current != null && Voxel.FiresWorldProfile.Current.ZoneMode;
             if (!File.Exists(path) && (LaunchFlagDecides(Voxel.FiresWorldProfile.Current) || profiled) && IsNeverSaved(world))
             {
                 if (CreateForNewWorld(world, out _))
-                    FiresLogger.LogInfo($"[FiresZones] {(profiled ? "its profile" : LaunchFlag)}: '{world.m_name}' has never been saved, so it "
+                    FiresLogger.LogDebug($"[FiresZones] {(profiled ? "its profile" : LaunchFlag)}: '{world.m_name}' has never been saved, so it "   // 0.2.1327: Debug; the world-mode line says it
                         + "becomes a ONE ZONE AT A TIME world.");
             }
             if (!File.Exists(path))
@@ -986,9 +999,10 @@ namespace VerdantsAscent.Terrain.Zones
             }
             Voxel.FiresWorldProfile.Set(state.Profile);
             Voxel.FiresWaterGuards.BindClient(state.WaterGuards);
-            if (state.Profile != null)
-                FiresLogger.LogInfo($"[FiresWorldGen] the server's profile for '{world.m_name}': {state.Profile.Describe()}.");
+            if (state.Profile != null)   // 0.2.1327: the client's one world-mode line
+                Voxel.FiresWorldProfile.LogMode(world.m_name, state.Profile, state.ZoneMode, "server profile");
             if (!state.ZoneMode) return;
+            if (Voxel.FatHaloArc.IsHaloFlatWorld(world.m_name)) { FiresLogger.LogInfo("[FiresZones] HaloFlat ring world: the server sent a zone gate - ignored here (HaloFlat is never one zone at a time)"); return; }
 
             s_modeActive = true;
             s_seeded = state.Seeded;

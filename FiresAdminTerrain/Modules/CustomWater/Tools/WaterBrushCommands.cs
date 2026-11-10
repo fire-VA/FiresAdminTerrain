@@ -458,6 +458,7 @@ namespace VerdantsAscent.Water.Tools
                             new Vector3(center.x,    0, center.z));
                         if (dxz <= radius + d.Radius)
                         {
+                            VerdantsAscent.Water.Core.WaterRemovedDisks.NoteRemovedHere(d);   // 0.2.1354 (review: permanent disk loss): before RemoveWaterDisk's save
                             c.RemoveWaterDisk(d);
                             removed++;
                         }

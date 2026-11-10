@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 
 namespace VerdantsAscent.Terrain.Voxel
 {
@@ -27,6 +28,12 @@ namespace VerdantsAscent.Terrain.Voxel
         // Version 4 (the admin "Super flat" build world) = version 3's layout (size always written) plus one
         // byte: super flat. Written only for a super flat world; every other world keeps 1..3 on the wire byte for byte.
         private const byte VersionSuperFlat = 4;
+        // 0.2.1102: version 5 = version 4 plus one byte: the skyland site rule (SkySites2). Written only for a super flat world made
+        // on 0.2.1102+, so every existing world stays 1..4 on the wire byte for byte.
+        private const byte VersionSkySites = 5;
+        // 0.2.1137: version 6 = version 5 plus SkySites3 (the pond-aware / mini site rule) and the list of EXISTING-world islands
+        // the server switched to it (islands with no generated zone when decided; FatLocationReplan). Written only when either is set.
+        private const byte VersionSkySites3 = 6;
         internal const string CloneSourcePrefix = "clone of ";
 
         internal ProfileGenerator Generator;
@@ -43,6 +50,16 @@ namespace VerdantsAscent.Terrain.Voxel
         // An admin build / test / blueprint world. Flat Meadows ground at y = SuperFlatHeight, 25% of the vanilla
         // size, no locations, no vegetation or clutter, no spawning of any kind. Chosen once on the New World screen; never changes.
         internal bool SuperFlat;
+        // 0.2.1102: new worlds only. True = every skyland gets a location site (a narrow island takes the palette's smallest site
+        // with its ease-back clamped to the island's heart). Existing worlds keep the 0.2.1096 rule so built islands never change.
+        internal bool SkySites2;
+        // 0.2.1137: new worlds: every skyland uses the 1137 site rule (pond islands sited on dry ground, a mini site when nothing
+        // else fits). Existing worlds: only the islands in SiteIslands3 (their Variety ids), decided once by the server.
+        internal bool SkySites3;
+        // 0.2.1327: the world this file belongs to (World.m_uid); null = written before 0.2.1327. Add-only key "worldid": an older
+        // FAT's reader skips keys it does not know (Read's switch has no default).
+        internal long? WorldUid;
+        internal readonly HashSet<int> SiteIslands3 = new HashSet<int>();
         internal const float SuperFlatHeight = 50f;
         internal const float SuperFlatRadius = 2500f, SuperFlatEdge = 2625f;
 
@@ -53,6 +70,9 @@ namespace VerdantsAscent.Terrain.Voxel
         // stock generator (patched flat by FatSuperFlat); Voxel wrap / Full voxel use the Fires generator, whose field is flat on a super
         // flat world (FiresWorldGenBase's branch). Rivers and lakes stay off. Sky islands and caves only exist in voxel terrain.
         internal static FiresWorldProfile NewSuperFlat(string source, ProfileTerrain terrain, bool skyIslands, bool caves)
+            => NewSuperFlat(source, terrain, skyIslands, caves, SuperFlatRadius, SuperFlatEdge);
+
+        internal static FiresWorldProfile NewSuperFlat(string source, ProfileTerrain terrain, bool skyIslands, bool caves, float radius, float edge)
         {
             bool voxel = terrain != ProfileTerrain.Heightmap;
             var flat = new FiresWorldProfile
@@ -64,9 +84,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 Hydrology = false,
                 Caves = voxel && caves,
                 SuperFlat = true,
+                SkySites2 = true,   // 0.2.1102: a new world
+                SkySites3 = true,   // 0.2.1137: a new world
                 Source = source,
             };
-            flat.RecordSize(new FatWorldSize.Size { Radius = SuperFlatRadius, Edge = SuperFlatEdge, Stretch = 1f, BiomeStretch = 1f });
+            flat.RecordSize(new FatWorldSize.Size { Radius = radius, Edge = edge, Stretch = 1f, BiomeStretch = 1f });
             return flat;
         }
 
@@ -81,6 +103,9 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         /// <summary>The current world is super flat (server: its file; client: the server's handshake profile).</summary>
+        // The world being generated (set as its generator initialises, server and client).
+        internal static string WorldName { get; private set; }
+
         internal static bool CurrentIsSuperFlat => s_current != null && s_current.SuperFlat;
 
         internal bool HasRecordedSize => WorldRadius.HasValue && WorldEdge.HasValue && WorldStretch.HasValue && BiomeStretch.HasValue;
@@ -165,8 +190,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // server authoritative instead of each client's own settings.
         internal static FiresWorldProfile Infer(string worldName, bool configMayChooseTheGenerator)
         {
-            var terrainMode = FiresVoxelConfig.TerrainMode?.Value ?? FiresTerrainMode.Off;
-            bool fullVoxel = terrainMode == FiresTerrainMode.FullVoxel;
+            bool fullVoxel = FiresVoxelConfig.LegacyConfigFullVoxel;   // 0.2.1336: the old cfg's value, pinned into this world's profile here, once
             var genMode = FiresVoxelConfig.WorldGenMode?.Value ?? FiresWorldGenMode.Auto;
             bool chosen = configMayChooseTheGenerator
                 ? FiresWorldGenBase.UnprofiledChoosesFires(worldName, genMode, out _, out _, out _)
@@ -208,50 +232,82 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static void OnWorldInitialize(World world)
         {
             s_current = null;
+            WorldName = world != null && !world.m_menu ? world.m_name : null;   // 0.2.1036: both peers know it here (FatHaloArc.RingOnly)
             FatWorldSize.Refresh();   // never the previous world's size; a client's arrives with the handshake (Set)
             if (world == null || world.m_menu) return;
             var net = ZNet.instance;
             if (net == null || !net.IsServer()) return;
+            bool neverSaved = Zones.ZoneModeRegistry.IsNeverSaved(world);
             s_current = Read(world.m_name);
+            // 0.2.1327 (Fire 10-31, audit: a new world picked up a deleted same-name world's .profile): the profile names its world's
+            // uid. A different uid = another world's leftover; no uid (written before 0.2.1327) is that world's own only once it has
+            // been saved - beside a never-saved world it is exactly the leftover case. Either way the leftover is ignored and the
+            // world is decided below as if it had none (that path writes the world's own profile over it).
+            string ignored = null;
+            if (s_current != null && s_current.WorldUid.HasValue && s_current.WorldUid.Value != world.m_uid)
+            {
+                FiresLogger.LogDebug($"[FiresWorldGen] '{world.m_name}'.profile names world uid {s_current.WorldUid.Value}, this world is "
+                    + $"uid {world.m_uid}: a deleted same-name world's leftover, ignored.");
+                s_current = null;
+                ignored = "stale .profile ignored (uid mismatch)";
+            }
+            else if (s_current != null && !s_current.WorldUid.HasValue && neverSaved)
+            {
+                FiresLogger.LogDebug($"[FiresWorldGen] '{world.m_name}'.profile has no world uid and the world has never been saved: "
+                    + "a deleted same-name world's leftover, ignored.");
+                s_current = null;
+                ignored = "stale .profile ignored (new world)";
+            }
             if (s_current != null)
             {
+                bool stamp = !s_current.WorldUid.HasValue;   // 0.2.1327: an older FAT's profile of a saved world is its own: stamp the uid in
+                if (stamp)
+                {
+                    s_current.WorldUid = world.m_uid;
+                    FiresLogger.LogDebug($"[FiresWorldGen] '{world.m_name}'.profile has no world uid but the world has save data: "
+                        + $"accepted as its own, uid {world.m_uid} stamped in.");
+                }
                 // A profile written before FAT knew world sizes takes Expand World Size's (once, if EWS makes a
                 // non-vanilla world); one that recorded a size keeps it and names a differing EWS config.
                 // New World writes the profile before the first save, so "existing" means the world has save data.
-                if (FatWorldSize.RecordFromExpandWorldSize(s_current, world.m_name, existingWorld: !Zones.ZoneModeRegistry.IsNeverSaved(world)))
+                if (FatWorldSize.RecordFromExpandWorldSize(s_current, world.m_name, existingWorld: !neverSaved) | stamp)
                     s_current.Write(world.m_name);
                 FatWorldSize.Refresh();
-                FiresLogger.LogInfo($"[FiresWorldGen] world '{world.m_name}' profile: {s_current.Describe()}.");
+                LogMode(world.m_name, s_current, s_current.ZoneMode, stamp ? "old .profile stamped" : "own .profile (uid ok)");   // 0.2.1327
                 return;
             }
 
-            bool neverSaved = Zones.ZoneModeRegistry.IsNeverSaved(world);
-            s_current = neverSaved && LaunchAsksSuperFlat(world.m_name) ? NewSuperFlat("created (" + NewSuperFlatArgument + ")")
+            // 0.2.1030 HaloFlat ([lead]: zero setup): a new world named HaloFlat is created super flat, full voxel, sized past
+            // the ring (FatHaloArc builds the ring key server-side on its first start).
+            s_current = neverSaved && FatHaloArc.IsHaloFlatWorld(world.m_name)
+                ? NewSuperFlat("created (HaloFlat: the full-size halo ring test world)", ProfileTerrain.VoxelOnly, false, false, FatHaloArc.HaloFlatWorldRadius, FatHaloArc.HaloFlatWorldEdge)
+                : neverSaved && LaunchAsksSuperFlat(world.m_name) ? NewSuperFlat("created (" + NewSuperFlatArgument + ")")
                 : neverSaved ? Infer(world.m_name, configMayChooseTheGenerator: true) : FromWorldRecords(world.m_name);
+            s_current.WorldUid = world.m_uid;   // 0.2.1327
             FatWorldSize.RecordFromExpandWorldSize(s_current, world.m_name, existingWorld: !neverSaved);
             FatWorldSize.Refresh();
-            FiresLogger.LogInfo(neverSaved
+            FiresLogger.LogDebug(neverSaved
                 ? $"[FiresWorldGen] world '{world.m_name}' has no profile and no save data, so it is being created: this "
                     + $"machine's config decides it, once - {s_current.Describe()}."
                 : $"[FiresWorldGen] world '{world.m_name}' has no profile but DOES have save data, so its generator comes "
                     + $"from its own records and not from any config - {s_current.Describe()}.");
             if (s_current.Write(world.m_name))
-                FiresLogger.LogInfo($"[FiresWorldGen] pinned that profile beside '{world.m_name}'. Every client is sent it, "
+                FiresLogger.LogDebug($"[FiresWorldGen] pinned that profile beside '{world.m_name}'. Every client is sent it, "
                     + "so the world is built the same way everywhere from now on.");
+            // 0.2.1327: the -fireszones flag makes a never-saved, unchosen world one zone at a time (ZoneModeRegistry, later this load).
+            bool flagZones = neverSaved && !FatHaloArc.IsHaloFlatWorld(world.m_name) && Zones.ZoneModeRegistry.LaunchFlagDecides(s_current);
+            string source = flagZones ? "-fireszones flag" : neverSaved ? "config defaults" : "config defaults (generator from the world's own records)";
+            LogMode(world.m_name, s_current, s_current.ZoneMode || flagZones, ignored != null ? ignored + ", then " + source : source);
         }
 
-        // The terrain mode this world runs under, given the configured one.
-        internal FiresTerrainMode TerrainMode(FiresTerrainMode configured)
-        {
-            switch (Terrain)
-            {
-                case ProfileTerrain.VoxelWrap:
-                case ProfileTerrain.VoxelOnly:
-                    return FiresTerrainMode.FullVoxel;
-                default:
-                    return configured == FiresTerrainMode.FullVoxel ? FiresTerrainMode.ZoneReplace : configured;
-            }
-        }
+        // 0.2.1327 (Fire 10-31): THE one Info line per world load: what the world is and where that came from (server and client).
+        internal static void LogMode(string worldName, FiresWorldProfile p, bool zoneMode, string source)
+            => FiresLogger.LogInfo($"[FiresWorldGen] world '{worldName}' mode: generator {p.Generator}, terrain {p.Terrain}, zone mode "
+                + $"{(zoneMode ? "on" : "off")}, super flat {(p.SuperFlat ? "on" : "off")} — source: {source}. ({p.Describe()})");
+
+        // 0.2.1336: the world's choice: Heightmap = zones swap only on edit; VoxelWrap / VoxelOnly = zones swap automatically.
+        internal FiresTerrainMode TerrainMode()
+            => Terrain == ProfileTerrain.Heightmap ? FiresTerrainMode.ZoneReplace : FiresTerrainMode.FullVoxel;
 
         // Full voxel is built by the Fires generator (the streamer stands down without it), so a stock-generated world
         // saved as full voxel runs as voxel wrap instead: its voxel ground, skylands and border walls still build.
@@ -302,7 +358,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     $"source={Source}",
                     $"created={CreatedUtc.ToString("O", CultureInfo.InvariantCulture)}",
                 };
+                if (WorldUid.HasValue) lines.Add($"worldid={WorldUid.Value.ToString(CultureInfo.InvariantCulture)}");   // 0.2.1327
                 if (SuperFlat) lines.Add("superflat=true");   // Only on a super flat world (every other file stays as it was)
+                if (SkySites3) lines.Add("skysites=3");   // 0.2.1137: new worlds only (implies 2)
+                else if (SkySites2) lines.Add("skysites=2");   // 0.2.1102: new worlds only
+                if (SiteIslands3.Count > 0) lines.Add("skysites3islands=" + string.Join(",", SiteIslands3.OrderBy(v => v)));   // 0.2.1137
                 // The world's size, only when it is not vanilla (a 10 km world's file stays as it was).
                 if (SizeIsNonVanilla)
                 {
@@ -347,11 +407,19 @@ namespace VerdantsAscent.Terrain.Voxel
                         case "biomeimage": profile.BiomeImage = value; break;
                         case "vahcbase": profile.VahcBase = value; break;
                         case "source": profile.Source = value; break;
+                        case "worldid":   // 0.2.1327
+                            if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long uid)) profile.WorldUid = uid;
+                            break;
                         case "worldradius": profile.WorldRadius = ParseSize(value); break;
                         case "worldedge": profile.WorldEdge = ParseSize(value); break;
                         case "worldstretch": profile.WorldStretch = ParseSize(value); break;
                         case "biomestretch": profile.BiomeStretch = ParseSize(value); break;
                         case "superflat": profile.SuperFlat = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;
+                        case "skysites": profile.SkySites2 = value.Trim() == "2" || value.Trim() == "3"; profile.SkySites3 = value.Trim() == "3"; break;
+                        case "skysites3islands":
+                            foreach (var id in value.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                                if (int.TryParse(id.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)) profile.SiteIslands3.Add(v);
+                            break;
                         case "created":
                             if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var created))
                                 profile.CreatedUtc = created;
@@ -389,7 +457,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             bool dryIslands = SkyIslandWater == false;
             bool sized = SizeIsNonVanilla;
-            byte version = SuperFlat && HasRecordedSize ? VersionSuperFlat : sized ? VersionWorldSize : dryIslands ? VersionIslandWater : Version;
+            byte version = SuperFlat && HasRecordedSize && (SkySites3 || SiteIslands3.Count > 0) ? VersionSkySites3 : SuperFlat && HasRecordedSize && SkySites2 ? VersionSkySites : SuperFlat && HasRecordedSize ? VersionSuperFlat : sized ? VersionWorldSize : dryIslands ? VersionIslandWater : Version;
             pkg.Write(version);
             pkg.Write((byte)Generator);
             pkg.Write((byte)Terrain);
@@ -410,13 +478,20 @@ namespace VerdantsAscent.Terrain.Voxel
                 pkg.Write(BiomeStretch.Value);
             }
             if (version >= VersionSuperFlat) pkg.Write(SuperFlat);
+            if (version >= VersionSkySites) pkg.Write(SkySites2);
+            if (version >= VersionSkySites3)
+            {
+                pkg.Write(SkySites3);
+                pkg.Write(SiteIslands3.Count);
+                foreach (int v in SiteIslands3.OrderBy(v => v)) pkg.Write(v);
+            }
         }
 
         internal static FiresWorldProfile Read(ZPackage pkg)
         {
             byte version = pkg.ReadByte();
-            if (version < Version || version > VersionSuperFlat)
-                throw new InvalidDataException($"world profile version {version}, this build reads {Version}-{VersionSuperFlat}");
+            if (version < Version || version > VersionSkySites3)
+                throw new InvalidDataException($"world profile version {version}, this build reads {Version}-{VersionSkySites3}");
             var profile = new FiresWorldProfile
             {
                 Generator = (ProfileGenerator)pkg.ReadByte(),
@@ -439,6 +514,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 profile.BiomeStretch = pkg.ReadSingle();
             }
             if (version >= VersionSuperFlat) profile.SuperFlat = pkg.ReadBool();
+            if (version >= VersionSkySites) profile.SkySites2 = pkg.ReadBool();
+            if (version >= VersionSkySites3)
+            {
+                profile.SkySites3 = pkg.ReadBool();
+                int n = pkg.ReadInt();
+                for (int i = 0; i < n; i++) profile.SiteIslands3.Add(pkg.ReadInt());
+            }
             return profile;
         }
 

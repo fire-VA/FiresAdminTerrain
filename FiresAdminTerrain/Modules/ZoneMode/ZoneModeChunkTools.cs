@@ -790,7 +790,7 @@ namespace VerdantsAscent.Terrain.Zones
         // Called from FAT's one Player.TryPlacePiece hook. Nothing is ever built.
         internal static void OnPlace(Player player, Piece piece)
         {
-            if (player == null || piece == null) return;
+            if (piece == null || (player == null && !ApiActive)) return;   // 0.2.1291: the server path (UseToolEntryAt) has no local player
             ZoneModeChaosHammer.Laugh(player);
             // The hammer's Undo / Redo step the ONE history (Core's, or Server Devcommands'), as numpad 7 / 9 do.
             if (Is(piece, s_undoTool)) { FiresCore.Undo.UndoHistory.Undo(); return; }
@@ -817,7 +817,7 @@ namespace VerdantsAscent.Terrain.Zones
                         return;
                     }
                 }
-                Ask(AskPaint, paint.Key, default, PaintPayload(ground, ZoneModeAreaTool.PaintRadius));
+                Ask(AskPaint, paint.Key, default, PaintPayload(ground, ZoneModeAreaTool.PaintRadius, ZoneModeAreaTool.WipeBuilds));
                 return;
             }
             bool skylandEntry = s_placeByPiece.TryGetValue(piece, out string key) && KindOf(key) == SkylandKind;
@@ -874,6 +874,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void RemoveDialog(Vector2s zone)
         {
+            if (ApiActive) { Ask(AskRemove, null, zone); return; }   // 0.2.1287: the Studio confirms
             if (s_confirming) return;
             if (!UnifiedPopup.IsAvailable())
             {
@@ -891,6 +892,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static void CloseDialog(Vector2s zone, bool area)
         {
             byte kind = area ? AskCloseArea : AskClose;
+            if (ApiActive) { Ask(kind, null, zone); return; }   // 0.2.1287
             if (s_confirming) return;
             if (!UnifiedPopup.IsAvailable())
             {
@@ -929,7 +931,7 @@ namespace VerdantsAscent.Terrain.Zones
             var zones = new List<Vector2s>();
             if (payload == null || payload.Length == 0) return zones;
             var pkg = new ZPackage(payload);
-            int n = pkg.ReadInt();
+            int n = FatNetGuard.Count(pkg.ReadInt(), MaxStepZones, "undo step zones");
             for (int i = 0; i < n; i++) zones.Add(pkg.ReadVector2s());
             return zones;
         }
@@ -999,6 +1001,12 @@ namespace VerdantsAscent.Terrain.Zones
         // The admin's own client photographs the chunk as it saves it; the picture rides with the save.
         private static void SaveDialog(Vector2s zone)
         {
+            if (ApiActive)   // 0.2.1287: the given name, no dialog
+            {
+                if (string.IsNullOrEmpty(s_apiName) || !ZoneModeChunkBlueprint.IsUsableName(s_apiName.Trim(), out string bad)) { Tell("Saving needs a usable name."); return; }
+                Ask(AskSave, s_apiName.Trim(), zone, ZoneModeBlueprintIcons.TakeSnapshot(zone));
+                return;
+            }
             var name = new MenuDialog.TextField("Name", $"chunk_{zone.x}_{zone.y}");
             var overwrite = new MenuDialog.CheckField("Replace one of the same name", false);
             MenuDialog.Show($"Save chunk ({zone.x},{zone.y})", new MenuDialog.Field[] { name, overwrite },
@@ -1012,6 +1020,13 @@ namespace VerdantsAscent.Terrain.Zones
         private static void SaveAreaDialog(Vector3 aim)
         {
             ZoneModeAreaTool.Shape(aim, out int radius, out int bottom, out int top);
+            if (ApiActive)   // 0.2.1287: the given name, the tool's own shape, no dialog
+            {
+                if (string.IsNullOrEmpty(s_apiName) || !ZoneModeChunkBlueprint.IsUsableName(s_apiName.Trim(), out string bad)) { Tell("Saving needs a usable name."); return; }
+                int ax = Mathf.RoundToInt(aim.x), az = Mathf.RoundToInt(aim.z);
+                Ask(AskSaveArea, s_apiName.Trim(), default, AreaPayload(new Vector3(ax, aim.y, az), radius, bottom, top, ZoneModeBlueprintIcons.TakeSnapshot(new Vector3(ax, (bottom + top) * 0.5f, az), radius * 2f)));
+                return;
+            }
             int x = Mathf.RoundToInt(aim.x), z = Mathf.RoundToInt(aim.z);
             var name = new MenuDialog.TextField("Name", $"area_{x}_{z}");
             var radiusField = new MenuDialog.TextField("Radius (m)", radius.ToString());
@@ -1047,6 +1062,12 @@ namespace VerdantsAscent.Terrain.Zones
             }
             FiresSkyIslands.IslandFootprint(index, out var centre, out _);
             FiresSkyIslands.SkylandFrame(index, out var focus, out float span);
+            if (ApiActive)   // 0.2.1287: the given name, no dialog
+            {
+                if (string.IsNullOrEmpty(s_apiName) || !ZoneModeChunkBlueprint.IsUsableName(s_apiName.Trim(), out string bad)) { Tell("Saving needs a usable name."); return; }
+                Ask(AskSaveSkyland, s_apiName.Trim(), default, SkylandPayload(aim, ZoneModeBlueprintIcons.TakeSnapshot(focus, span)));
+                return;
+            }
             var name = new MenuDialog.TextField("Name", $"skyland_{Mathf.RoundToInt(centre.x)}_{Mathf.RoundToInt(centre.z)}");
             var overwrite = new MenuDialog.CheckField("Replace one of the same name", false);
             MenuDialog.Show($"Save the {FiresSkyIslands.SkylandBiome(index)} skyland", new MenuDialog.Field[] { name, overwrite },
@@ -1082,13 +1103,36 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // For fat_paint_stroke_test: the Chaos Hammer's own paint request, for one circle.
-        internal static void ApiAskPaint(string key, Vector3 centre, int radius) => Ask(AskPaint, key, default, PaintPayload(centre, radius));
+        internal static void ApiAskPaint(string key, Vector3 centre, int radius, bool wipe = false, float blendWidth = -1f, float[] outlinePoints = null)
+            => Ask(AskPaint, key, default, PaintPayload(centre, radius, wipe, blendWidth, outlinePoints));
 
-        private static byte[] PaintPayload(Vector3 centre, int radius)
+        private const int PaintFlagWipe = 1, PaintFlagBlend = 2, PaintFlagOutline = 4, PaintFlagMapBlack = 8;
+
+        internal static void ApiAskPaintBlack(string key)
+        {
+            var pkg = new ZPackage();
+            pkg.Write(Vector3.zero);
+            pkg.Write(0);
+            pkg.Write(PaintFlagMapBlack);
+            Ask(AskPaint, key, default, pkg.GetArray());
+        }
+
+        private static byte[] PaintPayload(Vector3 centre, int radius, bool wipe = false, float blendWidth = -1f, float[] outlinePoints = null)
         {
             var pkg = new ZPackage();
             pkg.Write(centre);
             pkg.Write(radius);
+            int flags = (wipe ? PaintFlagWipe : 0) | (blendWidth >= 0f ? PaintFlagBlend : 0) | (outlinePoints != null ? PaintFlagOutline : 0);
+            if (flags != 0)
+            {
+                pkg.Write(flags);
+                if (blendWidth >= 0f) pkg.Write(blendWidth);
+                if (outlinePoints != null)
+                {
+                    pkg.Write(outlinePoints.Length);
+                    foreach (float v in outlinePoints) pkg.Write(v);
+                }
+            }
             return pkg.GetArray();
         }
 
@@ -1115,7 +1159,8 @@ namespace VerdantsAscent.Terrain.Zones
             if (net == null) return;
             if (net.IsServer())
             {
-                Answer(ZNet.GetUID(), what, name, zone, payload, local: true);
+                if (ApiActive && s_apiWho != 0) Answer(s_apiWho, what, name, zone, payload, local: false);   // 0.2.1291: the server path acts for that admin peer
+                else Answer(ZNet.GetUID(), what, name, zone, payload, local: true);
                 return;
             }
             var pkg = new ZPackage();
@@ -1252,7 +1297,27 @@ namespace VerdantsAscent.Terrain.Zones
                     var args = new ZPackage(payload ?? Array.Empty<byte>());
                     Vector3 centre = args.ReadVector3();
                     int radius = args.ReadInt();
-                    if (BiomePaint.TryPaint(name, centre, radius, who, out uint id, out string report))
+                    // 0.2.1374-5: older clients send none of this
+                    int flags = args.GetPos() < args.Size() ? args.ReadInt() : 0;
+                    if ((flags & PaintFlagMapBlack) != 0)
+                    {
+                        // 0.2.1378: every black area of the world's BC map, one request (admin checked above, as every Chaos Hammer tool)
+                        BiomePaint.TryPaintMapBlack(name, who, -1f, out string blackReport);
+                        FiresLogger.LogInfo("[FiresZones] " + blackReport);
+                        Reply(who, local, TellMessage, blackReport);
+                        return;
+                    }
+                    bool wipe = (flags & PaintFlagWipe) != 0;
+                    float blendWidth = (flags & PaintFlagBlend) != 0 ? args.ReadSingle() : -1f;
+                    float[] outlinePoints = null;
+                    if ((flags & PaintFlagOutline) != 0)
+                    {
+                        int floats = args.ReadInt();
+                        if (floats < 0 || floats > PaintOutline.MaxPoints * 2) { Reply(who, local, TellMessage, "That outline is too big."); return; }
+                        outlinePoints = new float[floats];
+                        for (int i = 0; i < floats; i++) outlinePoints[i] = args.ReadSingle();
+                    }
+                    if (BiomePaint.TryPaint(name, centre, radius, who, out uint id, out string report, wipe, blendWidth, outlinePoints))
                     {
                         ZoneModeChunkBlueprint.RecordPaint(id, $"the {BiomePaint.Describe(name)} paint");
                         Step(who, local, $"the {BiomePaint.Describe(name)} paint");
@@ -1355,6 +1420,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void RPC_Tell(long sender, ZPackage pkg)
         {
+            if (!FatNetGuard.FromServer(sender, "Chaos Hammer tell")) return;
             byte kind = pkg.ReadByte();
             if (kind == TellMessage)
             {
@@ -1390,7 +1456,7 @@ namespace VerdantsAscent.Terrain.Zones
                 TakeIcon(name, pictureKind, pkg.ReadByteArray());
                 return;
             }
-            int count = pkg.ReadInt();
+            int count = FatNetGuard.Count(pkg.ReadInt(), MaxBlueprintNames, "blueprint names");
             var names = new List<string>(count);
             var hashes = new List<uint>(count);
             for (int i = 0; i < count; i++)
@@ -1424,14 +1490,30 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly Dictionary<string, (uint Hash, Sprite Sprite)> s_icons = new Dictionary<string, (uint, Sprite)>();
         private static readonly Dictionary<string, uint> s_wantedHash = new Dictionary<string, uint>();
 
+        // Bounds for what the server may send: names in the hammer's menu, zones in one undo step, and an icon's size.
+        private const int MaxBlueprintNames = 4096;
+        private const int MaxStepZones = 65536;
+        private const int MaxIconBytes = 4 * 1024 * 1024;
+        private const int MaxIconSide = 512;
+
         private static void TakeIcon(string name, ZoneModeBlueprintIcons.Kind kind, byte[] data)
         {
+            if (data == null || data.Length > MaxIconBytes || PngTooLarge(data)) { FatNetGuard.Refuse("blueprint icon", $"'{name}' is too large"); return; }
             var sprite = ZoneModeBlueprintIcons.ToSprite(kind, data);
             if (sprite == null) return;
             s_icons[name] = (s_wantedHash.TryGetValue(name, out uint hash) ? hash : ZoneModeBlueprintIcons.Hash(data), sprite);
             foreach (var pair in s_placeByPiece)
                 if (pair.Value == name) pair.Key.m_icon = sprite;
             RefreshOpenMenu();
+        }
+
+        // A PNG states its size in the IHDR chunk (bytes 16-23, big-endian); check it before decoding anything.
+        private static bool PngTooLarge(byte[] data)
+        {
+            if (data.Length < 24 || data[0] != 0x89 || data[1] != (byte)'P' || data[2] != (byte)'N' || data[3] != (byte)'G') return false;
+            int width = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
+            int height = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
+            return width <= 0 || height <= 0 || width > MaxIconSide || height > MaxIconSide;
         }
 
         private static Sprite IconFor(string name) => s_icons.TryGetValue(name, out var have) ? have.Sprite : s_icon;
@@ -1454,9 +1536,63 @@ namespace VerdantsAscent.Terrain.Zones
             return true;
         }
 
+
+        // ── 0.2.1287 FatApi.UseToolEntry ([lead] OK, Fire: Studio walk-mode tools work like in game) ─────────────────────────────
+        // The Studio calls the SAME swing (OnPlace) the in-game TryPlacePiece hook calls - one implementation. For the call's
+        // length: the aim is the given point (ZoneModeAreaTool.TryGetAim reads it), the yes/no popups are skipped (the Studio asks
+        // its own), a save takes the given name instead of the name dialog, and every Tell is kept as the call's report.
+        internal static bool ApiActive;
+        internal static Vector3 ApiAim;
+        private static string s_apiName, s_apiReport;
+        internal static bool IsToolEntry(string prefab)
+        {
+            var piece = FindEntry(prefab);
+            return piece != null && (IsOurPiece(piece) || VerdantsAscent.Terrain.Voxel.VoxelToolPieces.IsTool(piece));
+        }
+        private static Piece FindEntry(string prefab)
+        {
+            if (s_table == null || string.IsNullOrEmpty(prefab)) return null;
+            foreach (var go in s_table.m_pieces) if (go != null && go.name == prefab) return go.GetComponent<Piece>();
+            return null;
+        }
+        internal static bool UseEntry(string tool, string prefab, Vector3 pos, string name, out string report)
+            => UseEntryCore(tool, prefab, pos, name, server: false, who: 0, out report);
+        // 0.2.1291 ([lead] / Fire: the Studio God client with NO game client): the same swing ON THE SERVER. OnPlace runs with no local
+        // player; its Ask lands in the server's own Answer (as on a host), acting for `who` (an admin peer; 0 = the server itself, e.g.
+        // the server-owned God clone). No camera on a dedi: a save goes without its photo (TakeSnapshot returns null), as [lead] accepted.
+        internal static bool UseEntryAt(string tool, string prefab, Vector3 pos, string name, long who, out string report)
+            => UseEntryCore(tool, prefab, pos, name, server: true, who: who, out report);
+        private static long s_apiWho;
+        private static bool UseEntryCore(string tool, string prefab, Vector3 pos, string name, bool server, long who, out string report)
+        {
+            report = null;
+            var player = Player.m_localPlayer;
+            if (server)
+            {
+                if (ZNet.instance == null || !ZNet.instance.IsServer()) { report = "UseToolEntryAt runs on the server only"; return false; }
+                if (who != 0 && !AdminSyncing.IsAdmin(who)) { report = "admins only"; return false; }
+            }
+            else
+            {
+                if (player == null) { report = "no local player (call it on the admin's own client)"; return false; }
+                if (!AdminSyncing.IsLocalAdmin()) { report = "admins only"; return false; }
+            }
+            if (tool != ZoneModePrefabs.ChaosHammerPrefab && tool != ZoneModePrefabs.ChunkHammerPrefab) { report = $"'{tool}' has no FAT tool table"; return false; }
+            var piece = FindEntry(prefab);
+            if (piece == null) { report = $"no entry '{prefab}' on {tool}"; return false; }
+            if (VerdantsAscent.Terrain.Voxel.VoxelToolPieces.IsTool(piece)) { report = "a V-tool brush: use FatApi.TerrainEdit"; return false; }
+            if (!IsOurPiece(piece)) { report = "a real piece: place it with zdo.place"; return false; }
+            ApiActive = true; ApiAim = pos; s_apiName = name; s_apiReport = null; s_apiWho = server ? who : 0;
+            try { OnPlace(server ? null : player, piece); }
+            finally { ApiActive = false; s_apiName = null; s_apiWho = 0; }
+            report = s_apiReport ?? "sent (the server's answer shows in game and in the log)";
+            FiresLogger.LogInfo($"[FiresZones] FatApi.UseToolEntry{(server ? "At" : "")} {tool} / {prefab} at ({pos.x:0.0},{pos.y:0.0},{pos.z:0.0}){(server ? $" for {(who == 0 ? "the server" : who.ToString())}" : "")}: {report} (0.2.1291)");
+            return true;
+        }
         private static void Tell(string message)
         {
             if (string.IsNullOrEmpty(message)) return;
+            if (ApiActive) s_apiReport = message;   // 0.2.1287
             if (MessageHud.instance != null) MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, message);
             FiresLogger.LogInfo("[FiresZones] " + message);
         }

@@ -313,11 +313,18 @@ namespace VerdantsAscent.Water.Core
             if (packed == null) return;
             try
             {
-                var bytes = Utils.Decompress(packed);
+                var bytes = FatInflate.Gzip(packed, "spring sources ZDO");   // 0.2.1333
+                if (bytes == null) return;
                 using (var ms = new MemoryStream(bytes))
                 using (var br = new BinaryReader(ms))
                 {
                     int n = br.ReadInt32();
+                    const int BytesPerSource = 16;
+                    if (n < 0 || n * (long)BytesPerSource > ms.Length - ms.Position)
+                    {
+                        FatNetGuard.Refuse("spring sources", $"count {n} with {ms.Length - ms.Position} bytes left; that block is skipped");
+                        return;
+                    }
                     _sources.Clear();
                     for (int i = 0; i < n; i++)
                         _sources.Add(new RiverSource
@@ -483,7 +490,8 @@ namespace VerdantsAscent.Water.Core
             if (packed == null) return;
             try
             {
-                var bytes = Utils.Decompress(packed);
+                var bytes = FatInflate.Gzip(packed, "spring blocked ZDO");   // 0.2.1333
+                if (bytes == null) return;
                 int n = Mathf.Min(_blocked.Length, bytes.Length * 8);
                 for (int i = 0; i < n; i++) _blocked[i] = (bytes[i >> 3] & (1 << (i & 7))) != 0;
             }

@@ -44,7 +44,16 @@ namespace VerdantsAscent.Terrain.Voxel
         // 10: YggdrasilRoot was upside down on the ceiling; it should hang with its ends buried a bit in the mesh:
         // the root hangs by its bottom (VoxelSurfaceSnap). A zone dressed at 7 to 9 re-mounts only its own tagged ceiling
         // YggdrasilRoots at their ceiling points (RehangYggdrasil); 5 and 6 re-roll every hanger anyway, with the new mount.
-        internal const int ContentVersion = 10;
+        // 11: mineral-rich cave zones (FatCaveOre, Fire: "some caves are mineral rich and become 'mines'"). A zone dressed at 10 or
+        // older is NOT re-dressed: after its own upgrade step it only gets the rich-zone ore added (AddRichOresToDressedZone), if it
+        // rolls rich, skipping the spots its existing content holds.
+        // 12: fix forward for 1133. The 5/6/7 upgrade steps marked a zone 11 even when its survey was incomplete, so its rich ore
+        // was never added. A v11 zone that rolls rich and holds NO cave ore gets the add once (AddRichOresToDressedZone: add-only,
+        // it skips held spots); every other v11 zone is just marked 12. The 5/6/7 steps now mark 8 (PoolFrom) on an incomplete
+        // survey, so the pool/root/ore steps run on a later pass with a full survey.
+        internal const int ContentVersion = 12;
+        private const int RichFixFrom = 11;
+        private const int OreFrom = 10;
         private const int RehangFrom = 9;
         private const int PoolFrom = 8;
         private static readonly int s_yggdrasilHash = "YggdrasilRoot".GetStableHashCode();
@@ -203,12 +212,34 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             int seed = WorldGenerator.instance != null ? WorldGenerator.instance.GetSeed() : 0;
             var rng = new System.Random(unchecked(zone.x * 73856093 ^ zone.y * 19349663 ^ seed));
+            FatCaveOre.TallyOnce();
+            if (recorded && version == RichFixFrom)
+            {
+                bool needsOre = FatCaveOre.IsRichZone(zone) && CountZoneOre(zone) == 0;
+                if (needsOre && (!GroundReady(zone) || Survey(zone, new System.Random(rng.Next() ^ FatCaveOre.OreSalt)) > 0)) { s_waiting.Add(zone); return; }
+                s_done.Add(zone);
+                s_waiting.Remove(zone);
+                int added = needsOre ? AddRichOresToDressedZone(zone, seed) : 0;
+                VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
+                if (needsOre) FiresLogger.LogInfo($"[CaveOre] zone ({zone.x},{zone.y}) v11 -> v12: rich with no ore (the 1133 incomplete-survey bug), {added} deposit(s) added");
+                return;
+            }
+            if (recorded && version == OreFrom)
+            {
+                if (!GroundReady(zone) || Survey(zone, new System.Random(rng.Next() ^ FatCaveOre.OreSalt)) > 0) { s_waiting.Add(zone); return; }
+                s_done.Add(zone);
+                s_waiting.Remove(zone);
+                AddRichOresToDressedZone(zone, seed);
+                VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
+                return;
+            }
             if (recorded && version == RehangFrom)
             {
-                if (!GroundReady(zone)) { s_waiting.Add(zone); return; }
+                if (!GroundReady(zone) || Survey(zone, new System.Random(rng.Next() ^ FatCaveOre.OreSalt)) > 0) { s_waiting.Add(zone); return; }
                 s_done.Add(zone);
                 s_waiting.Remove(zone);
                 int rehungYgg = RehangYggdrasil(zone, rng, out int droppedYgg);
+                AddRichOresToDressedZone(zone, seed);   // the v11 rich-ore add
                 VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
                 if (rehungYgg + droppedYgg > 0)
                     FiresLogger.LogDebug($"[Caves] zone ({zone.x},{zone.y}) v{version} -> v{ContentVersion}: {rehungYgg} YggdrasilRoot(s) re-hung by their ends, "
@@ -222,6 +253,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_waiting.Remove(zone);
                 bool laid = SeedPoolInDressedZone(zone, seed);
                 RehangYggdrasil(zone, rng, out _);   // the v10 root mount
+                AddRichOresToDressedZone(zone, seed);   // the v11 rich-ore add
                 VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
                 if (laid) FiresLogger.LogDebug($"[Caves] zone ({zone.x},{zone.y}) v{version} -> v{ContentVersion}: a pool carved and filled; nothing else touched");
                 return;
@@ -232,9 +264,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_done.Add(zone);
                 s_waiting.Remove(zone);
                 int fell = PlaceFellIn(zone, rng);
-                if (Survey(zone, new System.Random(rng.Next() ^ PoolSalt)) == 0) SeedPoolInDressedZone(zone, seed);   // the v9 pool roll
-                RehangYggdrasil(zone, rng, out _);   // the v10 root mount
-                VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
+                bool surveyed = Survey(zone, new System.Random(rng.Next() ^ PoolSalt)) == 0;
+                if (surveyed)
+                {
+                    SeedPoolInDressedZone(zone, seed);   // the v9 pool roll
+                    AddRichOresToDressedZone(zone, seed);   // the v11 rich-ore add (only on a complete survey)
+                    RehangYggdrasil(zone, rng, out _);   // the v10 root mount
+                }
+                // 0.2.1135: an incomplete survey marks 8 (PoolFrom), so the pool/root/ore steps run later with a full survey
+                // (was: marked 11 with no rich ore, never retried).
+                VoxelCaveRecord.MarkZoneDressed(zone, surveyed ? ContentVersion : PoolFrom);
                 if (fell > 0) FiresLogger.LogDebug($"[Caves] zone ({zone.x},{zone.y}) v{version} -> v{ContentVersion}: {fell} fallen piece(s) on its sinkhole floor(s); nothing else touched");
                 return;
             }
@@ -247,8 +286,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (version == RootFixFrom) rehung = FixHangingRoots(zone, rng, out dropped);
                 int rerolled = RerollHangers(zone, rng, out int rerollDropped, out string mix);
                 PlaceFellIn(zone, rng);
-                if (Survey(zone, new System.Random(rng.Next() ^ PoolSalt)) == 0) SeedPoolInDressedZone(zone, seed);   // the v9 pool roll
-                VoxelCaveRecord.MarkZoneDressed(zone, ContentVersion);
+                bool surveyed = Survey(zone, new System.Random(rng.Next() ^ PoolSalt)) == 0;
+                if (surveyed)
+                {
+                    SeedPoolInDressedZone(zone, seed);   // the v9 pool roll
+                    AddRichOresToDressedZone(zone, seed);   // the v11 rich-ore add (only on a complete survey)
+                }
+                // 0.2.1135: an incomplete survey marks 8 (PoolFrom); see the v12 note.
+                VoxelCaveRecord.MarkZoneDressed(zone, surveyed ? ContentVersion : PoolFrom);
                 if (rehung + dropped + rerolled + rerollDropped > 0)
                 {
                     string line = $"[Caves] zone ({zone.x},{zone.y}) v{version} -> v{ContentVersion}: "
@@ -274,7 +319,7 @@ namespace VerdantsAscent.Terrain.Voxel
             DressSmallItems(rng, ref tally);
             VoxelCaveChests.PlaceForZone(zone, s_spots, rng, ref tally);
             VoxelCaveSpawners.PlaceForZone(zone, s_spots, rng, ref tally);
-            PlaceOres(rng, ref tally);
+            PlaceOres(zone, rng, ref tally);
             PlaceProps(rng, ref tally);
             tally.Rubble += PlaceFellIn(zone, rng);
             bool pooled = TrySeedCavePool(rng);
@@ -350,7 +395,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (!VoxelZoneStreamer.TryGroundHeight(site.X, site.Z, out float ground)) return 0;
             float ax = site.X + site.LeanX * site.Floor, az = site.Z + site.LeanZ * site.Floor;
-            var biome = WorldGenerator.instance != null ? FiresCaveBiome.RegionBiome(ax, az, WorldGenerator.instance.GetBiome(ax, az)) : Heightmap.Biome.Meadows;
+            var biome = WorldGenerator.instance != null ? FiresCaveBiome.RegionBiome(ax, az, FatSuperFlat.WorldBiome(ax, az)) : Heightmap.Biome.Meadows;
             var table = CaveContentConfig.For(biome);
             int count = FellInMin + rng.Next(FellInMax - FellInMin + 1), placed = 0;
             for (int i = 0; i < count; i++)
@@ -548,23 +593,93 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        private static void PlaceOres(System.Random rng, ref CaveDressTally tally)
+        // 0.2.1133: a mineral-rich zone (FatCaveOre) rolls ore OreRichFactor x as often, up to its own cap; the pick merges the biome's
+        // 'Ore' list with other mods' registered ore (FatCaveOreApi); no ore within BuildClearance of a player build.
+        private static void PlaceOres(Vector2s zone, System.Random rng, ref CaveDressTally tally)
         {
-            int budget = CaveContentConfig.OresPerZone;
-            float chance = CaveContentConfig.OreChance * CaveContentConfig.Density;
-            for (int i = 0; i < s_spots.Count && budget > 0; i++)
+            bool rich = FatCaveOre.IsRichZone(zone);
+            int budget = rich ? FatCaveOre.RichCap(s_spots.Count) : CaveContentConfig.OresPerZone;
+            int placed = PlaceOreRun(zone, rng, rich, budget, out var counts, out var biome);
+            tally.Ores += placed;
+            if (rich) FatCaveOre.LogRichZone(zone, biome, counts, placed, $" (cap {budget}, {s_spots.Count} floor spots)");
+        }
+
+        // A dressed zone that rolls rich gets its rich ore ADDED: its existing content keeps its spots, nothing is removed.
+        // The survey (s_spots) has just been run by the caller.
+        private static int CountZoneOre(Vector2s zone)
+        {
+            int n = 0;
+            foreach (var zdo in ZoneObjects(zone)) if (zdo.GetInt(CaveContentKey) == (int)CaveContentKind.Ore) n++;
+            return n;
+        }
+
+        private static int AddRichOresToDressedZone(Vector2s zone, int seed)
+        {
+            if (!CaveContentConfig.Enabled || !FatCaveOre.IsRichZone(zone)) return 0;
+            s_bigItems.Clear();
+            int existing = 0;
+            foreach (var zdo in ZoneObjects(zone))
+            {
+                int kind = zdo.GetInt(CaveContentKey);
+                if (kind == 0) continue;
+                if (kind == (int)CaveContentKind.Ore) existing++;
+                ClaimBigItem(zdo.GetPosition(), 1f);
+            }
+            ClaimExistingContainers(zone);
+            int budget = FatCaveOre.RichCap(s_spots.Count) - existing;
+            if (budget <= 0) return 0;
+            var rng = new System.Random(unchecked(zone.x * 2654435 ^ zone.y * 40503 ^ seed ^ FatCaveOre.OreSalt));
+            int placed = PlaceOreRun(zone, rng, true, budget, out var counts, out var biome);
+            FatCaveOre.LogRichZone(zone, biome, counts, placed, $" added to a dressed zone (it held {existing} ore; cap {budget + existing})");
+            return placed;
+        }
+
+        private static readonly List<Vector3> s_builds = new List<Vector3>();
+        private static readonly Dictionary<int, bool> s_isBuild = new Dictionary<int, bool>();
+
+        private static int PlaceOreRun(Vector2s zone, System.Random rng, bool rich, int budget, out Dictionary<string, int> counts, out Heightmap.Biome biome)
+        {
+            counts = new Dictionary<string, int>();
+            biome = Heightmap.Biome.None;
+            s_builds.Clear();
+            foreach (var zdo in ZoneObjects(zone))
+            {
+                int hash = zdo.GetPrefab();
+                if (!s_isBuild.TryGetValue(hash, out bool isBuild))
+                {
+                    var prefab = ZNetScene.instance.GetPrefab(hash);
+                    isBuild = prefab != null && prefab.GetComponent<WearNTear>() != null;
+                    s_isBuild[hash] = isBuild;
+                }
+                if (isBuild) s_builds.Add(zdo.GetPosition());
+            }
+            float chance = CaveContentConfig.OreChance * CaveContentConfig.Density * (rich ? FatCaveOre.OreRichFactor : 1f);
+            int placed = 0;
+            for (int i = 0; i < s_spots.Count && placed < budget; i++)
             {
                 var spot = s_spots[i];
                 if (rng.NextDouble() >= chance) continue;
-                var table = CaveContentConfig.For(spot.Biome);
-                if (table == null || !table.Ores.TryPick(rng, out var ore)) continue;
+                if (NearBuild(spot.Floor)) continue;
+                if (!FatCaveOre.TryPick(spot.Biome, rich, rng, out var ore)) continue;
                 var footprint = Footprint(ore);
                 if (!FitsBigItem(spot, footprint.x, footprint.y, OreFloorRelief)) continue;
-                if (Spawn(ore, spot.Floor + Vector3.down * OreSink, RandomYaw(rng), 1f, CaveContentKind.Ore) == null) continue;
+                var at = spot.Floor + Vector3.down * OreSink;
+                if (Spawn(ore, at, RandomYaw(rng), 1f, CaveContentKind.Ore) == null) continue;
                 ClaimBigItem(spot.Floor, footprint.x);
-                tally.Ores++;
-                budget--;
+                placed++;
+                biome = spot.Biome;
+                counts.TryGetValue(ore.name, out int n);
+                counts[ore.name] = n + 1;
+                if (rich) FatCaveOre.Remember(zone, ore.name, at);
             }
+            return placed;
+        }
+
+        private static bool NearBuild(Vector3 p)
+        {
+            float r2 = FatCaveOre.BuildClearance * FatCaveOre.BuildClearance;
+            for (int i = 0; i < s_builds.Count; i++) if ((s_builds[i] - p).sqrMagnitude < r2) return true;
+            return false;
         }
 
         private static void PlaceProps(System.Random rng, ref CaveDressTally tally)

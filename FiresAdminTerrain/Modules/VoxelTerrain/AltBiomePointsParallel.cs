@@ -33,7 +33,9 @@ namespace VerdantsAscent.Terrain.Voxel
             var data = new AltBiomeWorldData(GridSize);
             data.dt = DateTime.Now;
             data.dbStep(StartStep);
-            Fill(generator, data, parallel: true);
+            // 0.2.1059 (load/save audit M2): a worker throw (an AggregateException) would escape VerifyBiomeData into the
+            // world load. The half-filled grid is dropped (never assigned to the world) and vanilla's serial loop runs.
+            if (!FatLoadGuard.Step("parallel biome points", () => Fill(generator, data, parallel: true))) return true;
             data.PointsGenerated = true;
             data.dbStep(DoneStep);
             world.m_biomeData = data;

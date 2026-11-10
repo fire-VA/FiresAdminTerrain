@@ -87,7 +87,7 @@ namespace VerdantsAscent.Terrain.Persistence
             if (bytes == null || bytes.Length == 0) return null;
 
             using (var src = new MemoryStream(bytes, writable: false))
-            using (var gz = new GZipStream(src, CompressionMode.Decompress))
+            using (var gz = FatInflate.GzipReader(src, "terrain tile ZDO", FatInflate.DefaultMaxBytes))   // 0.2.1333
             using (var r = new BinaryReader(gz))
             {
                 byte ver = r.ReadByte();

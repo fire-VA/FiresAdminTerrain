@@ -77,7 +77,8 @@ namespace VerdantsAscent.Terrain.Persistence
                 finalizer: new HarmonyMethod(AccessTools.Method(typeof(WecTerrainBridge), nameof(Parameters_Finalizer))));
             harmony.Patch(getCompilers,
                 prefix: new HarmonyMethod(AccessTools.Method(typeof(WecTerrainBridge), nameof(GetCompilers_Prefix))));
-            var addTerrainAction = AccessTools.Method(commandType.Assembly.GetType(UndoHelperType, false), "AddTerrainAction");
+            var undoHelper = commandType.Assembly.GetType(UndoHelperType, false);
+            var addTerrainAction = undoHelper != null ? AccessTools.Method(undoHelper, "AddTerrainAction") : null;
             if (addTerrainAction != null)
                 harmony.Patch(addTerrainAction, prefix: new HarmonyMethod(AccessTools.Method(typeof(WecTerrainBridge), nameof(AddTerrainAction_Prefix))));
             else FiresLogger.LogDebug($"{Tag} World Edit Commands' UndoHelper.AddTerrainAction not found; a voxel-routed op also leaves an empty WEC undo step");
@@ -112,10 +113,14 @@ namespace VerdantsAscent.Terrain.Persistence
                 if (assembly.GetName().Name == "InfinityHammer") { ih = assembly; break; }
             if (ih != null)
             {
-                var freeze = AccessTools.Method(ih.GetType("InfinityHammer.FreezePlacementMarker", false), "Postfix");
+                // 0.2.1055 (Fire's log sweep N5): the type is checked before AccessTools.Method, which logs "type is null" for a missing one.
+                var freezeType = ih.GetType("InfinityHammer.FreezePlacementMarker", false) ?? ih.GetType("FreezePlacementMarker", false);
+                var freeze = freezeType != null ? AccessTools.Method(freezeType, "Postfix") : null;
                 if (freeze == null) FiresLogger.LogDebug($"{Tag} Infinity Hammer's FreezePlacementMarker.Postfix not found; its ground height stays vanilla's");
                 else { harmony.Patch(freeze, prefix: open, finalizer: close); scoped.Add("InfinityHammer.FreezePlacementMarker.Postfix"); }
-                var snap = AccessTools.Method(ih.GetType("InfinityTools.BaseRuler", false), "Snap", new[] { typeof(Vector3) });
+                // IH 1.91 moved BaseRuler from InfinityTools to InfinityHammer; both names are tried.
+                var rulerType = ih.GetType("InfinityHammer.BaseRuler", false) ?? ih.GetType("InfinityTools.BaseRuler", false);
+                var snap = rulerType != null ? AccessTools.Method(rulerType, "Snap", new[] { typeof(Vector3) }) : null;
                 if (snap == null || snap.ReturnType != typeof(Vector3)) FiresLogger.LogDebug($"{Tag} Infinity Hammer's BaseRuler.Snap(Vector3) not found; its ruler ring stays on IH's own ray");
                 else { harmony.Patch(snap, prefix: new HarmonyMethod(AccessTools.Method(typeof(WecTerrainBridge), nameof(RulerSnap_Prefix)))); scoped.Add("InfinityTools.BaseRuler.Snap (ring on the nearest surface)"); }
             }
@@ -217,7 +222,7 @@ namespace VerdantsAscent.Terrain.Persistence
             var points = new List<Vector3>(PathPoints(paths, step));
             bool fatLayer = false;
             foreach (var p in points)
-                if (FiresSkyIslandTerrainEdit.Targets(p) || FiresLayerTerrainEdit.Takes(FiresTerrainLayers.Resolve(p))) { fatLayer = true; break; }
+                if (FiresSkyIslandTerrainEdit.Targets(p) || FiresLayerTerrainEdit.Takes(ResolveOp(p))) { fatLayer = true; break; }
             if (!fatLayer) return false;   // wholly on plain ground: WEC's own path edit on the TerrainComp
 
             bool levelToPath = s_levelToPathField?.GetValue(pars) is bool ltp && ltp;
@@ -230,7 +235,7 @@ namespace VerdantsAscent.Terrain.Persistence
                 {
                     var at = op.At(p, r, levelToPath && op.Level.HasValue ? p.y : op.Level);
                     if (FiresSkyIslandTerrainEdit.Targets(p)) { RouteToIsland(at, pars); island++; }
-                    else { var layer = FiresTerrainLayers.Resolve(p); RouteToLayer(at, pars, in layer); layered++; }
+                    else { var layer = ResolveOp(p); RouteToLayer(at, pars, in layer); layered++; }
                 }
             }
             finally { s_quiet = false; FatUndo.EndPlayerEdit(); }
@@ -264,6 +269,8 @@ namespace VerdantsAscent.Terrain.Persistence
         {
             var op = WecTerrainOp.Read(pars, s_fields);
             s_tookOp = false;
+            if (FiresLogger.DebugEnabled)   // 0.2.1346: per click
+                FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture, "{0} terrain op at ({1:0.0},{2:0.0},{3:0.0}) r {4:0.0}: height {5}, paint '{6}', route {7}, {8} brush chunk(s) under it (0.2.1346)", Tag, op.Position.x, op.Position.y, op.Position.z, op.Size, op.HasHeightOp, op.Paint, RouteName(op), BrushChunksUnder(op.Position, Mathf.Max(op.Size, 1f))));
 
             // WEC 1.80 path / arc / curve. Its area is the polylines, not Position / Size: never route it as a circle.
             if (PathsOf(pars) != null)
@@ -299,8 +306,8 @@ namespace VerdantsAscent.Terrain.Persistence
             // would colour the ground above the roof, so it is skipped. Open ground keeps the TerrainComp.
             if ((op.HasHeightOp || op.Paint.Length > 0) && VoxelZoneStreamer.IsVoxelWorldActive)
             {
-                var layer = FiresTerrainLayers.Resolve(op.Position);
-                if (FiresLayerTerrainEdit.Takes(in layer))
+                var layer = ResolveOp(op.Position);
+                if (FiresLayerTerrainEdit.Takes(in layer) || RoutesOverEdits(op, in layer))
                 {
                     RouteToLayer(op, pars, in layer);
                     if (op.Paint.Length > 0 && layer.Kind == TerrainLayerKind.Ground) return true;   // paint only, on its own WEC step
@@ -328,6 +335,52 @@ namespace VerdantsAscent.Terrain.Persistence
                 RefuseVoxelVoid(pars);
             if (op.Reset && VoxelZoneStreamer.IsVoxelWorldActive) RestoreVoxelGround(op);
             return true;
+        }
+
+        // ---- 0.2.1346 (Level tool): a carved column is clamped by its brush edits (VoxelChunk.ApplyBrushEditsLocked), so a TerrainComp raise cannot fill it. An op whose circle touches a
+        // brush-edited chunk near its height goes to the voxels. Reset, set and void keep their paths: reset has a TerrainComp half, the other two have no voxel meaning.
+        private const float BrushChunkBand = 32f;
+        private static bool s_overEditsProof;
+        private static readonly FatSpreadStat s_overEditsStat = new FatSpreadStat("terrain op brush chunk check");
+
+        private static int BrushChunksUnder(Vector3 p, float r)
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            float c = VoxelChunk.CELLS;
+            int n = 0;
+            for (int kz = Mathf.FloorToInt((p.z - r) / c); kz <= Mathf.FloorToInt((p.z + r) / c); kz++)
+                for (int kx = Mathf.FloorToInt((p.x - r) / c); kx <= Mathf.FloorToInt((p.x + r) / c); kx++)
+                {
+                    var stack = VoxelWorld.ColumnChunks(new Vector2Int(kx, kz));
+                    if (stack == null) continue;
+                    foreach (var chunk in stack)
+                    {
+                        if (chunk == null || !chunk.HasBrushEdits) continue;
+                        float y0 = chunk.Key.y * c;
+                        if (y0 > p.y + BrushChunkBand || y0 + c < p.y - BrushChunkBand) continue;   // a cave edit far below is not this ground
+                        n++;
+                    }
+                }
+            s_overEditsStat.Note((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+            return n;
+        }
+
+        private static bool RoutesOverEdits(WecTerrainOp op, in TerrainLayer layer)
+        {
+            if (FiresVoxelConfig.TerrainOpRoutesOverVoxelEdits == null || !FiresVoxelConfig.TerrainOpRoutesOverVoxelEdits.Value) return false;
+            if (layer.Kind != TerrainLayerKind.Ground || !op.HasHeightOp || op.Reset || op.Void || op.Set.HasValue) return false;
+            if (BrushChunksUnder(op.Position, Mathf.Max(op.Size, 1f)) == 0) return false;
+            if (!s_overEditsProof) { s_overEditsProof = true; FiresLogger.LogInfo("[WecTerrainBridge] a terrain op over voxel brush edits reshapes the voxels; open ground keeps the TerrainComp (0.2.1346)"); }
+            return true;
+        }
+
+        private static string RouteName(WecTerrainOp op)
+        {
+            if (!op.HasHeightOp) return "paint only";
+            if (FiresSkyIslandTerrainEdit.Targets(op.Position)) return "island";
+            if (!VoxelZoneStreamer.IsVoxelWorldActive) return "TerrainComp";
+            var layer = ResolveOp(op.Position);
+            return FiresLayerTerrainEdit.Takes(in layer) ? "layer" : RoutesOverEdits(op, in layer) ? "voxel edits" : "TerrainComp";
         }
 
         // `reset` on voxel ground (not an island) also takes back the voxel brush edits in its circle - V-tool carves and
@@ -359,15 +412,34 @@ namespace VerdantsAscent.Terrain.Persistence
             Vector3 p = op.Position;
             string what = op.Reset ? "reset" : op.Level.HasValue ? "level" : op.Slope.HasValue ? "slope" : op.Delta.HasValue ? (op.Delta.Value >= 0f ? "raise" : "lower")
                 : op.Set.HasValue ? "set" : op.Min.HasValue ? "min" : op.Max.HasValue ? "max" : op.Void ? "void" : "op";
-            string kind = FiresSkyIslandTerrainEdit.Targets(p) ? "island" : FiresTerrainLayers.Resolve(p).Describe();
+            string kind = FiresSkyIslandTerrainEdit.Targets(p) ? "island" : ResolveOp(p).Describe();
             bool had = VoxelWorld.TryFindSurfaceY(p.x, p.z, p.y, HammerSurfaceReach, out float before);
-            float top = !FiresSkyIslandTerrainEdit.Targets(p) && FiresTerrainLayers.Resolve(p).Kind == TerrainLayerKind.Cave && VoxelZoneStreamer.TryGroundHeight(p.x, p.z, out float t0) ? t0 : float.NaN;
-            ZNet.instance.StartCoroutine(WatchAfter(what, p, kind, had ? before : float.NaN, top));
+            float top = !FiresSkyIslandTerrainEdit.Targets(p) && ResolveOp(p).Kind == TerrainLayerKind.Cave && VoxelZoneStreamer.TryGroundHeight(p.x, p.z, out float t0) ? t0 : float.NaN;
+            float wr = Mathf.Max(op.Size, 1f);
+            SurfaceSpan(p, wr, out float min0, out float max0);   // 0.2.1346
+            string span = string.Format(CultureInfo.InvariantCulture, "route {0}, {1} brush chunk(s), circle min..max {2:0.00}..{3:0.00}", RouteName(op), BrushChunksUnder(p, wr), min0, max0);
+            ZNet.instance.StartCoroutine(WatchAfter(what, p, kind, had ? before : float.NaN, top, wr, span));
         }
 
-        private static System.Collections.IEnumerator WatchAfter(string what, Vector3 p, string kind, float before, float top)
+        // 0.2.1346: the voxel surface at the centre + two rings. NaN when none answered.
+        private static void SurfaceSpan(Vector3 p, float r, out float min, out float max)
+        {
+            min = float.NaN; max = float.NaN;
+            for (int ring = 0; ring <= 2; ring++)
+                for (int i = 0; i < (ring == 0 ? 1 : 8); i++)
+                {
+                    float a = i * Mathf.PI * 0.25f, d = r * ring * 0.5f;
+                    if (!VoxelWorld.TryFindSurfaceY(p.x + Mathf.Cos(a) * d, p.z + Mathf.Sin(a) * d, p.y, HammerSurfaceReach, out float y)) continue;
+                    min = float.IsNaN(min) ? y : Mathf.Min(min, y);
+                    max = float.IsNaN(max) ? y : Mathf.Max(max, y);
+                }
+        }
+
+        private static System.Collections.IEnumerator WatchAfter(string what, Vector3 p, string kind, float before, float top, float wr, string span)
         {
             yield return new WaitForSeconds(WatchSeconds);
+            SurfaceSpan(p, wr, out float min1, out float max1);   // 0.2.1346
+            FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture, "{0} {1} at ({2:0.0},{3:0.0}) r {4:0.0}: {5} -> after {6:0.00}..{7:0.00} (0.2.1346)", Tag, what, p.x, p.z, wr, span, min1, max1));
             bool has = VoxelWorld.TryFindSurfaceY(p.x, p.z, float.IsNaN(before) ? p.y : before, HammerSurfaceReach, out float after);
             FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture,
                 "{0} {1} at ({2:0.0},{3:0.0}) aimed y {4:0.0}: voxel surface {5} -> {6}{7} ({8}){9}", Tag, what, p.x, p.z, p.y,
@@ -448,6 +520,20 @@ namespace VerdantsAscent.Terrain.Persistence
         // The island route's maths on the op's layer (FiresLayerTerrainEdit): each column of the same layer, its cut or fill held
         // inside the layer's band. One FatUndo step per op (the queue's scope); WEC's empty step is skipped (AddTerrainAction_Prefix).
         private const string LayerRoute = "WEC / Infinity Hammer";
+
+        // 0.2.1068 (Fire: "infinity hammer level operations dont always fire"): an IH op's position carries the op's TARGET y
+        // (the ghost's), so a level or lower aimed below the ground put the point INSIDE solid rock. FiresTerrainLayers.Resolve
+        // then found "rock right above" and called it a cave (log: "terrain op on cave (edits up to 60.0 ...) ... 212 another
+        // layer or no surface (left alone)"); every column resolved as ground, none matched, and the click changed nothing.
+        // The layer is resolved at the surface nearest the op's y in its own column instead: the ground a level-down aims at,
+        // or the real cave floor a cave op sits on.
+        private const float OpSurfaceReach = 12f;
+        private static TerrainLayer ResolveOp(Vector3 p)
+        {
+            if (VoxelWorld.TryFindSurfaceY(p.x, p.z, p.y, OpSurfaceReach, out float surface))
+                return FiresTerrainLayers.Resolve(new Vector3(p.x, surface + 0.05f, p.z));
+            return FiresTerrainLayers.Resolve(p);
+        }
 
         private static void RouteToLayer(WecTerrainOp op, object pars, in TerrainLayer layer)
         {

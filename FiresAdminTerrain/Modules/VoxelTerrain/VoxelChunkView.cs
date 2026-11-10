@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using FiresCore.Materials;
 
@@ -21,6 +22,14 @@ namespace VerdantsAscent.Terrain.Voxel
         private MeshRenderer _renderer;
         private MeshCollider _collider;
         private Mesh _mesh;
+        // 0.2.1054 collider-before-mesh (Fire 10-26, Voxheim list #2): a remesh is written into _staging, the worker bakes
+        // _staging, and AssignCollider hands _staging to the collider AND the filter in one frame, then the two swap. Until
+        // then the live collider and the shown mesh stay the old, matching pair: a body resting on the chunk never sees a
+        // half-written mesh or a moment with no collider, and what you see never runs ahead of what you stand on. The
+        // retired mesh is cleared at the swap (its buffers freed) and reused as the next staging mesh.
+        private Mesh _staging;
+        private bool _stagingPending;
+        private float _stagedAt;
         private Color32[] _seasonFreeColors;
 
         // Memory line: estimated mesh bytes this view holds (CPU copy; the GPU holds about the same again).
@@ -28,7 +37,7 @@ namespace VerdantsAscent.Terrain.Voxel
         internal long MeshBytes(out int meshes)
         {
             meshes = 0;
-            return MeshBytes(_mesh, ref meshes) + MeshBytes(_waterMesh, ref meshes) + MeshBytes(_fallsMesh, ref meshes) + MeshBytes(_iceMesh, ref meshes);
+            return MeshBytes(_mesh, ref meshes) + MeshBytes(_staging, ref meshes) + MeshBytes(_waterMesh, ref meshes) + MeshBytes(_fallsMesh, ref meshes) + MeshBytes(_iceMesh, ref meshes);
         }
 
         private static long MeshBytes(Mesh m, ref int meshes)
@@ -64,12 +73,20 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             RenderSuppressed = suppressed;
             RefreshRenderVisibility();
+            if (!suppressed && _fallsHeld) { _fallsHeld = false; if (_fallsGO != null) _fallsGO.SetActive(true); }   // 0.2.1346
         }
 
         // The one place this view's renderers are switched on or off: a surface
         // to draw, the swap's suppression, and vanilla's overworld render group
         // (hidden while the player is inside an interior). Colliders are never
         // touched - vanilla keeps its terrain collidable in there too.
+        // 0.2.1039 (HaloFlat: Fire stood on a ring wall he could not see): every input of the renderer's visibility in one line.
+        internal string RenderState()
+            => $"verts {VertexCount}, tris {TriangleCount}, renderer {(_renderer == null ? "NONE" : _renderer.enabled ? "ENABLED" : "disabled")}, "
+             + $"not-collidable {_surfaceNotCollidable}, suppressed {RenderSuppressed}, overworld {VoxelRenderGroup.OverworldVisible}, "
+             + $"material '{(_renderer != null && _renderer.sharedMaterial != null ? _renderer.sharedMaterial.name + "' shader '" + (_renderer.sharedMaterial.shader != null ? _renderer.sharedMaterial.shader.name : "null") : "none")}', "
+             + $"bounds {(_renderer != null ? _renderer.bounds.center.ToString("F0") + " size " + _renderer.bounds.size.ToString("F0") : "-")}, layer {LayerMask.LayerToName(gameObject.layer)}, active {gameObject.activeInHierarchy}";
+
         internal void RefreshRenderVisibility()
         {
             bool overworldVisible = VoxelRenderGroup.OverworldVisible;
@@ -88,7 +105,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // The water and ice sheets wait for the swap with their ground (a skyland lake no longer shows over its
             // far piece before the island does).
             if (_waterRenderer != null) _waterRenderer.enabled = overworldVisible && !RenderSuppressed;
-            if (_iceRenderer != null) _iceRenderer.enabled = overworldVisible && !RenderSuppressed;
+            if (_iceRenderer != null) _iceRenderer.enabled = overworldVisible && !RenderSuppressed && !s_stateLook;   // 0.2.1097
         }
 
         public int VertexCount { get; private set; }
@@ -118,8 +135,12 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal Vector3Int Key;   // the chunk this view draws (VoxelWorld.GetOrCreateView)
 
+        // 0.2.1322 (PLAN_fat_driver_stalls F2 proof, no behaviour change): Init's phase stamps for VoxelWorld.GetOrCreateView's view-create timer
+        // (layer, MeshFilter add, MeshRenderer add, material + shadow, MeshCollider add, mesh new + bounds).
+        internal static readonly long[] InitT = new long[7];
         public void Init()
         {
+            InitT[0] = StallPhaseTimer.Now();
             // TERRAIN layer, same as the tile meshes (TileMeshRenderer): vanilla
             // ground queries raycast it, grass/clutter grows on it, build pieces
             // find support on it — and LiquidVolume pours drape their grids onto
@@ -133,18 +154,24 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (pieceLayer >= 0) gameObject.layer = pieceLayer;
             }
 
+            InitT[1] = StallPhaseTimer.Now();
             _filter = gameObject.AddComponent<MeshFilter>();
+            InitT[2] = StallPhaseTimer.Now();
+            InitT[3] = InitT[2];
             // Headless dedi: colliders ARE the product; no renderer,
             // no material lookups (shader/bundle access is a client concern).
             if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null)
             {
                 _renderer = gameObject.AddComponent<MeshRenderer>();
+                InitT[3] = StallPhaseTimer.Now();
                 _renderer.sharedMaterial = TerrainMaterialCache.GetCurrentMaterial();
                 ApplyShadowMode(_renderer);
             }
 
+            InitT[4] = StallPhaseTimer.Now();
             _collider = gameObject.AddComponent<MeshCollider>();
             _collider.convex = false;
+            InitT[5] = StallPhaseTimer.Now();
 
             _mesh = new Mesh
             {
@@ -152,6 +179,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 indexFormat = UnityEngine.Rendering.IndexFormat.UInt32,
             };
             _filter.sharedMesh = _mesh;
+            PadRenderBounds();
+            InitT[6] = StallPhaseTimer.Now();
         }
 
         // Fill the render mesh from worker output. Returns the mesh instance id
@@ -160,29 +189,81 @@ namespace VerdantsAscent.Terrain.Voxel
         // A surface made only of sliver triangles is not baked either: PhysX
         // welds them away and rejects the empty result ("cleaning the mesh
         // failed"), once on the bake worker and again on the main-thread assign.
-        public int ApplyBuffers(MeshBuffers buf)
+        // 0.2.1197: prepared = the layer paint, G refinement and normal guard already ran (paint on the main thread, the rest on the
+        // refine worker); preVerts / preTris are the counts as meshed, which these two fields have always reported.
+        public bool HasRenderer => _renderer != null;
+        public int ApplyBuffers(MeshBuffers buf, bool prepared = false, int preVerts = -1, int preTris = -1)
         {
-            VertexCount = buf.Verts.Count;
-            TriangleCount = buf.Tris.Count / 3;
+            VertexCount = prepared ? preVerts : buf.Verts.Count;
+            TriangleCount = prepared ? preTris / 3 : buf.Tris.Count / 3;
+            // 0.2.1117: the orphan-face stand-ins (border skirts) are tilted 15° down-outward in the mesher; count + say it once.
+            if (buf.SkirtTilted > 0) { SkirtViews.Add(this); SkirtOrigin = buf.SkirtOrigin; SkirtMask = buf.OrphanMask; }
+            else SkirtViews.Remove(this);
+            if (buf.SkirtTilted > 0)
+            {
+                SkirtChunks++; SkirtVerts += buf.SkirtTilted;
+                if (!s_skirtSaid)
+                {
+                    s_skirtSaid = true;
+                    FiresLogger.LogInfo($"[VoxelMesh] skirts: {SkirtChunks} built, tilt 15° down-outward (first: chunk {Key}, {buf.SkirtTilted} stand-in vertices; lips drop {0.5f * VoxelMesherSurfaceNets.SKIRT_TAN:0.000} m over 0.5 m)");
+                }
+            }
 
             if (VertexCount == 0)
             {
                 _mesh.Clear(false);
                 _collider.sharedMesh = null;
+                DropStaging();
                 _surfaceNotCollidable = false;   // no surface at all is not a sliver surface
                 ColliderReady = true;   // nothing to collide with — ready by definition
                 ApplyGenWater(buf);     // an all-air/solid layer can still OWN the sheet band
                 RefreshRenderVisibility();
+                BodyHold.ChunkChanged(this);
                 return 0;
             }
             ColliderReady = false;
 
+            // A chunk with a live collider keeps it (and its shown mesh) until the new bake lands: write the new surface
+            // into the staging mesh. A chunk with no collider yet (first build, or it was empty) fills _mesh as before.
+            bool stage = _collider.sharedMesh != null;
+            Mesh live = _mesh;
+            if (stage)
+            {
+                if (_staging == null)
+                    _staging = new Mesh { name = gameObject.name + " (staging)", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+                _mesh = _staging;   // the fill below writes the staging mesh; restored before returning
+                _stagingPending = true;
+                _stagedAt = Time.realtimeSinceStartup;
+            }
+            try
+            {
             _mesh.Clear(false);
             // The three handoffs where the engine allocates on OUR main-thread frame, split so a profile names which:
             // a profile pinned 601 blocks of 39,336 B a run to "(native code) under StreamerDriver.Update" with no managed
             // frame below, and set-vertices / set-triangles / collider-assign are the candidates.
+            long a0 = System.Diagnostics.Stopwatch.GetTimestamp(), a1 = a0, a2 = a0, a3 = a0;
             using (VertsMarker().Auto())
             {
+            if (_renderer != null && !prepared)
+            {
+                // 0.2.1101: the layer paint (UV0 into the mask / palette) first, then the 0.25 m refinement of G ground (cultivated
+                // soil, snow trails, shovel digs) that the vertex stage carves; both before the mesh takes the buffers.
+                VoxelLayerPaint.Render(Key, buf.Verts, buf.Uvs, buf.Uv1, buf.Colors);
+                a1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                lock (VoxelGTessellation.Gate)   // 0.2.1197: the refine worker shares the scratch
+                {
+                try { VoxelGTessellation.Apply(buf, Key); }
+                catch (System.Exception ex) { FiresLogger.LogDebug($"[Cultivated] bail: G refinement threw for chunk {Key}: {ex.Message} (mesh kept as meshed)"); }
+                a2 = System.Diagnostics.Stopwatch.GetTimestamp();
+                try { VoxelGTessellation.GuardNormals(buf); }   // 0.2.1154: after refinement, snap and skirts
+                catch (System.Exception ex) { FiresLogger.LogDebug($"[FiresVoxel] bail: normal guard threw for chunk {Key}: {ex.Message} (normals kept as meshed)"); }
+                }
+                a3 = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+            // 0.2.1174 (Fire: "if we turn the camera at the wrong angle the entire terrain disappears", first seen on 1167-1173): 1167 set
+            // the vertices with DontRecalculateBounds and relied on SetTriangles(calculateBounds) for the bounds. The chunk views sit at
+            // the world origin, so a mesh left with empty bounds pads to a box at (0,0,0) and every chunk is frustum-culled unless the
+            // view happens to include the origin. Back to the 1166 call (bounds computed here); BoundsCheck below proves and repairs.
             _mesh.SetVertices(buf.Verts);
             // Headless dedi: the mesher fills only Verts+Tris (CollidersOnly), so
             // the render attributes are empty — a MeshCollider needs neither.
@@ -197,14 +278,17 @@ namespace VerdantsAscent.Terrain.Voxel
                 _mesh.SetTangents(buf.Tangents);
                 // Each vertex wears its own layer's paint - the ground the column's mask and turned-ground circles,
                 // a cave floor or a skyland the paint laid on it (VoxelLayerPaint; UV0 into the mask's palette texels).
-                VoxelLayerPaint.Render(Key, buf.Verts, buf.Uvs, buf.Uv1, buf.Colors);
+                // 0.2.1101: rendered above, before the G refinement.
                 _mesh.SetUVs(0, buf.Uvs);
                 _mesh.SetUVs(1, buf.Uv1);   // UV1.x = per-vertex inland waterline (FiresVoxelHeightmap reads v.texcoord1.x)
                 KeepSeasonFreeColors(buf.Colors);
                 _mesh.SetColors(FatSeasons.RenderColors(buf.Colors, buf.Verts));
             }
             }
+            long a4 = System.Diagnostics.Stopwatch.GetTimestamp();
             using (TrisMarker().Auto()) _mesh.SetTriangles(buf.Tris, 0, calculateBounds: true);
+            long a5 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_filter != null && _filter.sharedMesh == _mesh) PadRenderBounds();   // 0.2.1084: the live mesh changed (no staging)
             if (_renderer != null)
             {
                 // Self-heal: if the vanilla heightmap material captured AFTER this
@@ -214,16 +298,92 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             bool collidable = HasCollidableTriangle(buf);
             _surfaceNotCollidable = !collidable;
+            int bakeId = collidable ? _mesh.GetInstanceID() : 0;
+            if (stage) _mesh = live;   // the filter + collider keep showing the old pair until AssignCollider
             if (!collidable)
             {
                 _collider.sharedMesh = null;
+                if (stage) SwapStaging(false);   // nothing to bake: show the new surface now
                 ColliderReady = true;
                 ReportSliverOnlySurface();
             }
             ApplyGenWater(buf);
             RefreshRenderVisibility();
-            return collidable ? _mesh.GetInstanceID() : 0;
+            BodyHold.ChunkChanged(this);
+            ApplyTiming.Note(Key, buf.Verts.Count, a0, a1, a2, a3, a4, a5, System.Diagnostics.Stopwatch.GetTimestamp());
+            return bakeId;
+            }
+            finally { if (stage && _mesh == _staging && _stagingPending) _mesh = live; }
         }
+
+        // The staged mesh becomes the shown + collided mesh in one frame; the old one is cleared and kept as the next stage.
+        private void SwapStaging(bool toCollider)
+        {
+            if (!_stagingPending || _staging == null) return;
+            var old = _mesh;
+            _mesh = _staging;
+            if (toCollider) _collider.sharedMesh = _mesh;   // a different mesh: no null in between, no wake from a re-set
+            if (_filter != null) _filter.sharedMesh = _mesh;
+            PadRenderBounds();
+            _staging = old;
+            if (_staging != null) _staging.Clear(false);
+            _stagingPending = false;
+            CollidersSwapped++;
+            float waited = (Time.realtimeSinceStartup - _stagedAt) * 1000f;
+            if (waited > MaxSwapWaitMs) MaxSwapWaitMs = waited;
+        }
+
+        private void DropStaging()
+        {
+            if (_staging != null && !(BakeInFlight && _bakingMeshId == _staging.GetInstanceID())) _staging.Clear(false);
+            _stagingPending = false;
+        }
+
+        // Collider-swap tally for the 30 s line (VoxelMeshPipeline); main thread only.
+        internal static int CollidersSwapped;
+        // 0.2.1117: border skirt tally (chunk builds with tilted orphan stand-ins, and their vertices); main thread only.
+        internal static int SkirtChunks, SkirtVerts;
+        // Views whose LAST build carried tilted stand-ins (the skirt proof measures their shown mesh), with that build's origin + mask.
+        internal static readonly HashSet<VoxelChunkView> SkirtViews = new HashSet<VoxelChunkView>();
+        internal Vector3 SkirtOrigin;
+        internal byte SkirtMask;
+        private static bool s_skirtSaid;
+        internal static float MaxSwapWaitMs;
+
+        // True when this chunk has a surface but no collider at all yet: the only moment a body over it can fall (a remesh
+        // keeps the old collider live, see _staging). BodyHold reads it.
+        // 0.2.1084 (Fire: "make sure that the shader does not cull itself when we are deep in the snow"): the voxel shader raises
+        // snow up to MaxDepth (2 m, Core 840) plus drift relief in the VERTEX stage, which the mesh bounds never knew about, so
+        // frustum culling dropped a chunk whose raised snow was still on screen (deep in the snow, looking along it). The
+        // renderer's bounds are padded up by SnowBoundsPad; the mesh (and the collider) keep their real bounds.
+        private const float SnowBoundsPad = 4f;
+        private static int s_emptyBoundsFixed;
+        private static float s_boundsLogAt;
+        private void PadRenderBounds()
+        {
+            if (_renderer == null || _mesh == null) return;
+            Bounds b = _mesh.bounds;
+            // 0.2.1174: never pad empty bounds (a box at the origin culls the chunk by camera angle): recompute from the vertices.
+            if (_mesh.vertexCount > 0 && b.size.sqrMagnitude < 1e-6f)
+            {
+                _mesh.RecalculateBounds();
+                Bounds was = b;
+                b = _mesh.bounds;
+                s_emptyBoundsFixed++;
+                if (Time.unscaledTime >= s_boundsLogAt)
+                {
+                    s_boundsLogAt = Time.unscaledTime + 10f;
+                    FiresLogger.LogDebug($"[FiresVoxel] render bounds: chunk {Key} mesh bounds were empty (centre {was.center}, size {was.size}) with {_mesh.vertexCount} verts; recomputed to centre {b.center} size {b.size} ({s_emptyBoundsFixed} fixed this session, renderer enabled {_renderer.enabled}, visible {_renderer.isVisible}) (0.2.1174)");
+                }
+            }
+            b.Encapsulate(b.max + Vector3.up * SnowBoundsPad);
+            b.Expand(new Vector3(1f, 0f, 1f));
+            _renderer.localBounds = b;
+        }
+
+        internal Bounds SurfaceBounds => _mesh != null ? _mesh.bounds : new Bounds(transform.position, Vector3.zero);   // world space (views sit at the origin)
+
+        internal bool AwaitingFirstCollider => VertexCount > 0 && !_surfaceNotCollidable && _collider != null && _collider.sharedMesh == null;
 
         private const float MinCollidableTriangleArea = 0.002f;
 
@@ -311,6 +471,9 @@ namespace VerdantsAscent.Terrain.Voxel
             PushBlock();
         }
 
+        // 0.2.1097: 0.2.1095's ApplyLavaLook (a whole chunk swapped to the lava material) is REMOVED: lava is per 1 m column in the
+        // sheet's state texture (WaterStateField.Bind in ApplyWaterSheet).
+
         private void PushBlock()
         {
             if (_renderer == null) return;
@@ -318,7 +481,79 @@ namespace VerdantsAscent.Terrain.Voxel
             s_mpb.Clear();
             if (_paintTex != null) s_mpb.SetTexture(s_clearedMaskProp, _paintTex);
             s_mpb.SetFloat(s_localWaterProp, _localWaterY);
+            // 0.2.1089: each step on its own, so one throwing never leaves the chunk without its snow binding (SnowBound).
+            // 0.2.1093 (Fire: yes, fix it): the zone look had the same (0,0) bug as the snow; both use the chunk's own origin now.
+            var chunkOrigin = new Vector3(Key.x * VoxelChunk.CELLS, Key.y * VoxelChunk.CELLS, Key.z * VoxelChunk.CELLS);
+            try { VoxelZoneLook.ApplyTo(s_mpb, chunkOrigin, Key); }   // the vanilla tile's own material values (Fire 10-23: paler zone)
+            catch (System.Exception ex) { FiresLogger.LogDebug($"[VoxelZoneLook] bail: zone look threw for chunk {Key} at {chunkOrigin}: {ex.Message} (snow still bound)"); }
+            // 0.2.1092 (Fire: "ground snow for sure still does not work"; his log: every "[VoxelSnow] snow MPB bound: chunk at (0,0)
+            // zone (0,0)"; capture frame34596: every voxel draw bound ONE empty FiresSnowZone across zones x 134-164): chunk views sit
+            // at the world origin (their meshes are in world space), so transform.position picked zone (0,0) for every chunk. The
+            // chunk's own origin comes from its key, as VoxelChunk.WorldOrigin does.
+            try { SnowBound = VoxelSnowDepth.ApplyTo(s_mpb, chunkOrigin); }   // 0.2.1027: Core SnowField depth for this zone (dynamic snow)
+            catch (System.Exception ex) { SnowBound = false; FiresLogger.LogDebug($"[VoxelSnow] bail: snow bind threw for chunk {Key} at {chunkOrigin}: {ex.Message}"); }
+            // 0.2.1098: visual-only cultivated depth (the vertex stage reads it, so it is on the block before the first draw).
+            float cultDepth = FiresVoxelConfig.CultivatedDepth != null ? Mathf.Max(0f, FiresVoxelConfig.CultivatedDepth.Value) : 0.12f;
+            float cultNormal = FiresVoxelConfig.CultivatedNormalBoost != null ? Mathf.Max(0f, FiresVoxelConfig.CultivatedNormalBoost.Value) : 1.5f;
+            s_mpb.SetFloat(s_cultDepthProp, cultDepth);
+            s_mpb.SetFloat(s_cultNormalProp, cultNormal);
+            if (cultDepth != s_cultDepthSaid || cultNormal != s_cultNormalSaid)
+            {
+                s_cultDepthSaid = cultDepth; s_cultNormalSaid = cultNormal;
+                FiresLogger.LogInfo($"[Cultivated] depth {cultDepth:0.00} m, normal boost {cultNormal:0.0} (vanilla = 0/0; shader 0.2.1098+, an older shader ignores them)");
+            }
+            // 0.2.1100: prove which shader the chunks really draw with (the bundle's _FiresShaderRev marker, 1100 = the parallax path).
+            if (!s_cultPathSaid && _renderer != null && _renderer.sharedMaterial != null)
+            {
+                s_cultPathSaid = true;
+                var m = _renderer.sharedMaterial;
+                float rev = m.HasProperty("_FiresShaderRev") ? m.GetFloat("_FiresShaderRev") : 0f;
+                FiresLogger.LogInfo(rev >= 1101f
+                    ? $"[Cultivated] shader path 1101 rows: amp {cultDepth:0.00} m (furrow floor {2f * cultDepth:0.00} m under the ridges), period 1 m, clods 0..0.05 m, on the 0.25 m G-refined mesh (gates: up-facing ground, cultivated paint G, no zone snow); normal boost {cultNormal:0.0}; shader '{(m.shader != null ? m.shader.name : "null")}' rev {rev:0}"
+                    : $"[Cultivated] shader path PRE-1101 (rev {rev:0} on '{(m.shader != null ? m.shader.name : "null")}', material '{m.name}'): no carved rows - the voxel shader bundle is older than 0.2.1101");
+                // 0.2.1115: Fire asked for the snow texture on both sides - the bundle's backface-stone branch is gone from rev 1115.
+                FiresLogger.LogInfo(rev >= 1115f
+                    ? $"[Shader] backface stone removed: back faces use the front surface (rev {rev:0})"
+                    : $"[Shader] backface stone STILL PRESENT: shader rev {rev:0} is older than 1115");
+            }
+            try { s_mpb.SetFloat(s_islandAltSnowProp, IslandAltSnowGate(chunkOrigin)); }
+            catch (System.Exception ex) { FiresLogger.LogDebug($"[IslandSnow] bail: gate threw at {chunkOrigin}: {ex.Message} (altitude snow left on)"); }
             _renderer.SetPropertyBlock(s_mpb);
+        }
+
+        // 0.2.1094 ([seasons], Fire shot 547: a Black Forest skyland at y 186 whitened): vanilla's distant snow is world-height based
+        // (FiresVoxelHeightmap.shader D8184: altitude > 70 m), so every sky island read as a snowy peak. A chunk inside a sky island
+        // keeps that snow only when the island's biome snows (Mountain, Deep North); winter snow on any island still comes from Core's
+        // zone snow (_FiresSnowZone). 1 = the ground's vanilla behaviour, unchanged.
+        private static readonly int s_islandAltSnowProp = Shader.PropertyToID("_FiresIslandAltSnow");
+        private static readonly int s_cultDepthProp = Shader.PropertyToID("_FiresCultDepth");
+        private static readonly int s_cultNormalProp = Shader.PropertyToID("_FiresCultDepthNormal");
+        private static float s_cultDepthSaid = -1f, s_cultNormalSaid = -1f;
+        private static bool s_cultPathSaid;
+        private static readonly System.Collections.Generic.HashSet<uint> s_islandSnowSaid = new System.Collections.Generic.HashSet<uint>();
+        private static float IslandAltSnowGate(Vector3 chunkOrigin)
+        {
+            var centre = chunkOrigin + new Vector3(VoxelChunk.CELLS * 0.5f, VoxelChunk.CELLS * 0.5f, VoxelChunk.CELLS * 0.5f);
+            if (!FiresSkyIslands.TryIslandAt(centre, VoxelChunk.CELLS * 0.5f, out uint id, out _, out _)) return 1f;
+            FiresSkyIslands.TrySkylandBiomeAt(centre, out Heightmap.Biome biome);
+            bool snows = biome == Heightmap.Biome.Mountain || biome == Heightmap.Biome.DeepNorth;
+            if (s_islandSnowSaid.Add(id))
+                FiresLogger.LogInfo($"[IslandSnow] island {id} biome {biome}: altitude snow {(snows ? "kept (snowy biome)" : "off (snow only from its biome or Core winter cover, never world height)")}");
+            return snows ? 1f : 0f;
+        }
+
+        // 0.2.1089: false until a PushBlock bound this chunk to its zone's snow texture (VoxelWorld.RebindSnow retries those).
+        internal bool SnowBound;
+
+        internal void RefreshBlock() => PushBlock();
+
+        // 0.2.1347: did this view's ground shape move since its last collider? The density hash (1344) plus the vertex count, which moves when a refine reshapes the
+        // mesh over the same density. A bake that lost its slot keeps the flag for the next assign. No signature = always moved (1346).
+        private uint _grassSig; private bool _grassSigSet, _grassDirty; private int _grassVerts;
+        internal void NoteMeshGround(bool hasSig, uint sig)
+        {
+            if (!hasSig || !_grassSigSet || _grassSig != sig || _grassVerts != VertexCount) _grassDirty = true;
+            _grassSigSet = hasSig; _grassSig = sig; _grassVerts = VertexCount;
         }
 
         public void AssignCollider()
@@ -328,13 +563,22 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 var spk = FatSpike.Start();
                 FatNativeTrace.Step("collider swap begin", _mesh != null ? _mesh.GetInstanceID() : 0, name);
-                _collider.sharedMesh = null;
-                _collider.sharedMesh = _mesh;
+                if (_stagingPending) SwapStaging(true);   // 0.2.1054: the baked staging mesh -> collider + filter, same frame
+                else
+                {
+                    // First collider for this chunk (it filled _mesh directly): the null resets a cooked mesh PhysX holds.
+                    _collider.sharedMesh = null;
+                    _collider.sharedMesh = _mesh;
+                }
                 FatNativeTrace.Step("collider swap end", _mesh != null ? _mesh.GetInstanceID() : 0);
                 FatSpike.Add(FatSpike.Stage.ColliderAssign, spk);
             }
             ColliderReady = true;
-            FatClutterRegrow.Collider(_collider.bounds);   // the grass over this chunk re-rolls on its new surface (vanilla's ResetGrass after an edit)
+            BodyHold.ChunkChanged(this);
+            if (FatHaloArc.Active && FiresLogger.DebugEnabled && FatHaloArc.ChunkOverlaps(new Vector3(Key.x * VoxelChunk.CELLS, Key.y * VoxelChunk.CELLS, Key.z * VoxelChunk.CELLS)))
+                FiresLogger.LogDebug($"[FatHalo] ring chunk collider assigned: '{name}' at ({transform.position.x:F0},{transform.position.y:F0},{transform.position.z:F0}), {VertexCount} vertices, layer {LayerMask.LayerToName(gameObject.layer)}, enabled {_collider.enabled}");
+            bool groundMoved = _grassDirty; _grassDirty = false;   // 0.2.1347
+            FatClutterRegrow.Collider(GetInstanceID(), _collider.bounds, groundMoved);   // the grass over this chunk re-rolls on its new surface (vanilla's ResetGrass after an edit)
             // When a dedicated server's voxel collider is (re)built, at Debug.
             if (ZNet.instance != null && ZNet.instance.IsDedicated() && FiresLogger.DebugEnabled)
                 FiresLogger.LogDebug($"[FiresVoxel] server collider built: '{name}' at ({_collider.bounds.center.x:F0},{_collider.bounds.center.y:F0},{_collider.bounds.center.z:F0}), "
@@ -369,6 +613,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // exactly how vanilla's ocean gets its pixel-perfect edge.
         private GameObject _waterGO;
         private GameObject _fallsGO;
+        private bool _fallsHeld;   // 0.2.1346
         private Mesh _fallsMesh;
         private Mesh _waterMesh;
         private MeshRenderer _waterRenderer;
@@ -426,6 +671,29 @@ namespace VerdantsAscent.Terrain.Voxel
         // Modes swap live via the console command; the empirical answer beats
         // another day of shader archaeology.
         private static Material s_sheetMat;
+
+        // 0.2.1181 (polished ice, Fire 10-28): Core's firesinlandwater bundle is shader-only, so the v7 ice look's two textures
+        // ship in it as plain assets and are handed out by FiresShaderBroker.GetTexture (Core, [wishbone]). Bound by reflection
+        // (older Core has no such textures: the shader keeps its safe defaults and v7 still renders). One Debug line says which.
+        private static void BindIceTextures(Material m)
+        {
+            Texture inner = null, surf = null;
+            try
+            {
+                var get = typeof(FiresCore.Materials.FiresShaderBroker).GetMethod("GetTexture",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static, null, new[] { typeof(string) }, null);
+                if (get != null)
+                {
+                    inner = get.Invoke(null, new object[] { "FatIceInner" }) as Texture;
+                    surf = get.Invoke(null, new object[] { "FatIceSurfNormal" }) as Texture;
+                }
+            }
+            catch (System.Exception ex) { FiresLogger.LogDebug($"[WaterIce] ice textures: broker lookup threw: {ex.Message}"); }
+            if (inner != null && m.HasProperty("_FiresIceInnerTex")) m.SetTexture("_FiresIceInnerTex", inner);
+            if (surf != null && m.HasProperty("_FiresIceSurfNormal")) m.SetTexture("_FiresIceSurfNormal", surf);
+            FiresLogger.LogDebug($"[WaterIce] ice textures: inner {(inner != null ? "bound" : "missing")}, surface normal {(surf != null ? "bound" : "missing")} " +
+                                 $"(shader v7 properties {(m.HasProperty("_FiresIceInnerTex") ? "present" : "absent")}; missing = the shader's defaults) (0.2.1181)");
+        }
         // FIELD-TESTED on screen: mode 0 — the shared pour material exactly as
         // the hand tools use it — is the one that renders our water correctly
         // with our shader. It is the default. Modes 1/2 exist as diagnostics
@@ -487,6 +755,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         break;
                     }
                     var im = new Material(inland) { name = "FiresInlandWater_Sheet" };
+                    BindIceTextures(im);   // 0.2.1181: the ice-look textures ship in Core's shader bundle (FiresInlandWater v7)
                     // Borrow the ripple/foam textures the liquid material already
                     // carries, so the port is not left sampling flat white.
                     var donor = VerdantsAscent.Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
@@ -650,6 +919,7 @@ namespace VerdantsAscent.Terrain.Voxel
 { var spkW = FatSpike.Start(); BuildSheet(buf, null); FatSpike.Add(FatSpike.Stage.WaterSheet, spkW); }
             CaptureSheetCorners();
             ApplyIceSheet();
+            ApplyCrustSheet();   // 0.2.1097
             if (s_wTris.Count == 0)
             {
                 if (_waterGO != null) _waterGO.SetActive(false);
@@ -680,6 +950,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     _waterRenderer.sharedMaterial = mat;
                     BoundSheetMaterial = mat;   // far-water quilt reuses THE sheet material
+                    VerdantsAscent.Water.Core.PlacedWaterSheets.SayMaterial("chunk water sheet", _waterRenderer);   // 0.2.1086
                     if (!s_wMatBound)
                     {
                         s_wMatBound = true;
@@ -701,6 +972,10 @@ namespace VerdantsAscent.Terrain.Voxel
                                      "resolves yet — sheets invisible until it does; retrying on every apply.");
                 }
             }
+            // 0.2.1097: the per-column ice / lava / crust state texture on the sheet (WaterStateField; replaces 1095's ApplyLavaLook).
+            // 0.2.1313: filled from the per-column grid (each column at its own level), not at the middle vertex's height (frame28800
+            // ev 5850: chunk (224,800) of a Deep North pond filled all-zero from a height in another 16 m band).
+            VerdantsAscent.Water.Core.WaterStateField.Bind(_waterRenderer, new Vector3(buf.OriginX, buf.OriginY, buf.OriginZ), GridFallbackY(buf), "generated", buf.WaterLvl);
             _waterGO.SetActive(true);
             _waterMesh.Clear(false);
             _waterMesh.SetVertices(s_wVerts);
@@ -712,6 +987,9 @@ namespace VerdantsAscent.Terrain.Voxel
             _waterMesh.SetColors(s_wCols);
             _waterMesh.SetTriangles(s_wTris, 0, calculateBounds: true);
             VoxelSheetFalls.Build(buf, _waterGO, ref _fallsGO, ref _fallsMesh);
+            // 0.2.1346: curtains (+ their mist and sounds) wait for the swap too; only the sheet renderers were tied to RenderSuppressed.
+            _fallsHeld = false;
+            if (RenderSuppressed && _fallsGO != null && _fallsGO.activeSelf && ZoneReveal.On) { _fallsGO.SetActive(false); _fallsHeld = true; }
             if (!s_wFirstSheet)
             {
                 s_wFirstSheet = true;
@@ -744,6 +1022,14 @@ namespace VerdantsAscent.Terrain.Voxel
             into.SetVertices(s_wVerts);
             into.SetNormals(s_wNorms);
             into.SetUVs(0, s_wUvs);
+            // 0.2.1321 (pond flat): a vertex on a pond disk's flat level carries no flow (a pond is still water).
+            int pondStill = 0;
+            for (int i = 0; i < s_wVerts.Count && i < s_wUv1.Count; i++)
+            {
+                var v = s_wVerts[i];
+                if (VerdantsAscent.Water.Tools.WaterSheets.PondTopAt(v.x, v.z, v.y - 0.6f, v.y + 0.6f, out _)) { s_wUv1[i] = Vector4.zero; pondStill++; }
+            }
+            if (pondStill > 0) VerdantsAscent.Water.Tools.WaterSheets.NotePondStill(pondStill);
             into.SetUVs(1, s_wUv1);
             into.SetUVs(2, s_wUv2);
             into.SetUVs(3, ZeroUv3(s_wVerts.Count));
@@ -751,6 +1037,42 @@ namespace VerdantsAscent.Terrain.Voxel
             into.SetTriangles(s_wTris, 0, calculateBounds: true);
             return true;
         }
+
+        // 0.2.1099 (Fire shot 556, SuperFlatSkyCaves3: "auto water should always make sure it builds enough banks to cover the
+        // mesh so it does not hang out"). A skyland water column is drawn only over the voxel bed the island actually carved for
+        // it: a floor at least max(5 cm, a third of the planned depth) under the level. A column with air under it (past the rim)
+        // or ground at/under the waterline that was never dug (grass outside the bowl) is cut. Draw-time, so it also fixes the
+        // ponds already saved on SuperFlatSkyCaves3 on reload. Main thread (the corner pass below samples the same floor).
+        private static readonly System.Collections.Generic.Dictionary<uint, Vector3Int> s_skyWaterSaid = new System.Collections.Generic.Dictionary<uint, Vector3Int>();
+        private static void ClipSkylandColumns(MeshBuffers buf, float[] lvls)
+        {
+            int S = VoxelChunk.SAMPLES;
+            int kept = 0, outside = 0, air = 0;
+            uint islandId = 0;
+            for (int z = 0; z < S; z++)
+                for (int x = 0; x < S; x++)
+                {
+                    int i = x + S * z;
+                    float v = lvls[i];
+                    if (v <= 0f) continue;
+                    float wx = buf.OriginX + (x - 1) + 0.5f, wz = buf.OriginZ + (z - 1) + 0.5f;
+                    if (!FiresSkyIslands.WaterSurfaceAt(wx, wz, out float il, out float idepth) || Mathf.Abs(il - v) > 1f) continue;
+                    if (islandId == 0 && FiresSkyIslands.TryIslandAt(new Vector3(wx, v, wz), 4f, out uint id, out _, out _)) islandId = id;
+                    if (!VoxelWorld.TrySampleWaterFloorY(wx, wz, v + 0.05f, v - 32f, out float bed, out bool wall)) { lvls[i] = 0f; air++; continue; }
+                    if (wall) { kept++; continue; }   // a bank at the waterline buries the column; harmless
+                    if (v - bed < Mathf.Max(0.05f, 0.35f * idepth)) { lvls[i] = 0f; outside++; continue; }
+                    kept++;
+                }
+            if (kept + outside + air == 0) return;
+            s_skyClipped += outside + air;
+            if (!s_skyWaterSaid.TryGetValue(islandId, out var said) || (outside + air > 0 && said.y + said.z == 0))
+            {
+                s_skyWaterSaid[islandId] = new Vector3Int(kept, outside, air);
+                FiresLogger.LogInfo($"[SkyWater] island {islandId:x8} pool: sheet columns {kept} in chunk ({buf.OriginX:0},{buf.OriginY:0},{buf.OriginZ:0}), clipped {outside} outside bed + {air} over air (no carved bed under the level), banks raised 0 (draw-time clip; the far view keeps only fully wet cells, {FiresSkyIslands.s_farCellsTrimmed} trimmed)");
+            }
+        }
+        private static int s_skyClipped;
+        private static float s_lipLogAt;
 
         internal static void BuildSheet(MeshBuffers buf, WaterSurfaceProvider surface)
         {
@@ -811,7 +1133,10 @@ namespace VerdantsAscent.Terrain.Voxel
                             // crests and rolled it down the far side.
                             if (v > 0f && TryBufGround(buf, x - 1, z - 1, out float skg))
                             {
-                                if (skg < v - (pass == 0 ? 2f : 0.05f)) v = 0f;
+                                // 0.2.1099 (Fire shot 557: "the edge of the islands mesh needs to fade into the waterfall and
+                                // not be shown as hard floating edges"): ring 1 no longer hangs up to 2 m past a lip. A skirt
+                                // cell only stands where a bank rises to bury it; the fall curtain starts AT the lip.
+                                if (skg < v - 0.05f) v = 0f;
                                 // And no fake lid over a cave mouth: the store
                                 // gate holes shaft columns; the skirt must not
                                 // re-cover them with swimless visual water.
@@ -834,6 +1159,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 var t = s_wExtA; s_wExtA = s_wExtB; s_wExtB = t;
             }
             var lvls = s_wExtA;
+            if (surface == null) ClipSkylandColumns(buf, lvls);
 
             // SMOOTH SURFACE, ALWAYS. Corner heights come from
             // ONE pure world function — TryGetWaterSurfaceSmooth, the same
@@ -1164,9 +1490,53 @@ namespace VerdantsAscent.Terrain.Voxel
             // read transform.position.y (= 0) for the ownership band, which
             // rejected every level ≥ 32 — zero sheets anywhere. World-space,
             // like the terrain, from the chunk origin carried in the buffers.
+            // 0.2.1099 (Fire shot 557: "the edge of the islands mesh needs to fade into the waterfall and not be shown as hard
+            // floating edges"). LIP TAPER, geometry only (FiresInlandWater reads no vertex colour, so no alpha ramp): a wet corner
+            // on the sheet's edge whose dry neighbour column drops away (no floor within LipDrop under the level, i.e. a cliff or a
+            // skyland rim) is bent down by LipTaper, so the last metre curls into the fall. The curtain's approach rows
+            // (FiresWaterfalls.ApproachRows, from 1.2 m upstream of the lip at lip height) overlap the bend, so there is no gap.
+            const float LipTaper = 0.4f, LipDrop = 3f;
+            int tapered = 0;
+            for (int cz = 0; cz <= C; cz++)
+                for (int cx = 0; cx <= C; cx++)
+                {
+                    int ci = (cx + 1) + S * (cz + 1);
+                    float lv = lvls[ci];
+                    if (lv <= 0f) continue;
+                    int gi = (cx + RING) + R * (cz + RING);
+                    if (s_wCornHx[gi] <= 0f) continue;
+                    bool lip = false;
+                    for (int k = 0; k < 4 && !lip; k++)
+                    {
+                        int nx = cx + (k == 0 ? -1 : k == 1 ? 1 : 0), nz = cz + (k == 2 ? -1 : k == 3 ? 1 : 0);
+                        int ni = (nx + 1) + S * (nz + 1);
+                        if (ni < 0 || ni >= lvls.Length || lvls[ni] != 0f) continue;   // wet or mopped neighbour: not an edge
+                        float wx = buf.OriginX + nx, wz = buf.OriginZ + nz;
+                        if (!VoxelWorld.TrySampleWaterFloorY(wx, wz, lv + 0.05f, lv - LipDrop, out _, out _)) lip = true;
+                    }
+                    if (!lip) continue;
+                    s_wCornHx[gi] -= LipTaper;
+                    tapered++;
+                }
+            if (tapered > 0 && Time.unscaledTime >= s_lipLogAt)
+            {
+                s_lipLogAt = Time.unscaledTime + 10f;
+                string island = FiresSkyIslands.TryIslandAt(new Vector3(buf.OriginX + C * 0.5f, buf.OriginY + C * 0.5f, buf.OriginZ + C * 0.5f), C * 0.5f, out uint lipIsland, out _, out _)
+                    ? lipIsland.ToString("x8") : "ground";
+                FiresLogger.LogDebug($"[SkyFalls] island {island} outlet: sheet clipped at lip, taper {LipTaper:0.0} m on {tapered} edge corner(s) in chunk ({buf.OriginX:0},{buf.OriginY:0},{buf.OriginZ:0}), fall attached (gap 0.0 m: the curtain's approach rows start 1.2 m upstream at lip height and overlap the bend)");
+            }
+
             float oy = buf.OriginY;
             s_wVerts.Clear(); s_wNorms.Clear(); s_wUvs.Clear(); s_wTris.Clear(); s_wCols.Clear(); s_wUv1.Clear(); s_wUv2.Clear();
             s_iVerts.Clear(); s_iNorms.Clear(); s_iUvs.Clear(); s_iTris.Clear();
+            s_cVerts.Clear(); s_cTris.Clear();
+            s_stateLook = VerdantsAscent.Water.Core.WaterStateField.ShaderReads(BoundSheetMaterial != null ? BoundSheetMaterial : ResolveSheetMaterial());   // 0.2.1097
+            // 0.2.1313 one source: generated sheets (surface == null) with the state shader cut their ice collider from the column grid the
+            // state texture is filled from (built at the first quad), and drop the flow on solid-ice corners.
+            bool gridIce = s_stateLook && surface == null;
+            VerdantsAscent.Water.Core.WaterStateField.Grid grid = null;
+            float iso = VerdantsAscent.Water.Core.WaterStateField.IceSolid;
+            int cVis = 0, cCol = 0, cVisOnly = 0, cColOnly = 0, flowZeroed = 0; string cFirst = null;
             const float UVS = 1f / 64f;
             for (int z = 0; z < C; z++)
             {
@@ -1237,7 +1607,7 @@ namespace VerdantsAscent.Terrain.Voxel
                                   == FiresWorldGenBase.WC_FROZEN
                                || FiresWorldGenBase.WaterClassAt(wx0 + 0.5f, wz0 - 3.5f)
                                   == FiresWorldGenBase.WC_FROZEN
-                               || FiresWorldGenBase.SeasonalFrozenAt(wx0 + 0.5f, wz0 + 0.5f);
+                               || GenTimedIceSolid(buf.WaterLvl[(x + 1) + S * (z + 1)], wx0, wz0);   // 0.2.1170: the timed ice (IceField via WaterStateField), so the collider, the no-liquid column and the look agree
                     if (frozen)
                     {
                         float sw00 = buf.WaterLvl[(x + 1) + S * (z + 1)];
@@ -1250,13 +1620,45 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (sw10 > 0f && sw10 < wmin) wmin = sw10;
                         if (sw01 > 0f && sw01 < wmin) wmin = sw01;
                         if (sw11 > 0f && sw11 < wmin) wmin = sw11;
-                        frozen = wmax <= 0f || wmax - wmin <= 0.3f;
-                        if (frozen)
+                        // 0.2.1192 (Fire: "we should not be flattening to the highest corner it should be a smooth mesh just
+                        // like the water was just frozen solid"): with the state-reading water shader the ice IS the water sheet, so
+                        // the ice collider keeps the sheet's own smoothed corner heights (y00..y11, shared with the neighbours) - no
+                        // max-corner snap, no slope reject. The old snap stays only for the legacy IceShell look (older Core).
+                        if (s_stateLook) { if (wmax > 0f) GenIceSmoothKept++; }
+                        else frozen = wmax <= 0f || wmax - wmin <= 0.3f;
+                        if (frozen && !s_stateLook)
                         {
                             float snap = wmax > 0f ? wmax : mx;
                             y00 = snap; y10 = snap; y01 = snap; y11 = snap;
                         }
                     }
+                    // 0.2.1097: the per-column state (WaterStateField). With Core's state-reading water shader every quad is DRAWN by
+                    // the water sheet (ice / lava / crust from the state texture) and frozen quads also feed the slip collider (IceShell,
+                    // collider only); with an older shader frozen quads keep the IceShell look as before. Cooled crust feeds a walkable
+                    // non-slip collider (CrustShell). Two passes when a quad goes to both lists.
+                    var cst = VerdantsAscent.Water.Core.WaterStateField.Sample(wx0 + 0.5f, wz0 + 0.5f, y00);
+                    if (cst.Crust >= 0.5f && cst.Lava < VerdantsAscent.Water.Core.WaterStateField.LavaHot)
+                    {
+                        if (cst.Crust < 0.85f) VerdantsAscent.Water.Core.WaterSteam.Note(wx0, y00, wz0);   // the water side of the crust band
+                        int cb = s_cVerts.Count;
+                        s_cVerts.Add(new Vector3(wx0, y00, wz0)); s_cVerts.Add(new Vector3(wx0 + 1f, y10, wz0));
+                        s_cVerts.Add(new Vector3(wx0, y01, wz0 + 1f)); s_cVerts.Add(new Vector3(wx0 + 1f, y11, wz0 + 1f));
+                        s_cTris.Add(cb); s_cTris.Add(cb + 2); s_cTris.Add(cb + 1); s_cTris.Add(cb + 1); s_cTris.Add(cb + 2); s_cTris.Add(cb + 3);
+                    }
+                    bool iceToo = frozen && s_stateLook;
+                    if (gridIce)
+                    {
+                        // 0.2.1313: the collider = this cell clipped at _FiresIceSolid on the grid's exact bilinear values (the look's own
+                        // values); the sheet quad is drawn once, as water (the shader draws the ice from the same grid).
+                        if (grid == null) grid = VerdantsAscent.Water.Core.WaterStateField.BuildGrid(VerdantsAscent.Water.Core.WaterStateField.GridSrc.Gen,
+                                buf.OriginX - 1f, buf.OriginZ - 1f, buf.WaterLvl, GridFallbackY(buf));
+                        VerdantsAscent.Water.Core.IceGridClip.ClipCell(grid, x, z, wx0, wz0, y00, y10, y01, y11, iso, s_iVerts, s_iTris, s_iNorms, s_iUvs,
+                            ref cVis, ref cCol, ref cVisOnly, ref cColOnly, ref cFirst);
+                        frozen = false; iceToo = false;
+                    }
+                    for (int pass = 0; pass < (iceToo ? 2 : 1); pass++)
+                    {
+                    if (pass == 1) frozen = false;
                     var vl = frozen ? s_iVerts : s_wVerts;
                     var nl = frozen ? s_iNorms : s_wNorms;
                     var ul = frozen ? s_iUvs : s_wUvs;
@@ -1280,10 +1682,12 @@ namespace VerdantsAscent.Terrain.Voxel
                         var wc = new Color32(255, 255, 255, 255);
                         s_wCols.Add(wc); s_wCols.Add(wc); s_wCols.Add(wc); s_wCols.Add(wc);
                         // UV1 downhill flow (.xy) + coherence (.z), corner order as the verts.
-                        s_wUv1.Add(new Vector4(s_wCornF[gi0].x, s_wCornF[gi0].y, s_wCornC[gi0], 0f));
-                        s_wUv1.Add(new Vector4(s_wCornF[gi0 + 1].x, s_wCornF[gi0 + 1].y, s_wCornC[gi0 + 1], 0f));
-                        s_wUv1.Add(new Vector4(s_wCornF[gi0 + R].x, s_wCornF[gi0 + R].y, s_wCornC[gi0 + R], 0f));
-                        s_wUv1.Add(new Vector4(s_wCornF[gi0 + R + 1].x, s_wCornF[gi0 + R + 1].y, s_wCornC[gi0 + R + 1], 0f));
+                        // 0.2.1313 (Fire: "frozen rivers still show flow"; frame33946 ev 12038: 1973 of 2508 iced vertices carried flow):
+                        // a corner on solid ice (the grid's bilinear value >= _FiresIceSolid) carries no flow and no coherence.
+                        s_wUv1.Add(CornerFlow(grid, x, z, gi0, iso, ref flowZeroed));
+                        s_wUv1.Add(CornerFlow(grid, x + 1, z, gi0 + 1, iso, ref flowZeroed));
+                        s_wUv1.Add(CornerFlow(grid, x, z + 1, gi0 + R, iso, ref flowZeroed));
+                        s_wUv1.Add(CornerFlow(grid, x + 1, z + 1, gi0 + R + 1, iso, ref flowZeroed));
                         // UV2.x — the TRUE water column (surface Y − bed Y) this corner
                         // stands in. Custom/FiresInlandWater keys its opacity, shore
                         // fade and bank collar off this instead of reconstructing depth
@@ -1300,8 +1704,79 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                     tl.Add(b); tl.Add(b + 2); tl.Add(b + 1);
                     tl.Add(b + 1); tl.Add(b + 2); tl.Add(b + 3);
+                    }
                 }
             }
+            if (grid != null)
+            {
+                VerdantsAscent.Water.Core.WaterStateField.NoteCells("generated", grid, cVis, cCol, cVisOnly, cColOnly, cFirst);
+                if (!s_gridColliderSaid && s_iTris.Count > 0)
+                {
+                    s_gridColliderSaid = true;
+                    FiresLogger.LogInfo($"[WaterIce] generated ice collider cut from the state grid (0.5 m sub-cells, marching squares at {iso:0.00}, no noise): first chunk ({buf.OriginX:0},{buf.OriginZ:0}) {s_iTris.Count / 3} tri(s), visual {cVis} / collider {cCol} sub-cells (0.2.1313)");
+                }
+                if (flowZeroed > 0 && !s_flowZeroSaid)
+                {
+                    s_flowZeroSaid = true;
+                    FiresLogger.LogInfo($"[WaterIce] frozen water carries no flow: {flowZeroed} sheet corner(s) on solid ice got flow 0 (first chunk ({buf.OriginX:0},{buf.OriginZ:0})) (0.2.1313)");
+                }
+                if (flowZeroed > 0 && FiresLogger.DebugEnabled && Time.unscaledTime >= s_flowZeroLogAt)
+                {
+                    s_flowZeroLogAt = Time.unscaledTime + 30f;
+                    FiresLogger.LogDebug($"[WaterIce] flow zeroed on {flowZeroed} solid-ice corner(s) in chunk ({buf.OriginX:0},{buf.OriginZ:0}) (why: bilinear ice >= {iso:0.00} there; flow returns when it thaws and the chunk remeshes) (0.2.1313)");
+                }
+            }
+        }
+
+        private static bool s_gridColliderSaid, s_flowZeroSaid;
+        private static float s_flowZeroLogAt;
+
+        // 0.2.1313: the height a dry texel of the column grid falls back to (no wet neighbour): the chunk's middle; the SAME value
+        // ApplyGenWater passes to WaterStateField.Bind, so the texture fill reuses the collider's grid.
+        internal static float GridFallbackY(MeshBuffers buf) => buf.OriginY + VoxelChunk.CELLS * 0.5f;
+
+        private static Vector4 CornerFlow(VerdantsAscent.Water.Core.WaterStateField.Grid grid, int cx, int cz, int gi, float iso, ref int zeroed)
+        {
+            if (grid != null && VerdantsAscent.Water.Core.WaterStateField.CornerIce(grid, cx, cz) >= iso) { zeroed++; return Vector4.zero; }
+            return new Vector4(s_wCornF[gi].x, s_wCornF[gi].y, s_wCornC[gi], 0f);
+        }
+
+        // 0.2.1170 (Fire: walkable ice on generated rivers and lakes from ~0.10 m): a generated column is frozen when the TIMED ice at its
+        // water level is solid (WaterStateField: biome rule x IceField exposure, holes, caves, fires). It replaces the old instant
+        // seasonal reach (SeasonalFrozenAt), which iced the column before the timed ice allowed it.
+        private static bool GenTimedIceSolid(float level, float wx0, float wz0)
+            => level > 0f && VerdantsAscent.Water.Core.WaterStateField.IceSolidAt(wx0 + 0.5f, wz0 + 0.5f, level);
+
+        // 0.2.1097: cooled crust (lava meeting water, WaterStateField): a walkable, non-slip collider at the surface (static_solid,
+        // default friction), collider only - the water sheet draws the crust from its state texture. No liquid level there
+        // (VoxelWaterSurface via FatLava.GenNotLiquidAt) and no burn (FatLava burns only hot lava).
+        private static readonly System.Collections.Generic.List<Vector3> s_cVerts = new System.Collections.Generic.List<Vector3>(64);
+        private static readonly System.Collections.Generic.List<int> s_cTris = new System.Collections.Generic.List<int>(96);
+        private static bool s_stateLook;
+        internal static int GenIceSmoothKept;   // 0.2.1192: generated ice cells that kept the sheet's smooth corner heights (no snap)
+        private GameObject _crustGO;
+        private MeshCollider _crustCollider;
+        private Mesh _crustMesh;
+
+        private void ApplyCrustSheet()
+        {
+            if (s_cTris.Count == 0) { if (_crustGO != null) _crustGO.SetActive(false); return; }
+            if (_crustGO == null)
+            {
+                _crustGO = new GameObject("CrustShell");
+                _crustGO.transform.SetParent(transform, false);
+                int solid = LayerMask.NameToLayer("static_solid");
+                if (solid >= 0) _crustGO.layer = solid;
+                _crustCollider = _crustGO.AddComponent<MeshCollider>();
+                _crustMesh = new Mesh { name = "gencrust" };
+            }
+            _crustMesh.Clear();
+            _crustMesh.SetVertices(s_cVerts);
+            _crustMesh.SetTriangles(s_cTris, 0);
+            _crustMesh.RecalculateBounds();
+            _crustCollider.sharedMesh = null;
+            _crustCollider.sharedMesh = _crustMesh;
+            _crustGO.SetActive(true);
         }
 
         // FROZEN sheet — same quads, ICE material, WALKABLE collider. The GO
@@ -1325,6 +1800,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 _iceRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 _iceRenderer.receiveShadows = false;
                 _iceCollider = _iceGO.AddComponent<MeshCollider>();
+                VerdantsAscent.Water.Core.VanillaIce.OptIn(_iceCollider);   // 0.2.1095: generated ice slips the vanilla way (layer static_solid + SlipperyIce)
                 _iceMesh = new Mesh { name = "genice" };
                 mf.sharedMesh = _iceMesh;
             }
@@ -1362,15 +1838,25 @@ namespace VerdantsAscent.Terrain.Voxel
                 FatNativeTrace.Step("ice collider end", _iceMesh != null ? _iceMesh.GetInstanceID() : 0);
                 FatSpike.Add(FatSpike.Stage.IceCollider, spkIce);
             }
+            if (_iceRenderer != null) _iceRenderer.enabled = !s_stateLook;   // 0.2.1097: with the state shader the water sheet draws the ice; this is the slip collider
             _iceGO.SetActive(true);
         }
 
         private void OnDestroy()
         {
+            SkirtViews.Remove(this);
             FatNativeTrace.Step("view destroy", _mesh != null ? _mesh.GetInstanceID() : 0, name + (BakeInFlight ? " (bake in flight: deferred)" : ""));
             // A mesh the bake worker is still cooking is destroyed by the pipeline once that bake returns
-            if (_mesh != null && BakeInFlight && _bakingMeshId != 0) VoxelMeshPipeline.DestroyAfterBake(_bakingMeshId, _mesh);
-            else if (_mesh != null) Destroy(_mesh);
+            // 0.2.1054: the mesh in the oven is the staging mesh when a remesh was staged, else _mesh.
+            bool bakingStaging = BakeInFlight && _bakingMeshId != 0 && _staging != null && _staging.GetInstanceID() == _bakingMeshId;
+            if (bakingStaging) { VoxelMeshPipeline.DestroyAfterBake(_bakingMeshId, _staging); if (_mesh != null) Destroy(_mesh); }
+            else
+            {
+                if (_mesh != null && BakeInFlight && _bakingMeshId != 0) VoxelMeshPipeline.DestroyAfterBake(_bakingMeshId, _mesh);
+                else if (_mesh != null) Destroy(_mesh);
+                if (_staging != null) Destroy(_staging);
+            }
+            BodyHold.ChunkGone(this);
             if (_waterMesh != null) Destroy(_waterMesh);
             if (_fallsMesh != null) Destroy(_fallsMesh);
             if (_iceMesh != null) Destroy(_iceMesh);

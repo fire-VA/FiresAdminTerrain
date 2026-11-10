@@ -22,6 +22,42 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // From the Priority.Low prefix of FAT's one TerrainOp.Awake hook (FatVanillaHooks),
         // after the closed-zone refusal and the FAT tile route have both passed on the op.
+        private static int s_snowKept;
+        private static float s_snowKeptLogAt;
+        private static void NoteSnowOpKept(Vector3 p)
+        {
+            s_snowKept++;
+            if (Time.unscaledTime < s_snowKeptLogAt) return;
+            s_snowKeptLogAt = Time.unscaledTime + 10f;
+            FiresLogger.LogDebug($"[SnowTrail] snow op at ({p.x:0.0},{p.y:0.0},{p.z:0.0}) kept on the ground TerrainComp (its point resolves to a cave layer); {s_snowKept} this session");
+        }
+
+        // 0.2.1155 (Fire: snow trails "on islands too"): a skyland's paint is per sample (VoxelLayerPaint), so a trail op on an island
+        // marks its samples cultivated (G 1 in the palette = the trench cut) at the TRAIL's width - vanilla's snow_walk r 1 painted a
+        // 2 m disc, a creature / shovel op its tagged radius. Only on an island with snow (FatSnowTrail.SnowTrailBiome); else as before.
+        private static bool s_islandTrailSaid;
+        private static float IslandPaintRadius(TerrainOp op, TerrainOp.Settings s)
+        {
+            float r = s.m_paintRadius;
+            try
+            {
+                var kind = FatSnowTrail.Kind(s);
+                if (kind == FatSnowTrail.OpKind.Other) return r;
+                Vector3 p = op.transform.position;
+                if (FiresTerrainLayers.Resolve(p).Kind != TerrainLayerKind.Island || !FatSnowTrail.SnowTrailBiome(p)) return r;
+                float half = kind == FatSnowTrail.OpKind.Walk ? FatSnowTrail.TrenchWidth * 0.5f
+                    : kind == FatSnowTrail.OpKind.Creature ? (FatCreatureTrail.HalfFromRadius(r, out float ch) ? ch : 0.5f)
+                    : FatShovelPatch.HalfFromRadius(r, out float ph) ? ph : 0.5f;
+                if (!s_islandTrailSaid)
+                {
+                    s_islandTrailSaid = true;
+                    FiresLogger.LogDebug($"[SnowTrail] island trail: {kind} op at ({p.x:0.0},{p.y:0.0},{p.z:0.0}) painted on the island layer {half * 2f:0.0} m wide (op r {r:0.00}) - Fire: trails on islands too (once per session)");
+                }
+                return half;
+            }
+            catch (System.Exception ex) { FiresLogger.LogDebug($"[SnowTrail] island trail radius bail: {ex.Message}"); return r; }
+        }
+
         internal static bool AllowTerrainOp(TerrainOp op)
         {
             if (op == null || TerrainOp.m_forceDisableTerrainOps) return true;
@@ -31,7 +67,17 @@ namespace VerdantsAscent.Terrain.Voxel
             if (settings == null) return true;
             // Paint keeps to the layer it is aimed at: on a cave floor or a skyland the op's paint goes on
             // that layer (VoxelLayerPaint) and never reaches the ground's TerrainComp; what is left of the op carries on.
-            if (settings.m_paintCleared && Player.m_localPlayer != null && VoxelLayerPaint.TryPaint(op.transform.position, settings.m_paintRadius, true,
+            // 0.2.1106 (round #3/#4: no walk trench at the Deep North hut 274 823): the snow_walk op at the player's feet (y ~40-42,
+            // the hut ground is dug below the generated height 50 with voxel overhead) resolved to a CAVE layer ("[FiresVoxel] layer
+            // paint queued: a terrain paint on cave … (274.0,42.0,823.0)"), so its G went to the cave layer paint and never reached
+            // the ground TerrainComp the snow trench reads; the TerrainComp writer (FatSnowTrail) never ran for it. Vanilla's snow
+            // ops (snow_walk / snow_decrease / snow_fire_*) stay on the ground TerrainComp unless they are really on a sky island.
+            bool snowOp = op.gameObject != null && op.gameObject.name.StartsWith("snow_", System.StringComparison.OrdinalIgnoreCase);
+            if (snowOp && settings.m_paintCleared && FiresTerrainLayers.Resolve(op.transform.position).Kind == TerrainLayerKind.Cave)
+            {
+                NoteSnowOpKept(op.transform.position);
+            }
+            else if (settings.m_paintCleared && Player.m_localPlayer != null && VoxelLayerPaint.TryPaint(op.transform.position, IslandPaintRadius(op, settings), true,
                     VoxelLayerPaint.MaskOf(settings.m_paintType), false, 0, "a terrain paint"))
             {
                 settings.m_paintCleared = false;   // this instance's copy, not the prefab's

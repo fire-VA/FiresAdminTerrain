@@ -321,16 +321,16 @@ namespace VerdantsAscent.Terrain.Zones
         private static class ZNet_LoadWorld_Guard
         {
             [HarmonyPriority(Priority.First)]
-            private static void Prefix() => BeforeServerLoad();
+            private static void Prefix() => FatLoadGuard.Step("world load guard (LoadWorld)", BeforeServerLoad);
 
-            private static void Postfix(bool __result) => AfterChunkedLoad(__result);
+            private static void Postfix(bool __result) => FatLoadGuard.Step("chunked-load check", () => AfterChunkedLoad(__result));
         }
 
         [HarmonyPatch(typeof(ZNet), "LoadOldWorld")]
         private static class ZNet_LoadOldWorld_Guard
         {
             [HarmonyPriority(Priority.First)]
-            private static void Prefix() => BeforeServerLoad();
+            private static void Prefix() => FatLoadGuard.Step("world load guard (LoadOldWorld)", BeforeServerLoad);
         }
 
     }

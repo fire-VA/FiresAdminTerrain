@@ -36,7 +36,8 @@ namespace VerdantsAscent.Terrain.BcImport
         [HarmonyPatch(typeof(ZoneSystem), "ClearNonPlacedLocations")]
         private static class ReapplyPinnedLocations
         {
-            private static void Postfix(ZoneSystem __instance) => Reapply(__instance);
+            // 0.2.1059 (load/save audit M5): guarded, so a throw never skips later mods' postfixes.
+            private static void Postfix(ZoneSystem __instance) => FatLoadGuard.Step("pinned locations reapply", () => Reapply(__instance));
         }
 
         [HarmonyPatch(typeof(ZoneSystem), "CountNrOfLocation")]

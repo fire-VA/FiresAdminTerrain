@@ -134,7 +134,10 @@ namespace VerdantsAscent.Terrain.Lifecycle
                 && ZRoutedRpc.instance != null
                 && !ZNet.instance.IsServer())
             {
-                RegionScrubberRPC.SendRequest(center, radius, scope, source);
+                // 0.2.1060: automatic scrubs (vanilla terrain ops) are batched, one REQUEST per 0.25 s; commands
+                // and brushes still go at once.
+                if (source == Source.VanillaTerrainOp) RegionScrubberRPC.QueueRequest(center, radius, scope, source);
+                else RegionScrubberRPC.SendRequest(center, radius, scope, source);
                 FiresLogger.LogVerbose($"[RegionScrubber] Client {source} → REQUEST dispatched to server; awaiting APPLY broadcast.");
                 return 0;
             }
@@ -164,8 +167,20 @@ namespace VerdantsAscent.Terrain.Lifecycle
             float radius,
             Scope scope,
             Source source)
+            => ApplyLocally(center, radius, scope, source, source);
+
+        // 0.2.1060: origin = why the scrub fired on the peer that started it (an RPC receiver gets source Rpc, the
+        // packed source as origin). A vanilla-terrain-op scrub resets grass only where it removed paint of ours.
+        public static int ApplyLocally(
+            Vector3 center,
+            float radius,
+            Scope scope,
+            Source source,
+            Source origin)
         {
             if (radius <= 0f || scope == Scope.None) return 0;
+            bool autoOp = origin == Source.VanillaTerrainOp;
+            Stats.Applied++;
 
             int changes = 0;
             string opName = $"VAScrub:{source}:{scope}";
@@ -201,11 +216,13 @@ namespace VerdantsAscent.Terrain.Lifecycle
                 }
 
                 // ── Layer 2: vanilla biome overlay (BiomePaintPersistence) ──
+                int biomeRemoved = 0;
                 if ((scope & Scope.VanillaBiome) != 0)
                 {
                     try
                     {
-                        changes += BiomePaintPersistence.RemoveOverlapping(center, radius);
+                        biomeRemoved = BiomePaintPersistence.RemoveOverlapping(center, radius);
+                        changes += biomeRemoved;
                     }
                     catch (Exception ex)
                     {
@@ -221,6 +238,15 @@ namespace VerdantsAscent.Terrain.Lifecycle
                 // VanillaPaint scope flag remains in the enum so callers
                 // compile, but it is now a no-op until/unless we add a
                 // direct TerrainComp.PaintCleared-clearing path.
+
+                // ── Layers 4 + 5 share one grass reset ──
+                // 0.2.1060 (Fire's Deep North perf): ClutterManager.ClearInRadius is itself a ResetGrass (the painted
+                // clutter system is retired), so Clutter + VanillaGrass reset the same grass twice. Now once, and for a
+                // vanilla-terrain-op scrub only where it actually removed paint of ours (vanilla's own op already
+                // resets its grass).
+                bool grassWanted = (scope & (Scope.Clutter | Scope.VanillaGrass)) != 0 && (!autoOp || biomeRemoved > 0);
+                if (!grassWanted) scope &= ~(Scope.Clutter | Scope.VanillaGrass);
+                else if ((scope & Scope.Clutter) != 0) scope &= ~Scope.VanillaGrass;
 
                 // ── Layer 4: painted clutter ──
                 if ((scope & Scope.Clutter) != 0)
@@ -278,8 +304,27 @@ namespace VerdantsAscent.Terrain.Lifecycle
                 if (recordUndo) TileUndoLog.EndOperation();
             }
 
-            FiresLogger.LogInfo($"[RegionScrubber] {source} | center={center} r={radius:F1} scope={scope} → {changes} change(s)");
+            if (autoOp) FiresLogger.LogDebug($"[RegionScrubber] {source} | center={center} r={radius:F1} scope={scope} → {changes} change(s)");
+            else FiresLogger.LogDebug($"[RegionScrubber] {source} | center={center} r={radius:F1} scope={scope} → {changes} change(s)");
+            Stats.MaybeReport();
             return changes;
+        }
+
+        // 0.2.1060: counters for the 30 s summary (main thread only).
+        internal static class Stats
+        {
+            internal static int Sent, Batches, EmptySkipped, ShovelSkipped, Duplicates, Applied;
+            private static float s_next;
+
+            internal static void MaybeReport()
+            {
+                float now = Time.unscaledTime;
+                if (now < s_next) return;
+                s_next = now + 30f;
+                if (Sent + Batches + EmptySkipped + ShovelSkipped + Duplicates + Applied == 0) return;
+                FiresLogger.LogDebug($"[RegionScrubber] scrubs: {Sent} sent ({Batches} batches), {EmptySkipped} empty skipped, {ShovelSkipped} shovel ops skipped, {Duplicates} duplicates dropped, {Applied} applied here (last 30 s)");
+                Sent = Batches = EmptySkipped = ShovelSkipped = Duplicates = Applied = 0;
+            }
         }
 
         // Ruler-aware scrub. Reads the currently-active Infinity Hammer

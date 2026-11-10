@@ -147,6 +147,54 @@ namespace VerdantsAscent.Water.Core
             CleanupVFX();
         }
 
+        // 0.2.1313 (Fire: on solid ice ALL flow animation stops - particles and sound included): every 2 s each emitter checks the
+        // water under it against the one ice grid (WaterStateField: the placed sheet's bilinear ice, as drawn and as walked); on solid
+        // ice it stops emitting (live particles finish), and it plays again when that water thaws. The ambient AudioSource is never
+        // spawned (SpawnAmbientAudio is off: "auto-placed SFX conflicts with world audio"), so there is no FAT water sound to gate; if
+        // it is ever turned on it is gated here too.
+        private float _iceCheckAt;
+        private static bool s_iceGateSaid;
+        private static float s_iceGateLogAt;
+        private void Update()
+        {
+            if (!_initialized || Time.unscaledTime < _iceCheckAt) return;
+            _iceCheckAt = Time.unscaledTime + 2f;
+            int stopped = 0, played = 0;
+            foreach (var ps in _waterfallSpray) GateOnIce(ps, ref stopped, ref played);
+            GateOnIce(_surfaceDebris, ref stopped, ref played);
+            if (_ambientAudio != null)
+            {
+                bool ice = SolidIceUnder(_ambientAudio.transform.position);
+                if (ice && _ambientAudio.isPlaying) { _ambientAudio.Pause(); stopped++; }
+                else if (!ice && !_ambientAudio.isPlaying && _ambientAudio.enabled) { _ambientAudio.UnPause(); played++; }
+            }
+            if (stopped > 0 && !s_iceGateSaid)
+            {
+                s_iceGateSaid = true;
+                FiresLogger.LogInfo($"[WaterIce] water particles / sound stop on solid ice: first combiner '{name}', {stopped} emitter(s) stopped (0.2.1313)");
+            }
+            if ((stopped > 0 || played > 0) && FiresLogger.DebugEnabled && Time.unscaledTime >= s_iceGateLogAt)
+            {
+                s_iceGateLogAt = Time.unscaledTime + 30f;
+                FiresLogger.LogDebug($"[WaterIce] ambient water fx '{name}': {stopped} emitter(s) stopped (why: solid ice under them, bilinear ice >= {WaterStateField.IceSolid:0.00}), {played} resumed (thawed) (0.2.1313)");
+            }
+        }
+
+        private static void GateOnIce(ParticleSystem ps, ref int stopped, ref int played)
+        {
+            if (ps == null) return;
+            bool ice = SolidIceUnder(ps.transform.position);
+            if (ice && ps.isEmitting) { ps.Stop(true, ParticleSystemStopBehavior.StopEmitting); stopped++; }
+            else if (!ice && !ps.isEmitting) { ps.Play(true); played++; }
+        }
+
+        private static bool SolidIceUnder(Vector3 p)
+        {
+            if (WaterStateField.TryGridIce(WaterStateField.GridSrc.Placed, p.x, p.z, out float gi)) return gi >= WaterStateField.IceSolid;
+            if (WaterStateField.TryGridIce(WaterStateField.GridSrc.Gen, p.x, p.z, out gi)) return gi >= WaterStateField.IceSolid;
+            return WaterStateField.IceSolidAt(p.x, p.z, p.y);
+        }
+
         #endregion
 
         #region Shoreline Edge Detection

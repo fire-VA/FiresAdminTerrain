@@ -20,7 +20,7 @@ namespace VerdantsAscent.Terrain.BcImport
     {
         private const int Magic = 0x44474246;
         private const int FormatVersion = 1;
-        private const int MaxGridSize = 8192;
+        private const int MaxGridSize = 2048;   // 0.2.1333: was 8192; vanilla GenerateBiomePoints and AltBiomePointsParallel both build exactly 2048 (a bigger grid = refused, the client builds its own)
         private const int HeightBytes = sizeof(float);
         private const double BytesPerMegabyte = 1024d * 1024d;
 
@@ -83,6 +83,8 @@ namespace VerdantsAscent.Terrain.BcImport
         }
 
         // Client, first thing in VerifyBiomeData (FatVanillaHooks): true when the server's grid now stands in for vanilla's build.
+        internal static long LastLoadMs = -1, LastSectorsMs = -1;   // 0.2.1317: read by BcJoinSync's PeerInfo split (Debug)
+
         internal static bool TryTakeServerGrid(World world)
         {
             if (ZNet.instance == null || ZNet.instance.IsServer() || world == null) return false;
@@ -117,6 +119,7 @@ namespace VerdantsAscent.Terrain.BcImport
             WorldOf(data) = world;
             world.m_biomeData = data;
             data.GenerateSectors();
+            LastLoadMs = loadMs; LastSectorsMs = clock.ElapsedMilliseconds - loadMs;   // 0.2.1317
             FiresLogger.LogInfo($"[BcImport] biome grid: took the server's {data.Size}² grid instead of sampling it: load {loadMs} ms, "
                 + $"sectors {clock.ElapsedMilliseconds - loadMs} ms.");
             return true;
@@ -136,7 +139,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 int cells = size * size;
                 var heightBytes = new byte[cells * HeightBytes];
                 var biomeBytes = new byte[cells];
-                using (var inflate = new DeflateStream(file, CompressionMode.Decompress, true))
+                using (var inflate = FatInflate.DeflateReader(file, "biome grid", heightBytes.LongLength + biomeBytes.LongLength, true))   // 0.2.1333: limit = its exact size (21 MB at 2048)
                 {
                     if (!ReadFully(inflate, heightBytes) || !ReadFully(inflate, biomeBytes))
                     {

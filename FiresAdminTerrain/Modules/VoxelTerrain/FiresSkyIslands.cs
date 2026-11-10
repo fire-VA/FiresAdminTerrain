@@ -70,6 +70,16 @@ namespace VerdantsAscent.Terrain.Voxel
         private static string KindName(byte k)
             => k == SkylandKind ? "skyland" : k == ShapedKind ? "shaped skyland" : k == 1 ? "mountain" : k == 2 ? "crater" : k == 3 ? "grotto" : "rolling";
 
+        // 0.2.1075: one Debug line per skyland that rose on a super flat world (the zone-mode set, not the plain lattice).
+        internal static void LogIslandProof(int i)
+        {
+            if (i < 0 || i >= s_islands.Count) return;
+            var isl = s_islands[i];
+            bool water = (!float.IsNaN(isl.RillAng) && isl.PondLvl > 0f) || (isl.Waters != null && isl.Waters.Rivers.Count > 0);
+            FiresLogger.LogDebug($"[FiresSkyIslands] island {i} kind {KindName(isl.Kind)} variety {isl.Variety} biome {isl.Biome} at ({WorldX(in isl):0},{WorldZ(in isl):0}) "
+                + $"top y {isl.Top + isl.OffY:0}: super-flat bypass=true, location site {(isl.Site > 0 ? "yes" : "no")}, water {(water ? "yes" : "no")}, shaped {(isl.Shape != null ? "yes" : "no")}");
+        }
+
         private const float PLACE_CELL = 1536f;   // one roll per ~1.5km cell
         private const float INDEX_CELL = 512f;    // spatial index granularity
 
@@ -78,13 +88,50 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool s_any;
 
         internal static int IslandCount => s_islands.Count;
+
+        // 0.2.1069: the island nearest a point (horizontal distance), for the super flat proof line: islands only build when
+        // their zones wrap around a player (no far representation), so "no island chunks" usually means "none near you".
+        internal static bool TryNearest(Vector3 p, out float x, out float z, out float top, out float dist)
+        {
+            x = z = top = 0f; dist = float.MaxValue;
+            for (int i = 0; i < s_islands.Count; i++)
+            {
+                var isl = s_islands[i];
+                float ix = WorldX(in isl), iz = WorldZ(in isl);
+                float d = Mathf.Sqrt((ix - p.x) * (ix - p.x) + (iz - p.z) * (iz - p.z));
+                if (d >= dist) continue;
+                dist = d; x = ix; z = iz; top = isl.Top + isl.OffY;
+            }
+            return dist < float.MaxValue;
+        }
+
+        // 0.2.1136 (fat_world_content_test): the nearest island's index, centre, radius, top and whether it rolled a location site.
+        internal static bool TryNearestInfo(Vector3 p, out int index, out float x, out float z, out float r, out float top, out bool site, out float dist)
+        {
+            index = -1; x = z = r = top = 0f; site = false; dist = float.MaxValue;
+            for (int i = 0; i < s_islands.Count; i++)
+            {
+                var isl = s_islands[i];
+                float ix = WorldX(in isl), iz = WorldZ(in isl);
+                float d = Mathf.Sqrt((ix - p.x) * (ix - p.x) + (iz - p.z) * (iz - p.z));
+                if (d >= dist) continue;
+                dist = d; index = i; x = ix; z = iz; r = isl.R; top = isl.Top + isl.OffY; site = isl.Site > 0;
+            }
+            return index >= 0;
+        }
         internal static int ClusterCount;
+        internal const bool LatticeIslandsOn = false;   // 0.2.1076: plain lattice islands off on every world (skylands only)
 
         internal static bool Enabled => s_any && FiresVoxelConfig.BuildsSkyIslands && !(FatSuperFlat.On && FiresWorldProfile.Current?.SkyIslands != true);   // On super flat only when its Sky islands row is ticked
+
+        // 0.2.1078: bumped whenever the live island set changes (Clear / AddIsland), so per-cell caches of island answers
+        // (FatSuperFlat's 2D biome bypass) know when to drop themselves.
+        internal static int Generation;
 
         internal static void Clear()
         {
             s_islands.Clear();
+            System.Threading.Interlocked.Increment(ref Generation);
             s_index.Clear();
             s_any = false;
             ClusterCount = 0;
@@ -111,6 +158,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 RollSkylandSite(ref derived);
             }
             s_islands.Add(derived);
+            System.Threading.Interlocked.Increment(ref Generation);
             float wx = WorldX(in isl), wz = WorldZ(in isl);
             int i0 = Mathf.FloorToInt((wx - isl.R - 8f) / INDEX_CELL), i1 = Mathf.FloorToInt((wx + isl.R + 8f) / INDEX_CELL);
             int j0 = Mathf.FloorToInt((wz - isl.R - 8f) / INDEX_CELL), j1 = Mathf.FloorToInt((wz + isl.R + 8f) / INDEX_CELL);
@@ -171,6 +219,10 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             GroundOverride = groundAt;
             Clear();
+            // 0.2.1076 (Fire: "we dont want the basic islands at all"): no plain lattice islands on any world. A seeded registry starts
+            // empty and every island is a skyland raised by ZoneModeSkylands around the open / visited zones. The lattice code below
+            // stays for reference and old registries, but is never reached.
+            if (!LatticeIslandsOn) return;
             if (FiresVoxelConfig.SkyIslands != null && !FiresVoxelConfig.SkyIslands.Value) return;
             float chance = FiresVoxelConfig.SkyIslandRarity != null
                 ? FiresVoxelConfig.SkyIslandRarity.Value : 0.30f;
@@ -695,6 +747,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // Deterministic points per island, filtered to the caller's zone
         // rect so each zone spawns exactly its own share once. Pure island
         // math — works before any chunk exists.
+        internal static int s_skippedSkylandProps;
+
         internal static void CollectProps(float x0, float z0, float x1, float z1,
             List<Vector3> pos, List<Quaternion> rot, List<string> name)
         {
@@ -713,6 +767,10 @@ namespace VerdantsAscent.Terrain.Voxel
                         var isl = s_islands[list[k]];
                         if (Mathf.FloorToInt(WorldX(in isl) / INDEX_CELL) != i
                             || Mathf.FloorToInt(WorldZ(in isl) / INDEX_CELL) != j) continue;
+                        // 0.2.1079 (Fire: rocks/logs/stumps/root-stars floating in a CIRCLE around shaped skylands): this ring is the
+                        // plain island's, laid on the disc radius (0.90-0.97 x isl.R) and the disc top, never the shaped outline. A
+                        // skyland is dressed only by its own shaped pass (ZoneModeSkylands.Dress, rim vines + belly on the real column).
+                        if (IsSkyland(isl.Kind)) { s_skippedSkylandProps++; continue; }
                         int first = pos.Count;
                         CollectIslandProps(in isl, x0 - isl.OffX, z0 - isl.OffZ, x1 - isl.OffX, z1 - isl.OffZ, pos, rot, name);
                         ShiftOut(in isl, pos, first);

@@ -88,8 +88,19 @@ namespace VerdantsAscent.Terrain.Voxel
         // never see.
         public int AppliedVersion = -1;
 
+        // 0.2.1353 (Fire: "get this terrain loading thing fixed"): Version minus the border-mirror bumps = this chunk's OWN data (generate, brush, record, stamp, mop).
+        // True once a mesh job has read that data, so another mesh now could only change the shared border ring, the lips or the paint refinement: never the chunk's own ground.
+        public int RingBumps;
+        private int _meshedOwn = int.MinValue;
+        public bool OwnDataMeshed { get { lock (_lock) return Version - RingBumps == _meshedOwn; } }
+
+        // 0.2.1353: the remesh queue's stamps of this chunk's last pick, for a starved re-queue (VoxelNearQueue.EnqueueKeepAge). Written and cleared by the worker that holds the chunk.
+        public long PickSeq, PickTicks;
+
         // Set while the chunk sits in the remesh queue (dedup).
         public bool Queued;
+        public long GenDoneTicks, MeshDoneTicks;   // 0.2.1346: worker stamps for the zone stage line (a torn read costs one proof number)
+        internal uint GroundSig; internal bool GroundSigSet;   // 0.2.1344: VoxelWaterSheetMesh.NoteChunkMeshed; on the chunk OBJECT, so a reloaded chunk's first mesh always counts as a change
 
         // DROPPED — the zone unwrapped (player flew past) while this chunk was
         // still queued/generating. The worker skips it instantly on dequeue
@@ -393,7 +404,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     changed++;
                     if (apply) _biome[kv.Key] = nv;
                 }
-                if (apply && changed > 0) Version++;
+                if (apply && changed > 0) { Version++; RingBumps++; }   // 0.2.1353: counted apart, see OwnDataMeshed
             }
             return changed;
         }
@@ -434,6 +445,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // chunks pay the per-voxel SDF union below.
                 bool skyIsle = FiresSkyIslands.ChunkOverlaps(WorldOrigin);
                 if (skyIsle) System.Threading.Interlocked.Increment(ref IslandChunksGenerated);
+                bool haloArc = FatHaloArc.ChunkOverlaps(WorldOrigin);   // 0.2.1027 halo ring spike: the test arc unions in like an island
+                int haloSolid = 0;   // 0.2.1035: ring-solid samples this generate laid (proof the SDF reached the data)
                 // BED RE-CARVE (Fires worlds). Generated water seats its surface
                 // just under the LOWER bank; where that level drops to meet a low
                 // bank the bed has to follow, or the channel becomes too shallow
@@ -537,7 +550,9 @@ namespace VerdantsAscent.Terrain.Voxel
                             // a water region stays OPEN: no stored column over
                             // the void, so the sheet AND the swim hole together
                             // by construction and the player drops in.
-                            if (!IsCaveShaftUnder(wx, wz, wlvl, g))
+                            // 0.2.1318 (Fire 10-31: "caves below the water ... the water should still be swimmable down to the bed depth"):
+                            // the one store rule (GenColumnKeepsWater), shared with the baseline rebuild.
+                            if (GenColumnKeepsWater(wx, wz, wlvl, g, "generate"))
                             {
                                 if (_genWater == null) _genWater = new float[SAMPLES * SAMPLES];
                                 // SEAT-DOWN on the STORED level only, and only
@@ -597,6 +612,16 @@ namespace VerdantsAscent.Terrain.Voxel
                                     if (qi > q) q = qi;
                                 }
                             }
+                            if (haloArc)
+                            {
+                                float dh = FatHaloArc.Sdf(wx, wy, wz);
+                                if (dh > -100f)
+                                {
+                                    var qh = (sbyte)Mathf.Clamp(Mathf.RoundToInt(dh * QUANT), -127, 127);
+                                    if (qh > q) q = qh;
+                                    if (qh > 0) haloSolid++;
+                                }
+                            }
                             int i = Idx(x, y, z);
                             _seed[i] = q;
                             sbyte dens = q;
@@ -625,6 +650,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     }
                 }
                 ApplyBrushEditsLocked();
+                if (haloArc) FiresLogger.LogDebug($"[FatHalo] ring chunk {Key} generated: {haloSolid} ring-solid sample(s)");
                 // Canonical borders LAST: rings adopt whatever a loaded,
                 // generated owner holds (brush edits included), so duplicated
                 // boundary cells mesh identically on both sides - density AND
@@ -646,7 +672,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 _genGround = null;
                 _genBiome = null;
                 _genCracks = null;
-                PendingGenerate = false;
+                PendingGenerate = false; GenDoneTicks = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1346
                 GenFailCount = 0;
                 Version++;
             }
@@ -919,6 +945,31 @@ namespace VerdantsAscent.Terrain.Voxel
         // Void just below the level, probed with the SAME cave SDF the density
         // fill carves with — if the surface would span a shaft, the water is
         // a lid you cannot drop through. Two probes cover the lip band.
+        // 0.2.1318 (Fire 10-31: "the spots we fall through and cannot swim are because of caves below the water ... the water should
+        // still be swimmable down to the bed depth"): IsCaveShaftUnder probed the cave noise at the surface - 0.75 / 1.75 m and DROPPED the
+        // stored column (no sheet, no swim, no ice grid level) over any cave there, but the density fill never carves within 0.5 m under the
+        // ground (g - wy > 0.5f), so the bed above those caves is always solid; shallow shore water (< 1.25 m) was hit most = the ice stopping
+        // short of the shore + the fall-through holes. ONE rule for both store paths: a wet column always stores its water down to the bed.
+        // The real sinkhole shafts keep their own swim-time rule (FatSinkFallCuts.BelowShaftBed in VoxelWaterSurface.SurfaceAt and
+        // CustomWaterManager.GeneratedLevelAt). Proof: Info once + Debug (5 s rate limit) for columns the old probe would have dropped.
+        private static int s_caveKept, s_caveKeptLogged;
+        private static bool s_caveKeptSaid;
+        private static long s_caveKeptLogAt;
+        private bool GenColumnKeepsWater(float wx, float wz, float lvl, float ground, string path)
+        {
+            if (float.IsNaN(ground) || !IsCaveShaftUnder(wx, wz, lvl, ground)) return true;
+            int n = System.Threading.Interlocked.Increment(ref s_caveKept);
+            if (!s_caveKeptSaid) { s_caveKeptSaid = true; FiresLogger.LogInfo($"[FiresVoxelWater] water over caves kept: column ({wx:0},{wz:0}) surface {lvl:0.00} bed {ground:0.00} has a cave under its solid bed - stored down to the bed (was dropped: no sheet / swim / ice there) (0.2.1318)"); }
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (FiresLogger.DebugEnabled && now >= System.Threading.Interlocked.Read(ref s_caveKeptLogAt))
+            {
+                System.Threading.Interlocked.Exchange(ref s_caveKeptLogAt, now + System.Diagnostics.Stopwatch.Frequency * 5);
+                int since = n - s_caveKeptLogged; s_caveKeptLogged = n;
+                FiresLogger.LogDebug($"[FiresVoxelWater] cave-under-water column kept ({path}) at ({wx:0.0},{wz:0.0}): surface {lvl:0.00}, bed {ground:0.00}, depth {lvl - ground:0.00} m (why: cave noise under the bed, bed solid - the density fill never carves within 0.5 m of the ground); {since} such column(s) since the last line, {n} total; dropped 0 (0.2.1318)");
+            }
+            return true;
+        }
+
         private bool IsCaveShaftUnder(float wx, float wz, float lvl, float ground)
         {
             if (!_genCaves) return false;
@@ -955,7 +1006,8 @@ namespace VerdantsAscent.Terrain.Voxel
                         && wlvl > 30.3f
                         && (!FiresWorldGenBase.Active
                             || FiresWorldGenBase.IsWetRawAt(bwx, bwz)
-                            || FiresWorldGenBase.IsChannelAt(bwx, bwz)))
+                            || FiresWorldGenBase.IsChannelAt(bwx, bwz))
+                        && GenColumnKeepsWater(bwx, bwz, wlvl, _genGround != null ? _genGround[(x + 1) + SAMPLES * (z + 1)] : float.NaN, "rebuild"))   // 0.2.1318: the same one store rule as the generate path
                     {
                         if (_genWater == null) _genWater = new float[SAMPLES * SAMPLES];
                         float seatB = GenWaterField.FromGenerator
@@ -1049,7 +1101,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     Kind = kind;
                     _density = null; _seed = null; _biome = null; _genWater = null; _genWaterMop = null;
                     _genGround = null; _genBiome = null; _genOverrides = null; _genCracks = null;
-                    PendingGenerate = false;
+                    PendingGenerate = false; GenDoneTicks = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1346
                     Version++;
                     return true;
                 }
@@ -1067,7 +1119,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int i = 0; i < wtr.Length && !anyW; i++) if (wtr[i] != 0f) anyW = true;
                 _genWater = anyW ? wtr : null;
                 Kind = ChunkKind.Full;
-                PendingGenerate = false;
+                PendingGenerate = false; GenDoneTicks = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1346
                 ApplyBrushEditsLocked();
                 Version++;
                 return true;
@@ -1114,7 +1166,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Kind = kind;
                 _density = null; _seed = null; _biome = null; _genWater = null;
                 _genGround = null; _genBiome = null; _genOverrides = null; _genCracks = null;
-                PendingGenerate = false;
+                PendingGenerate = false; GenDoneTicks = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1346
                 Version++;
             }
         }
@@ -1773,6 +1825,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             if (_genWaterMop[i] != 0) intoWater[i] = -1f;
                     hasWater = true;
                 }
+                _meshedOwn = Version - RingBumps;   // 0.2.1353
                 return Version;
             }
         }

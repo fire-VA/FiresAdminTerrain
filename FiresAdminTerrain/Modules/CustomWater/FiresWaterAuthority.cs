@@ -47,6 +47,7 @@ namespace VerdantsAscent.Water.Core
                 + "married to our rendered swell and stops the wave 'rewind' from vanilla's net-synced clock. "
                 + "Turn off to hand waves + time back to vanilla exactly.");
             s_propMasterOff = Shader.PropertyToID("_FiresMasterFxOff");
+            FiresWaves.Bind(cfg);   // 0.2.1175: the one wave slider, on the water authority
         }
 
         internal static bool Active =>
@@ -104,7 +105,7 @@ namespace VerdantsAscent.Water.Core
                     double behind = net - s_clock;
                     if (behind > SnapAheadSeconds)
                     {
-                        FiresLogger.LogInfo($"[WaterClock] snapped forward {behind:0.00} s to net time (a join or a big correction).");
+                        FiresLogger.LogDebug($"[WaterClock] snapped forward {behind:0.00} s to net time (a join or a big correction).");
                         s_clock = net;
                     }
                     else s_clock += System.Math.Max(-step * MaxSlew, System.Math.Min(step * MaxSlew, behind));
@@ -133,7 +134,7 @@ namespace VerdantsAscent.Water.Core
             s_watchUntil = now + WatchWindowSeconds;
             double worst = s_watchMax < 0.0 ? -s_watchMax : s_watchMax;
             if (worst > WatchOffset)
-                FiresLogger.LogInfo($"[WaterClock] up to {s_watchMax:+0.00;-0.00} s from net time in the last {WatchWindowSeconds:0} s "
+                FiresLogger.LogDebug($"[WaterClock] up to {s_watchMax:+0.00;-0.00} s from net time in the last {WatchWindowSeconds:0} s "
                                     + $"(frame {s_watchMaxStep * 1000.0:0} ms then; slewing at most {MaxSlew:P0} of a step).");
             s_watchMax = 0.0;
             s_watchMaxStep = 0.0;
@@ -309,7 +310,7 @@ namespace VerdantsAscent.Water.Core
             if (!s_tideBound)
             {
                 s_tideBound = true;
-                var t = AccessTools.TypeByName("VerdantsAscent.Galaxies.TideSystem");
+                var t = FatSoftTypes.Find("VerdantsAscent.Galaxies.TideSystem");   // ValheimGalaxies is optional
                 // Galaxies' SurfaceOffset is a property; look the property up first so HarmonyX's
                 // AccessTools.Field does not warn "Could not find field" every load. The field path stays for older builds.
                 var pr = t != null ? AccessTools.Property(t, "SurfaceOffset") : null;
@@ -415,8 +416,8 @@ namespace VerdantsAscent.Water.Core
 
         private static void OnProbeReply(long sender, ZPackage pkg)
         {
-            if (pkg == null) return;
-            int id = pkg.ReadInt(), n = pkg.ReadInt();
+            if (pkg == null || !FatNetGuard.FromServer(sender, "water probe reply")) return;
+            int id = pkg.ReadInt(), n = FatNetGuard.Count(pkg.ReadInt(), 1024, "water probe reply points");   // OnProbe answers at most 1024
             var d = new float[n];
             for (int i = 0; i < n; i++) d[i] = pkg.ReadSingle();
             LastServerTide = pkg.GetPos() + 4 <= pkg.Size() ? pkg.ReadSingle() : float.NaN;
@@ -427,7 +428,9 @@ namespace VerdantsAscent.Water.Core
         {
             if (s_sampler != null || Time.realtimeSinceStartup < s_nextBind) return s_sampler;
             s_nextBind = Time.realtimeSinceStartup + BindRetrySeconds;
-            var t = AccessTools.TypeByName("VerdantsAscent.Water.Core.FiresShoreField");
+            var t = FatSoftTypes.Find("VerdantsAscent.Water.Core.FiresShoreField");
+            // FiresTossinShade is optional: without it, stop looking once every mod has loaded (the analytic wave is used instead).
+            if (t == null && Time.realtimeSinceStartup > FatSoftTypes.GiveUpAfterSeconds) s_nextBind = float.MaxValue;
             var m = t != null ? AccessTools.Method(t, "TrySampleWave", new[] { typeof(float), typeof(float), typeof(float).MakeByRefType() }) : null;
             if (m == null || !m.IsStatic) return null;
             try { s_sampler = (Sampler)System.Delegate.CreateDelegate(typeof(Sampler), m); }
@@ -535,6 +538,7 @@ namespace VerdantsAscent.Water.Core
                     FiresWaveField.FromWind(worldPos, depth, wind1, waterTime, waveFactor, waveFactorBig),
                     FiresWaveField.FromWind(worldPos, depth, wind2, waterTime, waveFactor, waveFactorBig),
                     alpha);
+            __result *= FiresWaves.PhysicsMult;   // 0.2.1175: slider x weather x overrides, 1 until the sea shader reads _FiresWaveMult
             if (memo && s_memo.Count < 4096) s_memo[wk] = __result;
             return false;
         }

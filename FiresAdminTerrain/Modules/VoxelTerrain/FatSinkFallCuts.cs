@@ -303,6 +303,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // A cache load: the cuts this world was planned with (none for an older world, a faithful or a file for
         // another seed). A studio bake carries the seed it was imported with, which is the world's seed only by chance, so
         // a bake's file (seedless check) is accepted by name: `anySeed` true.
+        private const long MaxCutsFileBytes = 4L * 1024L * 1024L;
         internal static void Load(string path, int seed, bool anySeed)
         {
             Cuts.Clear();
@@ -310,6 +311,9 @@ namespace VerdantsAscent.Terrain.Voxel
             try
             {
                 if (!File.Exists(path)) return;
+                // 0.2.1336: this file can come from the server (join sync). Refused before it is read if no real list could be that long.
+                long size = new FileInfo(path).Length;
+                if (size > MaxCutsFileBytes) { FiresLogger.LogWarning($"[SinkFall] {path} is {size:N0} bytes, past {MaxCutsFileBytes:N0}: refused, no big sinkholes this session."); return; }
                 int fileSeed = int.MinValue;
                 foreach (var line in File.ReadAllLines(path))
                 {
@@ -318,7 +322,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     bool large = f.Length == 7 && f[0] == "large";
                     if (!large && (f.Length != 6 || f[0] != "big")) continue;
                     float P(int i) => float.Parse(f[i], CultureInfo.InvariantCulture);
-                    Cuts.Add(new Cut { X = P(1), Z = P(2), FlowX = P(3), FlowZ = P(4), Width = P(5), Level = large ? P(6) : 0f, LargeOverflow = large });
+                    var cut = new Cut { X = P(1), Z = P(2), FlowX = P(3), FlowZ = P(4), Width = P(5), Level = large ? P(6) : 0f, LargeOverflow = large };
+                    // 0.2.1336: float.Parse takes "NaN" and "Infinity"
+                    float sum = cut.X + cut.Z + cut.FlowX + cut.FlowZ + cut.Width + cut.Level;
+                    if (float.IsNaN(sum) || float.IsInfinity(sum) || cut.Width < 0f)
+                    { FiresLogger.LogWarning($"[SinkFall] {Path.GetFileName(path)}: a line with a bad value was skipped"); continue; }
+                    Cuts.Add(cut);
                 }
                 if (!anySeed && fileSeed != int.MinValue && fileSeed != seed)
                 {

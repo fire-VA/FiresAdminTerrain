@@ -123,12 +123,18 @@ namespace VerdantsAscent.Terrain.Voxel
         // Spliced after vanilla's `InsideClearArea(clearAreas, p)`: true skips the spot exactly as a clear area does.
         public static bool Filter(bool insideClearArea, ZoneSystem.ZoneVegetation veg, Vector3 p)
         {
-            if (insideClearArea || veg == null || veg.m_prefab == null || !FiresVegWaterEcology.Enabled) return insideClearArea;
-            if (!IsRefusedKind(veg.m_prefab)) return false;
-            if (!UnderFatWater(p, SurfaceTolerance, out _)) return false;
+            if (!FilterDecision(insideClearArea, veg, p) || insideClearArea) return insideClearArea;
             s_zoneRefused.TryGetValue(veg.m_prefab.name, out int n);
             s_zoneRefused[veg.m_prefab.name] = n + 1;
             return true;
+        }
+
+        // 0.2.1413: the decision alone, no tally (FarForest's replay calls it at the same step, one implementation).
+        internal static bool FilterDecision(bool insideClearArea, ZoneSystem.ZoneVegetation veg, Vector3 p)
+        {
+            if (insideClearArea || veg == null || veg.m_prefab == null || !FiresVegWaterEcology.Enabled) return insideClearArea;
+            if (!IsRefusedKind(veg.m_prefab)) return false;
+            return UnderFatWater(p, SurfaceTolerance, out _);
         }
 
         // Once per zone, and only when something was refused: "vegetation refused under water: N (prefab×count); locations refused: M".

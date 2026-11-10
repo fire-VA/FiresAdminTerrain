@@ -57,6 +57,7 @@ namespace VerdantsAscent.Terrain.Zones
                 rpc.Register<ZPackage>(RpcRequest, RPC_Request);
                 rpc.Register<string>(RpcReply, (sender, message) =>
                 {
+                    if (!FatNetGuard.FromServer(sender, "closeable reply")) return;
                     try { Console.instance?.AddString(message); } catch { }
                     FiresLogger.LogInfo(message);
                 });

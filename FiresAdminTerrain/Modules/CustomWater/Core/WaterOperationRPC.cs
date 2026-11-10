@@ -46,6 +46,7 @@ namespace VerdantsAscent.Water.Core
         private const string RPC_REQUEST_DISK_SYNC = "FiresAdminTerrain_Water_RequestDiskSync";
         private const string RPC_DISK_SYNC_RESPONSE = "FiresAdminTerrain_Water_DiskSyncResponse";
         private const string RPC_CLEAR_ALL_WATER = "FiresAdminTerrain_Water_ClearAll";
+        private const string RPC_REMOVED_LIST = "FiresAdminTerrain_Water_RemovedList";   // 0.2.1336: server -> a joining peer
 
         // Track operations we've already applied locally (to prevent double-apply)
         private static HashSet<int> _appliedDiskHashes = new HashSet<int>();
@@ -82,6 +83,8 @@ namespace VerdantsAscent.Water.Core
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_REQUEST_DISK_SYNC, RPC_HandleRequestDiskSync);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_DISK_SYNC_RESPONSE, RPC_HandleDiskSyncResponse);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_CLEAR_ALL_WATER, RPC_HandleClearAllWater);
+                ZRoutedRpc.instance.Register<ZPackage>(RPC_REMOVED_LIST, RPC_HandleRemovedList);   // 0.2.1336
+                ZRoutedRpc.instance.m_onNewPeer = (Action<long>)Delegate.Combine(ZRoutedRpc.instance.m_onNewPeer, new Action<long>(SendRemovedList));   // 0.2.1336: the join event, once per bus
 
                 _initialized = true;
                 FiresLogger.LogInfo("[WaterOperationRPC] Initialized all water operation RPCs");
@@ -131,6 +134,7 @@ namespace VerdantsAscent.Water.Core
         private static int RequestCreateWaterInternal(WaterDisk disk)
         {
             int stableHash = disk.StableHash;
+            WaterRemovedDisks.ForgetLocal(stableHash);   // 0.2.1336: an undo re-lays a removed hash
 
             // Mark as locally applied so we skip our own confirmed broadcast
             _appliedDiskHashes.Add(stableHash);
@@ -168,6 +172,7 @@ namespace VerdantsAscent.Water.Core
             Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             int stableHash = disk.StableHash;
+            WaterRemovedDisks.ForgetLocal(stableHash);   // 0.2.1336
 
             // Mark as locally applied so we skip our own confirmed broadcast
             _appliedDiskHashes.Add(stableHash);
@@ -208,19 +213,23 @@ namespace VerdantsAscent.Water.Core
         {
             Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
+            // 0.2.1336: where the disk is, so the server only opens the anchors whose bounds hold it (null = this peer does not hold it)
+            Vector3? at = PositionOfDisk(stableHash);
+
             // Apply locally first for instant feedback
-            RemoveWaterDiskByHash(stableHash);
-            _appliedDiskHashes.Add(stableHash);
+            ApplyRemoval(stableHash);
 
             if (IsServer())
             {
-                ServerHandleRemoveAndBroadcast(stableHash, GetLocalPlayerId());
+                ServerHandleRemoveAndBroadcast(stableHash, GetLocalPlayerId(), at);
             }
             else
             {
                 var pkg = new ZPackage();
                 pkg.Write(stableHash);
                 pkg.Write(GetLocalPlayerId());
+                pkg.Write(at.HasValue);   // 0.2.1336 add-only
+                if (at.HasValue) pkg.Write(at.Value);
                 ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_REMOVE_WATER, pkg);
             }
         }
@@ -258,6 +267,30 @@ namespace VerdantsAscent.Water.Core
                     RequestRemoveWater(hash);
                 }
             }
+        }
+
+        /// <summary>
+        /// 0.2.1334 (Vmop): removes the disks whose WHOLE footprint lies inside the horizontal ring, each through RequestRemoveWater
+        /// (local at once, the server checks AdminCheck.IsAdmin and broadcasts; no new RPC or payload). Disks the ring only partly covers go in partlyInside.
+        /// RequestRemoveWaterInRadius (centre test) is unchanged for its other caller. Returns how many were requested.
+        /// </summary>
+        public static int RequestRemoveWaterWhollyInside(Vector3 center, float radius, List<WaterDisk> partlyInside, Func<float, bool> reachesY)
+        {
+            Initialize();   // cheap; re-registers on a new ZRoutedRpc
+
+            var hashes = new List<int>();
+            foreach (var combiner in new List<WaterMeshCombiner>(WaterMeshCombiner.AllCombiners))
+            {
+                if (combiner == null) continue;
+                foreach (var disk in combiner.WaterDisks)
+                {
+                    if (disk == null || (reachesY != null && !reachesY(disk.Position.y))) continue;
+                    if (disk.LiesInsideRing(center, radius)) hashes.Add(disk.StableHash);
+                    else if (disk.GetEdgeDistance(center) < radius && partlyInside != null) partlyInside.Add(disk);
+                }
+            }
+            foreach (int hash in hashes) RequestRemoveWater(hash);
+            return hashes.Count;
         }
 
         /// <summary>
@@ -369,7 +402,14 @@ namespace VerdantsAscent.Water.Core
             {
                 int stableHash = pkg.ReadInt();
                 long originPlayerId = pkg.ReadLong();
-                ServerHandleRemoveAndBroadcast(stableHash, originPlayerId);
+                // 0.2.1336: add-only trailing position; absent (older client) or not finite = every anchor is opened
+                Vector3? at = null;
+                if (pkg.GetPos() < pkg.Size() && pkg.ReadBool())
+                {
+                    Vector3 p = pkg.ReadVector3();
+                    if (!float.IsNaN(p.x + p.z) && !float.IsInfinity(p.x + p.z)) at = p;
+                }
+                ServerHandleRemoveAndBroadcast(stableHash, originPlayerId, at);
             }
             catch (Exception ex)
             {
@@ -443,6 +483,7 @@ namespace VerdantsAscent.Water.Core
 
             // Cache + persist
             _serverWaterCache[disk.StableHash] = disk;
+            WaterRemovedDisks.ForgetOnServer(disk.StableHash);   // 0.2.1336
             TriggerServerSave(disk.Position);
 
             // Broadcast confirmed to every client EXCEPT the origin - they already
@@ -456,18 +497,15 @@ namespace VerdantsAscent.Water.Core
             FiresLogger.LogInfo($"[WaterOperationRPC] Server confirmed create disk hash={disk.StableHash}, broadcasting to all");
         }
 
-        private static void ServerHandleRemoveAndBroadcast(int stableHash, long originPlayerId)
+        private static void ServerHandleRemoveAndBroadcast(int stableHash, long originPlayerId, Vector3? at)
         {
-            if (!_appliedDiskHashes.Contains(stableHash))
-            {
-                RemoveWaterDiskByHash(stableHash);
-            }
-            else
-            {
-                _appliedDiskHashes.Remove(stableHash);
-            }
+            // 0.2.1336: removal is idempotent, so it never consults _appliedDiskHashes (ApplyRemoval).
+            ApplyRemoval(stableHash);
 
             _serverWaterCache.Remove(stableHash);
+
+            // 0.2.1336: persists even with no combiner loaded here: the anchor ZDO is rewritten directly, and the hash goes on the list clients' cache files are checked against.
+            WaterRemovedDisks.NoteOnServer(stableHash, at);
 
             var pkg = new ZPackage();
             pkg.Write(stableHash);
@@ -550,6 +588,7 @@ namespace VerdantsAscent.Water.Core
                 long originPlayerId = pkg.ReadLong();
 
                 var disk = WaterDisk.Deserialize(diskData);
+                WaterRemovedDisks.ForgetLocal(disk.StableHash);   // 0.2.1336
 
                 // Skip if we already applied this locally (we are the origin)
                 if (_appliedDiskHashes.Contains(disk.StableHash))
@@ -581,13 +620,12 @@ namespace VerdantsAscent.Water.Core
                 int stableHash = pkg.ReadInt();
                 long originPlayerId = pkg.ReadLong();
 
-                if (_appliedDiskHashes.Contains(stableHash))
-                {
-                    _appliedDiskHashes.Remove(stableHash);
-                    return;
-                }
-
-                RemoveWaterDiskByHash(stableHash);
+                // 0.2.1336: _appliedDiskHashes kept the hash on the client that created the disk (the server skips the origin when
+                // broadcasting a create), so another admin's removal was swallowed there until a relog. A removal always applies;
+                // the origin of a removal is skipped by the broadcast itself, and removing a disk that is gone is a no-op.
+                bool wasKept = _appliedDiskHashes.Contains(stableHash);
+                ApplyRemoval(stableHash);
+                if (wasKept) FiresLogger.LogDebug($"[WaterOperationRPC] remove disk hash={stableHash}: applied on this client although it held the hash from its own create (0.2.1336)");
             }
             catch (Exception ex)
             {
@@ -713,6 +751,61 @@ namespace VerdantsAscent.Water.Core
             }
         }
 
+        // 0.2.1336: one removal on this peer, whoever asked: the add dedupe entry goes with the disk, so a later re-lay of the hash is not skipped.
+        private static void ApplyRemoval(int stableHash)
+        {
+            _appliedDiskHashes.Remove(stableHash);
+            WaterRemovedDisks.AddLocal(stableHash);
+            RemoveWaterDiskByHash(stableHash);
+        }
+
+        private static Vector3? PositionOfDisk(int stableHash)
+        {
+            foreach (var combiner in WaterMeshCombiner.AllCombiners)
+            {
+                if (combiner == null) continue;
+                foreach (var disk in combiner.WaterDisks)
+                    if (disk.StableHash == stableHash) return disk.Position;
+            }
+            return null;
+        }
+
+        // 0.2.1336 SERVER: a new peer's cache file may be older than removals made while it was away; a removed disk whose anchor is
+        // gone has nothing left in the world to correct that cache, so the peer gets the list. Event driven (ZRoutedRpc's new-peer event).
+        private static void SendRemovedList(long peer)
+        {
+            if (!IsServer() || ZRoutedRpc.instance == null) return;
+            var hashes = WaterRemovedDisks.ServerList();
+            if (hashes.Count == 0) return;
+            var pkg = new ZPackage();
+            pkg.Write(hashes.Count);
+            foreach (int h in hashes) pkg.Write(h);
+            ZRoutedRpc.instance.InvokeRoutedRPC(peer, RPC_REMOVED_LIST, pkg);
+            FiresLogger.LogDebug($"[WaterOperationRPC] sent {hashes.Count} removed disk hash(es) to peer {peer}");
+        }
+
+        private static void RPC_HandleRemovedList(long sender, ZPackage pkg)
+        {
+            if (pkg == null || IsServer()) return;
+            if (!FatNetGuard.FromServer(sender, "water removed list")) return;
+            try
+            {
+                int count = pkg.ReadInt();
+                long left = pkg.Size() - pkg.GetPos();
+                if (count < 0 || count > WaterRemovedDisks.MaxHashes || count * (long)sizeof(int) > left)
+                {
+                    FatNetGuard.Refuse("water removed list", $"count {count} with {left} bytes left");
+                    return;
+                }
+                for (int i = 0; i < count; i++) ApplyRemoval(pkg.ReadInt());
+                FiresLogger.LogDebug($"[WaterOperationRPC] applied the server's {count} removed disk hash(es) to this client's water and cache file");
+            }
+            catch (Exception ex)
+            {
+                FiresLogger.LogWarning($"[WaterOperationRPC] Error handling the removed list: {ex.Message}");
+            }
+        }
+
         private static void RPC_HandleRequestSync(long sender, ZPackage pkg)
         {
             // DEPRECATED: Water anchors restore from ZDO automatically.
@@ -725,11 +818,11 @@ namespace VerdantsAscent.Water.Core
         {
             if (pkg == null) return;
             if (IsServer()) return; // Server doesn't receive sync, only sends
-            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "cache sync"); return; }
+            if (!FatNetGuard.FromServer(sender, "water cache sync")) return;   // only the server, not any admin client
 
             try
             {
-                int diskCount = pkg.ReadInt();
+                int diskCount = FatNetGuard.Count(pkg.ReadInt(), MaxSyncDisks, "water cache sync disks");
 
                 FiresLogger.LogInfo($"[WaterOperationRPC] Receiving water cache sync: {diskCount} disks");
 
@@ -937,6 +1030,18 @@ namespace VerdantsAscent.Water.Core
         /// SERVER-SIDE: Handles a client requesting disk data for a specific position.
         /// Finds all disks near the position from loaded combiners and sends them back.
         /// </summary>
+        private const int MaxSyncDisks = 200000;
+        private const float DiskSyncGapSeconds = 0.25f;
+        private static readonly Dictionary<long, float> s_lastDiskSync = new Dictionary<long, float>();
+
+        private static bool DiskSyncAllowed(long sender)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (s_lastDiskSync.TryGetValue(sender, out float last) && now - last < DiskSyncGapSeconds) return false;
+            s_lastDiskSync[sender] = now;
+            return true;
+        }
+
         private static void RPC_HandleRequestDiskSync(long sender, ZPackage pkg)
         {
             if (pkg == null) return;
@@ -945,7 +1050,9 @@ namespace VerdantsAscent.Water.Core
             try
             {
                 Vector3 position = pkg.ReadVector3();
-                long requesterId = pkg.ReadLong();
+                pkg.ReadLong();   // the requester id in the payload is ignored: the answer goes to the real sender
+                long requesterId = sender;
+                if (!DiskSyncAllowed(sender)) return;
 
                 FiresLogger.LogInfo($"[WaterOperationRPC] Server received disk sync request from peer {requesterId} for position {position:F1}");
 
@@ -1025,12 +1132,12 @@ namespace VerdantsAscent.Water.Core
         {
             if (pkg == null) return;
             if (IsServer()) return;
-            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "disk sync"); return; }
+            if (!FatNetGuard.FromServer(sender, "water disk sync")) return;
 
             try
             {
                 Vector3 position = pkg.ReadVector3();
-                int diskCount = pkg.ReadInt();
+                int diskCount = FatNetGuard.Count(pkg.ReadInt(), MaxSyncDisks, "water disk sync disks");
 
                 FiresLogger.LogInfo($"[WaterOperationRPC] Received disk sync response: {diskCount} disks for position {position:F1}");
 
@@ -1123,9 +1230,16 @@ namespace VerdantsAscent.Water.Core
                 if (diskToRemove != null)
                 {
                     combiner.RemoveWaterDisk(diskToRemove);
-                    break;
+                    // 0.2.1334: RemoveWaterDisk saves the anchor (server) but not the file cache, so a combiner keeping other disks could
+                    // restore the removed one from a stale cache at the next login. An emptied combiner already cleared its own entry.
+                    if (combiner.WaterDisks.Count > 0) WaterCombinerCache.UpdateCombinerCache(combiner);
+                    return;
                 }
             }
+            // 0.2.1336: a group no live combiner stands for (zone unloaded) would bring the disk back from the file at the next login.
+            bool cached = WaterCombinerCache.PurgeRemovedDisk(stableHash);
+            // 0.2.1334: proof for the Vmop deletes. 0.2.1336: the server's anchor write follows (WaterRemovedDisks.Flush).
+            if (IsServer()) FiresLogger.LogDebug($"[WaterOperationRPC] remove disk hash={stableHash}: no loaded combiner on this server holds it; cache group purged={cached}; the anchor ZDO is written directly");
         }
 
         /// <summary>
@@ -1150,6 +1264,7 @@ namespace VerdantsAscent.Water.Core
                             pos.y = newSurfaceY.Value;
                             disk.Position = pos;
                         }
+                        combiner.NoteDisksChanged();   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
                         combiner.MarkDirty();
                         WaterCombinerCache.UpdateCombinerCache(combiner);
                         return;
@@ -1184,6 +1299,7 @@ namespace VerdantsAscent.Water.Core
 
                 if (allDisksInRadius)
                 {
+                    foreach (var disk in combiner.WaterDisks) WaterRemovedDisks.NoteRemovedHere(disk);   // 0.2.1354 (review: permanent disk loss): also reaches an anchor ZDO with no instance here
                     // Remove from file cache BEFORE destroying (needs valid combiner reference)
                     WaterCombinerCache.OnCombinerPermanentlyDeleted(combiner);
 
@@ -1204,6 +1320,7 @@ namespace VerdantsAscent.Water.Core
 
                     foreach (var disk in disksToRemove)
                     {
+                        WaterRemovedDisks.NoteRemovedHere(disk);   // 0.2.1354 (review: permanent disk loss): before RemoveWaterDisk's save
                         combiner.RemoveWaterDisk(disk);
                     }
 
@@ -1322,6 +1439,7 @@ namespace VerdantsAscent.Water.Core
         {
             _appliedDiskHashes.Clear();
             _serverWaterCache.Clear();
+            WaterRemovedDisks.Clear();   // 0.2.1336
             _initialized = false;
             lock (_pendingSyncLock)
             {

@@ -37,6 +37,51 @@ namespace VerdantsAscent.Terrain.Voxel
             public long SolidMask = -1; // Far supertile: which zones under it were solid when its triangles were built
         }
 
+        // ── 0.2.1414 FarLands #3 (Tools\DESIGN_FAT_FarForest_FarTerrain_20261108.md): [Far Terrain] ExtendedReach ──────────────
+        // Two more rings of the same 33x33 tiles, same material, masks and height function: ring 2 = 512 m tiles (16 m step) out
+        // to 3072 m, ring 3 = 1024 m tiles (32 m step) out to ReachMeters. Off = rings 0/1 exactly as before.
+        // Each outer ring hides where the ring inside it fully covers it (the ring-1 rule) and sits a little lower (ring 1 -2 m,
+        // ring 2 -4 m, ring 3 -8 m; shoreline clamp just above the 30 m plane, lower per ring), so overlaps never z-fight.
+        internal static BepInEx.Configuration.ConfigEntry<bool> ExtendedReach;
+        internal static BepInEx.Configuration.ConfigEntry<float> ReachMeters;
+        private const float Ring2Max = 3072f;
+
+        internal static void BindFarTerrain(BepInEx.Configuration.ConfigFile cfg)
+        {
+            ExtendedReach = cfg.Bind("Far Terrain", "ExtendedReach", false,
+                "FarLands: draw the far terrain out to ReachMeters with two more rings (512 m tiles to 3072 m, 1024 m tiles beyond), same look as the far quilt. Fires worlds only. Default off.");
+            ReachMeters = cfg.Bind("Far Terrain", "ReachMeters", 4096f,
+                new BepInEx.Configuration.ConfigDescription("How far the extended far terrain reaches (m). Fog and the camera's far clip decide how much of it shows.",
+                    new BepInEx.Configuration.AcceptableValueRange<float>(1536f, 6000f)));
+        }
+
+        private static bool ExtOn => ExtendedReach != null && ExtendedReach.Value;
+        private static float RingSize(int ring) => ring == 0 ? 64f : ring == 1 ? 256f : ring == 2 ? 512f : 1024f;
+        private static float RingRadius(int ring, float near, float far)
+        {
+            if (ring == 0) return near;
+            if (ring == 1) return far;
+            float reach = ReachMeters != null ? ReachMeters.Value : 4096f;
+            return ring == 2 ? Mathf.Min(Ring2Max, reach) : reach;
+        }
+        internal static float RingDrop(int ring) => ring == 1 ? 2f : ring == 2 ? 4f : 8f;            // baked into vertices
+        internal static float RingShoreClamp(int ring) => ring == 1 ? 30.1f : ring == 2 ? 30.08f : 30.06f;
+        private static float RingOrigin(int ring, int k) => ring == 0 ? k * 64f - 32f : k * RingSize(ring);
+        private static float s_tickFar = 1536f;   // this tick's Far Radius, for the ring-2/3 visibility rule
+        private static bool s_extSaid;
+
+        private static void SayExtended(float far)
+        {
+            if (s_extSaid) return;
+            s_extSaid = true;
+            var cam = Camera.main;
+            float reach = ReachMeters.Value, clip = cam != null ? cam.farClipPlane : -1f;
+            FiresLogger.LogInfo($"[FarTerrain] ExtendedReach on: far quilt rings to {reach:0} m (512 m tiles {far:0}-{Mathf.Min(Ring2Max, reach):0} m" +
+                                (reach > Ring2Max ? $", 1024 m tiles to {reach:0} m" : "") + $"); camera far clip {(clip > 0 ? clip.ToString("0") + " m" : "unknown")}" +
+                                (clip > 0 && clip < reach ? $" (WHY less shows: terrain past {clip:0} m is clipped by the camera)" : "") + ".");
+        }
+        private static int s_extBuilt; private static double s_extBuildMs; private static float s_extNextLog;
+
         private static readonly Dictionary<Vector3Int, Tile> s_tiles = new Dictionary<Vector3Int, Tile>();
         private static readonly List<Vector3Int> s_drop = new List<Vector3Int>();
         private static readonly List<Vector3Int> s_want = new List<Vector3Int>();
@@ -97,7 +142,7 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // The far field plus a chunk world's start-cave hill, so the far mesh agrees with the near voxels there.
-        private static float FarHeight(float wx, float wz)
+        internal static float FarHeight(float wx, float wz)   // 0.2.1415: internal ([generator] #8/#10 sample the drawn far height)
         {
             if (FatSuperFlat.On) return FatSuperFlat.HeightAt(wx, wz);   // The far terrain is the same flat land + shore + sea floor
             float h = FiresWorldGenBase.SampleFinalMeters(wx, wz);
@@ -137,6 +182,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void Tick()
         {
+            FarTerrainVanilla.Tick(Enabled);   // 0.2.1418: ExtendedReach on worlds the far quilt doesn't draw (vanilla TerrainLod)
             if (!Enabled)
             {
                 if (s_tiles.Count > 0) ClearAll();
@@ -167,6 +213,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             float near = FiresVoxelConfig.FarQuiltNearRadius.Value;
             float far = FiresVoxelConfig.FarQuiltFarRadius.Value;
+            s_tickFar = far;
 
             // Desired tile set. Key = (x, ring, z); ring-0 keys are ZONE
             // coordinates (tiles sit exactly on vanilla zone squares, centers
@@ -182,12 +229,34 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int tz = fMinZ; tz <= fMaxZ; tz++)
                 for (int tx = fMin; tx <= fMax; tx++)
                     s_want.Add(new Vector3Int(tx, 1, tz));
+            // 0.2.1414: rings 2 and 3 (ExtendedReach). Wanted AFTER rings 0/1, so the build budget still fills near-first.
+            if (ExtOn)
+            {
+                SayExtended(far);
+                for (int ring = 2; ring <= 3; ring++)
+                {
+                    float r = RingRadius(ring, near, far), inner = RingRadius(ring - 1, near, far), sz = RingSize(ring);
+                    if (r <= inner) continue;
+                    int a0 = Mathf.FloorToInt((c.x - r) / sz), a1 = Mathf.FloorToInt((c.x + r) / sz);
+                    int b0 = Mathf.FloorToInt((c.z - r) / sz), b1 = Mathf.FloorToInt((c.z + r) / sz);
+                    for (int tz = b0; tz <= b1; tz++)
+                        for (int tx = a0; tx <= a1; tx++)
+                        {
+                            // Tiles wholly inside the inner ring's square would never show: not built at all.
+                            float cx = tx * sz + sz * 0.5f, cz = tz * sz + sz * 0.5f, half = sz * 0.5f;
+                            if (Mathf.Abs(cx - c.x) + half <= inner && Mathf.Abs(cz - c.z) + half <= inner) continue;
+                            s_want.Add(new Vector3Int(tx, ring, tz));
+                        }
+                }
+            }
+            else s_extSaid = false;
 
             // Drop out-of-range tiles.
             s_drop.Clear();
             foreach (var kv in s_tiles)
             {
-                float r = kv.Key.y == 0 ? near : far;
+                if (kv.Key.y >= 2 && !ExtOn) { s_drop.Add(kv.Key); continue; }
+                float r = RingRadius(kv.Key.y, near, far);
                 TileCenter(kv.Key, out float cx, out float cz, out float size);
                 if (Mathf.Abs(cx - c.x) > r + size || Mathf.Abs(cz - c.z) > r + size)
                     s_drop.Add(kv.Key);
@@ -342,9 +411,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void BuildMask(Vector3Int key, Tile t)
         {
             t.MaskDone = true;
-            float size = key.y == 0 ? 64f : 256f;
-            float ox = key.y == 0 ? key.x * 64f - 32f : key.x * 256f;
-            float oz = key.y == 0 ? key.z * 64f - 32f : key.z * 256f;
+            float size = RingSize(key.y);
+            float ox = RingOrigin(key.y, key.x);
+            float oz = RingOrigin(key.y, key.z);
             float texel = size / (MASK_RES - 1);
 
             if (s_maskPx == null) s_maskPx = new Color32[MASK_RES * MASK_RES];
@@ -453,7 +522,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 float h = size * 0.5f;
                 if (x < cx - h || x > cx + h || z < cz - h || z > cz + h) continue;
                 n++;
-                float y = FiresWorldGenBase.SampleFinalMeters(x, z) + t.Go.transform.position.y - (kv.Key.y == 1 ? 2f : 0f);   // far tiles bake -2 m into their vertices
+                float y = FiresWorldGenBase.SampleFinalMeters(x, z) + t.Go.transform.position.y - (kv.Key.y >= 1 ? RingDrop(kv.Key.y) : 0f);   // far tiles bake -2 m (ring 2 -4, ring 3 -8) into their vertices
                 if (y > quiltY) quiltY = y;
                 kinds += kv.Key.y == 0 ? "near " : "far ";
             }
@@ -496,7 +565,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static void TileCenter(Vector3Int key, out float cx, out float cz, out float size)
         {
             if (key.y == 0) { size = 64f; cx = key.x * 64f; cz = key.z * 64f; }
-            else { size = 256f; cx = key.x * 256f + 128f; cz = key.z * 256f + 128f; }
+            else { size = RingSize(key.y); cx = key.x * size + size * 0.5f; cz = key.z * size + size * 0.5f; }
         }
 
         private static void UpdateVisibility(Vector3Int key, Tile t, Vector3 c, float near)
@@ -525,7 +594,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 // a hole in the world.
                 TileCenter(key, out float cx, out float cz, out float fsize);
                 float half = fsize * 0.5f;
-                show = Mathf.Abs(cx - c.x) + half > near || Mathf.Abs(cz - c.z) + half > near;
+                float inner = key.y == 1 ? near : RingRadius(key.y - 1, near, s_tickFar);   // 0.2.1414: ring k hides under ring k-1 alike
+                show = Mathf.Abs(cx - c.x) + half > inner || Mathf.Abs(cz - c.z) + half > inner;
             }
             // A far supertile re-triangulates when a zone under it turns solid (or stops being solid), so it never draws over
             // live voxel ground: no generator-height quilt poking through a levelled pad at range.
@@ -555,10 +625,11 @@ namespace VerdantsAscent.Terrain.Voxel
             // from with no tile at all: unwrap happened, the tile then had to
             // queue through the build budget, and the trailing gap showed
             // neither voxel nor lod ("chunks load too slow, show neither").
-            float size = key.y == 0 ? 64f : 256f;
-            int verts = key.y == 0 ? NEAR_VERTS : FAR_VERTS;
-            float ox = key.y == 0 ? key.x * 64f - 32f : key.x * 256f;
-            float oz = key.y == 0 ? key.z * 64f - 32f : key.z * 256f;
+            long tBuild = System.Diagnostics.Stopwatch.GetTimestamp();
+            float size = RingSize(key.y);
+            int verts = key.y == 0 ? NEAR_VERTS : FAR_VERTS;   // rings 1-3 all 33x33 (8 / 16 / 32 m steps)
+            float ox = RingOrigin(key.y, key.x);
+            float oz = RingOrigin(key.y, key.z);
             float step = size / (verts - 1);
 
             var vs = new Vector3[verts * verts];
@@ -586,7 +657,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             // Ocean-floor supertiles that never break the surface: skip, the
             // water plane hides them anyway. (Near ring keeps them — shores.)
-            if (key.y == 1 && maxH < 27f)
+            if (key.y >= 1 && maxH < 27f)
             {
                 s_tiles[key] = new Tile();   // tombstone: counted as present
                 return false;
@@ -618,13 +689,14 @@ namespace VerdantsAscent.Terrain.Voxel
             // uniform transform drop was sinking distant SHORELINES under the
             // water plane; deep/concave ground keeps the full budget (hidden
             // by water anyway).
-            if (key.y == 1)
+            if (key.y >= 1)
             {
+                float drop = RingDrop(key.y), clamp = RingShoreClamp(key.y);   // ring 1 = -2 m / 30.1 as before
                 for (int i = 0; i < vs.Length; i++)
                 {
                     float h = vs[i].y;
-                    float y = h - 2.0f;
-                    if (h > 30.05f) y = Mathf.Max(y, 30.1f);
+                    float y = h - drop;
+                    if (h > 30.05f) y = Mathf.Max(y, clamp);
                     vs[i].y = y;
                 }
             }
@@ -664,7 +736,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // near stays a −0.80m transform (2m steps ⇒ 0.5·|h''| chord,
             // within budget). Offsets stay distinct — the coplanar z-fight
             // class stays banned.
-            tile.Go.transform.position = new Vector3(ox, key.y == 1 ? 0f : -0.8f, oz);
+            tile.Go.transform.position = new Vector3(ox, key.y >= 1 ? 0f : -0.8f, oz);
             // Analytic world-anchored tangents (same formula as the voxel
             // mesher): pure function of the normal, so adjacent tiles and
             // voxel chunks share an identical normal-map basis — per-mesh
@@ -691,6 +763,18 @@ namespace VerdantsAscent.Terrain.Voxel
             tile.Go.SetActive(true);
             s_tiles[key] = tile;
             UpdateVisibility(key, tile, c, near);
+            if (key.y >= 2)
+            {
+                s_extBuilt++;
+                s_extBuildMs += (System.Diagnostics.Stopwatch.GetTimestamp() - tBuild) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                if (Time.time >= s_extNextLog)
+                {
+                    s_extNextLog = Time.time + 30f;
+                    int r2 = 0, r3 = 0;
+                    foreach (var kv in s_tiles) { if (kv.Value.Go == null) continue; if (kv.Key.y == 2) r2++; else if (kv.Key.y == 3) r3++; }
+                    FiresLogger.LogDebug($"[FarTerrain] extended rings: {r2} x 512 m + {r3} x 1024 m tile(s) live; {s_extBuilt} built so far, {s_extBuildMs / s_extBuilt:0.00} ms avg build (main thread)");
+                }
+            }
             return true;
         }
 

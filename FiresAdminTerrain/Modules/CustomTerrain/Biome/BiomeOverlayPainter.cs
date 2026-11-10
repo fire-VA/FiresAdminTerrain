@@ -120,7 +120,7 @@ namespace VerdantsAscent.Terrain.Biome
         {
             public Heightmap Heightmap;
             public Color32[] OriginalColors;
-            public Heightmap.Biome[] OriginalCornerBiomes;
+            public BiomeSector[] OriginalCornerBiomes;   // 0.2.1429: Valheim 1.0's m_cornerBiomes is BiomeSector[] (was read as Biome[], always null)
         }
 
         #endregion
@@ -244,13 +244,13 @@ namespace VerdantsAscent.Terrain.Biome
                     {
                         Heightmap = hm,
                         OriginalColors = renderMesh.colors32,
-                        OriginalCornerBiomes = _cornerBiomesField?.GetValue(hm) as Heightmap.Biome[]
+                        OriginalCornerBiomes = _cornerBiomesField?.GetValue(hm) as BiomeSector[]
                     };
 
                     // Clone the corner biomes array
                     if (data.OriginalCornerBiomes != null)
                     {
-                        data.OriginalCornerBiomes = (Heightmap.Biome[])data.OriginalCornerBiomes.Clone();
+                        data.OriginalCornerBiomes = (BiomeSector[])data.OriginalCornerBiomes.Clone();
                     }
 
                     _paintedHeightmaps[hmId] = data;
@@ -357,8 +357,10 @@ namespace VerdantsAscent.Terrain.Biome
 
             try
             {
-                var cornerBiomes = _cornerBiomesField.GetValue(hm) as Heightmap.Biome[];
-                if (cornerBiomes == null || cornerBiomes.Length < 4) return;
+                // 0.2.1429: BiomeSector[] in Valheim 1.0, cloned before writing (vanilla shares the array with the builder's cached build, Heightmap.cs:449)
+                var shared = _cornerBiomesField.GetValue(hm) as BiomeSector[];
+                if (shared == null || shared.Length < 4) return;
+                var cornerBiomes = (BiomeSector[])shared.Clone();
 
                 var hmPos = hm.transform.position;
                 float scale = hm.m_scale;
@@ -382,7 +384,7 @@ namespace VerdantsAscent.Terrain.Biome
                     {
                         // REPLACE the biome instead of OR-ing to avoid invalid combined biome flags
                         // Combined flags like (Mountain | BlackForest) cause dictionary lookup errors
-                        cornerBiomes[i] = targetBiome;
+                        cornerBiomes[i] = VerdantsAscent.Terrain.Zones.BiomePaint.PlainSectorFor(targetBiome);   // a shared plain sector, never a world sector edited in place
                         anyChanged = true;
                     }
                 }

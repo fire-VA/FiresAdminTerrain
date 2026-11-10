@@ -69,6 +69,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void RPC_Reply(long sender, ZPackage pkg)
         {
+            if (!FatNetGuard.FromServer(sender, "chunk keys reply")) return;
             bool stepped = pkg.ReadBool();
             string message = pkg.ReadString();
             Show(message);

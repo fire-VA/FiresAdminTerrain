@@ -63,6 +63,29 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static void Clear() { s_cells.Clear(); s_retryAt.Clear(); }
 
+        // 0.2.1083 (Fire: "still no lillies vass or fish ... we had all this working for our genned rivers"): the beds of GENERATED water
+        // come from GenWaterField; player-placed water (Vriver / Vpond / Vpool) from FatWaterChecks.TryWaterAt, the same answer the
+        // clutter ecology and the fish spawn checks use. Generated water keeps its own field first.
+        private static bool WaterAt(float x, float z, out float level, out float depth)
+        {
+            if (GenWaterField.TryWaterSurfaceSmooth(x, z, out level, out depth)) return true;
+            if (VerdantsAscent.Water.Core.FatWaterChecks.TryWaterAt(x, z, 0.2f, false, out level, out float bed)) { depth = level - bed; s_placedSamples++; return true; }
+            return false;
+        }
+        private static int s_placedSamples;
+        internal static int PlacedSamples => s_placedSamples;
+
+        // Drop the cached cells over (centre, reach) so they rebuild against the water that now exists (an empty cell is cached).
+        internal static int Invalidate(Vector3 centre, float reach)
+        {
+            int n = 0;
+            int c0x = Mathf.FloorToInt((centre.x - reach) / Cell), c1x = Mathf.FloorToInt((centre.x + reach) / Cell);
+            int c0z = Mathf.FloorToInt((centre.z - reach) / Cell), c1z = Mathf.FloorToInt((centre.z + reach) / Cell);
+            for (int z = c0z; z <= c1z; z++)
+                for (int x = c0x; x <= c1x; x++) { var k = new Vector2Int(x, z); if (s_cells.Remove(k)) n++; s_retryAt.Remove(k); }
+            return n;
+        }
+
         internal static void Tick()
         {
             if (s_enabled == null || !s_enabled.Value || SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null || s_failed)
@@ -79,12 +102,14 @@ namespace VerdantsAscent.Terrain.Voxel
             foreach (var c in s_cells.Values)
             {
                 if (c.Count == 0 || c.Bounds.SqrDistance(eye) > r2) continue;
+                if (ZoneReveal.On && VoxelZoneStreamer.ZoneMidSwap(ZoneSystem.GetZone(c.Bounds.center))) continue;   // 0.2.1346: drawn from the swap frame on
                 foreach (var b in c.Batches)
                 {
                     var rp = b.Params; rp.worldBounds = c.Bounds;
                     int n = b.Matrices.Count;
                     try
                     {
+                        VerdantsAscent.Terrain.FatPerfCensus.InstancedCalls += (n + MaxInstancesPerDraw - 1) / MaxInstancesPerDraw;
                         for (int s = 0; s < n; s += MaxInstancesPerDraw)
                             Graphics.RenderMeshInstanced(in rp, b.Mesh, 0, b.Matrices, Mathf.Min(MaxInstancesPerDraw, n - s), s);
                     }
@@ -96,7 +121,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_reportAt = Time.time + 60f;
                 int cells = 0; Array.Clear(s_kindCount, 0, 4);
                 foreach (var c in s_cells.Values) if (c.Count > 0) cells++;
-                FiresLogger.LogInfo($"[FiresVoxel] underwater clutter: {s_cells.Count} cell(s) built, {cells} with clutter; material from '{s_grassBase?.name}' ({s_grassBase?.shader?.name}) (Underwater clutter = ON)");
+                FiresLogger.LogDebug($"[FiresVoxel] underwater clutter: {s_cells.Count} cell(s) built, {cells} with clutter; material from '{s_grassBase?.name}' ({s_grassBase?.shader?.name}) (Underwater clutter = ON)");
             }
         }
 
@@ -130,7 +155,7 @@ namespace VerdantsAscent.Terrain.Voxel
             for (int i = 0; i < 5 && !anyWater; i++)
             {
                 float sx = x0 + (i == 0 ? Cell * 0.5f : ((i & 1) != 0 ? 2f : Cell - 2f)), sz = z0 + (i == 0 ? Cell * 0.5f : ((i & 2) != 0 ? 2f : Cell - 2f));
-                anyWater = GenWaterField.TryWaterSurfaceSmooth(sx, sz, out _, out float dd) && dd > 0.2f;
+                anyWater = WaterAt(sx, sz, out _, out float dd) && dd > 0.2f;
             }
             var cell = new CellClutter { Bounds = new Bounds(new Vector3(x0 + Cell * 0.5f, 0f, z0 + Cell * 0.5f), Vector3.zero) };
             if (!anyWater) { cell.Bounds = new Bounds(cell.Bounds.center, new Vector3(Cell, 1f, Cell)); s_cells[k] = cell; return; }
@@ -148,7 +173,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int i = 0; i < n && cell.Count < MaxPerCell; i++)
                 {
                     float x = x0 + (float)rng.NextDouble() * Cell, z = z0 + (float)rng.NextDouble() * Cell;
-                    if (!GenWaterField.TryWaterSurfaceSmooth(x, z, out float level, out float depth) || depth < 0.2f) continue;
+                    if (!WaterAt(x, z, out float level, out float depth) || depth < 0.2f) continue;
                     if (!InBand(layer.Band, depth)) continue;
                     tries++;
                     if (!Physics.Raycast(new Vector3(x, level + 0.5f, z), Vector3.down, out RaycastHit hit, depth + 6f, s_terrainMask)) { misses++; continue; }
@@ -182,7 +207,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (tries > 8 && misses * 2 > tries) { s_retryAt[k] = Time.time + 2f; return; }
             if (!boundsSet) cell.Bounds = new Bounds(new Vector3(x0 + Cell * 0.5f, 0f, z0 + Cell * 0.5f), new Vector3(Cell, 1f, Cell));
             s_cells[k] = cell;
-            if (cell.Count > 0)
+            if (cell.Count > 0 && FatDiag.WaterClutter)
                 FiresLogger.LogDebug($"[FiresVoxel] underwater clutter cell ({k.x},{k.y}) {palette}: {cell.Count} piece(s) in {cell.Batches.Count} batch(es), {misses}/{tries} bed rays missed");
         }
 

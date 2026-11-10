@@ -306,9 +306,38 @@ namespace VerdantsAscent.Terrain.Persistence
         //   * Idempotent — steady state (player far + both null OR player
         //     near + both assigned) does one Vector3 distance + a few
         //     bool checks per 0.5s.
+        // 0.2.1319: the spread render half of RebuildMesh (same calls, same order, from the same buffers).
+        private const int RenderSpreadMaxFrames = 8;
+        private static bool RenderSpreadOn => Voxel.FiresVoxelConfig.TileMeshSpread != null && Voxel.FiresVoxelConfig.TileMeshSpread.Value;
+        private bool _renderPending; private int _renderPendingTris, _renderPendingSince;
+        private static bool s_renderSpreadProof;
+        private static readonly Voxel.FatSpreadStat s_renderSpread = new Voxel.FatSpreadStat("tile mesh render rebuild");
+        private void FinishRender()
+        {
+            if (Voxel.FatBudget.LeftMs() <= 0.0 && Time.frameCount - _renderPendingSince < RenderSpreadMaxFrames) return;
+            _renderPending = false;
+            if (_tile == null || _tile.Heights == null || _vertices == null || _triangles == null) return;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            int size = TerrainTileCodec.VERTEX_GRID_SIZE;
+            FillMesh(_renderMesh, _renderPendingTris);
+            ApplySeamNormals(_renderMesh, size);
+            RebuildPaintMaskAndBind(size);
+            _renderMesh.bounds = new Bounds(Vector3.zero, new Vector3(64f, 1000f, 64f));
+            _renderMeshDirty = true;
+            if (_meshFilter != null && _renderAssigned)
+            {
+                _meshFilter.sharedMesh = _renderMesh;
+                _renderMeshDirty = false;
+            }
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            Voxel.FatBudget.Spend(Voxel.FatBudget.Who.Spread, ms);
+            s_renderSpread.Note(ms);
+        }
+
         private void Update()
         {
             if (_renderMesh == null || _meshFilter == null) return;
+            if (_renderPending) FinishRender();   // 0.2.1319
             if (Time.unscaledTime < _nextLodCheckTime) return;
             _nextLodCheckTime = Time.unscaledTime + LOD_CHECK_INTERVAL;
 
@@ -581,7 +610,12 @@ namespace VerdantsAscent.Terrain.Persistence
             // LOD is 600m, collider LOD is 92m, see Update). Independent
             // Mesh objects mean Unity tracks them separately so nulling
             // one for LOD doesn't affect the other.
-            FillMesh(_renderMesh, t);
+            // 0.2.1319 (PLAN_fat_frame_spread item 10): key "Tile mesh render rebuild spread" fills the COLLIDER (and the underside,
+            // which has its own collider) in this frame as before, and the visible mesh (fill + normals, seam normals, paint mask,
+            // assign) in a later frame with FatBudget left (FinishRender, from Update; at most RenderSpreadMaxFrames late). The
+            // render mesh keeps its previous complete contents until then (never half filled). Off = everything in this frame.
+            bool spread = RenderSpreadOn && isActiveAndEnabled;
+            if (!spread) FillMesh(_renderMesh, t);
             FillMesh(_colliderMesh, t);
 
             // Seam-consistent BORDER NORMALS. RecalculateNormals
@@ -593,14 +627,14 @@ namespace VerdantsAscent.Terrain.Persistence
             // vert normals with analytic central-difference normals whose
             // neighbor samples cross the tile boundary — both tiles then
             // compute IDENTICAL normals at shared verts by construction.
-            ApplySeamNormals(_renderMesh, size);
+            if (!spread) ApplySeamNormals(_renderMesh, size);
 
             // Rebuild and bind the per-tile paint mask
             // so paved/dirt/cultivated colors from `_tile.Paint[]` actually
             // appear on the rendered surface. Before this hook the data was
             // persisted but the shader had no per-tile `_ClearedMaskTex` to
             // sample from, so paint was invisible.
-            RebuildPaintMaskAndBind(size);
+            if (!spread) RebuildPaintMaskAndBind(size);
 
             // Force-set bounds explicitly to the tile's footprint so frustum
             // culling doesn't kick in early. RecalculateBounds() already
@@ -613,20 +647,30 @@ namespace VerdantsAscent.Terrain.Persistence
             // float at Y=500+ so the local-Y range can be large).
             // Local-space bounds: center on origin, size 64 × 1000 × 64.
             var hugeBounds = new Bounds(Vector3.zero, new Vector3(64f, 1000f, 64f));
-            _renderMesh.bounds = hugeBounds;
+            if (!spread) _renderMesh.bounds = hugeBounds;
             _colliderMesh.bounds = hugeBounds;
 
             _meshTriCount = t;
-            _renderMeshDirty = true;     // LOD re-assigns to MeshFilter next tick
             _colliderMeshDirty = true;   // LOD re-cooks collider next tick
-
-            // If renderer was currently assigned, swap to the freshly-filled
-            // mesh immediately so the player sees the change without waiting
-            // 0.5s for the next LOD poll. Cheap (reference swap).
-            if (_meshFilter != null && _renderAssigned)
+            if (spread)
             {
-                _meshFilter.sharedMesh = _renderMesh;
-                _renderMeshDirty = false;
+                _renderPendingTris = t; _renderPendingSince = Time.frameCount;
+                _renderPending = true;
+                if (!s_renderSpreadProof) { s_renderSpreadProof = true; FiresLogger.LogInfo("[TileMesh] tile render mesh rebuilds in a later frame under FatBudget; collider still in the edit frame (0.2.1319)"); }
+            }
+            else
+            {
+                _renderPending = false;
+                _renderMeshDirty = true;     // LOD re-assigns to MeshFilter next tick
+
+                // If renderer was currently assigned, swap to the freshly-filled
+                // mesh immediately so the player sees the change without waiting
+                // 0.5s for the next LOD poll. Cheap (reference swap).
+                if (_meshFilter != null && _renderAssigned)
+                {
+                    _meshFilter.sharedMesh = _renderMesh;
+                    _renderMeshDirty = false;
+                }
             }
 
             // If the collider was assigned, swap directly to the fresh mesh
@@ -672,7 +716,8 @@ namespace VerdantsAscent.Terrain.Persistence
             // verts off our render mesh — same geometric data.
             if (_underside != null)
             {
-                _underside.SyncFrom(_renderMesh, transform.position);
+                // 0.2.1319: spread = from the collider mesh (same vertices / triangles / uv / colours, filled this frame)
+                _underside.SyncFrom(spread ? _colliderMesh : _renderMesh, transform.position);
             }
 
             float rebuildMs = (Time.realtimeSinceStartup - rebuildStart) * 1000f;

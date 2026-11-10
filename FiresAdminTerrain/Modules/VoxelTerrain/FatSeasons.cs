@@ -28,6 +28,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private const float ZoneHalf = 32f;
         private const int RecoloursPerFrame = 8;
         private const int IceSteps = 4;
+        internal const float AlwaysFrozenReachM = 1000f;   // 0.2.1095: Deep North ice reaches every depth
         private const float IcePollSeconds = 2f;
         private const float PaintRimBlendM = 4f;
         private const float PaintRimBlendMaxShareOfRadius = 0.5f;
@@ -82,6 +83,15 @@ namespace VerdantsAscent.Terrain.Voxel
         /// <summary>Metres of water depth the ice covers at a point right now: 0 outside Vedr's winter biomes or out of season.</summary>
         internal static float IceReachAt(float wx, float wz)
         {
+            // 0.2.1097: the per-column state (WaterStateField, the one rule for placed and generated water: Deep North always - the
+            // painted biome, the island's at height - other biomes in Vedr's winter, soft at biome edges). Solid ice freezes the column
+            // to any depth; slush, crust or lava never freezes it here (slush stays swimmable; crust and lava have no liquid level).
+            if (GenWaterField.Ready && GenWaterField.TryWaterSurfaceSmooth(wx, wz, out float level, out float depth) && depth > 0.05f)
+            {
+                var st = VerdantsAscent.Water.Core.WaterStateField.Sample(wx, wz, level);
+                if (st.Ice >= VerdantsAscent.Water.Core.WaterStateField.IceSolid) return AlwaysFrozenReachM;
+                if (st.Lava >= 0.05f || st.Crust >= 0.05f || st.Ice >= 0.2f) return 0f;
+            }
             if (s_iceStep == 0 || (SeasonBridge.WinterBiomeMask & (int)BiomeManager.GetBiomeAt(wx, wz)) == 0) return 0f;
             return FiresWorldGenBase.MaxSeasonalIceDepthM * s_iceStep / IceSteps;
         }
@@ -104,6 +114,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 FiresLogger.LogInfo($"[FiresSeasons] ice step {step}/{IceSteps} (reaches {FiresWorldGenBase.MaxSeasonalIceDepthM * step / IceSteps:0.#} m deep):{why} remeshing {remeshed} water chunk(s).");
             }
         }
+
+        // 0.2.1095: a biome repaint can make generated water Deep North (ice) or Ashlands (lava): remesh the water chunks once per
+        // paint change (SeasonalWaterFreeze.Tick sees the paint version), with or without Vedr.
+        internal static int RemeshWaterForBiomeChange() => RemeshWaterChunks();
 
         private static int RemeshWaterChunks()
         {
@@ -257,8 +271,7 @@ namespace VerdantsAscent.Terrain.Voxel
             CornerWeights(wx, wz, out float ix, out float iz);
             float worldSnow = Mathf.Lerp(Mathf.Lerp(s_s0, s_s1, ix), Mathf.Lerp(s_s2, s_s3, ix), iz);
             float band = Mathf.Min(PaintRimBlendM, circle.R * PaintRimBlendMaxShareOfRadius);
-            float dx = wx - circle.X, dz = wz - circle.Z;
-            float inward = Mathf.Clamp01((circle.R - Mathf.Sqrt(dx * dx + dz * dz)) / band);
+            float inward = Mathf.Clamp01(circle.Rim(wx, wz, band) / band);
             float snow = Mathf.Lerp(worldSnow, SnowShare(ground), inward);
             return Color32.Lerp(painted, SnowColour, snow);
         }

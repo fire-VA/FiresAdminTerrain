@@ -19,9 +19,77 @@ namespace VerdantsAscent.Terrain.Voxel
     // serializes per-view so the mesh is never mutated while PhysX reads it.
     public static class VoxelMeshPipeline
     {
+        private static float s_nextSwapLine;   // 0.2.1054 collider-swap line, every 30 s
         private sealed class ApplyResult
         {
             public VoxelChunk Chunk; public MeshBuffers Buffers; public int Version; public float MeshMs;
+            // 0.2.1197 off-thread refinement: Stage 0 = as meshed, 1 = on the refine worker (buffers belong to it), 2 = refined.
+            // InGroup = held by a trail group (the worker leaves it there); Discard = replaced while refining (the worker frees it).
+            // Stage / InGroup / Discard change only under lock (this).
+            public int Stage; public bool InGroup, Discard; public int PreVerts, PreTris;
+            public uint GroundSig; public bool HasGroundSig;   // 0.2.1344: the density this mesh was built from (worker); VoxelWaterSheetMesh.NoteChunkMeshed
+        }
+
+        // ---- 0.2.1197: the refine worker (one thread; VoxelGTessellation's scratch is single-user under its Gate) ----
+        private static readonly ConcurrentQueue<(ApplyResult r, VoxelGTessellation.RefineSnap s)> s_refineJobs = new ConcurrentQueue<(ApplyResult, VoxelGTessellation.RefineSnap)>();
+        private static readonly AutoResetEvent s_refineWake = new AutoResetEvent(false);
+        private static Thread s_refineThread;
+        private static bool s_refineBroken;
+
+        private static bool RefineOffThreadOn
+            => !Headless && !s_refineBroken && FiresVoxelConfig.RefineOffThread != null && FiresVoxelConfig.RefineOffThread.Value;
+
+        // Main thread: layer paint now, then the refinement on the worker. True = r is on the worker (do not apply it now).
+        private static readonly StallPhaseTimer s_refineStartTimer = new StallPhaseTimer("[Cultivated] refine start", 20.0, "view get/create", "worker check", "layer paint", "capture");   // 0.2.1322
+        private static bool TryStartRefine(ApplyResult r)
+        {
+            if (r.Stage != 0 || !RefineOffThreadOn) return false;
+            if (!VoxelWorld.IsLive(r.Chunk) || r.Chunk.Kind != ChunkKind.Full || r.Buffers.Verts.Count == 0 || r.Buffers.CollidersOnly) return false;
+            if (VoxelGTessellation.SeamCheck) { VoxelGTessellation.OffRanOnMain++; return false; }   // the seam check reads live neighbours: main thread
+            // 0.2.1322 (PLAN_fat_driver_stalls step 1b, proof only): refine start split - view get/create, layer paint, capture (+ gen-0 GC).
+            var rt = s_refineStartTimer.T; int rgc0 = StallPhaseTimer.Gc();
+            rt[0] = StallPhaseTimer.Now();
+            var view = VoxelWorld.GetOrCreateView(r.Chunk);
+            rt[1] = StallPhaseTimer.Now();
+            if (view == null || !view.HasRenderer) { VoxelGTessellation.OffRanOnMain++; return false; }
+            if (s_refineThread == null)
+            {
+                try { s_refineThread = new Thread(RefineLoop) { IsBackground = true, Name = "FiresVoxelRefine" }; s_refineThread.Start(); }
+                catch (System.Exception ex) { s_refineThread = null; FiresLogger.LogDebug($"[Cultivated] bail: refine worker thread could not start: {ex.Message} (refining on the main thread)"); s_refineBroken = true; return false; }
+            }
+            long t0 = Stopwatch.GetTimestamp();
+            var buf = r.Buffers;
+            r.PreVerts = buf.Verts.Count; r.PreTris = buf.Tris.Count;
+            rt[2] = StallPhaseTimer.Now();
+            VoxelLayerPaint.Render(r.Chunk.Key, buf.Verts, buf.Uvs, buf.Uv1, buf.Colors);
+            rt[3] = StallPhaseTimer.Now();
+            var s = VoxelGTessellation.Capture(r.Chunk.Key, r.Chunk.WorldOrigin);
+            rt[4] = StallPhaseTimer.Now();
+            s.MainMs = (float)((Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency);
+            s_refineStartTimer.Note(StallPhaseTimer.Gc() - rgc0, $"chunk {r.Chunk.Key} {buf.Verts.Count} verts");
+            lock (r) r.Stage = 1;
+            s_refineJobs.Enqueue((r, s));
+            s_refineWake.Set();
+            return true;
+        }
+
+        private static void RefineLoop()
+        {
+            while (true)
+            {
+                if (!s_refineJobs.TryDequeue(out var job)) { s_refineWake.WaitOne(100); continue; }
+                var r = job.r;
+                try { VoxelGTessellation.RunSnap(r.Buffers, job.s); }
+                catch (System.Exception ex) { job.s.Logs.Add($"[Cultivated] bail: refine worker threw for chunk {r.Chunk?.Key}: {ex.Message}"); }
+                VoxelGTessellation.Finished(job.s);
+                lock (r)
+                {
+                    r.Stage = 2;
+                    if (r.Discard) { ReturnBufferCounted(r.Buffers); continue; }
+                    if (r.InGroup) continue;   // its trail group lands it
+                }
+                if (r.Chunk != null && s_urgentKeys.ContainsKey(r.Chunk.Key)) s_urgentApply.Enqueue(r); else s_applyQueue.Enqueue(r, r.Chunk);   // 0.2.1344
+            }
         }
         private sealed class BakeJob
         {
@@ -43,12 +111,14 @@ namespace VerdantsAscent.Terrain.Voxel
             s_destroyAfterBake[meshId] = mesh;
         }
 
-        private static readonly ConcurrentQueue<VoxelChunk> s_remeshQueue = new ConcurrentQueue<VoxelChunk>();
-        private static readonly ConcurrentQueue<VoxelChunk> s_generateQueue = new ConcurrentQueue<VoxelChunk>();
+        private static readonly VoxelNearQueue<VoxelChunk> s_remeshQueue = new VoxelNearQueue<VoxelChunk>(stampPicks: true);   // 0.2.1344: nearest first (key off: the FIFO); 0.2.1353: stamps for a starved re-queue
+        private static readonly VoxelNearQueue<VoxelChunk> s_generateQueue = new VoxelNearQueue<VoxelChunk>();   // 0.2.1344
         private const int MaxGenerateRetries = 3;
-        private static readonly ConcurrentQueue<ApplyResult> s_applyQueue = new ConcurrentQueue<ApplyResult>();
+        private static readonly VoxelNearQueue<ApplyResult> s_applyQueue = new VoxelNearQueue<ApplyResult>(trackChunks: true);   // 0.2.1344
         private static readonly ConcurrentQueue<BakeJob> s_bakeQueue = new ConcurrentQueue<BakeJob>();
         private static readonly ConcurrentQueue<AssignJob> s_assignQueue = new ConcurrentQueue<AssignJob>();
+        // 0.2.1105: everything still queued in the pipeline (the circle test waits for 0 before it measures a settled window).
+        internal static int Backlog => s_remeshQueue.Count + s_generateQueue.Count + s_applyQueue.Count + s_bakeQueue.Count + s_assignQueue.Count + s_urgentRemesh.Count + s_urgentApply.Count;
         private static readonly ConcurrentBag<MeshBuffers> s_bufferPool = new ConcurrentBag<MeshBuffers>();
         private static readonly AutoResetEvent s_signal = new AutoResetEvent(false);
 
@@ -136,7 +206,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // INFO, not Verbose: this is the line that decides throttle-bound vs cost-bound vs starved, and the
         // first long traverse produced none of it because FAT verbose was off. Self-throttled to one line per
             // 15s and skipped entirely when every queue is idle, so it cannot flood the way global verbose does.
-            FiresLogger.LogInfo($"[FiresVoxelPipe] applies {applied}({rate:0.0}/s; cap {cap}/frame x {fps:0} fps = {cap * fps:0.0}/s ceiling) " +
+            FiresLogger.LogDebug($"[FiresVoxelPipe] applies {applied}({rate:0.0}/s; cap {cap}/frame x {fps:0} fps = {cap * fps:0.0}/s ceiling) " +
                       $"assigns {assigned} | queues apply={s_applyQueue.Count} assign={s_assignQueue.Count} remesh={s_remeshQueue.Count} generate={s_generateQueue.Count} " +
                       $"| starved {Interlocked.Read(ref s_pipeStarved)} " +
                       $"| buffers alloc={s_buffersAllocated}/{s_maxBuffers} pool={s_bufferPool.Count} " +
@@ -152,6 +222,26 @@ namespace VerdantsAscent.Terrain.Voxel
         // to ~0 when the queues drain, there is no leak and starvation is just
         // honest backpressure.
         private static long s_bufRented, s_bufReturned;
+
+        // 0.2.1350 (proof only): worker time and picks, counted only at Debug, read by the generate wait line. Busy % is the share of all workers'
+        // wall time spent in generate / mesh / bake over the window since the previous line. A starve costs a worker up to 10 ms (WaitOne(10)).
+        private static long s_proofGenTicks, s_proofMeshTicks, s_proofBakeTicks, s_proofPicksGen, s_proofPicksPlain;
+        private static long s_proofLastAt, s_proofLastGen, s_proofLastMesh, s_proofLastBake, s_proofLastStarved, s_proofLastPicksGen, s_proofLastPicksPlain, s_proofLastApplied;
+        internal static string GenerateWaitProof()
+        {
+            long now = Stopwatch.GetTimestamp();
+            long gen = Interlocked.Read(ref s_proofGenTicks), mesh = Interlocked.Read(ref s_proofMeshTicks), bake = Interlocked.Read(ref s_proofBakeTicks);
+            long starved = Interlocked.Read(ref s_pipeStarved), pg = Interlocked.Read(ref s_proofPicksGen), pp = Interlocked.Read(ref s_proofPicksPlain), applied = Interlocked.Read(ref s_pipeApplied);
+            int workers = s_workers != null ? s_workers.Length : 0;
+            double window = s_proofLastAt == 0 ? 0.0 : (now - s_proofLastAt) / (double)Stopwatch.Frequency;
+            double all = window * Mathf.Max(1, workers) * Stopwatch.Frequency;
+            string Pct(long ticks) => all > 0.0 ? (ticks / all * 100.0).ToString("0") + "%" : "n/a";
+            string line = $"queues remesh {s_remeshQueue.Count} urgent {s_urgentRemesh.Count} apply {s_applyQueue.Count} urgent apply {s_urgentApply.Count} retry {s_applyRetry.Count} refine {s_refineJobs.Count} bake {s_bakeQueue.Count} assign {s_assignQueue.Count} | " +
+                $"buffers alloc {s_buffersAllocated}/{s_maxBuffers} pool {s_bufferPool.Count} outstanding {Interlocked.Read(ref s_bufRented) - Interlocked.Read(ref s_bufReturned)} | " +
+                $"over the last {window:0.0} s, {workers} workers: generate {Pct(gen - s_proofLastGen)} mesh {Pct(mesh - s_proofLastMesh)} bake {Pct(bake - s_proofLastBake)}, starved +{starved - s_proofLastStarved}, picks needing generate +{pg - s_proofLastPicksGen} plain remesh +{pp - s_proofLastPicksPlain}, applies +{applied - s_proofLastApplied}";
+            s_proofLastAt = now; s_proofLastGen = gen; s_proofLastMesh = mesh; s_proofLastBake = bake; s_proofLastStarved = starved; s_proofLastPicksGen = pg; s_proofLastPicksPlain = pp; s_proofLastApplied = applied;
+            return line;
+        }
 
         private static MeshBuffers RentBuffer()
         {
@@ -208,6 +298,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // keep-block) safe to fire without a per-caller Kind check.
             if (chunk.Kind != ChunkKind.Full) { chunk.Queued = false; return; }
             EnsureDriver();
+            if (!chunk.Queued && HoldRemeshUntilSwap(chunk)) return;   // 0.2.1353: ahead of the mirror below: the run at the swap comes back through here and mirrors then
             // Convergence by construction: a mesh is never built from an
             // un-mirrored border ring. The audit caught chunks sitting at
             // dataDiff=122 with queued=False - remeshed via orphan/frontier
@@ -218,11 +309,118 @@ namespace VerdantsAscent.Terrain.Voxel
             chunk.OrphanMask = ComputeOrphanMask(chunk, batchAlsoCovers);
             if (chunk.Queued) return;
             if (s_batchDepth > 0 && System.Threading.Thread.CurrentThread.ManagedThreadId == s_batchThread) { s_batched.Add(chunk); return; }
-            if (!s_urgentKeys.ContainsKey(chunk.Key) && Defer(chunk)) return;
+            if (!s_urgentKeys.ContainsKey(chunk.Key) && Defer(chunk)) { if (CarveTiming.On) CarveTiming.Deferred(chunk.Key); return; }
             chunk.Queued = true;
             NoteRemesh(chunk.Key);
-            (s_urgentKeys.ContainsKey(chunk.Key) ? s_urgentRemesh : s_remeshQueue).Enqueue(chunk);
+            if (s_urgentKeys.ContainsKey(chunk.Key)) s_urgentRemesh.Enqueue(chunk); else s_remeshQueue.Enqueue(chunk, chunk);   // 0.2.1344
             s_signal.Set();
+        }
+
+        // 0.2.1353 (Fire: "get this terrain loading thing fixed"; login zones: workers 0-2% busy, all 32 buffers held, apply queue 30-32, 5-9 applies per chunk, 59 plain remeshes
+        // picked against 17 first generates): while a zone is mid-swap, a remesh that could not change anything shown stops using a buffer. It only notes the chunk (one per chunk);
+        // the swap runs each once. Same shape as PlacedWaterSheets' HoldFor / Flush / DrainHeld, including its 20 s give-up. Off: the 1352 path. Main thread.
+        //
+        // Held only when ALL of these hold, and each one is what keeps a rule:
+        //  - the renderer is suppressed until the swap: nothing the player can see goes stale (a zone in VoxelOnly, or past the 1334 give-up, shows its chunks: never held);
+        //  - no generate pending, and this chunk's own data has been read by a mesh job (OwnDataMeshed): a first mesh, a brush dab, a saved record, a stamp or a mop always meshes,
+        //    so the swap shows the real ground and its collider, and only ring / lip / paint refinement work waits;
+        //  - not in the urgent lane or a trail group (live edits);
+        //  - TrySwap's gate is already met or on its way without a further mesh: a view whose collider is ready or baking, or no view yet but its built mesh waiting in the apply queue.
+        //    A chunk with neither is the swap's own re-arm (noView) and must mesh, so it passes straight through.
+        // Queued stays false for a held chunk, so TrySwap's "queued" count never waits on one.
+        private sealed class HeldRemeshes { public readonly HashSet<VoxelChunk> Chunks = new HashSet<VoxelChunk>(); public float Since; public int Asks; }
+        private static readonly Dictionary<Vector2s, HeldRemeshes> s_heldRemesh = new Dictionary<Vector2s, HeldRemeshes>();
+        private static readonly HashSet<Vector2s> s_heldRemeshGaveUp = new HashSet<Vector2s>();   // not held again until the zone swaps or unwraps (a zone that will not swap must not cycle)
+        private static readonly List<Vector2s> s_heldRemeshDue = new List<Vector2s>();
+        private static readonly Queue<VoxelChunk> s_heldRemeshRun = new Queue<VoxelChunk>();
+        private const float HeldRemeshGiveUpSeconds = 20f;
+        private const double HeldRemeshRunMs = 1.0;   // a run re-mirrors each chunk, so it spreads over frames (at least one a frame) instead of landing in the swap's frame
+        private static float s_heldRemeshCheckAt;
+        private static long s_hrAsks, s_hrHeldChunks, s_hrFlushed, s_hrDropped, s_hrGaveUpZones, s_starveAgeKept, s_starveAgeLast;
+        private static bool s_hrProof, s_starveProof;
+
+        private static bool HoldRemeshUntilSwap(VoxelChunk chunk)
+        {
+            if (FiresVoxelConfig.RemeshHoldUntilSwap == null || !FiresVoxelConfig.RemeshHoldUntilSwap.Value) return false;
+            if (Thread.CurrentThread.ManagedThreadId != VoxelZoneStreamer.s_wetMainThread) return false;   // the zone table is main-thread
+            if (chunk.PendingGenerate || !chunk.SuppressRenderUntilSwap) return false;
+            if (s_urgentKeys.ContainsKey(chunk.Key) || s_trailGroupOf.ContainsKey(chunk.Key)) return false;
+            if (!VoxelZoneStreamer.ZoneHoldsRemeshes(chunk.Key, out var zone) || s_heldRemeshGaveUp.Contains(zone)) return false;
+            if (!chunk.OwnDataMeshed) return false;
+            bool gateSafe = VoxelWorld.TryGetView(chunk.Key, out var view) && view != null ? view.ColliderReady || view.BakeInFlight : s_applyQueue.Holds(chunk);
+            if (!gateSafe) return false;
+            if (!s_heldRemesh.TryGetValue(zone, out var held)) { held = new HeldRemeshes { Since = Time.realtimeSinceStartup }; s_heldRemesh[zone] = held; }
+            held.Asks++;
+            s_hrAsks++;
+            if (held.Chunks.Add(chunk)) s_hrHeldChunks++;
+            if (!s_hrProof) { s_hrProof = true; FiresLogger.LogInfo("[FiresVoxel] a zone mid-swap holds the remeshes that cannot change its ground; each runs once at the swap (0.2.1353)"); }
+            return true;
+        }
+
+        // The zone swapped or left (or gave up, from the drain below): its held chunks line up to run. A dropped chunk is skipped by the run. Returns how many; asks = the requests they folded.
+        internal static int ReleaseHeldRemeshes(Vector2s zone, out int asks, out bool gaveUp)
+        {
+            gaveUp = s_heldRemeshGaveUp.Remove(zone);
+            asks = 0;
+            if (!s_heldRemesh.TryGetValue(zone, out var held)) return 0;
+            s_heldRemesh.Remove(zone);
+            asks = held.Asks;
+            foreach (var c in held.Chunks) s_heldRemeshRun.Enqueue(c);
+            return held.Chunks.Count;
+        }
+
+        // Main thread (the driver's Update).
+        private static void DrainHeldRemeshes()
+        {
+            if (s_heldRemesh.Count > 0)
+            {
+                float now = Time.realtimeSinceStartup;
+                if (now >= s_heldRemeshCheckAt)
+                {
+                    s_heldRemeshCheckAt = now + 1f;
+                    bool on = FiresVoxelConfig.RemeshHoldUntilSwap != null && FiresVoxelConfig.RemeshHoldUntilSwap.Value;
+                    s_heldRemeshDue.Clear();
+                    foreach (var kv in s_heldRemesh)
+                        if (!on || now - kv.Value.Since >= HeldRemeshGiveUpSeconds || !VoxelZoneStreamer.ZoneHoldsRemeshes(kv.Key)) s_heldRemeshDue.Add(kv.Key);
+                    foreach (var z in s_heldRemeshDue)
+                    {
+                        bool stillMid = on && VoxelZoneStreamer.ZoneHoldsRemeshes(z);
+                        float held = now - s_heldRemesh[z].Since;
+                        int n = ReleaseHeldRemeshes(z, out int asks, out _);
+                        if (!stillMid) continue;
+                        s_heldRemeshGaveUp.Add(z);
+                        s_hrGaveUpZones++;
+                        FiresLogger.LogDebug($"[FiresVoxel] zone ({z.x},{z.y}): gave up holding remeshes after {held:0} s with no swap: {n} chunk(s) ({asks} ask(s)) run now, none held again until it swaps or unwraps (0.2.1353)");
+                    }
+                }
+            }
+            if (s_heldRemeshRun.Count == 0) return;
+            long t0 = Stopwatch.GetTimestamp(), limit = t0 + (long)(HeldRemeshRunMs * Stopwatch.Frequency / 1000.0);
+            do
+            {
+                var c = s_heldRemeshRun.Dequeue();
+                if (c.Dropped || !VoxelWorld.IsLive(c)) { s_hrDropped++; continue; }
+                // this run IS the coalesced mesh: past the window, and any deferral of the same chunk folds into it
+                lock (s_lastQueued) { s_deferred.Remove(c); s_deferredFirst.Remove(c); s_lastQueued.Remove(c.Key); }
+                s_hrFlushed++;
+                EnqueueRemesh(c);
+            }
+            while (s_heldRemeshRun.Count > 0 && Stopwatch.GetTimestamp() < limit);
+        }
+
+        // One clause set for the 10 s line; empty when nothing happened. Resets. Also says the starve proof line on the main thread.
+        private static string TakeHeldRemeshStats()
+        {
+            long kept = Interlocked.Read(ref s_starveAgeKept);
+            if (kept > 0 && !s_starveProof) { s_starveProof = true; FiresLogger.LogInfo("[FiresVoxel] a chunk starved of a mesh buffer keeps its place by age (0.2.1353)"); }
+            long keptNow = kept - s_starveAgeLast;
+            s_starveAgeLast = kept;
+            string s = "";
+            if (s_hrAsks + s_hrFlushed + s_hrDropped + s_hrGaveUpZones > 0 || s_heldRemesh.Count > 0)
+                s = $"remeshes held: {s_hrAsks} ask(s) on {s_hrHeldChunks} chunk(s), {s_hrFlushed} run after the swap, {s_hrDropped} dropped with their zone, {s_hrGaveUpZones} zone(s) gave up, {s_heldRemesh.Count} zone(s) holding, {s_heldRemeshRun.Count} waiting to run; ";
+            if (keptNow > 0) s += $"starved chunks that kept their age {keptNow}; ";
+            s_hrAsks = s_hrHeldChunks = s_hrFlushed = s_hrDropped = s_hrGaveUpZones = 0;
+            return s;
         }
 
         // Edits were sometimes smooth and other times redrew the mesh ~8 times: `Queued` only folds the
@@ -317,7 +515,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 foreach (var kv in s_deferred) if (now >= kv.Value) s_due.Add(kv.Key);
                 foreach (var c in s_due) { s_deferred.Remove(c); s_deferredFirst.Remove(c); s_lastQueued.Remove(c.Key); }
             }
-            foreach (var c in s_due) EnqueueRemesh(c);
+            foreach (var c in s_due) { if (CarveTiming.On) CarveTiming.Released(c.Key); EnqueueRemesh(c); }
         }
 
         private static void NoteRemesh(Vector3Int key)
@@ -371,10 +569,125 @@ namespace VerdantsAscent.Terrain.Voxel
         }
         private static readonly List<TerraformWatch> s_watches = new List<TerraformWatch>();
 
+        // ── Trail groups (0.2.1157) ────────────────────────────────────────────────────────────────────────────────────────
+        // Fire, round 36: "sometimes when we walk the seams seperate and it takes a few frames for them to re seam" - a fresh trail
+        // stamp on a chunk border re-meshed one side first and the other a few frames later (the 1119 neighbour re-mesh), a dark
+        // see-through crack in between. A trail stamp's chunks now form ONE group: all ride the urgent lane (no coalesce window),
+        // each built mesh is held, and the group's meshes swap in together in one frame; until then the old meshes stay visible.
+        private sealed class TrailGroup
+        {
+            public readonly HashSet<Vector3Int> Pending = new HashSet<Vector3Int>();
+            public readonly HashSet<Vector3Int> Members = new HashSet<Vector3Int>();
+            public readonly List<ApplyResult> Ready = new List<ApplyResult>();
+            public int Frame0, Size; public float T0;
+            public System.Action<int> OnApplied;
+        }
+        private static readonly List<TrailGroup> s_trailGroups = new List<TrailGroup>();
+        private static readonly Dictionary<Vector3Int, TrailGroup> s_trailGroupOf = new Dictionary<Vector3Int, TrailGroup>();
+        // 0.2.1160 (PERF): 1 group a frame across BOTH ApplyTrailGroups calls (was 2 per call = up to 4 a frame at ~5.7 ms a chunk)
+        private const int TrailGroupsPerFrame = 1;
+        private static int s_tgFrame = -1, s_tgThisFrame;
+        internal static bool InTrailGroup(Vector3Int key) => s_trailGroupOf.ContainsKey(key);
+        private const float TrailGroupTimeout = 0.5f;
+        private static bool s_tgSwapSaid, s_tgPartialSaid;
+        private static int s_tgDone, s_tgMinSize = int.MaxValue, s_tgMaxSize, s_tgWaited, s_tgTimedOut, s_tgCapped;
+        private static float s_tgLogAt;
+
+        /// <summary>
+        /// Queue these chunks as one atomic trail group (main thread). A chunk already in an open group joins it (the groups merge).
+        /// Returns how many chunks were queued into the group. onApplied gets the frame the group landed.
+        /// </summary>
+        internal static int EnqueueTrailGroup(List<VoxelChunk> chunks, System.Action<int> onApplied)
+        {
+            TrailGroup g = null;
+            foreach (var c in chunks) if (c != null && s_trailGroupOf.TryGetValue(c.Key, out var og)) { g = og; break; }
+            if (g == null) { g = new TrailGroup { Frame0 = Time.frameCount, T0 = Time.realtimeSinceStartup }; s_trailGroups.Add(g); }
+            int added = 0;
+            foreach (var c in chunks)
+            {
+                if (c == null || c.Kind != ChunkKind.Full || !c.MeshAll || c.PendingGenerate || VoxelZoneStreamer.HoldsDataOnly(c.Key)) continue;
+                if (s_trailGroupOf.TryGetValue(c.Key, out var other) && other != g)
+                {
+                    // merge the other open group into this one
+                    foreach (var k in other.Pending) g.Pending.Add(k);
+                    foreach (var k in other.Members) { g.Members.Add(k); s_trailGroupOf[k] = g; }
+                    g.Ready.AddRange(other.Ready);
+                    g.OnApplied += other.OnApplied;
+                    if (other.Frame0 < g.Frame0) { g.Frame0 = other.Frame0; g.T0 = other.T0; }
+                    s_trailGroups.Remove(other);
+                }
+                s_urgentKeys[c.Key] = 1;
+                EnqueueRemesh(c);
+                if (!c.Queued) { if (!g.Members.Contains(c.Key)) s_urgentKeys.TryRemove(c.Key, out _); continue; }
+                // a member whose result is already held waits for the newer one too (both read the same G at apply)
+                for (int i = g.Ready.Count - 1; i >= 0; i--)
+                    if (g.Ready[i].Chunk.Key == c.Key) { var old = g.Ready[i]; lock (old) { if (old.Stage == 1) old.Discard = true; else ReturnBufferCounted(old.Buffers); } g.Ready.RemoveAt(i); }   // 0.2.1197: a refining one is freed by the worker
+                g.Pending.Add(c.Key);
+                if (g.Members.Add(c.Key)) added++;
+                s_trailGroupOf[c.Key] = g;
+            }
+            g.Size = g.Members.Count;
+            if (onApplied != null) g.OnApplied += onApplied;
+            if (g.Members.Count == 0) { s_trailGroups.Remove(g); return 0; }
+            return added;
+        }
+
+        // A built mesh of a chunk in an open trail group is held (true) until the whole group is built (main thread).
+        private static bool CaptureTrailMember(ApplyResult r)
+        {
+            if (s_trailGroupOf.Count == 0 || r == null || r.Chunk == null) return false;
+            if (!s_trailGroupOf.TryGetValue(r.Chunk.Key, out var g)) return false;
+            for (int i = g.Ready.Count - 1; i >= 0; i--)
+                if (g.Ready[i].Chunk.Key == r.Chunk.Key)   // keep the newest
+                {
+                    var old = g.Ready[i];
+                    lock (old) { if (old.Stage == 1) old.Discard = true; else ReturnBufferCounted(old.Buffers); }   // 0.2.1197: a refining one is freed by the worker
+                    g.Ready.RemoveAt(i);
+                }
+            lock (r) r.InGroup = true;
+            g.Ready.Add(r);
+            g.Pending.Remove(r.Chunk.Key);
+            return true;
+        }
+
+        internal static void TrailGroupStats(out int groups, out int minSize, out int maxSize, out int waited, out int timedOut, out int capped)
+        {
+            groups = s_tgDone; minSize = s_tgDone > 0 ? s_tgMinSize : 0; maxSize = s_tgMaxSize; waited = s_tgWaited; timedOut = s_tgTimedOut; capped = s_tgCapped;
+            s_tgDone = 0; s_tgMinSize = int.MaxValue; s_tgMaxSize = 0; s_tgWaited = 0; s_tgTimedOut = 0; s_tgCapped = 0;
+        }
+
         /// <summary>The chunks of an edited zone about to be rebuilt: mesh and apply them ahead of other work (main thread).</summary>
         internal static void MarkUrgent(List<Vector3Int> keys)
         {
             foreach (var k in keys) s_urgentKeys[k] = 1;
+        }
+
+        /// <summary>
+        /// A V-tool dab changed this chunk (VoxelWorld.ApplyBrush, main thread): the coalescing rule's "a player edit is never
+        /// deferred". Only the hoe/terraform rebuild used to mark its chunks, so a carve stroke's re-dabs waited 1.2-4 s each
+        /// (Fire 10-23: "the edits with the voxel carve tools take forever to apply"). The key leaves the lane when its mesh lands.
+        /// </summary>
+        internal static void MarkEditUrgent(Vector3Int key) => s_urgentKeys[key] = 1;
+
+        // 0.2.1344 near-first: results that met a busy collider bake this frame (main thread), the streamer's question, and the 10 s line.
+        private static readonly List<ApplyResult> s_applyRetry = new List<ApplyResult>();
+        internal static bool ResultWaiting(VoxelChunk chunk) => s_applyQueue.Holds(chunk);
+        private static float s_nearLogAt;
+        private static bool s_nearProof;
+        private static void NearOrderReport()
+        {
+            if (!s_nearProof && VoxelNearOrder.On)
+            {
+                s_nearProof = true;
+                FiresLogger.LogInfo("[FiresVoxel] build order: wrap start, generate, remesh and apply take the pending item nearest the player; first wraps left the urgent lane (live edits keep it) (0.2.1344)");
+            }
+            float now = Time.realtimeSinceStartup;
+            if (now < s_nearLogAt) return;
+            s_nearLogAt = now + 10f;
+            string s = s_remeshQueue.TakeStats("remesh") + s_applyQueue.TakeStats("apply") + s_generateQueue.TakeStats("generate");   // always taken, so a window never carries over
+            if (s.Length > 0 && FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] near-first last 10 s: {s}{VoxelZoneStreamer.TakeWrapPickStats()}(0.2.1344)");
+            string held = TakeHeldRemeshStats();   // 0.2.1353: always taken too
+            if (held.Length > 0 && FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] loading last 10 s: {held}(0.2.1353)");
         }
 
         /// <summary>
@@ -392,7 +705,7 @@ namespace VerdantsAscent.Terrain.Voxel
             watch.Total = watch.Pending.Count;
             s_watches.RemoveAll(w => w.Zone.x == zone.x && w.Zone.y == zone.y);
             if (watch.Total > 0) s_watches.Add(watch);
-            else if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] terraform: zone ({zone.x},{zone.y}) rebuilt with no chunk to remesh " +
+            else if (FatDiag.Terraform) FiresLogger.LogDebug($"[FiresVoxel] terraform: zone ({zone.x},{zone.y}) rebuilt with no chunk to remesh " +
                                       $"({(startedAt - editedAt) * 1000f:0} ms after its heightmap changed)");
         }
 
@@ -408,7 +721,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (!w.Pending.Remove(key) && !expired) continue;
                 if (w.Pending.Count > 0 && !expired) continue;
                 if (FatLogGate.Allow("tf-visible", out _))
-                if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] terraform: zone ({w.Zone.x},{w.Zone.y}) visible {(now - w.EditedAt) * 1000f:0} ms after its heightmap changed " +
+                if (FatDiag.Terraform) FiresLogger.LogDebug($"[FiresVoxel] terraform: zone ({w.Zone.x},{w.Zone.y}) visible {(now - w.EditedAt) * 1000f:0} ms after its heightmap changed " +
                                      $"(rebuild started at +{(w.StartedAt - w.EditedAt) * 1000f:0} ms; {w.Total - w.Pending.Count} of {w.Total} chunk mesh(es) landed" +
                                      $"{(expired ? ", gave up waiting for the rest" : "")}; queues: urgent {s_urgentRemesh.Count}, normal {s_remeshQueue.Count}, apply {s_applyQueue.Count})");
                 foreach (var k in w.Pending) s_urgentKeys.TryRemove(k, out _);
@@ -427,7 +740,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (chunk == null || chunk.Kind != ChunkKind.Full || !chunk.PendingGenerate || chunk.Queued) return;
             EnsureDriver();
             chunk.Queued = true;
-            s_generateQueue.Enqueue(chunk);
+            s_generateQueue.Enqueue(chunk, chunk);
             s_signal.Set();
         }
 
@@ -586,6 +899,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] BakeMesh threw: {ex.Message}"); }
                     FatNativeTrace.Step("bake end", bake.MeshId);
                     sw.Stop();
+                    if (FiresLogger.DebugEnabled) Interlocked.Add(ref s_proofBakeTicks, sw.ElapsedTicks);   // 0.2.1350 (proof)
                     s_assignQueue.Enqueue(new AssignJob
                     {
                         View = bake.View, Chunk = bake.Chunk, Version = bake.Version, MeshId = bake.MeshId,
@@ -618,17 +932,31 @@ namespace VerdantsAscent.Terrain.Voxel
                         // number means the BUFFER CAP is the constraint, not
                         // the apply rate - a completely different fix.
                         Interlocked.Increment(ref s_pipeStarved);
-                        if (!chunk.Queued) { chunk.Queued = true; s_remeshQueue.Enqueue(chunk); }
+                        if (!chunk.Queued)
+                        {
+                            chunk.Queued = true;
+                            // 0.2.1353 (Fire: "get this terrain loading thing fixed"): starving must not reset the chunk's age
+                            if (FiresVoxelConfig.StarveKeepsAge != null && FiresVoxelConfig.StarveKeepsAge.Value)
+                            {
+                                if (s_remeshQueue.EnqueueKeepAge(chunk, chunk)) Interlocked.Increment(ref s_starveAgeKept);
+                            }
+                            else s_remeshQueue.Enqueue(chunk, chunk);
+                        }
                         s_signal.WaitOne(10);
                         continue;
                     }
+                    chunk.PickTicks = 0L;   // 0.2.1353: it has its buffer; these stamps are spent
                     // Contain any per-chunk throw so one bad chunk can't kill the
                     // worker (and all meshing until relog).
                     try
                     {
                         sw.Restart();
+                        bool proofOn = FiresLogger.DebugEnabled;   // 0.2.1350 (proof: picks and the generate / mesh split of this job)
+                        if (proofOn) Interlocked.Increment(ref chunk.PendingGenerate ? ref s_proofPicksGen : ref s_proofPicksPlain);
                         chunk.RunPendingGenerate();   // W1 streamed chunks: fill + cave-carve first (no-op otherwise)
-                        int version = chunk.Snapshot(buf.Density, buf.Seed, buf.Biome, buf.WaterLvl, out buf.HasWater, buf.Ground);
+                        long proofGenTicks = proofOn ? sw.ElapsedTicks : 0L;
+                        if (proofOn) Interlocked.Add(ref s_proofGenTicks, proofGenTicks);
+                        int version =chunk.Snapshot(buf.Density, buf.Seed, buf.Biome, buf.WaterLvl, out buf.HasWater, buf.Ground);
                         if (version == VoxelChunk.SnapshotUniform) { ReturnBufferCounted(buf); continue; }
                         // FIRES: per-vertex inland waterline for the wet-shore band. Seed from the reconciled
                         // inland surface (buf.WaterLvl > sea+0.25), then BOUNDED-dilate a few cells so the band
@@ -687,6 +1015,28 @@ namespace VerdantsAscent.Terrain.Voxel
                                         prev = cur;
                                     }
                                 }
+                            // 0.2.1035 (HaloFlat: Fire fell through a ring wall whose density probed SOLID): the band above only
+                            // sees crossings ALONG Y. A vertical wall - the ring's inside face, a sheer cliff a brush cut - has
+                            // none in its columns (solid all the way up beside air all the way up), so the band came out empty
+                            // or ended at the ground and the wall was never meshed: no render, no collider. Crossings between
+                            // horizontal neighbours widen the band too.
+                            for (int y = -1; y <= VoxelChunk.CELLS; y++)
+                            {
+                                if (y >= bLo && y <= bHi) continue;
+                                bool crosses = false;
+                                for (int z = -1; z <= VoxelChunk.CELLS && !crosses; z++)
+                                    for (int x = -1; x <= VoxelChunk.CELLS; x++)
+                                    {
+                                        int i = (x + 1) + SS * ((y + 1) + SS * (z + 1));
+                                        bool cur = dd[i] > 0;
+                                        if ((x < VoxelChunk.CELLS && (dd[i + 1] > 0) != cur) || (z < VoxelChunk.CELLS && (dd[i + SS * SS] > 0) != cur)) { crosses = true; break; }
+                                    }
+                                if (!crosses) continue;
+                                if (y - 1 < bLo) bLo = y - 1;
+                                if (y + 1 > bHi) bHi = y + 1;
+                            }
+                            if (bLo < -1) bLo = -1;
+                            if (bHi > VoxelChunk.CELLS) bHi = VoxelChunk.CELLS;
                             buf.MeshYLo = bLo; buf.MeshYHi = bHi;
                         }
                         buf.EmitLips = FiresVoxelConfig.SeamLips != null && FiresVoxelConfig.SeamLips.Value;
@@ -701,11 +1051,17 @@ namespace VerdantsAscent.Terrain.Voxel
                         buf.CollidersOnly = Headless;
                         VoxelMesherSurfaceNets.Build(buf, chunk.WorldOrigin);
                         sw.Stop();
-                        (s_urgentKeys.ContainsKey(chunk.Key) ? s_urgentApply : s_applyQueue).Enqueue(new ApplyResult
+                        if (proofOn) Interlocked.Add(ref s_proofMeshTicks, sw.ElapsedTicks - proofGenTicks);   // 0.2.1350 (proof)
+                        chunk.MeshDoneTicks = Stopwatch.GetTimestamp();   // 0.2.1346
+                        var built = new ApplyResult
                         {
                             Chunk = chunk, Buffers = buf, Version = version,
                             MeshMs = (float)sw.Elapsed.TotalMilliseconds,
-                        });
+                        };
+                        // 0.2.1344: a hash of the density this mesh came from, the data every placed-water ground read answers from (SampleColumnSurface);
+                        // a remesh with the same bytes (paint, snow G, refine, a border mirror that bumped Version only) moved no ground.
+                        if (VoxelWaterSheetMesh.GroundSigOn || FatClutterRegrow.GroundChangeOn) { built.GroundSig = VoxelWaterSheetMesh.DensityHash(buf.Density); built.HasGroundSig = true; }
+                        if (s_urgentKeys.ContainsKey(chunk.Key)) s_urgentApply.Enqueue(built); else s_applyQueue.Enqueue(built, chunk);   // 0.2.1344
                     }
                     catch (System.Exception ex)
                     {
@@ -722,7 +1078,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (chunk.PendingGenerate && !chunk.Queued && ++chunk.GenFailCount <= 3)
                         {
                             chunk.Queued = true;
-                            s_remeshQueue.Enqueue(chunk);
+                            s_remeshQueue.Enqueue(chunk, chunk);
                             s_signal.Set();
                         }
                         else if (chunk.PendingGenerate)
@@ -744,7 +1100,7 @@ namespace VerdantsAscent.Terrain.Voxel
                         if (dataChunk.PendingGenerate && !dataChunk.Queued && ++dataChunk.GenFailCount <= MaxGenerateRetries)
                         {
                             dataChunk.Queued = true;
-                            s_generateQueue.Enqueue(dataChunk);
+                            s_generateQueue.Enqueue(dataChunk, dataChunk);
                             s_signal.Set();
                         }
                     }
@@ -759,124 +1115,336 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // -- Main-thread pump -------------------------------------------------
+        // ── 0.2.1163 DRIVER FRAME BUDGET ───────────────────────────────────────────────────────────────────────────────
+        // One time budget for every main-thread stage of VoxelPipelineDriver.Update (4 ms; 8 ms while far behind; 16 ms
+        // before the player exists - a loading screen). A stage that alone exceeds it still runs once (one apply / one
+        // assign a frame minimum); everything after waits for the next frame. Debug every 10 s: the worst frame's breakdown.
+        internal static class Budget
+        {
+            internal enum S { Flush, Saves, Paint, Trail, Destroy, Apply, Collider, Other, Count }
+            private const float BaseMs = 4f, BehindMs = 8f, LoadingMs = 16f;
+            private const int BehindUnits = 64;
+            private static long s_frame0, s_mark;
+            private static float s_budgetMs = BaseMs;
+            private static readonly double[] s_cur = new double[(int)S.Count], s_worst = new double[(int)S.Count];
+            private static double s_worstMs;
+            private static int s_over, s_frames, s_lastBacklog;
+            private static long s_deferredSum;
+            private static float s_logAt;
+
+            internal static void Begin()
+            {
+                s_frame0 = s_mark = Stopwatch.GetTimestamp();
+                for (int i = 0; i < s_cur.Length; i++) s_cur[i] = 0.0;
+                s_budgetMs = Player.m_localPlayer == null ? LoadingMs : s_lastBacklog > BehindUnits ? BehindMs : BaseMs;
+            }
+
+            internal static void Mark(S stage)
+            {
+                long now = Stopwatch.GetTimestamp();
+                s_cur[(int)stage] += (now - s_mark) * 1000.0 / Stopwatch.Frequency;
+                s_mark = now;
+            }
+
+            internal static float LeftMs => s_budgetMs - (float)((Stopwatch.GetTimestamp() - s_frame0) * 1000.0 / Stopwatch.Frequency);
+            internal static bool SpentAny => LeftMs < s_budgetMs - 0.5f;
+
+            internal static void End(int backlog)
+            {
+                double ms = (Stopwatch.GetTimestamp() - s_frame0) * 1000.0 / Stopwatch.Frequency;
+                s_frames++;
+                if (ms > s_budgetMs) { s_over++; s_deferredSum += backlog; }
+                s_lastBacklog = backlog;
+                if (ms > s_worstMs) { s_worstMs = ms; System.Array.Copy(s_cur, s_worst, s_cur.Length); }
+                if (ms > 50.0 && FiresLogger.DebugEnabled)
+                    FiresLogger.LogDebug($"[FiresVoxelPipe] driver frame {ms:0} ms over the {s_budgetMs:0} ms budget: {Breakdown(s_cur)}; backlog {backlog} unit(s)");
+                float t = Time.realtimeSinceStartup;
+                if (t < s_logAt) return;
+                s_logAt = t + 10f;
+                if (FiresLogger.DebugEnabled && s_frames > 0)
+                    FiresLogger.LogDebug($"[FiresVoxelPipe] frame budget {BaseMs:0} ms ({BehindMs:0} behind, {LoadingMs:0} loading): worst frame {s_worstMs:0.0} ms "
+                        + $"(stage breakdown: {Breakdown(s_worst)}), frames over budget {s_over}/{s_frames}, deferred units {(s_over > 0 ? s_deferredSum / s_over : 0)} avg backlog when over (0.2.1163)");
+                s_worstMs = 0.0; s_over = s_frames = 0; s_deferredSum = 0;
+            }
+
+            private static string Breakdown(double[] a) =>
+                $"apply {a[(int)S.Apply]:0.0}, collider {a[(int)S.Collider]:0.0}, paint compose+upload {a[(int)S.Paint]:0.0}, remesh flush {a[(int)S.Flush]:0.0}, "
+                + $"saves {a[(int)S.Saves]:0.0}, trail {a[(int)S.Trail]:0.0}, view destroys {a[(int)S.Destroy]:0.0}, other {a[(int)S.Other]:0.0}";
+        }
+
         private sealed class VoxelPipelineDriver : MonoBehaviour
         {
             private readonly Stopwatch _sw = new Stopwatch();
 
             private const float PaintDrainBudgetMs = 2f;
             private const float ApplyBudgetMs = 3f;
+            private const int TimedSlotHardCap = 64;   // 0.2.1346: time ends the loop; this only bounds a run of zero-cost skips
+            private static bool s_timedSlotsProof;
+            private static readonly FatSpreadStat s_timedSlotStat = new FatSpreadStat("mesh apply by time");
+            private const double SlowApplyMs = 50.0;   // 0.2.1418 hitch proof threshold
+
+            // 0.2.1157: the trail groups whose every member is built land now, all in this frame (at most TrailGroupsPerFrame
+            // groups a frame - each counts as one unit, never split); a group still waiting after TrailGroupTimeout lands what it has.
+            private int ApplyTrailGroups()
+            {
+                if (s_trailGroups.Count == 0) return 0;
+                if (s_tgFrame != Time.frameCount) { s_tgFrame = Time.frameCount; s_tgThisFrame = 0; }
+                long t0 = Stopwatch.GetTimestamp();
+                int applied = 0, groups = 0;
+                float now = Time.realtimeSinceStartup;
+                for (int gi = 0; gi < s_trailGroups.Count; gi++)
+                {
+                    var g = s_trailGroups[gi];
+                    // a member that left the world (dropped / not Full) is not waited for
+                    if (g.Pending.Count > 0) g.Pending.RemoveWhere(k => !VoxelWorld.TryGetChunk(k, out var c) || c == null || c.Kind != ChunkKind.Full);
+                    bool timedOut = g.Pending.Count > 0 && now - g.T0 > TrailGroupTimeout;
+                    if (g.Pending.Count > 0 && !timedOut) continue;
+                    if (s_tgThisFrame >= TrailGroupsPerFrame) { s_tgCapped++; continue; }   // next frame, still whole
+                    // 0.2.1197: a member still on the refine worker holds the group (whole, one frame); at the timeout it is detached
+                    // and lands alone when the worker hands it back. Every member's refinement starts in THIS frame, from one frame's
+                    // paint and column set, so two members sharing an edge split it identically (as when all refined at landing).
+                    bool refining = false;
+                    if (!timedOut)
+                        foreach (var m in g.Ready)
+                            if (m.Stage == 0 && TryStartRefine(m)) refining = true;
+                    for (int ri = g.Ready.Count - 1; ri >= 0; ri--)
+                    {
+                        var m = g.Ready[ri];
+                        lock (m)
+                        {
+                            if (m.Stage != 1) continue;
+                            if (!timedOut) { refining = true; break; }
+                            m.InGroup = false; g.Ready.RemoveAt(ri); VoxelGTessellation.OffGroupDetached++;
+                        }
+                    }
+                    if (refining) { VoxelGTessellation.OffGroupHeld++; continue; }
+                    bool busy = false;
+                    foreach (var r in g.Ready)
+                        if (VoxelWorld.IsLive(r.Chunk) && VoxelWorld.TryGetView(r.Chunk.Key, out var v) && v != null && v.BakeInFlight) { busy = true; break; }
+                    if (busy && !timedOut) continue;   // a collider bake is reading one member's mesh: the whole group waits a frame
+                    int frames = Time.frameCount - g.Frame0;
+                    foreach (var r in g.Ready)
+                    {
+                        if (ApplyOne(r) == 1) applied++;
+                    }
+                    foreach (var k in g.Pending) s_urgentKeys.TryRemove(k, out _);   // timed-out stragglers apply alone when they arrive
+                    foreach (var k in g.Members) if (s_trailGroupOf.TryGetValue(k, out var og) && og == g) s_trailGroupOf.Remove(k);
+                    s_trailGroups.RemoveAt(gi--);
+                    groups++; s_tgThisFrame++;
+                    s_tgDone++;
+                    if (g.Size < s_tgMinSize) s_tgMinSize = g.Size;
+                    if (g.Size > s_tgMaxSize) s_tgMaxSize = g.Size;
+                    if (timedOut) s_tgTimedOut++;
+                    // 0.2.1159 (Fire: "you fix, I check" - proof lines in his log)
+                    if (!s_tgSwapSaid && !timedOut && g.Size > 1)
+                    {
+                        s_tgSwapSaid = true;
+                        FiresLogger.LogDebug($"[TrailSeam] first atomic border group swapped: {g.Size} chunk(s), {applied} applied, waited {frames} frame(s) - all members swapped in one frame: no seam crack (0.2.1157)");
+                    }
+                    if (!s_tgPartialSaid && (timedOut || busy))
+                    {
+                        s_tgPartialSaid = true;
+                        FiresLogger.LogDebug($"[TrailSeam] trail group landed PARTIAL (once per session): {g.Size} chunk(s), {g.Pending.Count} unbuilt after {(now - g.T0) * 1000f:0} ms (timeout {TrailGroupTimeout * 1000f:0} ms){(busy ? ", a collider bake was reading a member" : "")} - the unbuilt member(s) land alone (a short seam crack is possible there)");
+                    }
+                    if (frames > 2)
+                    {
+                        s_tgWaited++;
+                        if (FiresLogger.DebugEnabled && now >= s_tgLogAt)
+                        {
+                            s_tgLogAt = now + 2f;
+                            FiresLogger.LogDebug($"[TrailPredict] trail group of {g.Size} chunk(s) waited {frames} frame(s) ({(now - g.T0) * 1000f:0} ms) before it landed{(timedOut ? $"; TIMED OUT with {g.Pending.Count} member(s) unbuilt (they land alone)" : "")}");
+                        }
+                    }
+                    try { g.OnApplied?.Invoke(Time.frameCount); } catch { }
+                }
+                if (applied > 0) FatTrailFast.AddApplyCost(t0);
+                return applied;
+            }
+
+            // One built mesh onto its chunk (the apply loop's body, 0.2.1157: shared with the trail groups).
+            // 0 = skipped (dropped / not Full), 1 = applied, 2 = its view's collider bake is busy (re-queued; stop for this frame).
+            private int ApplyOne(ApplyResult r)
+            {
+                if (!VoxelWorld.IsLive(r.Chunk))
+                {
+                    ReturnBufferCounted(r.Buffers);   // world cleared / chunk dropped
+                    return 0;
+                }
+                // Downgraded to uniform after this mesh was built (terraform
+                // reclassified it mid-flight). Uniform chunks stay registered,
+                // so IsLive passes - but applying would RESURRECT a view+mesh+
+                // collider onto a chunk the governor accounts as free (the leak
+                // that defeats the RAM ceiling). EnsureUniformChunk already
+                // dropped the view; just recycle and skip.
+                if (r.Chunk.Kind != ChunkKind.Full)
+                {
+                    ReturnBufferCounted(r.Buffers);
+                    return 0;
+                }
+                // DO NOT drop a version-stale mesh. Dropping it left the chunk
+                // VIEWLESS while a neighbour's border-mirror kept bumping the
+                // version, so the view NEVER landed and the zone swap
+                // deadlocked at noView for minutes (log: noView=12 queued=0,
+                // both idle) - a HOLE in the world (vanilla render+collider are
+                // suppressed in voxel mode). Apply the slightly-stale mesh so
+                // the chunk gets a collider NOW and the zone swaps; if the data
+                // genuinely advanced, re-queue ONE refresh so the border seam
+                // corrects on the next pass. A brief seam beats a permanent
+                // hole, and it self-converges once the borders settle.
+                bool stale = r.Version != r.Chunk.Version;
+                long a0 = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1204: apply sub-timers (ApplySplit)
+                int nVerts = r.Buffers != null && r.Buffers.Verts != null ? r.Buffers.Verts.Count : -1;
+                var view = VoxelWorld.GetOrCreateView(r.Chunk);
+                long a1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (view.BakeInFlight)
+                {
+                    // 0.2.1344: nearest-first would hand this same result back next frame and stop every other apply until the bake ends;
+                    // it sits out this frame instead and the rest keep landing. Key off: the 1343 re-queue + stop.
+                    if (VoxelNearOrder.On) { s_applyRetry.Add(r); return 0; }
+                    s_applyQueue.Enqueue(r, r.Chunk);       // PhysX is reading this mesh - retry next frame
+                    return 2;
+                }
+
+                _sw.Restart();
+                var spk = FatSpike.Start();
+                if (FatNativeTrace.On) FatNativeTrace.Step("apply begin", 0, r.Chunk.Key + " v" + r.Version + " verts " + r.Buffers.Verts.Count);
+                int meshId = view.ApplyBuffers(r.Buffers, r.Stage == 2, r.PreVerts, r.PreTris);   // 0.2.1197: Stage 2 = refined on the worker
+                if (FatNativeTrace.On) FatNativeTrace.Step("apply end", meshId, r.Chunk.Key.ToString());
+                FatSpike.Add(FatSpike.Stage.MeshApply, spk);
+                _sw.Stop();
+                long a2 = System.Diagnostics.Stopwatch.GetTimestamp();
+                // ReturnBuffer, NOT a raw pool add: the raw add put the buffer
+                // back but never called s_signal.Set(), so a worker blocked in
+                // RentBuffer's WaitOne(10) was not woken by the very event that
+                // freed its buffer. It sat out the full timeout and retried -
+                // once per freed buffer, ~4/frame. That is what drove
+                // starved=40696 with the queues sitting empty.
+                ReturnBufferCounted(r.Buffers);
+                NoteApplied(r.Chunk.Key);
+                VoxelZoneStreamer.NoteStageApply(r.Chunk.Key, r.MeshMs);   // 0.2.1346
+                if (CarveTiming.On) CarveTiming.MeshShown(r.Chunk.Key);
+                if (view != null) view.NoteMeshGround(r.HasGroundSig, r.GroundSig);   // 0.2.1347: the grass reads this at the collider assign
+                VoxelWaterSheetMesh.NoteChunkMeshed(r.Chunk, r.Version, r.HasGroundSig, r.GroundSig);   // 0.2.1344: + the ground signature; 0.2.1165: voxel data changes only; placed water rebuilds over a carved / filled chunk
+                r.Chunk.AppliedVersion = r.Version;   // sweep's stale-mesh test
+                if (stale) EnqueueSeamRefresh(r.Chunk);   // the coalescing rule: see EnqueueSeamRefresh
+                // ORPHAN HANDOFF: a lateral neighbour that was meshing a
+                // shared plane as an orphan face (this chunk didn't exist
+                // or hadn't meshed) must drop its stand-in NOW - the
+                // audit caught stand-ins lingering as opposite-normal
+                // slivers (dot -0.9999) until the slow sweep came around.
+                PokeOrphanNeighbours(r.Chunk);
+                // BORDER CONVERGENCE: this chunk's data just became mesh
+                // truth - any lateral neighbour whose ring disagrees with
+                // it re-mirrors and remeshes NOW. This is the event that
+                // was missing: a neighbour whose last mesh predated this
+                // chunk's final data kept a stale ring forever (audit:
+                // dataDiff=122, queued=False, both sides idle).
+                PokeStaleNeighbours(r.Chunk);
+                ApplySplit.Note(r.Chunk.Key, nVerts, a0, a1, a2, System.Diagnostics.Stopwatch.GetTimestamp());
+
+                if (meshId != 0)
+                {
+                    view.NoteBakeStarted(meshId);
+                    s_bakeQueue.Enqueue(new BakeJob
+                    {
+                        View = view, Chunk = r.Chunk, MeshId = meshId, Version = r.Version,
+                        MeshMs = r.MeshMs, ApplyMs = (float)_sw.Elapsed.TotalMilliseconds,
+                    });
+                    s_signal.Set();
+                }
+                // (per-chunk EMPTY timing line retired — mesh/apply health
+                // lives in the [FiresVoxelPipe] ledger; re-add if a chunk
+                // apply regression needs per-chunk attribution again)
+                return 1;
+            }
 
             private void Update()
             {
                 FatSpike.FrameStart();     // report the last frame if it was a spike
+                // 0.2.1163 (the lead, FDT stall ledger: "193 ms FiresAdminTerrain: VoxelPipelineDriver.Update x1" at a zone border):
+                // ONE per-frame time budget across every main-thread stage here; each stage is timed and the 10 s line names the
+                // worst frame's breakdown. The collider ASSIGN loop had no time check at all and runs ApplyPerFrame per frame, which
+                // the spawn gate multiplies x16 (the "cap 96/frame" in the applies line).
+                Budget.Begin();
                 RefreshBufferBudget();     // config hot-reload (main thread only)
-                { var t0 = FatSpike.Start(); FlushDeferred(); FatSpike.Add(FatSpike.Stage.RemeshFlush, t0); }   // coalesced re-queues whose window has passed
+                VoxelNearOrder.Publish();  // 0.2.1344: the position the workers' nearest picks measure against
+                NearOrderReport();         // 0.2.1344
+                VerdantsAscent.Water.Core.WaterMeshCombiner.PumpMopRefresh();   // 0.2.1344: queued mop-mask refreshes
+                { var t0 = FatSpike.Start(); FlushDeferred(); DrainHeldRemeshes(); FatSpike.Add(FatSpike.Stage.RemeshFlush, t0); }   // coalesced re-queues whose window has passed; 0.2.1353: the remeshes a swap released
+                Budget.Mark(Budget.S.Flush);
                 VoxelWorld.FlushSaves();   // P1 - debounced anchor persistence
+                CarveTiming.Tick();
+                Budget.Mark(Budget.S.Saves);
 
                 // The driver exists whenever chunks do (brush chunks in
                 // Vanilla world mode included); the streamer tick only runs in
                 // voxel modes, so the paint drain lives here.
                 // Every frame, at most PaintDrainBudgetMs, resumable mid-column (4 whole columns every
                 // 0.25 s in one frame cost ~91 ms median in fly-through hitches).
-                VoxelWorld.DrainPaintDirtyTimed(PaintDrainBudgetMs);
+                VoxelWorld.DrainPaintDirtyTimed(Mathf.Min(PaintDrainBudgetMs, Mathf.Max(0.25f, Budget.LeftMs)));
+                Budget.Mark(Budget.S.Paint);
+                FatTrailFast.Tick();   // 0.2.1157: predicted-trail reconcile + the [TrailPredict] / [TrailLatency] lines
+                VoxelGTessellation.DrainCommits();   // 0.2.1197: the refine worker's tallies + log lines, on the main thread
+                Budget.Mark(Budget.S.Trail);
                 VoxelWorld.DrainViewDestroys(VoxelWorld.ViewDestroysPerFrame);   // unwrapped zones' views, a few a frame
+                Budget.Mark(Budget.S.Destroy);
 
                 // Mesh-truth seam sentinel - silent unless a face diverges.
                 VoxelSeamAudit.AutoTick();
                 PipeReport();
+                Budget.Mark(Budget.S.Other);
 
                 // Apply built meshes (<=2/frame).
                 var swApply = System.Diagnostics.Stopwatch.StartNew();
                 int appliedThisFrame = 0;
+                // 0.2.1157 (Fire, round 36: "sometimes when we walk the seams seperate and it takes a few frames for them to re seam"):
+                // a trail stamp's chunks land together, in one frame, outside the per-frame cap (a group counts as one unit).
+                long g0 = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1204
+                int groupApplied = Budget.LeftMs > 0f ? ApplyTrailGroups() : 0;
+                double groupMs = (System.Diagnostics.Stopwatch.GetTimestamp() - g0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;   // 0.2.1418 hitch proof
+                ApplySplit.NoteStage(0, g0);   // 0.2.1163: a group is one unit inside the frame budget
                 // An edited zone's meshes go first and on top of the per-frame cap.
                 int applyCap = ApplyPerFrame + Mathf.Min(s_urgentApply.Count, UrgentAppliesPerFrame);
+                // 0.2.1346 (plan B: 1 ms applies, 3 ms a frame: at 5 fps about 17/s with 226 waiting; slow frames throttled the drain and slowed the frames behind it):
+                // slots by time. A slow frame gets the same SHARE of its time (3 ms of 16.7), and the driver's budget still ends the loop. Off: the count and the fixed 3 ms.
+                bool timedSlots = FiresVoxelConfig.ApplySlotsTimed != null && FiresVoxelConfig.ApplySlotsTimed.Value;
+                double applyBudgetMs = ApplyBudgetMs;
+                if (timedSlots)
+                {
+                    applyCap = Mathf.Max(applyCap, TimedSlotHardCap);
+                    applyBudgetMs = System.Math.Max(ApplyBudgetMs, ApplyBudgetMs * Time.unscaledDeltaTime / (1f / 60f));
+                    if (!s_timedSlotsProof) { s_timedSlotsProof = true; FiresLogger.LogInfo("[FiresVoxel] mesh apply slots run by time inside the driver budget, not a count per frame (0.2.1346)"); }
+                }
                 // Also stop once ApplyBudgetMs is spent (at least one apply a frame, so it never stalls); the
                 // count cap alone let a SpawnGate x16 burst upload dozens of meshes in one frame.
-                for (int n = 0; n < applyCap && (appliedThisFrame == 0 || swApply.Elapsed.TotalMilliseconds < ApplyBudgetMs)
+                // 0.2.1163: and the shared frame budget (a single unit that alone exceeds it still lands: one apply a frame minimum)
+                for (int n = 0; n < applyCap && (appliedThisFrame == 0 ? Budget.LeftMs > 0f || !Budget.SpentAny : swApply.Elapsed.TotalMilliseconds < applyBudgetMs && Budget.LeftMs > 0f)
                     && (s_urgentApply.TryDequeue(out var r) || s_applyQueue.TryDequeue(out r));)
                 {
+                    if (CaptureTrailMember(r)) continue;   // held until its whole group is built
                     appliedThisFrame++;
-                    if (!VoxelWorld.IsLive(r.Chunk))
-                    {
-                        ReturnBufferCounted(r.Buffers);   // world cleared / chunk dropped
-                        continue;
-                    }
-                    // Downgraded to uniform after this mesh was built (terraform
-                    // reclassified it mid-flight). Uniform chunks stay registered,
-                    // so IsLive passes - but applying would RESURRECT a view+mesh+
-                    // collider onto a chunk the governor accounts as free (the leak
-                    // that defeats the RAM ceiling). EnsureUniformChunk already
-                    // dropped the view; just recycle and skip.
-                    if (r.Chunk.Kind != ChunkKind.Full)
-                    {
-                        ReturnBufferCounted(r.Buffers);
-                        continue;
-                    }
-                    // DO NOT drop a version-stale mesh. Dropping it left the chunk
-                    // VIEWLESS while a neighbour's border-mirror kept bumping the
-                    // version, so the view NEVER landed and the zone swap
-                    // deadlocked at noView for minutes (log: noView=12 queued=0,
-                    // both idle) - a HOLE in the world (vanilla render+collider are
-                    // suppressed in voxel mode). Apply the slightly-stale mesh so
-                    // the chunk gets a collider NOW and the zone swaps; if the data
-                    // genuinely advanced, re-queue ONE refresh so the border seam
-                    // corrects on the next pass. A brief seam beats a permanent
-                    // hole, and it self-converges once the borders settle.
-                    bool stale = r.Version != r.Chunk.Version;
-                    var view = VoxelWorld.GetOrCreateView(r.Chunk);
-                    if (view.BakeInFlight)
-                    {
-                        s_applyQueue.Enqueue(r);       // PhysX is reading this mesh - retry next frame
-                        break;
-                    }
-
-                    _sw.Restart();
-                    var spk = FatSpike.Start();
-                    if (FatNativeTrace.On) FatNativeTrace.Step("apply begin", 0, r.Chunk.Key + " v" + r.Version + " verts " + r.Buffers.Verts.Count);
-                    int meshId = view.ApplyBuffers(r.Buffers);
-                    if (FatNativeTrace.On) FatNativeTrace.Step("apply end", meshId, r.Chunk.Key.ToString());
-                    FatSpike.Add(FatSpike.Stage.MeshApply, spk);
-                    _sw.Stop();
-                    // ReturnBuffer, NOT a raw pool add: the raw add put the buffer
-                    // back but never called s_signal.Set(), so a worker blocked in
-                    // RentBuffer's WaitOne(10) was not woken by the very event that
-                    // freed its buffer. It sat out the full timeout and retried -
-                    // once per freed buffer, ~4/frame. That is what drove
-                    // starved=40696 with the queues sitting empty.
-                    ReturnBufferCounted(r.Buffers);
-                    NoteApplied(r.Chunk.Key);
-                    VoxelWaterSheetMesh.NoteChunkMeshed(r.Chunk.Key);   // placed water rebuilds over a carved / filled chunk
-                    r.Chunk.AppliedVersion = r.Version;   // sweep's stale-mesh test
-                    if (stale) EnqueueSeamRefresh(r.Chunk);   // the coalescing rule: see EnqueueSeamRefresh
-                    // ORPHAN HANDOFF: a lateral neighbour that was meshing a
-                    // shared plane as an orphan face (this chunk didn't exist
-                    // or hadn't meshed) must drop its stand-in NOW - the
-                    // audit caught stand-ins lingering as opposite-normal
-                    // slivers (dot -0.9999) until the slow sweep came around.
-                    PokeOrphanNeighbours(r.Chunk);
-                    // BORDER CONVERGENCE: this chunk's data just became mesh
-                    // truth - any lateral neighbour whose ring disagrees with
-                    // it re-mirrors and remeshes NOW. This is the event that
-                    // was missing: a neighbour whose last mesh predated this
-                    // chunk's final data kept a stale ring forever (audit:
-                    // dataDiff=122, queued=False, both sides idle).
-                    PokeStaleNeighbours(r.Chunk);
+                    long rf0 = System.Diagnostics.Stopwatch.GetTimestamp();   // 0.2.1204
+                    bool refining = TryStartRefine(r);
+                    ApplySplit.NoteStage(1, rf0);
+                    if (refining) { n++; continue; }   // 0.2.1197: layer paint now, refinement on the worker; it comes back as Stage 2
+                    long ap0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    int apVerts = r.Buffers != null && r.Buffers.Verts != null ? r.Buffers.Verts.Count : -1;
+                    int res = ApplyOne(r);
+                    double apMs = (System.Diagnostics.Stopwatch.GetTimestamp() - ap0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    if (apMs > SlowApplyMs && FiresLogger.DebugEnabled)   // 0.2.1418 ([lead]: "worst 337 ms in one frame"): which mesh makes the slow frame
+                        FiresLogger.LogDebug($"[FatSpread] slow mesh apply: chunk {r.Chunk.Key} (zone {ZoneSystem.GetZone(r.Chunk.WorldOrigin + new Vector3(16f, 0f, 16f))}), {apVerts} verts, stage {r.Stage}, {apMs:0.0} ms (result {res}; frame {Time.frameCount})");
+                    if (res == 2) break;
+                    if (res == 0) continue;
                     n++;
-
-                    if (meshId != 0)
-                    {
-                        view.NoteBakeStarted(meshId);
-                        s_bakeQueue.Enqueue(new BakeJob
-                        {
-                            View = view, Chunk = r.Chunk, MeshId = meshId, Version = r.Version,
-                            MeshMs = r.MeshMs, ApplyMs = (float)_sw.Elapsed.TotalMilliseconds,
-                        });
-                        s_signal.Set();
-                    }
-                    // (per-chunk EMPTY timing line retired — mesh/apply health
-                    // lives in the [FiresVoxelPipe] ledger; re-add if a chunk
-                    // apply regression needs per-chunk attribution again)
                 }
+                if (Budget.LeftMs > 0f) groupApplied += ApplyTrailGroups();   // a group the loop above completed lands this same frame
+                for (int ri = 0; ri < s_applyRetry.Count; ri++) s_applyQueue.Enqueue(s_applyRetry[ri], s_applyRetry[ri].Chunk);   // 0.2.1344
+                s_applyRetry.Clear();
+                Budget.Mark(Budget.S.Apply);
+                if (timedSlots && appliedThisFrame > 0) s_timedSlotStat.Note(swApply.Elapsed.TotalMilliseconds);   // 0.2.1346
+                if (swApply.Elapsed.TotalMilliseconds > SlowApplyMs && FiresLogger.DebugEnabled)   // 0.2.1418: the slow frame's split
+                    FiresLogger.LogDebug($"[FatSpread] slow apply frame {Time.frameCount}: {swApply.Elapsed.TotalMilliseconds:0.0} ms total = trail groups {groupApplied} in {groupMs:0.0} ms + {appliedThisFrame} single apply(s); queue {s_applyQueue.Count}, urgent {s_urgentApply.Count}, frame dt {Time.unscaledDeltaTime * 1000f:0} ms");
+                appliedThisFrame += groupApplied;
 
                 if (appliedThisFrame > 0)
                 {
@@ -884,10 +1452,21 @@ namespace VerdantsAscent.Terrain.Voxel
                     lock (s_bufferPool) s_pipeMsApply += swApply.Elapsed.TotalMilliseconds;
                 }
 
+                BodyHold.Tick();
+                Budget.Mark(Budget.S.Other);   // 0.2.1054: bodies over a chunk with a surface but no collider yet stay put until it is live
+                if (FiresLogger.DebugEnabled && Time.realtimeSinceStartup >= s_nextSwapLine && VoxelChunkView.CollidersSwapped > 0)
+                {
+                    s_nextSwapLine = Time.realtimeSinceStartup + 30f;
+                    FiresLogger.LogDebug($"[FiresVoxel] collider swap: {VoxelChunkView.CollidersSwapped} chunks swapped (staging), max wait {VoxelChunkView.MaxSwapWaitMs:0} ms");
+                    VoxelChunkView.CollidersSwapped = 0; VoxelChunkView.MaxSwapWaitMs = 0f;
+                }
+
                 // Assign baked colliders (<=2/frame).
                 var swAssign = System.Diagnostics.Stopwatch.StartNew();
                 int assignedThisFrame = 0;
-                for (int n = 0; n < ApplyPerFrame && s_assignQueue.TryDequeue(out var a); n++)
+                // 0.2.1163: inside the frame budget (it had none: up to ApplyPerFrame = 96 under the spawn gate in one frame); at least
+                // one assign a frame so colliders never stall.
+                for (int n = 0; n < (timedSlots ? TimedSlotHardCap : ApplyPerFrame) && (n == 0 || Budget.LeftMs > 0f) && s_assignQueue.TryDequeue(out var a); n++)
                 {
                     assignedThisFrame++;
                     // A view destroyed while its mesh was cooking left the mesh here; the bake is back, so it can go now
@@ -903,6 +1482,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (!VoxelWorld.IsLive(a.Chunk) || a.Version != a.Chunk.AppliedVersion) continue;
                     if (FatNativeTrace.On) FatNativeTrace.Step("assign begin", a.MeshId, a.Chunk.Key.ToString());
                     a.View.AssignCollider();
+                    VoxelZoneStreamer.NoteStageCollider(a.Chunk.Key);   // 0.2.1346
+                    if (CarveTiming.On) CarveTiming.ColliderOn(a.Chunk.Key);
                     FatNativeTrace.Step("assign end", a.MeshId);
 
                     // (per-chunk mesh/bake timing line retired — see the
@@ -914,6 +1495,8 @@ namespace VerdantsAscent.Terrain.Voxel
                     Interlocked.Add(ref s_pipeAssigned, assignedThisFrame);
                     lock (s_bufferPool) s_pipeMsAssign += swAssign.Elapsed.TotalMilliseconds;
                 }
+                Budget.Mark(Budget.S.Collider);
+                Budget.End(s_applyQueue.Count + s_urgentApply.Count + s_assignQueue.Count);
             }
 
             private void OnDestroy()
@@ -921,8 +1504,153 @@ namespace VerdantsAscent.Terrain.Voxel
                 // World unload - drop everything; the worker thread survives
                 // idle (background) and the queues drain to stale-drops.
                 VoxelWorld.Clear();
+                s_heldRemesh.Clear(); s_heldRemeshGaveUp.Clear(); s_heldRemeshRun.Clear();   // 0.2.1353
                 s_driverGO = null;
             }
+        }
+
+        // ── CARVE TIMING (Debug only) ───────────────────────────────────────────────────────────────────────────────
+        // Fire 10-23: "the edits with the voxel carve tools take forever to apply". One line per V-tool stroke (after the last of
+        // its chunks has its collider, or 20 s): dab -> mesh visible and dab -> collider (avg / max ms), how many of its re-queues
+        // the coalescing rule DEFERRED and for how long, the main-thread cost of the dabs, and the queues when it ended.
+        // Times run from the FIRST dab still waiting on that chunk, so a deferred chunk shows the whole wait the player sees.
+        internal static class CarveTiming
+        {
+            private const float StrokeQuietSeconds = 1f, GiveUpSeconds = 20f;
+            private sealed class Pending { public float DabAt, MeshAt = -1f, DeferredAt = -1f; public int Defers; }
+            private static readonly Dictionary<Vector3Int, Pending> s_pending = new Dictionary<Vector3Int, Pending>();
+            private static float s_strokeStart = -1f, s_lastDab;
+            private static int s_dabs, s_chunkDabs, s_meshes, s_colliders, s_defers, s_seeded;
+            private static double s_meshSum, s_meshMax, s_colSum, s_colMax, s_deferSum, s_deferMax, s_brushMs, s_brushMax;
+
+            internal static bool On => FiresLogger.DebugEnabled;
+
+            // VoxelWorld.ApplyBrush, main thread: a chunk this dab changed is about to be queued.
+            internal static void Dab(Vector3Int key)
+            {
+                float now = Now();
+                lock (s_pending)
+                {
+                    if (s_strokeStart < 0f) s_strokeStart = now;
+                    s_lastDab = now;
+                    s_chunkDabs++;
+                    if (!s_pending.ContainsKey(key)) s_pending[key] = new Pending { DabAt = now };
+                }
+            }
+
+            // End of VoxelWorld.ApplyBrush: its main-thread cost.
+            internal static void BrushDone(double ms, int seeded)
+            {
+                lock (s_pending) { s_dabs++; s_seeded += seeded; s_brushMs += ms; if (ms > s_brushMax) s_brushMax = ms; }
+            }
+
+            // Defer() returned true for this chunk.
+            internal static void Deferred(Vector3Int key)
+            {
+                lock (s_pending)
+                    if (s_pending.TryGetValue(key, out var p)) { p.Defers++; s_defers++; if (p.DeferredAt < 0f) p.DeferredAt = Now(); }
+            }
+
+            // FlushDeferred released it.
+            internal static void Released(Vector3Int key)
+            {
+                lock (s_pending)
+                    if (s_pending.TryGetValue(key, out var p) && p.DeferredAt >= 0f)
+                    {
+                        double w = (Now() - p.DeferredAt) * 1000.0;
+                        s_deferSum += w; if (w > s_deferMax) s_deferMax = w;
+                        p.DeferredAt = -1f;
+                    }
+            }
+
+            internal static void MeshShown(Vector3Int key)
+            {
+                lock (s_pending)
+                    if (s_pending.TryGetValue(key, out var p) && p.MeshAt < 0f)
+                    {
+                        p.MeshAt = Now();
+                        double ms = (p.MeshAt - p.DabAt) * 1000.0;
+                        s_meshes++; s_meshSum += ms; if (ms > s_meshMax) s_meshMax = ms;
+                    }
+            }
+
+            internal static void ColliderOn(Vector3Int key)
+            {
+                lock (s_pending)
+                    if (s_pending.TryGetValue(key, out var p) && p.MeshAt >= 0f)
+                    {
+                        double ms = (Now() - p.DabAt) * 1000.0;
+                        s_colliders++; s_colSum += ms; if (ms > s_colMax) s_colMax = ms;
+                        s_pending.Remove(key);   // a later dab on this chunk starts a new wait
+                    }
+            }
+
+            // Driver Update, main thread.
+            internal static void Tick()
+            {
+                if (s_strokeStart < 0f) return;
+                float now = Now();
+                string line;
+                lock (s_pending)
+                {
+                    bool quiet = now - s_lastDab > StrokeQuietSeconds;
+                    if (!quiet || (s_pending.Count > 0 && now - s_lastDab < GiveUpSeconds)) return;
+                    line = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "[FiresVoxel] carve timing: stroke {0:0.0} s, {1} dab(s) ({2} chunk edit(s), {3} chunk(s) seeded), main thread {4:0.0} ms/dab (max {5:0.0}) | "
+                        + "dab -> mesh visible avg {6:0} ms max {7:0} ({8} mesh(es)) | dab -> collider avg {9:0} ms max {10:0} ({11}) | "
+                        + "coalescing deferred {12} re-queue(s), waited avg {13:0} ms max {14:0} | {15} chunk(s) still waiting | queues: urgent {16}, normal {17}, apply {18}, assign {19}",
+                        s_lastDab - s_strokeStart, s_dabs, s_chunkDabs, s_seeded, s_dabs > 0 ? s_brushMs / s_dabs : 0.0, s_brushMax,
+                        s_meshes > 0 ? s_meshSum / s_meshes : 0.0, s_meshMax, s_meshes, s_colliders > 0 ? s_colSum / s_colliders : 0.0, s_colMax, s_colliders,
+                        s_defers, s_defers > 0 ? s_deferSum / s_defers : 0.0, s_deferMax, s_pending.Count,
+                        s_urgentRemesh.Count, s_remeshQueue.Count, s_applyQueue.Count, s_assignQueue.Count);
+                    s_pending.Clear();
+                    s_strokeStart = -1f;
+                    s_dabs = s_chunkDabs = s_meshes = s_colliders = s_defers = s_seeded = 0;
+                    s_meshSum = s_meshMax = s_colSum = s_colMax = s_deferSum = s_deferMax = s_brushMs = s_brushMax = 0.0;
+                }
+                FiresLogger.LogDebug(line);
+            }
+        }
+    }
+}
+
+namespace VerdantsAscent.Terrain.Voxel
+{
+    // 0.2.1204 (lead, fly56 outer circle 900 m: the driver's worst zone-load frames were "apply 82.7 / 109.9 / 135.8" ms with one unit
+    // landing, every other stage ~0): where one apply goes. When a single apply (or the trail-group / refine-start step) takes
+    // >= 20 ms, one Debug line (at most every 5 s) splits it: view create, mesh upload (ApplyBuffers), the after-steps (water note,
+    // orphan / stale neighbour pokes), with the chunk and its vertex count. The worst of the window is kept.
+    internal static class ApplySplit
+    {
+        private const double SlowMs = 20.0;
+        private static double s_logAt, s_worst;
+        private static string s_worstLine;
+        private static readonly double Ms = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+        internal static void Note(object key, int verts, long a0, long a1, long a2, long a3)
+        {
+            double total = (a3 - a0) * Ms;
+            if (total < SlowMs || !FiresLogger.DebugEnabled) return;
+            if (total > s_worst) { s_worst = total; s_worstLine = $"chunk {key}, {verts} vert(s): {total:0.0} ms = view create {(a1 - a0) * Ms:0.0} + mesh upload (ApplyBuffers) {(a2 - a1) * Ms:0.0} + after-steps (water note, neighbour pokes) {(a3 - a2) * Ms:0.0}"; }
+            Flush();
+        }
+
+        // 0 = trail groups, 1 = refine start (layer paint on the main thread)
+        internal static void NoteStage(int which, long t0)
+        {
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * Ms;
+            if (ms < SlowMs || !FiresLogger.DebugEnabled) return;
+            if (ms > s_worst) { s_worst = ms; s_worstLine = $"{(which == 0 ? "trail group apply (ApplyTrailGroups)" : "refine start (TryStartRefine: layer paint on the main thread)")} {ms:0.0} ms"; }
+            Flush();
+        }
+
+        private static void Flush()
+        {
+            double now = UnityEngine.Time.realtimeSinceStartup;
+            if (now < s_logAt) return;
+            s_logAt = now + 5.0;
+            FiresLogger.LogDebug($"[FiresVoxelPipe] slow apply: {s_worstLine} (worst of the last 5 s; 0.2.1204)");
+            s_worst = 0; s_worstLine = null;
         }
     }
 }

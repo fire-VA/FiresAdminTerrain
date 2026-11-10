@@ -393,6 +393,7 @@ namespace VerdantsAscent.Water.Core
                 _waterMeshFilter = _waterGO.AddComponent<MeshFilter>();
                 _waterMeshFilter.sharedMesh = _waterMesh;
                 _waterRenderer = _waterGO.AddComponent<MeshRenderer>();
+                _waterRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;   // 0.2.1093: a see-through water/overlay surface never casts a shadow (Fire shot 537: phantom shadow bar on the snow)
                 if (_waterMaterial != null)
                     _waterRenderer.material = _waterMaterial;
             }
@@ -432,7 +433,7 @@ namespace VerdantsAscent.Water.Core
                 // Slippery physics material so the player slides on ice
                 // instead of sticking, so the player can run along it
                 // and slide.
-                _iceCollider.sharedMaterial = GetOrCreateIcePhysicsMaterial();
+                VanillaIce.OptIn(_iceCollider);   // 0.2.1095: vanilla slippery ice (layer static_solid + SlipperyIce), replaces FAT's home-made slide
             }
         }
 

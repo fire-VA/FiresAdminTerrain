@@ -37,6 +37,33 @@ namespace VerdantsAscent.Terrain.BcImport
             }
         }
 
+        // 0.2.1379 (Fire: "we need to make sure that alt biomes have properly placed on va dn"): sectors are worked out at load and not saved, so this is the only record of where each alt
+        // is. Read-only. Debug: each alt, its sectors with centre, size and ground, including the ones with none.
+        private static void NoteEverySector(AltBiomeWorldData data)
+        {
+            if (!FiresLogger.DebugEnabled || data?.Sectors == null || AltBiomeList.m_altBiomes == null) return;
+            var byName = new SortedDictionary<string, List<BiomeSector>>(System.StringComparer.Ordinal);
+            foreach (AltBiome alt in AltBiomeList.m_altBiomes)
+                if (alt != null && !string.IsNullOrEmpty(alt.m_name) && !byName.ContainsKey(alt.m_name)) byName[alt.m_name] = new List<BiomeSector>();
+            foreach (BiomeSector sector in data.Sectors)
+            {
+                if (sector?.AltBiomes == null) continue;
+                foreach (AltBiome alt in sector.AltBiomes)
+                {
+                    if (alt == null || string.IsNullOrEmpty(alt.m_name)) continue;
+                    if (!byName.TryGetValue(alt.m_name, out var list)) byName[alt.m_name] = list = new List<BiomeSector>();
+                    list.Add(sector);
+                }
+            }
+            foreach (var pair in byName)
+            {
+                var line = new StringBuilder($"[AltBiome] {pair.Key}: {pair.Value.Count} sector(s)");
+                foreach (BiomeSector s in pair.Value)
+                    line.Append($"; {s.Biome} at ({s.Center.x:0},{s.Center.y:0}) {s.Max.x - s.Min.x:0} x {s.Max.y - s.Min.y:0} m, height {s.HeightMin:0}..{s.HeightMax:0}");
+                FiresLogger.LogDebug(line.Append(" (0.2.1379)").ToString());
+            }
+        }
+
         private static void Report(AltBiomeWorldData data)
         {
             // Only where locations get placed (server or singleplayer); on a joining client the answer changes nothing.
@@ -73,6 +100,7 @@ namespace VerdantsAscent.Terrain.BcImport
             FiresLogger.LogInfo($"[AltBiome] {defined} alt-biome(s) defined; {withAlt} of {sectors} biome sector(s) carry "
                 + $"at least one. Placed: {Describe(supply)}");
 
+            NoteEverySector(data);
             var demand = Demand();
             if (demand.Count == 0) return;
             FiresLogger.LogInfo($"[AltBiome] locations asking for one: {Describe(demand)}");

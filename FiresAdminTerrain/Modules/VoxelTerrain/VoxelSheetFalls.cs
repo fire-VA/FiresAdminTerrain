@@ -22,7 +22,10 @@ namespace VerdantsAscent.Terrain.Voxel
         private const int MistSitesPerChunk = 6;   // stacked falls read as mist
         private const float StackMistPerCurtain = 0.5f, StackMistMax = 3f;
         private const float StackFadeMin = 0.5f;
-        private static readonly MaterialPropertyBlock s_stackBlock = new MaterialPropertyBlock();
+        // 0.2.1206 ([visual], Norger kit S0: a static initializer here ran on the game's HeightmapBuilder thread -> 'CreateImpl can only be called
+        // from the main thread' -> TypeInitializationException, the type dead for the session): created on first (main-thread) use instead.
+        private static MaterialPropertyBlock s_stackBlock_;
+        private static MaterialPropertyBlock s_stackBlock { get { if (s_stackBlock_ == null) { s_stackBlock_ = new MaterialPropertyBlock(); FatMainThreadInit.Note("VoxelSheetFalls"); } return s_stackBlock_; } }
         private static readonly int P_StackFade = Shader.PropertyToID("_StackFade");
 
         private static readonly List<FiresWaterfallMist.Site> s_mistSites = new List<FiresWaterfallMist.Site>(16);
@@ -496,7 +499,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // The seed follows the water level, not the chunk, so the same step on both sides of a border matches.
             float seed = Mathf.Repeat(firstLip.Level * 3.7f, 97f);
             if (FiresWaterfalls.AppendCurtain(s_columns, mean, FiresWaterfalls.EdgeLipOut, 0f, seed, FiresWaterfalls.TerrainProfile,
-                approach: false))
+                approach: false, placed: FatSuperFlat.On))
             {
                 s_mistSites.Add(FiresWaterfalls.LastSite);
                 var shape = FiresWaterfalls.LastShape;

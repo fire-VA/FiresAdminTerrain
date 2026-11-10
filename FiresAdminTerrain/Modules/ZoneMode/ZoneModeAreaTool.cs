@@ -70,6 +70,7 @@ namespace VerdantsAscent.Terrain.Zones
         internal static bool TryGetAim(out Vector3 point)
         {
             point = default;
+            if (ZoneModeChunkTools.ApiActive) { point = ZoneModeChunkTools.ApiAim; return true; }   // 0.2.1287: FatApi.UseToolEntry aims here
             var camera = Utils.GetMainCamera();
             if (camera == null) return false;
             var ray = new Ray(camera.transform.position, camera.transform.forward);
@@ -94,6 +95,7 @@ namespace VerdantsAscent.Terrain.Zones
                 return;
             }
             m_lastZoneMessage = null;
+            m_zoneDrawn = false;
             if (m_zone != null) m_zone.gameObject.SetActive(false);
             if (!WantsWheel(player) || !TryGetAim(out var aim))
             {
@@ -103,11 +105,24 @@ namespace VerdantsAscent.Terrain.Zones
             if (ZoneModeChunkTools.IsPaintSelected(player))
             {
                 ReadPaintWheel(player);
+                ReadWipeToggle(player);
                 DrawPaint(aim);
                 return;
             }
             ReadWheel();
             Draw(aim);
+        }
+
+        // 0.2.1374 (Fire: builds "preserved or wiped based off a toggle on the brush tool"). Off by default, every session.
+        internal static bool WipeBuilds => s_wipeBuilds;
+        private static bool s_wipeBuilds;
+
+        private static void ReadWipeToggle(Player player)
+        {
+            var key = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.BiomePaintWipeToggle;
+            if (key == null || !key.Value.IsDown() || !player.TakeInput()) return;
+            s_wipeBuilds = !s_wipeBuilds;
+            player.Message(MessageHud.MessageType.Center, s_wipeBuilds ? "Paint: builds in the circle will be WIPED (asks first)" : "Paint: builds are kept");
         }
 
         private static void ReadPaintWheel(Player player)
@@ -151,6 +166,9 @@ namespace VerdantsAscent.Terrain.Zones
                     : $"Area: radius {Radius} m, {Mathf.RoundToInt(s_below)} m below to {Mathf.RoundToInt(s_above)} m above the aim");
         }
 
+        private bool m_postsDrawn;
+        private Vector4 m_postsAt;
+
         private void Draw(Vector3 aim)
         {
             EnsureLines();
@@ -163,6 +181,9 @@ namespace VerdantsAscent.Terrain.Zones
             var centre = new Vector3(Mathf.Round(aim.x), 0f, Mathf.Round(aim.z));
             Circle(m_top, centre, radius, top);
             Circle(m_bottom, centre, radius, bottom);
+            var postKey = new Vector4(centre.x, centre.z, radius, top * 100000f + bottom);
+            if (m_postsDrawn && postKey == m_postsAt) return;
+            m_postsDrawn = true; m_postsAt = postKey;
             for (int i = 0; i < Posts; i++)
             {
                 float angle = i * Mathf.PI * 2f / Posts;
@@ -182,6 +203,13 @@ namespace VerdantsAscent.Terrain.Zones
         private static readonly Color ZoneRefused = new Color(1f, 0.3f, 0.25f, 0.95f);
         private LineRenderer m_zone;
         private string m_lastZoneMessage;
+        private const float ZoneRecheckSeconds = 0.5f;
+        private static readonly Vector2[] s_zoneCorners = new Vector2[4];
+        private static readonly Vector3[] s_zonePoints = new Vector3[4 * ZoneEdgePoints];
+        private bool m_zoneDrawn, m_zoneArea;
+        private Vector2s m_zoneAt;
+        private string m_zoneAction;
+        private float m_zoneRecheck;
 
         private void DrawZone(Player player, Vector3 aim, string action, bool area)
         {
@@ -192,28 +220,34 @@ namespace VerdantsAscent.Terrain.Zones
             foreach (var post in m_posts) post.gameObject.SetActive(false);
             m_zone.gameObject.SetActive(true);
 
+            // 0.2.1058 ([classes-ui]'s UI efficiency audit T1): the outline (96 ground heights) is rebuilt only when the aimed
+            // zone, the action or the area changes, or every ZoneRecheckSeconds (an edit can move the ground); the verdict (it
+            // reads other players' positions) on the same change or every ZoneRecheckSeconds.
             var zone = ZoneSystem.GetZone(aim);
+            bool changed = !m_zoneDrawn || zone.x != m_zoneAt.x || zone.y != m_zoneAt.y || action != m_zoneAction || area != m_zoneArea;
+            bool due = Time.unscaledTime >= m_zoneRecheck;
+            if (!changed && !due) return;
+            m_zoneDrawn = true; m_zoneAt = zone; m_zoneAction = action; m_zoneArea = area;
+            m_zoneRecheck = Time.unscaledTime + ZoneRecheckSeconds;
             string why = PredictRefusal(action, zone, player);
             m_zone.startColor = m_zone.endColor = why == null ? ZoneGo : ZoneRefused;
             Vector3 centre = ZoneSystem.GetZonePos(zone);
             float half = ZoneSystem.c_ZoneSizeHalf * (area ? 3f : 1f);
-            var corners = new[]
-            {
-                new Vector2(centre.x - half, centre.z - half), new Vector2(centre.x + half, centre.z - half),
-                new Vector2(centre.x + half, centre.z + half), new Vector2(centre.x - half, centre.z + half),
-            };
+            s_zoneCorners[0] = new Vector2(centre.x - half, centre.z - half); s_zoneCorners[1] = new Vector2(centre.x + half, centre.z - half);
+            s_zoneCorners[2] = new Vector2(centre.x + half, centre.z + half); s_zoneCorners[3] = new Vector2(centre.x - half, centre.z + half);
             int i = 0;
             for (int edge = 0; edge < 4; edge++)
             {
-                var a = corners[edge];
-                var b = corners[(edge + 1) % 4];
+                var a = s_zoneCorners[edge];
+                var b = s_zoneCorners[(edge + 1) % 4];
                 for (int k = 0; k < ZoneEdgePoints; k++, i++)
                 {
                     var p = Vector2.Lerp(a, b, k / (float)ZoneEdgePoints);
                     float ground = ZoneSystem.instance != null ? ZoneSystem.instance.GetGroundHeight(new Vector3(p.x, 0f, p.y)) : WaterLevel;
-                    m_zone.SetPosition(i, new Vector3(p.x, Mathf.Max(ground, WaterLevel) + ZoneLift, p.y));
+                    s_zonePoints[i] = new Vector3(p.x, Mathf.Max(ground, WaterLevel) + ZoneLift, p.y);
                 }
             }
+            m_zone.SetPositions(s_zonePoints);
 
             string message = why == null
                 ? $"{action} {(area ? "the 3x3 round " : "chunk ")}({zone.x},{zone.y})"
@@ -249,13 +283,21 @@ namespace VerdantsAscent.Terrain.Zones
             return null;
         }
 
+        // 0.2.1058 (audit T2): a ring is rewritten only when its centre, radius or height changed, in one SetPositions call.
+        private static readonly System.Collections.Generic.Dictionary<LineRenderer, Vector4> s_ringAt = new System.Collections.Generic.Dictionary<LineRenderer, Vector4>();
+        private static readonly Vector3[] s_ringPoints = new Vector3[RingSegments];
+
         private static void Circle(LineRenderer line, Vector3 centre, float radius, float height)
         {
+            var key = new Vector4(centre.x, centre.z, radius, height);
+            if (s_ringAt.TryGetValue(line, out var last) && last == key) return;
+            s_ringAt[line] = key;
             for (int i = 0; i < RingSegments; i++)
             {
                 float angle = i * Mathf.PI * 2f / RingSegments;
-                line.SetPosition(i, new Vector3(centre.x + Mathf.Cos(angle) * radius, height, centre.z + Mathf.Sin(angle) * radius));
+                s_ringPoints[i] = new Vector3(centre.x + Mathf.Cos(angle) * radius, height, centre.z + Mathf.Sin(angle) * radius);
             }
+            line.SetPositions(s_ringPoints);
         }
 
         private void EnsureLines()

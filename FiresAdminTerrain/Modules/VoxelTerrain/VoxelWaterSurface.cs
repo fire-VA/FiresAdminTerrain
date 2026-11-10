@@ -26,6 +26,9 @@ namespace VerdantsAscent.Terrain.Voxel
             // CustomWaterManager.GetWaterLevelAt where the floor is applied. Inside a big shaft below the river bed, the
             // river is not this point's water (the pond's own sheet is).
             if (FatSinkFallCuts.BelowShaftBed(pos, ShaftBedMargin)) return -10000f;
+            // 0.2.1097: a generated column that is solid ice, cooled crust or hot lava (WaterStateField) has no liquid level; lava burns
+            // through vanilla's heat path (FatLava).
+            if (VerdantsAscent.Water.Core.FatLava.GenNotLiquidAt(pos.x, pos.z)) return -10000f;
             return SurfaceAtBase(pos);
         }
 
@@ -220,9 +223,34 @@ namespace VerdantsAscent.Terrain.Voxel
             return surface;
         }
 
+        // 0.2.1314 (Fire 10-31 on 1313: "it showed as ice and we fell through and started walking under the ice"): a column was "frozen"
+        // here (no liquid level: no swimming) by the world-gen FROZEN class or the old instant seasonal reach (SeasonalFrozenAt), while
+        // 1313's ice collider only exists where the ONE column grid is solid - so forming ice (slush, below _FiresIceSolid) had no
+        // collider AND no water: you dropped to the bed and walked under the sheet. Frozen = the one grid's value at the column >=
+        // _FiresIceSolid (the collider's own test); anything below is water you swim in. No grid yet = the per-column sample.
         private static bool FrozenAt(float wx, float wz)
-            => FiresWorldGenBase.WaterClassAt(wx, wz) == FiresWorldGenBase.WC_FROZEN
-            || FiresWorldGenBase.SeasonalFrozenAt(wx, wz);
+        {
+            float cx = wx + 0.5f, cz = wz + 0.5f;
+            bool frozen;
+            string src;
+            if (WaterStateField.TryGridIce(WaterStateField.GridSrc.Gen, cx, cz, out float ice)) { frozen = ice >= WaterStateField.IceSolid; src = "grid"; }
+            else if (GenWaterField.Ready && GenWaterField.TryWaterSurfaceSmooth(cx, cz, out float lvl, out _)) { ice = WaterStateField.Sample(cx, cz, lvl).Ice; frozen = ice >= WaterStateField.IceSolid; src = "column sample"; }
+            else { ice = 0f; frozen = false; src = "no water"; }
+            if (!s_frozenOneSaid) { s_frozenOneSaid = true; FiresLogger.LogInfo($"[WaterIce] swim / liquid level: a column is frozen only where the one ice grid is solid (>= {WaterStateField.IceSolid:0.00}, the collider's test); slush below that is swimmable water (was: world-gen frozen class / seasonal reach) (0.2.1314)"); }
+            if (FiresLogger.DebugEnabled && System.Threading.Thread.CurrentThread.ManagedThreadId == WaterStateField.MainThread && Player.m_localPlayer != null && Time.unscaledTime >= s_frozenWhyAt)
+            {
+                Vector3 p = Player.m_localPlayer.transform.position;
+                if (Mathf.Abs(p.x - cx) < 1.5f && Mathf.Abs(p.z - cz) < 1.5f)
+                {
+                    s_frozenWhyAt = Time.unscaledTime + 5f;
+                    bool oldRule = FiresWorldGenBase.WaterClassAt(wx, wz) == FiresWorldGenBase.WC_FROZEN || FiresWorldGenBase.SeasonalFrozenAt(wx, wz);
+                    FiresLogger.LogDebug($"[WaterIce] swim column ({wx:0},{wz:0}) at the player: ice {ice:0.00} via {src}, solid {WaterStateField.IceSolid:0.00} -> {(frozen ? "FROZEN (no liquid, walk the collider)" : "WATER (swim)")}; old rule (class / seasonal reach) said {(oldRule ? "frozen" : "water")} (0.2.1314)");
+                }
+            }
+            return frozen;
+        }
+        private static bool s_frozenOneSaid;
+        private static float s_frozenWhyAt;
 
         // Main-thread scratch for the one-lock 3x3 batch.
         private static readonly float[] s_nine = new float[9];

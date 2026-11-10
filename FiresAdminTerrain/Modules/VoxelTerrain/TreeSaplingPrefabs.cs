@@ -35,6 +35,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private const string DefaultAshlandsTrees = "AshlandsTree3, AshlandsTree4, AshlandsTree5, AshlandsTree6";
         // SnowFirTree_small carries no TreeBase in 1.0, so it was always skipped; listing it only logged a warning.
         private const string DefaultSnowFirTrees = "SnowFirTree, SnowFirTree 2";
+        private const string OldDefaultNonTree = "SnowFirTree_small";   // 0.2.1404
         private const int SeedCost = 1;
         private const string CultivatorItem = "Cultivator";
 
@@ -125,6 +126,12 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 GameObject tree = scene.GetPrefab(name);
                 if (tree == null) { Missing($"{saplingName}: no prefab named '{name}'."); continue; }
+                if (tree.GetComponent<TreeBase>() == null && name == OldDefaultNonTree)
+                {
+                    // 0.2.1404 (log sweep 11-07): the old default listed it; a cfg saved then still does. Skipped quietly, value untouched.
+                    FiresLogger.LogDebug($"[FiresZones] {saplingName}: '{name}' skipped (no TreeBase in 1.0; it was in the old default list, still in this cfg).");
+                    continue;
+                }
                 if (tree.GetComponent<TreeBase>() == null)
                 {
                     Missing($"{saplingName}: '{name}' is not a tree, it carries no TreeBase.");

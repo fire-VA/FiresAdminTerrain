@@ -107,7 +107,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_probed = true;
                 try
                 {
-                    Type t = AccessTools.TypeByName("ExpandWorldData.BiomeManager");
+                    Type t = FatSoftTypes.Find("ExpandWorldData.Biome.BiomeManager") ?? FatSoftTypes.Find("ExpandWorldData.BiomeManager");   // 0.2.1389: its namespace since 1.79
                     if (t != null)
                     {
                         s_toTerrainMethod = AccessTools.Method(t, "BiomeToTerrain", new[] { typeof(Heightmap.Biome) });

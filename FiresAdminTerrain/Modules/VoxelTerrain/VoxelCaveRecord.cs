@@ -213,6 +213,13 @@ namespace VerdantsAscent.Terrain.Voxel
             return s_zones.TryGetValue(zone, out version);
         }
 
+        // 0.2.1133: the zones this world's record holds (FatCaveOre's per-world tally and test).
+        internal static List<Vector2s> DressedZones()
+        {
+            EnsureLoaded();
+            return new List<Vector2s>(s_zones.Keys);
+        }
+
         internal static void MarkZoneDressed(Vector2s zone, int version)
         {
             EnsureLoaded();

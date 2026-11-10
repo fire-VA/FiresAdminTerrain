@@ -45,7 +45,13 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (br.ReadUInt32() != 0x574F4C46u) return;   // "FLOW"
                     int n = br.ReadInt32();
                     float half = br.ReadSingle();
-                    if (n < 16 || n > 16384 || half < 100f) return;
+                    // 0.2.1336: the size against the file BEFORE ReadBytes allocates (536 MB at the top limit), and a NaN half refused.
+                    long left = br.BaseStream.Length - br.BaseStream.Position;
+                    if (n < 16 || n > 16384 || !(half >= 100f) || float.IsInfinity(half) || n * (long)n * 2L > left)
+                    {
+                        FiresLogger.LogWarning($"[FiresVoxelWater] flow sidecar refused: size {n}, half {half}, {left} bytes left; falling back to the surface gradient.");
+                        return;
+                    }
                     var xz = br.ReadBytes(n * n * 2);
                     if (xz.Length != n * n * 2) return;
                     var s = new sbyte[xz.Length];

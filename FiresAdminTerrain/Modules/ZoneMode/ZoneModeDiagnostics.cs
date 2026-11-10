@@ -16,10 +16,23 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal static void Tick()
         {
+            // 0.2.1089 (Fire, live 1088 overlay: ZoneSystem.Update 288 ms/s): every FAT cause in this postfix is timed;
+            // ZoneUpdateTimes writes the per-cause [ZoneUpdate] line every 10 s.
+            long t = ZoneUpdateTimes.Now();
             // Chunk blueprints are placed on any voxel world, so their keys answer before the zone-mode gate.
             ZoneModeChunkKeys.ClientTick();
+            t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.ChunkKeys, t);
             BiomePaint.Tick();
+            t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.BiomePaint, t);
             ZoneModeCloseable.Tick();   // make-closeable runs on a world that is not zone mode yet
+            t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.Closeable, t);
+            if (ZoneModeSkylands.PlayerDriven)   // 0.2.1075 super flat, 0.2.1076 every non-zone-mode world with sky islands
+            {
+                ZoneModeSkylands.ServerTick();
+                t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.SkylandsServer, t);
+                ZoneModeSkylands.ClientTick();
+                t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.SkylandsClient, t);
+            }
             if (!ZoneModeRegistry.ModeActive) return;
             ZoneModeOpening.Tick();
             ZoneModeOverClosed.Tick();
@@ -39,6 +52,7 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModeChunkTools.ClientTick();
             ZoneModeSwaps.EnsureIndex();
             ZoneModeEyeOfTheBeholder.ClientTick();
+            ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.ZoneModeTicks, t);
 
             if (Time.time < s_nextSummary) return;
             s_nextSummary = Time.time + SummaryIntervalSeconds;
@@ -130,6 +144,109 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModeEyeOfTheBeholder.Reset();
             BiomePaint.Reset();
             ZoneModeCloseable.Reset();
+        }
+    }
+
+    // 0.2.1089: per-cause timing of ZoneSystem.Update (Fire, live 1088: the overlay's top cost, 288 ms/s). The prefix/postfix pair on
+    // ZoneSystem.Update (ZoneModePatches) gives the whole call including vanilla and every other mod; FAT's own causes are timed where
+    // they run: the ZoneModeDiagnostics.Tick stages, BiomePaint.Tick's stages, and FAT's heightmap postfixes when they run INSIDE
+    // ZoneSystem.Update (a zone spawning builds its heightmap in that call). Debug, one line every 10 s:
+    //   [ZoneUpdate] last 10 s: whole call X ms/s (n calls, worst W ms); FAT Y ms/s; <cause> ms/s (calls) ...; rest (vanilla, other mods, FAT's cultivated-bind postfix) Z ms/s
+    internal static class ZoneUpdateTimes
+    {
+        internal enum Cause
+        {
+            ChunkKeys, BiomePaint, BiomeRefresh, BiomeDeepRecolour, BiomeDeepCells, BiomeServer, Closeable,
+            SkylandsServer, SkylandsClient, ZoneModeTicks,
+            HmTint, HmPaintColours, HmEnvBox, HmWetMask, Count
+        }
+
+        private const float Every = 30f;   // 0.2.1102: the [ZoneUpdate] summary every 30 s (was 10 s)
+        private static readonly long[] s_ticks = new long[(int)Cause.Count];
+        private static readonly int[] s_calls = new int[(int)Cause.Count];
+        private static long s_wholeTicks, s_wholeWorst, s_wholeStart;
+        private static int s_wholeCalls, s_depth;
+        private static float s_since = -1f;
+        private static readonly System.Text.StringBuilder s_sb = new System.Text.StringBuilder(512);
+        private static readonly int[] s_order = new int[(int)Cause.Count];
+
+        // True while ZoneSystem.Update runs (heightmap postfixes count as a ZoneSystem.Update cause only then).
+        internal static bool Inside => s_depth > 0;
+
+        internal static long Now() => System.Diagnostics.Stopwatch.GetTimestamp();
+
+        // Adds the time since t0 to the cause and returns now, so stages chain: t = Add(a, t); t = Add(b, t);
+        internal static long Add(Cause c, long t0)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            s_ticks[(int)c] += now - t0;
+            s_calls[(int)c]++;
+            s_cumulative += now - t0;
+            return now;
+        }
+
+        // 0.2.1103 (fat_proof_snow_mp_test): every FAT cause's time since start, never reset (Stopwatch ticks).
+        private static long s_cumulative;
+        internal static long CumulativeTicks => s_cumulative;
+
+        // A heightmap postfix: counted only inside ZoneSystem.Update.
+        internal static void AddIfInside(Cause c, long t0)
+        {
+            if (s_depth > 0) Add(c, t0);
+        }
+
+        internal static void Begin()
+        {
+            if (s_depth++ == 0) s_wholeStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        internal static void End()
+        {
+            if (s_depth <= 0) return;
+            if (--s_depth > 0) return;
+            long d = System.Diagnostics.Stopwatch.GetTimestamp() - s_wholeStart;
+            s_wholeTicks += d;
+            if (d > s_wholeWorst) s_wholeWorst = d;
+            s_wholeCalls++;
+            Report();
+        }
+
+        private static void Report()
+        {
+            float now = Time.unscaledTime;
+            if (s_since < 0f) { s_since = now; return; }
+            float span = now - s_since;
+            if (span < Every) return;
+            if (FiresLogger.DebugEnabled)
+            {
+                double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency / span;   // ticks -> ms per second
+                long fat = 0;
+                for (int i = 0; i < (int)Cause.Count; i++) { fat += s_ticks[i]; s_order[i] = i; }
+                // the stages nest: BiomePaint's own stages are inside BiomePaint, so FAT's total counts the outer stages only
+                fat -= s_ticks[(int)Cause.BiomeRefresh] + s_ticks[(int)Cause.BiomeDeepRecolour] + s_ticks[(int)Cause.BiomeDeepCells]
+                     + s_ticks[(int)Cause.BiomeServer];
+                System.Array.Sort(s_order, (a, b) => s_ticks[b].CompareTo(s_ticks[a]));
+                s_sb.Length = 0;
+                s_sb.Append("[ZoneUpdate] last ").Append(span.ToString("0")).Append(" s: whole call ")
+                    .Append((s_wholeTicks * f).ToString("0.0")).Append(" ms/s (").Append(s_wholeCalls).Append(" calls, worst ")
+                    .Append((s_wholeWorst * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0")).Append(" ms); FAT ")
+                    .Append((fat * f).ToString("0.0")).Append(" ms/s:");
+                int shown = 0;
+                for (int k = 0; k < s_order.Length && shown < 8; k++)
+                {
+                    int i = s_order[k];
+                    if (s_calls[i] == 0) break;
+                    s_sb.Append(' ').Append(((Cause)i).ToString()).Append(' ').Append((s_ticks[i] * f).ToString("0.00"))
+                        .Append(" (").Append(s_calls[i]).Append(");");
+                    shown++;
+                }
+                s_sb.Append(" rest (vanilla, other mods, FAT's cultivated-bind postfix) ").Append(((s_wholeTicks - fat) * f).ToString("0.0")).Append(" ms/s");
+                FiresLogger.LogDebug(s_sb.ToString());
+            }
+            System.Array.Clear(s_ticks, 0, s_ticks.Length);
+            System.Array.Clear(s_calls, 0, s_calls.Length);
+            s_wholeTicks = s_wholeWorst = 0; s_wholeCalls = 0;
+            s_since = now;
         }
     }
 }

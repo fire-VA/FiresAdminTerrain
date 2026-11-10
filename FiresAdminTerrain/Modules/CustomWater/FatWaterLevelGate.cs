@@ -58,27 +58,51 @@ namespace VerdantsAscent.Water
         // The Floating.GetWaterLevel postfix body: pours, the (indexed or full) combiner/legacy scan, the generated field; timed per part.
         internal static void Apply(Vector3 p, ref float result)
         {
-            if (!FiresLogger.DebugEnabled)   // the per-part timing (4 Stopwatch reads per call, every floater every step) only with Debug
+            CustomWaterPatches.RaiseToPourSurface(p, ref result);   // cheap (0.03 µs) and reads the caller's own result: never memoised
+            // 0.2.1167 (Fire: "fixed update is over 100ms/f"; 1166 log "[FatWaterLevel] 244976 call(s)/min: combiner+legacy lookup
+            // 3.67 µs"): Floating, Character.InWater/IsSwimming/GetLiquidLevel and the feeders ask the same point many times in one
+            // physics step, and every ask re-ran each overlapping placed-water combiner's PlacedWaterField.TrySurface (up to 17 in one
+            // zone at the homestead pond). The combined level (combiners + legacy + generated field) is memoised per 0.25 m cell
+            // (x, y, z) per physics step: the same step and cell return the first answer. Waves only move between steps.
+            float t = Time.inFixedTimeStep ? Time.fixedTime : Time.time;
+            int cx = Mathf.FloorToInt(p.x * 4f), cy = Mathf.FloorToInt(p.y * 4f), cz = Mathf.FloorToInt(p.z * 4f);
+            long key = ((long)(cx & 0xFFFFF) << 40) | ((long)(cy & 0xFFFFF) << 20) | (long)(cz & 0xFFFFF);
+            int slot = (int)((ulong)(key * unchecked((long)0x9E3779B97F4A7C15UL)) >> 52);   // 4096 slots
+            s_memoCalls++;
+            if (s_memoKey[slot] == key && s_memoT[slot] == t && s_memoValid[slot])
             {
-                CustomWaterPatches.RaiseToPourSurface(p, ref result);
-                float sc = CustomWaterManager.ScannedLevelAt(p);
-                if (sc > result) result = sc;
-                float gn = CustomWaterManager.GeneratedLevelAt(p);
-                if (gn > result) result = gn;
+                s_memoHits++;
+                float m = s_memoV[slot];
+                if (m > result) result = m;
+                if (FiresLogger.DebugEnabled) Report();
                 return;
             }
-            long t0 = Stopwatch.GetTimestamp();
-            CustomWaterPatches.RaiseToPourSurface(p, ref result);
-            long t1 = Stopwatch.GetTimestamp();
-            float scanned = CustomWaterManager.ScannedLevelAt(p);
-            if (scanned > result) result = scanned;
-            long t2 = Stopwatch.GetTimestamp();
-            float gen = CustomWaterManager.GeneratedLevelAt(p);
-            if (gen > result) result = gen;
-            long t3 = Stopwatch.GetTimestamp();
-            s_tPour += t1 - t0; s_tScan += t2 - t1; s_tGen += t3 - t2; s_calls++;
-            Report();
+            float v;
+            if (!FiresLogger.DebugEnabled)   // the per-part timing only with Debug
+            {
+                float sc = CustomWaterManager.ScannedLevelAt(p);
+                float gn = CustomWaterManager.GeneratedLevelAt(p);
+                v = sc > gn ? sc : gn;
+            }
+            else
+            {
+                long t1 = Stopwatch.GetTimestamp();
+                float scanned = CustomWaterManager.ScannedLevelAt(p);
+                long t2 = Stopwatch.GetTimestamp();
+                float gen = CustomWaterManager.GeneratedLevelAt(p);
+                long t3 = Stopwatch.GetTimestamp();
+                v = scanned > gen ? scanned : gen;
+                s_tScan += t2 - t1; s_tGen += t3 - t2; s_calls++;
+            }
+            s_memoKey[slot] = key; s_memoT[slot] = t; s_memoV[slot] = v; s_memoValid[slot] = true;
+            if (v > result) result = v;
+            if (FiresLogger.DebugEnabled) Report();
         }
+
+        private static readonly long[] s_memoKey = new long[4096];
+        private static readonly float[] s_memoT = new float[4096], s_memoV = new float[4096];
+        private static readonly bool[] s_memoValid = new bool[4096];
+        private static long s_memoCalls, s_memoHits;
 
         private static void EnsureIndex()
         {
@@ -151,16 +175,17 @@ namespace VerdantsAscent.Water
             if (now < s_nextReport) return;
             bool first = s_nextReport == 0f;
             s_nextReport = now + ReportSeconds;
-            if (first || s_calls == 0) { s_tPour = s_tScan = s_tGen = s_calls = 0; return; }
+            if (first || s_calls == 0) { s_tPour = s_tScan = s_tGen = s_calls = 0; s_memoCalls = s_memoHits = 0; return; }
             EnsureIndex();
             double per = TicksToMicros / s_calls;
             int maxList = s_combZones.Count == 0 ? 0 : s_combZones.Values.Max(l => l.Count);
+            double msPerSec = (s_tScan + s_tGen) * TicksToMicros / 1000.0 / ReportSeconds;
             FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture,
-                "[FatWaterLevel] {0} call(s)/min: pours {1:0.00} µs, combiner+legacy {2} {3:0.00} µs, generated field {4:0.00} µs per call; " +
-                "index {5} ([Voxel Terrain] Water level zone gate): {6} zone(s), at most {7} combiner(s) in one zone, of {8} combiner(s), {9} legacy",
-                s_calls, s_tPour * per, IndexOn ? "lookup" : "scan", s_tScan * per, s_tGen * per,
+                "[FatWaterLevel] {0} call(s)/min, memo hit {1:0.0} % (0.25 m cell per physics step, 0.2.1167); {2} miss(es): combiner+legacy {3} {4:0.00} µs, generated field {5:0.00} µs per miss; lookups {6:0.00} ms/s; " +
+                "index {7} ([Voxel Terrain] Water level zone gate): {8} zone(s), at most {9} combiner(s) in one zone, of {10} combiner(s), {11} legacy",
+                s_memoCalls, s_memoCalls > 0 ? 100.0 * s_memoHits / s_memoCalls : 0.0, s_calls, IndexOn ? "lookup" : "scan", s_tScan * per, s_tGen * per, msPerSec,
                 IndexOn ? "ON" : "OFF", s_combZones.Count, maxList, s_combiners, s_legacy));
-            s_tPour = s_tScan = s_tGen = s_calls = 0;
+            s_tPour = s_tScan = s_tGen = s_calls = 0; s_memoCalls = s_memoHits = 0;
         }
 
         // ── fat_waterlevel_ab(_test): every indexed path OFF vs ON at the same points, same frame ─────────────────────────────────

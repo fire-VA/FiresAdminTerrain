@@ -24,6 +24,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // How long the worker's read took, for the join's line, once this join's world adopted it; NotAdopted otherwise.
         internal static long AdoptedReadMs { get; private set; } = NotAdopted;
 
+        // 0.2.1317 ([BcImport] PeerInfo split, Debug): why this join's world did not adopt a read, and what TakeFor cost.
+        internal static string NotAdoptedWhy = "no read-ahead started: the join sync never settled the bake (no bake answer this join)";
+        internal static long LastTakeMs = -1;
+        private static bool s_infoSaid;
+
         internal static void Start(string path)
         {
             if (string.IsNullOrEmpty(path) || (path == s_path && s_read != null)) return;
@@ -31,6 +36,7 @@ namespace VerdantsAscent.Terrain.Voxel
             s_clock = Stopwatch.StartNew();
             s_readMs = 0;
             AdoptedReadMs = NotAdopted;
+            NotAdoptedWhy = $"a read-ahead was started for {path} but the world generator never asked for it (TakeFor not called this PeerInfo: not a FAT bake world, or the world was already loaded)";   // 0.2.1317
             var clock = s_clock;
             s_read = Task.Run(() =>
             {
@@ -46,7 +52,20 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static FiresWorldGenBase.CacheFile TakeFor(string path)
         {
             var read = s_read;
-            if (read == null || path != s_path) return null;
+            // 0.2.1317: say why (Debug PeerInfo split); the return values are unchanged
+            if (read == null)
+            {
+                NotAdoptedWhy = $"the world asked for {path} but no read-ahead was running ({NotAdoptedWhy})";
+                SayWhyOnce();
+                return null;
+            }
+            if (path != s_path)
+            {
+                NotAdoptedWhy = $"path mismatch: the world asked for {path}, the read-ahead was for {s_path}";
+                SayWhyOnce();
+                return null;
+            }
+            var takeClock = Stopwatch.StartNew();
             long waitStart = s_clock.ElapsedMilliseconds;
             FiresWorldGenBase.CacheFile file = null;
             try { file = read.Result; }
@@ -54,17 +73,27 @@ namespace VerdantsAscent.Terrain.Voxel
             long waited = s_clock.ElapsedMilliseconds - waitStart;
             long readMs = s_readMs;
             Forget();
-            if (file == null) return null;
+            LastTakeMs = takeClock.ElapsedMilliseconds;
+            if (file == null) { NotAdoptedWhy = "the worker's read failed or returned no file; the main thread read it itself"; SayWhyOnce(); return null; }
+            NotAdoptedWhy = "adopted";
             AdoptedReadMs = readMs;
             FiresLogger.LogInfo($"[FiresWorldGen] adopted the terrain cache a worker read in {readMs} ms"
                 + (waited > 0 ? $" (the world waited {waited} ms more for it)." : ", ready before the world asked for it."));
             return file;
         }
 
+        private static void SayWhyOnce()
+        {
+            if (s_infoSaid) return;
+            s_infoSaid = true;
+            FiresLogger.LogInfo($"[FiresWorldGen] bake read-ahead not adopted: {NotAdoptedWhy} (0.2.1317)");
+        }
+
         internal static void Reset()
         {
             Forget();
             AdoptedReadMs = NotAdopted;
+            NotAdoptedWhy = "no read-ahead started: the join sync never settled the bake (no bake answer this join)";   // 0.2.1317
         }
 
         private static void Forget()

@@ -133,6 +133,9 @@ namespace VerdantsAscent.Terrain.Voxel
             string flowTarget = Path.ChangeExtension(target, FlowExtension);
             if (File.Exists(flow)) File.Copy(flow, flowTarget, true);
             else if (File.Exists(flowTarget)) File.Delete(flowTarget);
+            // 0.2.1166: the Studio's round-trip sample manifest rides along, for `fat_studio_roundtrip` (no argument) in game.
+            string samples = Path.ChangeExtension(baked, FatStudioRoundtrip.ManifestExtension);
+            if (File.Exists(samples)) File.Copy(samples, Path.ChangeExtension(target, FatStudioRoundtrip.ManifestExtension), true);
             // The bake's big waterfall sinkholes (firesgen_<name>_sinkfalls.txt beside it). A bake without one
             // (faithful, or from an older studio) still overwrites the target, so an older world's cuts never linger.
             const string bakedSuffix = "_baked.bin";

@@ -27,6 +27,34 @@ namespace VerdantsAscent.Terrain.Biome
     /// </summary>
     public static class BiomePaintPersistence
     {
+        // 0.2.1316 (C4 cache, SAME behaviour): the TerrainComp reflection lookups ran on every
+        // paint / restore call; the type never changes, so each is looked up once (lazily, on first
+        // use inside the same try as before - a lookup that throws still throws there) and reused.
+        // Null results stay null and hit the same null checks. Save has its own holder so it is still
+        // only looked up on the owner/save path, as before.
+        private static class TcReflection
+        {
+            internal static readonly FieldInfo PaintMask = typeof(TerrainComp).GetField("m_paintMask",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            internal static readonly FieldInfo ModifiedPaint = typeof(TerrainComp).GetField("m_modifiedPaint",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            internal static readonly FieldInfo NView = typeof(TerrainComp).GetField("m_nview",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            private static bool s_proofLogged;
+            internal static void ProofOnce()
+            {
+                if (s_proofLogged) return;
+                s_proofLogged = true;
+                FiresLogger.LogDebug($"[BiomePaintPersistence] TerrainComp reflection cached (m_paintMask {(PaintMask != null ? "ok" : "null")}, m_modifiedPaint {(ModifiedPaint != null ? "ok" : "null")}, m_nview {(NView != null ? "ok" : "null")}): looked up once per process, the type never changes (0.2.1316)");
+            }
+        }
+
+        private static class TcSaveReflection
+        {
+            internal static readonly MethodInfo Save = typeof(TerrainComp).GetMethod("Save",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        }
+
         #region Constants
 
         // ZDO keys for our custom data
@@ -227,6 +255,20 @@ namespace VerdantsAscent.Terrain.Biome
         /// Checks if there are any painted areas. Used for fast-path optimization.
         /// </summary>
         public static bool HasAnyPaintedAreas() => _hasAnyPaintedAreas;
+
+        // 0.2.1060 (Fire's Deep North perf, [seasons]' diag section 6): would RemoveOverlapping(center, radius) remove
+        // anything here? Read-only, same fully-contained rule, on the loaded paints only (no ZDO parse), so a vanilla
+        // terrain op over unpainted ground never sends a scrub.
+        public static bool AnyFullyContained(Vector3 center, float radius)
+        {
+            if (!_hasAnyPaintedAreas || _activePaints == null || radius <= 0f) return false;
+            foreach (var p in _activePaints)
+            {
+                float dx = p.X - center.x, dz = p.Z - center.z;
+                if (Mathf.Sqrt(dx * dx + dz * dz) + p.Radius <= radius) return true;
+            }
+            return false;
+        }
 
         /// <summary>
         /// Gets the biome paint data affecting a specific world position.
@@ -494,12 +536,11 @@ namespace VerdantsAscent.Terrain.Biome
             try
             {
                 // Access the paint mask via reflection
-                var paintMaskField = typeof(TerrainComp).GetField("m_paintMask",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                var modifiedField = typeof(TerrainComp).GetField("m_modifiedPaint",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                var nviewField = typeof(TerrainComp).GetField("m_nview",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                // 0.2.1316 (C4 cache, SAME): TerrainComp's fields never change in the process - looked up once, same null checks below
+                var paintMaskField = TcReflection.PaintMask;
+                var modifiedField = TcReflection.ModifiedPaint;
+                var nviewField = TcReflection.NView;
+                TcReflection.ProofOnce();
 
                 if (paintMaskField == null) return;
 
@@ -625,8 +666,7 @@ namespace VerdantsAscent.Terrain.Biome
                     if (nview != null && nview.IsValid() && nview.IsOwner())
                     {
                         // Call Save method via reflection to persist the changes
-                        var saveMethod = typeof(TerrainComp).GetMethod("Save",
-                            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        var saveMethod = TcSaveReflection.Save;   // 0.2.1316 (C4 cache, SAME): looked up once, still only on the owner path
                         saveMethod?.Invoke(tc, null);
                     }
 
@@ -691,12 +731,11 @@ namespace VerdantsAscent.Terrain.Biome
 
                 try
                 {
-                    var paintMaskField = typeof(TerrainComp).GetField("m_paintMask",
-                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    var modifiedField = typeof(TerrainComp).GetField("m_modifiedPaint",
-                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    var nviewField = typeof(TerrainComp).GetField("m_nview",
-                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    // 0.2.1316 (C4 cache, SAME): looked up once per process, same null checks below
+                    var paintMaskField = TcReflection.PaintMask;
+                    var modifiedField = TcReflection.ModifiedPaint;
+                    var nviewField = TcReflection.NView;
+                    TcReflection.ProofOnce();
 
                     if (paintMaskField == null) continue;
 
@@ -748,8 +787,7 @@ namespace VerdantsAscent.Terrain.Biome
                     var nview = nviewField?.GetValue(tc) as ZNetView;
                     if (nview != null && nview.IsValid() && nview.IsOwner())
                     {
-                        var saveMethod = typeof(TerrainComp).GetMethod("Save",
-                            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        var saveMethod = TcSaveReflection.Save;   // 0.2.1316 (C4 cache, SAME): looked up once, still only on the owner path
                         saveMethod?.Invoke(tc, null);
                     }
 
@@ -789,7 +827,8 @@ namespace VerdantsAscent.Terrain.Biome
                 byte[] data = zdo.GetByteArray(ZDO_BIOME_PAINTS);
                 if (data == null || data.Length == 0) return paints;
 
-                byte[] decompressed = Utils.Decompress(data);
+                byte[] decompressed = FatInflate.Gzip(data, "biome paints ZDO");   // 0.2.1333
+                if (decompressed == null) return paints;
                 var pkg = new ZPackage(decompressed);
 
                 int version = pkg.ReadInt();
@@ -800,6 +839,11 @@ namespace VerdantsAscent.Terrain.Biome
                 }
 
                 int count = pkg.ReadInt();
+                if (count < 0 || count * 20L > pkg.Size() - pkg.GetPos())   // 0.2.1333: 5 fields of 4 bytes
+                {
+                    FatNetGuard.Refuse("biome paints", $"count {count} with {pkg.Size() - pkg.GetPos()} bytes left; that block is skipped");
+                    return paints;
+                }
                 for (int i = 0; i < count; i++)
                 {
                     paints.Add(new BiomePaintData
@@ -1135,13 +1179,19 @@ namespace VerdantsAscent.Terrain.Biome
                 byte[] data = zdo.GetByteArray(ZDO_CLUTTER_PAINTS);
                 if (data == null || data.Length == 0) return paints;
 
-                byte[] decompressed = Utils.Decompress(data);
+                byte[] decompressed = FatInflate.Gzip(data, "clutter paints ZDO");   // 0.2.1333
+                if (decompressed == null) return paints;
                 var pkg = new ZPackage(decompressed);
 
                 int version = pkg.ReadInt();
                 if (version != DATA_VERSION) return paints;
 
                 int count = pkg.ReadInt();
+                if (count < 0 || count * 21L > pkg.Size() - pkg.GetPos())   // 0.2.1333: 5 fields of 4 bytes + at least a string's length byte
+                {
+                    FatNetGuard.Refuse("clutter paints", $"count {count} with {pkg.Size() - pkg.GetPos()} bytes left; that block is skipped");
+                    return paints;
+                }
                 for (int i = 0; i < count; i++)
                 {
                     paints.Add(new ClutterPaintData

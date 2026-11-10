@@ -253,6 +253,8 @@ namespace VerdantsAscent.Water.Core
                 return;
             }
 
+            _regenEpoch++;   // 0.2.1344: supersedes a queued mop run in progress
+
             // Step 1: Calculate bounds
             CalculateCombinedBounds();
 
@@ -305,6 +307,7 @@ namespace VerdantsAscent.Water.Core
             // controller's first Initialize() sees empty arrays and builds
             // no mesh / no collider.
             RefreshSecondaryMeshes();
+            _gridBuiltAt = Time.realtimeSinceStartup;   // 0.2.1344
 
             // VFX manager removed - auto VFX spawning disabled
             // Use manual VFX placement commands instead
@@ -669,6 +672,23 @@ namespace VerdantsAscent.Water.Core
                     _voxelProbeTop = d.Position.y + VoxelProbeAbove;
         }
 
+        private static bool VoxelSampleApplies(Vector3 worldPos)
+        {
+            if (ZNet.instance != null && ZNet.instance.IsDedicated()) return true;   // the server has no colliders: voxel data is its ground
+            if (VerdantsAscent.Terrain.Voxel.VoxelOnlyMode.Active) return true;
+            Vector2s zone = ZoneSystem.GetZone(worldPos);
+            if (VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.IsZoneKnown(zone)) return true;
+            if (!s_vanillaZoneSampleLogged)
+            {
+                s_vanillaZoneSampleLogged = true;
+                FiresLogger.LogDebug($"[FiresWater] water grid over vanilla-heightmap zone ({zone.x},{zone.y}) samples the shown (vanilla) ground, not the "
+                    + "uncarved voxel density (0.2.1064: before this a channel cut into the heightmap read as bank there and its water stopped at the zone edge); first of this session.");
+            }
+            return false;
+        }
+
+        private static bool s_vanillaZoneSampleLogged;
+
         private bool TryVoxelGround(Vector3 worldPos, out float ground)
         {
             ground = 0f;
@@ -784,6 +804,168 @@ namespace VerdantsAscent.Water.Core
             return n;
         }
 
+        // ── 0.2.1344 mop-mask arrival (r22: RefreshMopsIn from VoxelChunkAnchor.Apply: 102 ms per body, worst 384 ms in one record's frame) ──
+        // WHY a body regenerates when a mask arrives: not for a mesh (BuildWaterMesh skips placed fresh water since 1091) and not for its level or sheet (both
+        // read the mask live through PlacedWaterField). For placed fresh water only the GRID follows the mask: the swim trigger's boxes (an unmop needs
+        // boxes over the columns back in water), the shore VFX and cliff edges. Other liquids (lava, tar...) and their grid mesh need it fully.
+        // So it still runs, and the mop rule does not change, but a queue folds a burst to one run per body, one body at a time; fresh water runs
+        // its steps over frames (time-capped sampling, one step a frame), other liquids whole, spaced. A direct regenerate supersedes a run.
+        private const float MopQuietSeconds = 0.5f, MopMaxWaitSeconds = 3f, MopWholeSpacing = 0.25f, MopSampleSliceMs = 1f, MopSliceStuckSeconds = 20f;
+        private struct MopWait { public float First, Last; }
+        private static readonly Dictionary<WaterMeshCombiner, MopWait> s_mopQueue = new Dictionary<WaterMeshCombiner, MopWait>();
+        private static WaterMeshCombiner s_mopRunning;
+        private static float s_mopRunningSince, s_mopWholeAt, s_mopLogAt;
+        private static bool s_mopProof;
+        private static int s_mMarks, s_mFolded, s_mRuns, s_mWhole, s_mAborted, s_mSteps, s_mSkippedOlder;
+        private static double s_mStepMs, s_mStepWorst;
+        private int _regenEpoch = 0;
+        private float _gridBuiltAt = -1f;
+        private bool _mopSliceRunning;
+        private Coroutine _mopSliceCoroutine;
+
+        internal static bool MopQueueOn => VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.MopRefreshQueued != null && VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.MopRefreshQueued.Value;
+
+        // builtSince >= 0: only bodies whose grid was built since then (the same mask back with a reloaded chunk: an older grid already has it).
+        internal static int QueueMopRefreshIn(Vector3 center, float radius, float builtSince = -1f)
+        {
+            int n = 0;
+            float now = Time.realtimeSinceStartup;
+            for (int i = 0; i < s_allCombiners.Count; i++)
+            {
+                var c = s_allCombiners[i];
+                if (c == null || c.WaterDisks == null || c.WaterDisks.Count == 0) continue;
+                var b = c.GetCombinedBounds();
+                float dx = Mathf.Max(b.min.x - center.x, 0f, center.x - b.max.x);
+                float dz = Mathf.Max(b.min.z - center.z, 0f, center.z - b.max.z);
+                if (dx * dx + dz * dz > radius * radius) continue;
+                float dy = Mathf.Max(b.min.y - center.y, 0f, center.y - b.max.y);
+                if (dy > radius + 32f) continue;
+                if (builtSince >= 0f && c._gridBuiltAt >= 0f && c._gridBuiltAt < builtSince) { s_mSkippedOlder++; continue; }
+                s_mMarks++;
+                if (s_mopQueue.TryGetValue(c, out var w)) { s_mFolded++; w.Last = now; s_mopQueue[c] = w; }
+                else s_mopQueue[c] = new MopWait { First = now, Last = now };
+                n++;
+            }
+            if (n > 0 && !s_mopProof) { s_mopProof = true; FiresLogger.LogInfo("[FiresWater] a mop mask arriving with a chunk record refreshes water bodies through a queue, once per body, over frames (0.2.1344)"); }
+            return n;
+        }
+
+        // From the voxel driver, every frame.
+        internal static void PumpMopRefresh()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now >= s_mopLogAt)
+            {
+                s_mopLogAt = now + 10f;
+                if (FiresLogger.DebugEnabled && (s_mMarks > 0 || s_mRuns > 0 || s_mWhole > 0 || s_mSkippedOlder > 0))
+                    FiresLogger.LogDebug($"[FiresWater] mop refresh last 10 s: {s_mMarks} mark(s), {s_mFolded} folded, {s_mSkippedOlder} skipped (mask unchanged, grid older than the chunk's drop), {s_mRuns} sliced + {s_mWhole} whole run(s), {s_mAborted} superseded, {s_mSteps} step(s) total {s_mStepMs:0.0} ms worst {s_mStepWorst:0.0} ms, waiting {s_mopQueue.Count} (0.2.1344); {VerdantsAscent.Terrain.Voxel.VoxelChunkAnchor.TakeBudgetStats()}");
+                s_mMarks = s_mFolded = s_mRuns = s_mWhole = s_mAborted = s_mSteps = s_mSkippedOlder = 0; s_mStepMs = s_mStepWorst = 0;
+            }
+            if (s_mopQueue.Count == 0) return;
+            if (s_mopRunning != null && s_mopRunning._mopSliceRunning && s_mopRunning.isActiveAndEnabled && now - s_mopRunningSince < MopSliceStuckSeconds) return;
+            if (s_mopRunning != null) s_mopRunning._mopSliceRunning = false;
+            s_mopRunning = null;
+            WaterMeshCombiner pick = null, gone = null;
+            foreach (var kv in s_mopQueue)
+            {
+                if (kv.Key == null) { gone = kv.Key; continue; }
+                if (now - kv.Value.Last < MopQuietSeconds && now - kv.Value.First < MopMaxWaitSeconds) continue;
+                pick = kv.Key;
+                break;
+            }
+            if (gone != null || (object)gone != null) s_mopQueue.Remove(gone);
+            if (pick == null) return;
+            bool slice = pick.IsPlacedFreshWater && !pick._isSettling && !pick._isGelled && !pick._isRegeneratingAsync && pick.isActiveAndEnabled;
+            if (slice)
+            {
+                s_mopQueue.Remove(pick);
+                s_mRuns++;
+                s_mopRunning = pick; s_mopRunningSince = now;
+                pick._mopSliceRunning = true;
+                pick._mopSliceCoroutine = pick.StartCoroutine(pick.MopSliceRun());
+                return;
+            }
+            if (now < s_mopWholeAt) return;
+            s_mopQueue.Remove(pick);
+            s_mopWholeAt = now + MopWholeSpacing;
+            s_mWhole++;
+            pick.RegenerateMesh();
+        }
+
+        private static void NoteMopStep(long t0)
+        {
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            s_mSteps++; s_mStepMs += ms; if (ms > s_mStepWorst) s_mStepWorst = ms;
+        }
+
+        // RegenerateMesh's steps for placed fresh water (its mesh step is a no-op), each in its own frame. It writes the same fields in the same order;
+        // while it runs the fresh-water level still answers from the field, and SaveToAnchor finishes the run first (FinishMopSliceNow).
+        private IEnumerator MopSliceRun()
+        {
+            int epoch = _regenEpoch;
+            System.Func<bool> stop = () => { if (_regenEpoch == epoch && !_isSettling && !_isGelled && !_isRegeneratingAsync) return false; s_mAborted++; _mopSliceRunning = false; return true; };
+            long t = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_waterDisks.Count == 0) { _mopSliceRunning = false; yield break; }
+            CalculateCombinedBounds();
+            SetupGrid();
+            SetVoxelProbeTop();
+            NoteMopStep(t);
+            yield return null;
+            if (stop()) yield break;
+            int zi = 0, xi = 0;
+            while (zi < _gridHeight)
+            {
+                t = System.Diagnostics.Stopwatch.GetTimestamp();
+                long limit = t + (long)(MopSampleSliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+                while (zi < _gridHeight && System.Diagnostics.Stopwatch.GetTimestamp() < limit)
+                {
+                    _terrainHeights[zi * _gridWidth + xi] = SampleTerrainHeightAt(GridToWorld(xi, zi));
+                    if (++xi >= _gridWidth) { xi = 0; zi++; }
+                }
+                NoteMopStep(t);
+                if (zi < _gridHeight) { yield return null; if (stop()) yield break; }
+            }
+            ReportServerSample();
+            for (int step = 0; step < 12; step++)
+            {
+                yield return null;
+                if (stop()) yield break;
+                t = System.Diagnostics.Stopwatch.GetTimestamp();
+                MopSliceStep(step);
+                NoteMopStep(t);
+            }
+            _gridBuiltAt = Time.realtimeSinceStartup;
+            _mopSliceRunning = false;
+        }
+
+        private void MopSliceStep(int step)
+        {
+            switch (step)
+            {
+                case 0: CalculateWaterSurfaceWithDepth(); break;
+                case 1: GravitySettleEdges(); break;
+                case 2: NormalizeChannelDepth(); break;
+                case 3: TerrainClipPass(); break;
+                case 4: SmoothWaterSurface(); break;
+                case 5: CalculateWaterDepths(); break;
+                case 6: BuildWaterMesh(); break;
+                case 7: SetupMaterial(); break;
+                case 8: SetupSwimTrigger(); break;
+                case 9: DetectCliffEdges(); break;
+                case 10: SpawnAmbientVFX(); break;
+                case 11: RefreshSecondaryMeshes(); break;
+            }
+        }
+
+        // A save never sees a half-sampled grid: a run in progress finishes whole, now.
+        private void FinishMopSliceNow()
+        {
+            if (!_mopSliceRunning) return;
+            if (_mopSliceCoroutine != null) StopCoroutine(_mopSliceCoroutine);
+            _mopSliceRunning = false;
+            RegenerateMesh();
+        }
+
         private float SampleTerrainHeightAt(Vector3 worldPos)
         {
             // Vmop: a column the mop mask covers at this water's height is bank, never water, so hand-drawn water
@@ -826,8 +1008,10 @@ namespace VerdantsAscent.Water.Core
                 return customY;
             }
 
-            // The edited voxel ground where it is loaded (see TryVoxelGround).
-            if (TryVoxelGround(worldPos, out float voxelY))
+            // The edited voxel ground where it is loaded (see TryVoxelGround). 0.2.1064: on a client, only where the voxel ground is
+            // the shown ground (voxel-only, or a converted zone). Over a zone still on the vanilla heightmap the voxel density is the
+            // UNcarved ground, so a channel cut into the heightmap read as bank and its water was clipped at the zone edge.
+            if (VoxelSampleApplies(worldPos) && TryVoxelGround(worldPos, out float voxelY))
                 return voxelY;
 
             float baseTerrainHeight;
@@ -2202,9 +2386,22 @@ namespace VerdantsAscent.Water.Core
 
         #region Mesh Building
 
+        private static int s_skippedMeshes;
+        private static bool s_skipSaid;
+        internal static void NoteSkippedMesh()
+        {
+            s_skippedMeshes++;
+            if (s_skipSaid) return;
+            s_skipSaid = true;
+            FiresLogger.LogInfo("[WaterField] placed fresh-water combiners build no grid mesh (0.2.1091): the drawn sheet and every level query read PlacedWaterField");
+        }
+
         private void BuildWaterMesh()
         {
             if (_surfaceHeights == null || _waterDepths == null) return;
+            // 0.2.1091 (one implementation): placed fresh water is drawn by PlacedWaterSheets from PlacedWaterField; the combiner
+            // builds no grid mesh for it (it was built every time and never drawn).
+            if (IsPlacedFreshWater) { _waterMesh?.Clear(); NoteSkippedMesh(); return; }
 
             var vertices = new List<Vector3>();
             var triangles = new List<int>();
@@ -2743,7 +2940,9 @@ namespace VerdantsAscent.Water.Core
             if (_waterMaterial != null)
             {
                 _meshRenderer.material = _waterMaterial;
+                PlacedWaterSheets.SayMaterial("combined water mesh", _meshRenderer);   // 0.2.1086
                 UpdateLavaWaterOverlay();
+                ToolWaterStencil.OnCombiner(_meshRenderer, transform.position);
                 return;
             }
 
@@ -2772,6 +2971,7 @@ namespace VerdantsAscent.Water.Core
                 CreateFallbackMaterial();
             }
 
+            ToolWaterStencil.OnCombiner(_meshRenderer, transform.position);   // 0.2.1068: stable draw order + the stencil proof toggle
             // Rebuild the lava water overlay after material setup
             UpdateLavaWaterOverlay();
         }

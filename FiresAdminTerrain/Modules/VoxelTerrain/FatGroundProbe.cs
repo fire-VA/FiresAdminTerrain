@@ -95,6 +95,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void OnReply(long sender, ZPackage pkg)
         {
+            if (!FatNetGuard.FromServer(sender, "ground probe reply")) return;
             if (pkg == null) return;
             int id = pkg.ReadInt();
             string line = pkg.ReadString();

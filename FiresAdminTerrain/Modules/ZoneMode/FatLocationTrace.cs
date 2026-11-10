@@ -54,7 +54,7 @@ namespace VerdantsAscent.Terrain.Zones
             s_generating.Remove(zoneID);
             var generated = GeneratedZones(__instance);
             if (generated == null || !generated.Contains(zoneID)) return;
-            if (!FiresLogger.DebugEnabled) return;   // the line and its StackTrace are costly, so they are built only with Debug on
+            if (!FiresLogger.DebugEnabled || global::VerdantsAscent.Terrain.BcImport.BcRegenCommand.QuietTrace) return;   // 0.2.1223: quiet during a non-verbose regen   // the line and its StackTrace are costly, so they are built only with Debug on
             __instance.m_locationInstances.TryGetValue(zoneID, out var instance);
             FiresLogger.LogDebug($"[LocationTrace] SpawnZone({zoneID.x},{zoneID.y}, {mode}) generated the zone"
                 + (instance.m_location != null ? $"; location {instance.m_location.m_prefabName} at ({instance.m_position.x:0},{instance.m_position.z:0}), placed {instance.m_placed}" : "; no location")
@@ -65,7 +65,7 @@ namespace VerdantsAscent.Terrain.Zones
         [HarmonyPrefix]
         private static void PlaceLocationsPrefix(ZoneSystem __instance, Vector2s zoneID, ZoneSystem.SpawnMode mode)
         {
-            if (!FiresLogger.DebugEnabled) return;   // no StackTrace per placed location unless Debug is on
+            if (!FiresLogger.DebugEnabled || global::VerdantsAscent.Terrain.BcImport.BcRegenCommand.QuietTrace) return;   // 0.2.1223: quiet during a non-verbose regen   // no StackTrace per placed location unless Debug is on
             if (!__instance.m_locationInstances.TryGetValue(zoneID, out var instance) || instance.m_location == null || instance.m_placed) return;
             FiresLogger.LogDebug($"[LocationTrace] PlaceLocations({zoneID.x},{zoneID.y}, {mode}) places {instance.m_location.m_prefabName} "
                 + $"at ({instance.m_position.x:0.0},{instance.m_position.y:0.0},{instance.m_position.z:0.0}). Caller:{Caller()}");

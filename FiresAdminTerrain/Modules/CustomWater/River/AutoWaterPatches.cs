@@ -639,7 +639,7 @@ namespace VerdantsAscent.Water.Core
         {
             // Server doesn't need to handle its own stream - it already has the combiners
             if (ZNet.instance != null && ZNet.instance.IsServer()) return;
-            if (pkg == null || !VerdantsAscent.Terrain.Lifecycle.AdminCheck.IsAdmin(sender)) return;
+            if (pkg == null || !FatNetGuard.FromServer(sender, "stream water combiner")) return;
 
             try
             {
@@ -647,7 +647,7 @@ namespace VerdantsAscent.Water.Core
                 Vector3 centerPos = pkg.ReadVector3();
                 LiquidType liquidType = (LiquidType)pkg.ReadInt();
                 bool isPondMode = pkg.ReadBool();
-                int diskCount = pkg.ReadInt();
+                int diskCount = FatNetGuard.Count(pkg.ReadInt(), 200000, "stream water combiner disks");
 
                 if (diskCount <= 0) return;
 
@@ -842,6 +842,7 @@ namespace VerdantsAscent.Water.Core
 
                 if (modified)
                 {
+                    combiner.NoteDisksChanged();   // 0.2.1354 (review: a combiner with no anchor instance skipped its save)
                     modifiedCombiners.Add(combiner);
                 }
 

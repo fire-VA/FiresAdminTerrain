@@ -21,6 +21,7 @@ namespace VerdantsAscent.Terrain.Zones
         // Names other mods give the nodes they add to vanilla's crafting panel (VAInventory InventoryTabs: tab buttons + views)
         private static readonly string[] ForeignNamePrefixes = { "VATab_", "VAView_" };
         private const string GamepadHint = "gamepad_hint";
+        private const string PanelArt = "Bkg";
         private const string RowIcon = "icon";
         private const string RowName = "name";
         private const string RowSelected = "selected";
@@ -244,6 +245,7 @@ namespace VerdantsAscent.Terrain.Zones
                 ZoneModeChunkGeneratorMenu.Close();
                 return Missing("the chest grid or split dialog in their clones");
             }
+            LayOutFuelPanel(panel, (RectTransform)root);   // 0.2.1336
             // The dialog's own OK and Cancel buttons carry our step; its SplitAccepted/SplitCanceled events clash with
             // their backing fields in the publicized game assembly, so they are left alone. It still hides itself.
             if (s_split.m_splitOkButton == null || s_split.m_splitCancelButton == null)
@@ -267,9 +269,89 @@ namespace VerdantsAscent.Terrain.Zones
             // item it shows, so without it the grid stops after its first item with every square's parts still showing.
             s_grid.CanDropDragOntoItem = item => false;
             if (!RefreshFuel()) return true;
+            LogFuelWindowState(panel, gui);
             if (preselect != null) ShowSplit(preselect);
             ZoneModeChunkGeneratorMenu.SetKeys(null, ZoneModeChunkGeneratorMenu.Close);
             return true;
+        }
+
+        // 0.2.1336: the clone copies a panel other mods may have resized (VAInventory in unified mode), so the live size says nothing about
+        // this 8x4 grid. The panel takes its size from the grid: columns/rows x element space + padding + the title band, clamped to the canvas;
+        // a tall grid scrolls in the panel's own ScrollRect. Same clone and art; only the rects change. Position stays CloneUi's centre (this
+        // window keeps no saved position of its own).
+        private const float FuelPadding = 16f, FuelTitleBand = 48f;
+        internal static string LastFuelLayout;
+        internal static bool LastFuelFits;
+        private static bool s_layoutInfoSaid;
+
+        private static void LayOutFuelPanel(RectTransform panel, RectTransform canvas)
+        {
+            float space = s_grid.m_elementSpace;
+            float gridW = FuelColumns * space, gridH = FuelRows * space;
+            Vector2 was = panel.sizeDelta;
+            float wantW = gridW + FuelPadding * 2f, wantH = gridH + FuelPadding * 2f + FuelTitleBand;
+            Vector2 room = canvas.rect.size;
+            float w = room.x > 0f ? Mathf.Min(wantW, room.x) : wantW, h = room.y > 0f ? Mathf.Min(wantH, room.y) : wantH;
+            panel.sizeDelta = new Vector2(w, h);
+
+            // The background covers the panel at its new size.
+            if (panel.Find(PanelArt) is RectTransform art)
+            {
+                art.anchorMin = Vector2.zero;
+                art.anchorMax = Vector2.one;
+                art.offsetMin = art.offsetMax = Vector2.zero;
+            }
+
+            var gridRect = (RectTransform)s_grid.transform;
+            gridRect.anchorMin = Vector2.zero;
+            gridRect.anchorMax = Vector2.one;
+            gridRect.pivot = new Vector2(0.5f, 0.5f);
+            gridRect.offsetMin = new Vector2(FuelPadding, FuelPadding);
+            gridRect.offsetMax = new Vector2(-FuelPadding, -(FuelPadding + FuelTitleBand));
+
+            // Fire 11-02, the squares did not show: the clone keeps the live grid root's position, logged at y -102293 under a 280-high mask, so
+            // every cell was clipped. The root's place belongs to this window too: across the grid's top, cells running down from it.
+            var cells = s_grid.m_gridRoot;
+            if (cells != null)
+            {
+                Vector2 wasCells = cells.anchoredPosition;
+                cells.anchorMin = new Vector2(0f, 1f);
+                cells.anchorMax = Vector2.one;
+                cells.pivot = new Vector2(0f, 1f);
+                cells.sizeDelta = new Vector2(0f, gridH);
+                cells.anchoredPosition = Vector2.zero;
+                FiresLogger.LogDebug($"[FiresZones] Chunk Generator fuel grid root placed at the grid's top (the clone had it at {wasCells})");
+            }
+
+            var scroll = s_grid.GetComponentInChildren<ScrollRect>(true) ?? s_grid.GetComponentInParent<ScrollRect>(true);
+            bool tall = h < wantH;
+            if (scroll != null) { scroll.enabled = true; scroll.horizontal = false; scroll.vertical = tall; }
+            LastFuelFits = w <= room.x + 0.5f && h <= room.y + 0.5f;
+            LastFuelLayout = $"fuel grid {FuelColumns}x{FuelRows}, panel {w:0}x{h:0} (source of size: grid x element space {space:0}; cloned panel was {was.x:0}x{was.y:0}; canvas {room.x:0}x{room.y:0}; scroll {(tall ? "on" : "off")})";
+            FiresLogger.LogDebug($"[FiresZones] Chunk Generator {LastFuelLayout}");
+            if (!s_layoutInfoSaid) { s_layoutInfoSaid = true; FiresLogger.LogInfo("[FiresZones] Chunk Generator fuel window lays out from its grid, not from the live chest panel (0.2.1336)"); }
+        }
+
+        // Fire 11-02, the squares do not show and the cause is unproven. Measure only, once per open: what the grid built, where it landed and
+        // what could hide it. A set drag inventory with no drag item makes VAInventory's SafeGuiPatches veto InventoryGrid.UpdateGui with no log.
+        private static void LogFuelWindowState(RectTransform panel, InventoryGui gui)
+        {
+            var root = s_grid.m_gridRoot;
+            var art = panel.Find(PanelArt)?.GetComponent<Image>();
+            var first = root != null && root.childCount > 0 ? root.GetChild(0) as RectTransform : null;
+            var face = first != null ? first.GetComponent<Image>() : null;
+            var masks = new List<string>();
+            foreach (var mask in s_grid.GetComponentsInChildren<Mask>(true)) masks.Add($"{mask.name} {((RectTransform)mask.transform).rect.size}");
+            foreach (var mask in s_grid.GetComponentsInChildren<RectMask2D>(true)) masks.Add($"{mask.name} {((RectTransform)mask.transform).rect.size}");
+            float alpha = 1f;
+            foreach (var group in s_grid.GetComponentsInParent<CanvasGroup>(true)) alpha *= group.alpha;
+            FiresLogger.LogDebug($"[FiresZones] Chunk Generator fuel squares: elements {s_grid.m_elements.Count}, root children {root?.childCount ?? -1}, " +
+                $"grid active {s_grid.gameObject.activeInHierarchy}, root active {(root != null && root.gameObject.activeInHierarchy)}, " +
+                $"grid rect {((RectTransform)s_grid.transform).rect} at {s_grid.transform.position}, root rect {root?.rect} at {root?.position}; " +
+                $"first cell {first?.rect} at {first?.position}, image {(face != null ? $"enabled {face.enabled}, sprite '{face.sprite?.name}', colour {face.color}" : "none")}; " +
+                $"group alpha {alpha}; masks [{string.Join("; ", masks)}]; " +
+                $"background {(art != null ? $"enabled {art.enabled}, sprite '{art.sprite?.name}', colour {art.color}" : "none")}; " +
+                $"drag inventory set {gui.m_dragInventory != null}, drag item set {gui.m_dragItem != null}");
         }
 
         // The player's own stacks of every fuel the recipe burns, as the grid shows them; closes with a centre message
@@ -357,9 +439,29 @@ namespace VerdantsAscent.Terrain.Zones
         private static void Unhook() => s_splitFuel = null;
 
         // Every frame while the fuel window is open, as InventoryGui does for its grids: hover highlight and tooltips.
+        // 0.2.1058 ([classes-ui]'s UI efficiency audit T3): the fuel grid redraws when its inventory changes (m_onChanged), and
+        // otherwise at most every FuelRedrawSeconds (a drag or a split can move items without a change event on this view).
+        private const float FuelRedrawSeconds = 0.25f;
+        private static Inventory s_fuelHooked;
+        private static bool s_fuelDirty = true;
+        private static float s_fuelNextRedraw;
+
+        private static void FuelChanged() => s_fuelDirty = true;
+
         internal static void Tick()
         {
-            if (s_grid != null && s_fuelView != null) s_grid.UpdateInventory(s_fuelView, null, null);
+            if (s_grid == null || s_fuelView == null) return;
+            if (!ReferenceEquals(s_fuelHooked, s_fuelView))
+            {
+                if (s_fuelHooked != null) s_fuelHooked.m_onChanged = (Action)Delegate.Remove(s_fuelHooked.m_onChanged, (Action)FuelChanged);
+                s_fuelHooked = s_fuelView;
+                s_fuelView.m_onChanged = (Action)Delegate.Combine(s_fuelView.m_onChanged, (Action)FuelChanged);
+                s_fuelDirty = true;
+            }
+            if (!s_fuelDirty && Time.unscaledTime < s_fuelNextRedraw) return;
+            s_fuelDirty = false;
+            s_fuelNextRedraw = Time.unscaledTime + FuelRedrawSeconds;
+            s_grid.UpdateInventory(s_fuelView, null, null);
         }
 
         internal static void Clear()
@@ -370,6 +472,9 @@ namespace VerdantsAscent.Terrain.Zones
             s_recipes = null;
             s_recipesSelected = null;
             s_grid = null;
+            if (s_fuelHooked != null) s_fuelHooked.m_onChanged = (Action)Delegate.Remove(s_fuelHooked.m_onChanged, (Action)FuelChanged);
+            s_fuelHooked = null;
+            s_fuelDirty = true;
             s_fuelView = null;
             s_fuelTitle = null;
             s_split = null;
@@ -422,6 +527,9 @@ namespace VerdantsAscent.Terrain.Zones
             foreach (var behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
                 if (behaviour == null || behaviour.gameObject == root) continue;
+                // Fire 11-02: VAInventory's UniversalDragHandler sits on the chest panel's own Bkg, and taking the node took the window's
+                // background with it. The art stays here; the script-only strip below removes the handler from this clone. The live panel is not touched.
+                if (behaviour.transform.parent == root.transform && behaviour.gameObject.name == PanelArt) continue;
                 string asm = behaviour.GetType().Assembly.GetName().Name;
                 if (asm == "assembly_valheim" || asm == GuiUtilsAssembly || asm.StartsWith("Unity", StringComparison.Ordinal)) continue;
                 if (!injected.Contains(behaviour.gameObject)) injected.Add(behaviour.gameObject);

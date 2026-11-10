@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace VerdantsAscent.Terrain.Voxel
@@ -20,6 +20,8 @@ namespace VerdantsAscent.Terrain.Voxel
         public byte FrontierMask; // faces with NO covering neighbour (1=+X,2=−X,4=+Z,8=−Z)
         public byte OrphanMask;   // +faces whose owner chunk DOESN'T EXIST (1=+X,4=+Z): WE mesh the plane
         public int KeyX, KeyZ; // chunk key (zone-edge face detection for border lips)
+        public int SkirtTilted;   // 0.2.1117: orphan stand-in vertices tilted 15 deg down-outward this build (render meshes only)
+        public Vector3 SkirtOrigin;   // 0.2.1117: the chunk's world origin this build (the skirt proof finds the +X/+Z planes from it)
         public readonly List<Vector3> Verts = new List<Vector3>(4096);
         public readonly List<Vector3> Normals = new List<Vector3>(4096);
         public readonly List<Vector4> Tangents = new List<Vector4>(4096);
@@ -123,6 +125,8 @@ namespace VerdantsAscent.Terrain.Voxel
         public static void Build(MeshBuffers buf, Vector3 origin)
         {
             buf.ResetMesh();
+            buf.SkirtTilted = 0;
+            buf.SkirtOrigin = origin;
             var d = buf.Density;
             var seed = buf.Seed;
             var cellIndex = buf.CellIndex;
@@ -144,6 +148,58 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 edited[ci] = 2;
                 return false;
+            }
+
+            // 0.2.1125: the surface-nets vertex height of a cell (no registration), for the skirt's inside-slope read.
+            bool CellVertexY(int x, int y, int z, out float vy)
+            {
+                vy = 0f;
+                if (x < -1 || x > C || y < -1 || y > C || z < -1 || z > C) return false;
+                float sy = 0f; int n = 0;
+                for (int e = 0; e < 12; e++)
+                {
+                    int a = EDGES[e, 0], b = EDGES[e, 1];
+                    float da = d[DIdx(x + (a & 1), y + ((a >> 1) & 1), z + ((a >> 2) & 1))];
+                    float db = d[DIdx(x + (b & 1), y + ((b >> 1) & 1), z + ((b >> 2) & 1))];
+                    if ((da > 0f) == (db > 0f)) continue;
+                    float t = da / (da - db);
+                    sy += ((a >> 1) & 1) + t * (((b >> 1) & 1) - ((a >> 1) & 1));
+                    n++;
+                }
+                if (n == 0) return false;
+                vy = origin.y + y + sy / n;
+                return true;
+            }
+
+            // 0.2.1125: the inside surface next to a stand-in (cells C-1 and C-2 in the same column, the layer nearest refY) and
+            // its slope per metre outward. False on multi-layer columns, a > 1 m step, or no surface: the caller keeps the 1120 drop.
+            bool InsideSlope(bool alongX, int cx, int cy, int cz, float refY, out float yIn, out float slope)
+            {
+                yIn = 0f; slope = 0f;
+                int ax1 = alongX ? C - 1 : cx, az1 = alongX ? cz : C - 1;
+                int ax2 = alongX ? C - 2 : cx, az2 = alongX ? cz : C - 2;
+                int layers = 0; bool f1 = false; float best = float.MaxValue;
+                for (int y = Mathf.Max(-1, cy - 4); y <= Mathf.Min(C, cy + 4); y++)
+                {
+                    if (!CellVertexY(ax1, y, az1, out float vy)) continue;
+                    // a new layer = a surface cell not stacked directly on the previous one
+                    if (y == Mathf.Max(-1, cy - 4) || !CellVertexY(ax1, y - 1, az1, out _)) layers++;
+                    float dy = Mathf.Abs(vy - refY);
+                    if (dy < best) { best = dy; yIn = vy; f1 = true; }
+                }
+                if (!f1 || layers > 1) return false;
+                bool f2 = false; float y2 = 0f; best = float.MaxValue;
+                for (int y = Mathf.Max(-1, cy - 4); y <= Mathf.Min(C, cy + 4); y++)
+                {
+                    if (!CellVertexY(ax2, y, az2, out float vy)) continue;
+                    float dy = Mathf.Abs(vy - yIn);
+                    if (dy < best) { best = dy; y2 = vy; f2 = true; }
+                }
+                if (!f2) return false;
+                slope = yIn - y2;                               // per metre (cells are 1 m), outward
+                if (Mathf.Abs(slope) > 1f) return false;        // > 1 m step: a wall, keep the 1120 drop
+                slope = Mathf.Max(slope, -SKIRT_SLOPE_CAP);     // cap the extrapolation (60 deg)
+                return true;
             }
 
             // Lazily create the cell's surface-nets vertex on first reference.
@@ -174,6 +230,35 @@ namespace VerdantsAscent.Terrain.Voxel
                     origin.x + cx + px * inv,
                     origin.y + cy + py * inv,
                     origin.z + cz + pz * inv);
+                // 0.2.1117 (Fire: "each skirt should tilt down towards the zone next to it at about 15°"): the orphan-face
+                // stand-in cells sit past the +X/+Z plane on the clamped-flat apron row, so seen from the neighbour's side
+                // their underside showed. On render meshes they slope down outward: y -= tan15 x (run from the inside vertex).
+                // Vertices at/inside the plane (cx, cz < C) are untouched, so the weld holds.
+                // 0.2.1120 (round #17 border_skirt: "median slope 7.6 deg ... min 7.6, max 7.6"): the drop was tan15 x the distance past
+                // the plane (~0.5 m: the stand-in vertex sits mid-cell), but the visible face runs from the last INSIDE vertex (mid-cell,
+                // ~0.5 m before the plane) to it - a 1 m run, so 0.134 m over 1 m = 7.6 deg. The drop is now tan15 x the run from the
+                // inside vertex one cell back (cells are 1 m): that face slopes 15 deg.
+                float skirtX = 0f, skirtZ = 0f;
+                if (buf.MeshAll && !buf.CollidersOnly)
+                {
+                    if (cx >= C && (buf.OrphanMask & 1) != 0) skirtX = cx - C + 1f;
+                    if (cz >= C && (buf.OrphanMask & 4) != 0) skirtZ = cz - C + 1f;
+                    if (skirtX > 0f || skirtZ > 0f)
+                    {
+                        // 0.2.1125 (round #24 border_skirt): on DOWNHILL ground the flat apron copy, even tilted, stayed flatter than
+                        // the falling ground, so its underside still showed from the lower neighbour. The strip now starts from the
+                        // inside surface CONTINUED past the plane (its downhill part only; uphill keeps the flat copy, which is lower),
+                        // then drops tan15 x run - always >= 15 deg below the surface continuation. Multi-layer / >1 m-step columns
+                        // keep the 1120 drop (no extrapolation spikes at walls).
+                        bool alongX = skirtX >= skirtZ;
+                        float run = alongX ? skirtX : skirtZ;
+                        float baseY = world.y;
+                        if (InsideSlope(alongX, cx, cy, cz, world.y, out float yIn, out float slope))
+                            baseY = Mathf.Min(baseY, yIn + Mathf.Min(0f, slope) * run);
+                        world.y = baseY - SKIRT_TAN * run;
+                        buf.SkirtTilted++;
+                    }
+                }
 
                 int idx = buf.Verts.Count;
                 cellIndex[ci] = idx;
@@ -190,6 +275,12 @@ namespace VerdantsAscent.Terrain.Voxel
                 float gz = (cd[4] + cd[5] + cd[6] + cd[7]) - (cd[0] + cd[1] + cd[2] + cd[3]);
                 var n = new Vector3(-gx, -gy, -gz);
                 n = n.sqrMagnitude > 1e-10f ? n.normalized : Vector3.up;
+                // 0.2.1117: a tilted stand-in is lit as the down-sloping face it now is, not as the flat apron.
+                if (skirtX > 0f || skirtZ > 0f)
+                {
+                    float up = Mathf.Max(0f, n.y);
+                    n = (n + new Vector3(skirtX >= skirtZ ? SKIRT_TAN * up : 0f, 0f, skirtZ > skirtX ? SKIRT_TAN * up : 0f)).normalized;
+                }
 
                 buf.Normals.Add(n);
                 // ANALYTIC world-anchored tangent — a pure function of the
@@ -219,7 +310,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 int z0 = Mathf.Clamp(cz, -1, C), z1 = Mathf.Clamp(cz + 1, -1, C);
                 int i00 = (x0 + 1) + S * (z0 + 1), i10 = (x1 + 1) + S * (z0 + 1), i01 = (x0 + 1) + S * (z1 + 1), i11 = (x1 + 1) + S * (z1 + 1);
                 Color b0 = Color.Lerp(buf.Biome[i00], buf.Biome[i10], fx), b1 = Color.Lerp(buf.Biome[i01], buf.Biome[i11], fx);
-                buf.Colors.Add(Color.Lerp(b0, b1, fz));
+                Color vc = Color.Lerp(b0, b1, fz);
+                if (FatHaloArc.Active && FatHaloBiome.TryColorAt(world, out Color ringColor)) vc = ringColor;   // 0.2.1040: the ring's biome patches, per vertex (a column's biome cannot vary up a vertical wall)
+                buf.Colors.Add(vc);
                 buf.Uv1.Add(new Vector2(BlendWetLine(buf.WetLine[i00], buf.WetLine[i10], buf.WetLine[i01], buf.WetLine[i11], fx, fz), 0f));   // per-vertex inland waterline → shader fWL
                 return idx;
             }
@@ -331,8 +424,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // dropping only 0.12m surfaces on any hill steeper than ~9°, showing a
         // dark seam). 0.5m out + 0.45m down (~42° tuck) stays buried under any
         // slope below ~42° while still spanning the observed gap width.
+        // 0.2.1117 (Fire: border skirting tilts ~15° down toward the neighbour): the lip drops 0.5 x tan15 = 0.134 m.
         private const float LIP_OUT = 0.5f;
-        private const float LIP_DOWN = 0.45f;
+        internal const float SKIRT_TAN = 0.26794919f;   // tan(15°)
+        private const float SKIRT_SLOPE_CAP = 1.7320508f;   // 0.2.1125: tan(60°), the most the inside slope is extrapolated
+        private const float LIP_DOWN = LIP_OUT * SKIRT_TAN;
         private const float LIP_MAX_STEP = 3f;
 
         private static void EmitZoneEdgeLips(MeshBuffers buf)
