@@ -1505,6 +1505,138 @@ namespace VerdantsAscent.Water.Core
             }
         }
 
+        // ── 0.2.1471 ([lead]: FatApi.TryWaterBodyAt on a dedicated server, the same gap as DediVoxelRead): a dedicated server holds no
+        // GameObjects where the players are (VoxelAnchorPrefab.FindZdo's note), so no WaterMeshCombiner exists there and TryWaterBodyAt's
+        // combiner pass found no tool-placed pond or river. Their disks DO live on the dedi, in each body's anchor ZDO (va_is_water_combiner_anchor
+        // + va_water_disks, the blob ReadZdoDisks reads). This reads them READ-ONLY: per zone sector (the query's sector and its 8 neighbours,
+        // a body reaches over a sector edge), anchors listed and their disks decoded once per ZDO data revision, re-checked at most every
+        // 2 s. Fresh water only (no lava / tar / solid), as TryWaterBodyAt's live pass. Main thread.
+        private sealed class DediBody { public uint Rev; public List<WaterDisk> Disks; public float MinX, MaxX, MinZ, MaxZ, Size; }
+        private sealed class DediSector { public float CheckedAt = -100f; public readonly Dictionary<ZDOID, DediBody> Bodies = new Dictionary<ZDOID, DediBody>(); }
+        private static readonly Dictionary<long, DediSector> s_dediSectors = new Dictionary<long, DediSector>();
+        private static readonly List<ZDOID> s_dediGone = new List<ZDOID>();
+        private static readonly HashSet<ZDOID> s_dediSeen = new HashSet<ZDOID>();
+        private static readonly HarmonyLib.AccessTools.FieldRef<ZDOMan, List<ZDO>[]> s_dediBySector =
+            HarmonyLib.AccessTools.FieldRefAccess<ZDOMan, List<ZDO>[]>("m_objectsBySector");
+
+        internal static bool DediActive => ZNet.instance != null && ZNet.instance.IsDedicated();
+
+        // The smallest placed fresh-water body whose disks cover p.xz: its surface there (the highest covering disk) and its extent.
+        internal static bool DediTryWaterBodyAt(Vector3 p, out float surfaceY, out float size)
+        {
+            surfaceY = 0f; size = 0f;
+            var zone = ZoneSystem.GetZone(p);
+            DediBody best = null; float bestY = float.MinValue;
+            for (int dz = -1; dz <= 1; dz++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    var sec = DediSectorFor(zone.x + dx, zone.y + dz);
+                    if (sec == null) continue;
+                    foreach (var body in sec.Bodies.Values)
+                    {
+                        if (p.x < body.MinX || p.x > body.MaxX || p.z < body.MinZ || p.z > body.MaxZ) continue;
+                        if (best != null && body.Size >= best.Size) continue;
+                        float top = float.MinValue;
+                        foreach (var d in body.Disks)
+                        {
+                            float ddx = p.x - d.Position.x, ddz = p.z - d.Position.z;
+                            if (ddx * ddx + ddz * ddz <= d.Radius * d.Radius && d.Position.y > top) top = d.Position.y;
+                        }
+                        if (top == float.MinValue) continue;
+                        best = body; bestY = top;
+                    }
+                }
+            if (best == null) return false;
+            surfaceY = bestY; size = best.Size;
+            return true;
+        }
+
+        private static DediSector DediSectorFor(int zx, int zz) => DediSectorFor(zx, zz, false, out _);
+
+        private static DediSector DediSectorFor(int zx, int zz, bool force, out bool changed)
+        {
+            changed = false;
+            long key = ((long)zx << 32) ^ (uint)zz;
+            float now = Time.unscaledTime;
+            if (!s_dediSectors.TryGetValue(key, out var sec))
+            {
+                if (s_dediSectors.Count > 512) s_dediSectors.Clear();
+                sec = new DediSector();
+                s_dediSectors[key] = sec;
+            }
+            if (!force && now - sec.CheckedAt < 2f) return sec;
+            sec.CheckedAt = now;
+            var zdoMan = ZDOMan.instance;
+            var bySector = zdoMan != null ? s_dediBySector(zdoMan) : null;
+            if (bySector == null) return sec;
+            uint index = ZoneSystem.GetSectorIndex(ZoneSystem.GetZonePos(new Vector2s(zx, zz))).Sector;
+            var list = index < bySector.Length ? bySector[index] : null;
+            s_dediSeen.Clear();
+            if (list != null)
+                foreach (var zdo in list)
+                {
+                    if (zdo == null || !zdo.GetBool(s_isAnchorHash)) continue;
+                    var id = zdo.m_uid;
+                    s_dediSeen.Add(id);
+                    uint rev = zdo.DataRevision;
+                    if (sec.Bodies.TryGetValue(id, out var have) && have.Rev == rev) continue;
+                    var body = DediDecode(zdo, rev);
+                    if (body == null) { if (sec.Bodies.Remove(id)) changed = true; }
+                    else { sec.Bodies[id] = body; changed = true; }
+                }
+            s_dediGone.Clear();
+            foreach (var id in sec.Bodies.Keys) if (!s_dediSeen.Contains(id)) s_dediGone.Add(id);
+            foreach (var id in s_dediGone) { sec.Bodies.Remove(id); changed = true; }
+            return sec;
+        }
+
+        // 0.2.1472 ([generator] Q3: FiresGodComplex caches a zone's water until FatApi.WaterSurfacesRevision moves; on a dedicated server
+        // that revision only moved for renderers, which a dedi never has, so a pond placed / changed / removed after a zone was read stayed
+        // unseen). From WaterLookHost.Tick (Game.Update) every 2 s on a dedi: the sectors already read are re-checked (one sector list walk
+        // each, bodies re-decoded only on a ZDO data revision change); true = a body appeared, changed or went, and the caller bumps the
+        // revision. A sector's FIRST read never bumps (the reader already sees it).
+        private static float s_dediSweepAt;
+        private static readonly List<long> s_dediSweepKeys = new List<long>();
+        internal static bool DediSweep()
+        {
+            float now = Time.unscaledTime;
+            if (now < s_dediSweepAt || s_dediSectors.Count == 0) return false;
+            s_dediSweepAt = now + 2f;
+            s_dediSweepKeys.Clear();
+            s_dediSweepKeys.AddRange(s_dediSectors.Keys);
+            bool any = false;
+            foreach (long k in s_dediSweepKeys)
+            {
+                DediSectorFor((int)(k >> 32), (int)(uint)k, true, out bool changed);
+                if (changed)
+                {
+                    any = true;
+                    if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresWater] dedi placed water changed in zone {(int)(k >> 32)},{(int)(uint)k}: WaterSurfacesRevision bumps (0.2.1472)");
+                }
+            }
+            return any;
+        }
+
+        private static DediBody DediDecode(ZDO zdo, uint rev)
+        {
+            List<WaterDisk> all;
+            try { all = ReadZdoDisks(zdo); } catch (Exception) { return null; }
+            if (all == null || all.Count == 0) return null;
+            var disks = new List<WaterDisk>(all.Count);
+            float minX = float.MaxValue, maxX = float.MinValue, minZ = float.MaxValue, maxZ = float.MinValue;
+            foreach (var d in all)
+            {
+                if (d == null || d.LiquidType != LiquidType.Water) continue;
+                var t = d.CustomLiquidType;
+                if (t == CustomLiquidType.Lava || t == CustomLiquidType.Tar || t.IsSolid()) continue;
+                disks.Add(d);
+                minX = Mathf.Min(minX, d.Position.x - d.Radius); maxX = Mathf.Max(maxX, d.Position.x + d.Radius);
+                minZ = Mathf.Min(minZ, d.Position.z - d.Radius); maxZ = Mathf.Max(maxZ, d.Position.z + d.Radius);
+            }
+            if (disks.Count == 0) return null;
+            return new DediBody { Rev = rev, Disks = disks, MinX = minX, MaxX = maxX, MinZ = minZ, MaxZ = maxZ, Size = Mathf.Max(maxX - minX, maxZ - minZ) };
+        }
+
         // 0.2.1331: LoadWaterDisks' reader, split so the kinds can be read without adding disks. Null = nothing readable.
         private static List<WaterDisk> ReadZdoDisks(ZDO zdo)
         {
@@ -2021,6 +2153,63 @@ namespace VerdantsAscent.Water.Core
             WriteDisks(zdo, disks);
             WriteGrid(zdo, group.GridWidth, group.GridHeight, group.CellSize, group.SettledWaterLevel, group.IsPondMode);
             WriteBounds(zdo, group.BoundsMin, group.BoundsMax);
+            zdo.Set(s_segmentCountHash, 0);
+            zdo.Set(s_segmentZdoidsHash, new byte[0]);
+            zdo.SetOwner(0L);   // vanilla hands it to whoever comes near
+            return zdo;
+        }
+
+        // ── [ghost] (rivers diff, auto-water undo; AutoWaterBackup): an anchor's own payload, kept and laid back ────────────────────
+        // Only this anchor's keys travel (not the raw ZDO: a recreated anchor is a NEW ZDO made the way CreateAnchorZdoForGroup makes one),
+        // with no heights and no segments, so each peer rebuilds from the disks as after a world-load repair. Absent float / int keys are
+        // kept absent (NaN / int.MinValue marks).
+        internal const int BackupEntryVersion = 1;
+
+        internal static bool IsAnchorZdo(ZDO zdo) => zdo != null && zdo.GetBool(s_isAnchorHash, false);
+
+        internal static void WriteBackupEntry(ZDO zdo, ZPackage pkg)
+        {
+            pkg.Write(zdo.GetPosition());
+            pkg.Write(zdo.GetVec3(s_realPositionHash, zdo.GetPosition()));
+            pkg.Write(zdo.GetInt(s_versionHash, int.MinValue));
+            pkg.Write(zdo.GetInt(s_liquidTypeHash, int.MinValue));
+            pkg.Write(zdo.GetInt(s_customLiquidTypeHash, int.MinValue));
+            pkg.Write(zdo.GetFloat(s_waveIntensityHash, float.NaN));
+            pkg.Write(zdo.GetBool(s_isGelledHash, false));
+            pkg.Write(zdo.GetByteArray(s_waterDisksHash) ?? new byte[0]);
+            pkg.Write(zdo.GetByteArray(s_gridDataHash) ?? new byte[0]);
+            pkg.Write(zdo.GetByteArray(s_boundsDataHash) ?? new byte[0]);
+        }
+
+        internal static ZDO CreateAnchorZdoFromBackup(ZPackage pkg)
+        {
+            Vector3 pos = pkg.ReadVector3(), real = pkg.ReadVector3();
+            int version = pkg.ReadInt(), liquid = pkg.ReadInt(), custom = pkg.ReadInt();
+            float wave = pkg.ReadSingle();
+            bool gelled = pkg.ReadBool();
+            byte[] disks = pkg.ReadByteArray(), grid = pkg.ReadByteArray(), bounds = pkg.ReadByteArray();
+            if (ZNetScene.instance == null || ZDOMan.instance == null) return null;
+            var prefab = FindPrefab();
+            var view = prefab != null ? prefab.GetComponent<ZNetView>() : null;
+            if (view == null || !view.m_persistent) return null;
+            int prefabHash = prefab.name.GetStableHashCode();
+            var zdo = ZDOMan.instance.CreateNewZDO(pos, prefabHash);
+            zdo.Persistent = view.m_persistent;
+            zdo.Type = view.m_type;
+            zdo.Distant = view.m_distant;
+            zdo.SetPrefab(prefabHash);
+            zdo.SetRotation(Quaternion.identity);
+            zdo.Set(s_isAnchorHash, true);
+            zdo.Set(s_versionHash, version != int.MinValue ? version : CURRENT_VERSION);
+            zdo.Set(s_savedTicksHash, DateTime.UtcNow.Ticks);
+            zdo.Set(s_realPositionHash, real);
+            if (liquid != int.MinValue) zdo.Set(s_liquidTypeHash, liquid);
+            if (custom != int.MinValue) zdo.Set(s_customLiquidTypeHash, custom);
+            if (!float.IsNaN(wave)) zdo.Set(s_waveIntensityHash, wave);
+            zdo.Set(s_isGelledHash, gelled);
+            zdo.Set(s_waterDisksHash, disks);
+            if (grid.Length > 0) zdo.Set(s_gridDataHash, grid);
+            if (bounds.Length > 0) zdo.Set(s_boundsDataHash, bounds);
             zdo.Set(s_segmentCountHash, 0);
             zdo.Set(s_segmentZdoidsHash, new byte[0]);
             zdo.SetOwner(0L);   // vanilla hands it to whoever comes near

@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -125,7 +125,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // voxel terrain builds. Bound by name, so FAT still builds and runs against a Core without the gate.
         internal static void RegisterWearGround()
         {
-            var gate = AccessTools.TypeByName("FiresCore.Pieces.WearGate");
+            var gate = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Pieces.WearGate");
             var register = gate != null ? AccessTools.Method(gate, "RegisterGround") : null;
             if (register == null)
             {
@@ -985,8 +985,11 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             // 0.2.1163 (FDT F8: StreamerDriver.Update 13,771 ms over 1,714 stall frames): per-stage ms, Debug every 10 s.
-            private static readonly string[] s_sdNames = { "arm+halo", "snow tick", "far impostors", "cave clutter", "underwater clutter", "terraform drain", "streamer tick" };
-            private static readonly double[] s_sdMs = new double[7], s_sdMax = new double[7];
+            // 0.2.1490 ([lead] G9 read-back): "zone scan" is its own stage. ContinueScan ran after SdMark(5) and before the tick-gate
+            // return, so on the 3 of 4 frames without a tick its slice was never counted (and on tick frames it was folded into
+            // "streamer tick"). Counting only: the stage order and every call are unchanged.
+            private static readonly string[] s_sdNames = { "arm+halo", "snow tick", "distant paint LOD", "cave clutter", "underwater clutter", "terraform drain", "zone scan", "streamer tick" };   // stage 2 was "far impostors" until 0.2.1490; it times DistantPaintCache.PumpLodJobs
+            private static readonly double[] s_sdMs = new double[8], s_sdMax = new double[8];
             private static long s_sdMark; private static float s_sdLogAt; private static int s_sdFrames;
             private static void SdMark(int i)
             {
@@ -1002,7 +1005,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_sdLogAt = Time.realtimeSinceStartup + 10f;
                 var sb = new System.Text.StringBuilder("[FiresVoxel] streamer driver 10 s (ms total / worst one frame): ");
                 for (int i = 0; i < s_sdMs.Length; i++) sb.Append(s_sdNames[i]).Append(' ').Append(s_sdMs[i].ToString("0.0")).Append(" / ").Append(s_sdMax[i].ToString("0.0")).Append("; ");
-                sb.Append(s_sdFrames).Append(" frame(s) (0.2.1163)");
+                sb.Append(s_sdFrames).Append(" frame(s) (0.2.1163; zone scan split out 0.2.1490)");
                 FiresLogger.LogDebug(sb.ToString());
                 System.Array.Clear(s_sdMs, 0, s_sdMs.Length); System.Array.Clear(s_sdMax, 0, s_sdMax.Length); s_sdFrames = 0;
             }
@@ -1028,10 +1031,6 @@ namespace VerdantsAscent.Terrain.Voxel
                 catch (System.Exception ex) { FiresLogger.LogDebug($"[FiresVoxel] snow tick threw: {ex.Message}"); }
                 SdMark(1);
 
-                // Impostors draw per frame (DrawMeshInstanced is a one-frame
-                // submission) — outside the 0.25s streamer throttle.
-                try { FarVegImpostors.Tick(); }
-                catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] far impostors threw: {ex.Message}"); }
                 try { Paint.DistantPaintCache.PumpLodJobs(); }   // 0.2.1319: spread distant LOD paint compose (no-op with no job)
                 catch (System.Exception ex) { FiresLogger.LogWarning($"[DistantPaint] LOD compose pump threw: {ex.Message}"); }
                 SdMark(2);
@@ -1055,12 +1054,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 // 0.2.1319: the next slice of a spread zone scan (no-op when none is running or the tick below already ran one)
                 try { ContinueScan(); }
                 catch (System.Exception ex) { s_scanActive = false; FiresLogger.LogWarning($"[FiresVoxel] zone scan slice threw: {ex}"); }
+                SdMark(6);   // 0.2.1490: before the tick gate, so every frame's slice is counted
 
                 if (Time.time < _nextTick) return;
                 _nextTick = Time.time + 0.25f;
                 try { Tick(); }
                 catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] streamer tick threw: {ex}"); }
-                SdMark(6);
+                SdMark(7);
             }
 
             private void OnDestroy()
@@ -1865,7 +1865,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (pc.MirrorBordersNow(true) > 0
                     || pc.Version != pc.AppliedVersion
                     || VoxelMeshPipeline.ComputeFrontierMask(pc) != pc.FrontierMask
-                    || VoxelMeshPipeline.ComputeOrphanMask(pc) != pc.OrphanMask)
+                    || VoxelMeshPipeline.ComputeOrphanMask(pc) != pc.OrphanMask
+                    || ((pc.Stitch != null || pc.AppliedStitchMask != 0)
+                        && (VoxelMeshPipeline.ComputeStitch(pc, VoxelMeshPipeline.AllFaces, false)?.Mask ?? 0) != (pc.Stitch?.Mask ?? 0)))   // 0.2.1454: the asked faces moved (the mesher may stitch fewer: caves at the border)
                     VoxelMeshPipeline.EnqueueRemesh(pc);
                 budget--;
             }
@@ -2837,6 +2839,51 @@ namespace VerdantsAscent.Terrain.Voxel
             s_peakLongest = 0f;
         }
 
+        // 0.2.1454: a chunk next door whose SHOWN mesh is stitched onto this zone's vanilla edge would open a half-metre crack the
+        // moment that heightmap hides, so it re-meshes first (its face is covered by this zone's meshed chunks now, so it unstitches);
+        // after StitchWaitCap seconds the swap goes ahead anyway (one Warning) rather than hold the zone. Free while no mesh is stitched.
+        private const float StitchWaitCap = 5f;
+        private static readonly Dictionary<Vector2s, float> s_stitchWaitSince = new Dictionary<Vector2s, float>();
+        private static int s_stitchSwapWaits, s_stitchSwapGaveUp;
+
+        private static bool StitchNeighboursReady(ZoneWrap wrap)
+        {
+            if (!VoxelMeshPipeline.AnyStitchShown) return true;
+            var z = wrap.Zone;
+            int waiting = 0;
+            // zone (zx, zy) = chunk columns 2zx-1..2zx by 2zy-1..2zy; the column / row next to each side and the face of it pointing in
+            Side(true, 2 * z.x - 2, 2 * z.y - 1, 2 * z.y, 1);   // west column, its +X face
+            Side(true, 2 * z.x + 1, 2 * z.y - 1, 2 * z.y, 2);   // east column, its -X face
+            Side(false, 2 * z.y - 2, 2 * z.x - 1, 2 * z.x, 4);  // south row, its +Z face
+            Side(false, 2 * z.y + 1, 2 * z.x - 1, 2 * z.x, 8);  // north row, its -Z face
+            if (waiting == 0) { s_stitchWaitSince.Remove(z); return true; }
+            if (!s_stitchWaitSince.TryGetValue(z, out float since)) { s_stitchWaitSince[z] = Time.time; s_stitchSwapWaits++; return false; }
+            if (Time.time - since < StitchWaitCap) return false;
+            s_stitchWaitSince.Remove(z);
+            s_stitchSwapGaveUp++;
+            FiresLogger.LogWarning($"[FiresVoxel] zone ({z.x},{z.y}) swapped with {waiting} stitched neighbour chunk(s) still not re-meshed after {StitchWaitCap:0} s: a border crack can show until they land (0.2.1454; waits {s_stitchSwapWaits}, gave up {s_stitchSwapGaveUp}).");
+            return true;
+
+            void Side(bool xFixed, int fixedIdx, int lo, int hi, byte bit)
+            {
+                for (int i = lo; i <= hi; i++)
+                {
+                    var stack = VoxelWorld.ColumnChunks(xFixed ? new Vector2Int(fixedIdx, i) : new Vector2Int(i, fixedIdx));
+                    if (stack == null) continue;
+                    for (int k = 0; k < stack.Count; k++)
+                    {
+                        var c = stack[k];
+                        if (c == null) continue;
+                        bool shown = (c.AppliedStitchMask & bit) != 0;
+                        bool asked = c.Stitch != null && (c.Stitch.Mask & bit) != 0;
+                        if (!shown && !asked) continue;
+                        waiting++;
+                        if (!c.Queued && !VoxelMeshPipeline.ResultWaiting(c)) VoxelMeshPipeline.EnqueueRemesh(c);
+                    }
+                }
+            }
+        }
+
         private static void TrySwap(ZoneWrap wrap)
         {
             if (wrap.DataOnly) { TrySwapDataOnly(wrap); return; }
@@ -2885,6 +2932,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 return;
             }
+            if (!StitchNeighboursReady(wrap)) return;   // 0.2.1454
             if (!RevealPrepReady(wrap)) return;   // 0.2.1346
             wrap.TPrep = System.Diagnostics.Stopwatch.GetTimestamp();
 
@@ -3644,6 +3692,10 @@ namespace VerdantsAscent.Terrain.Voxel
         [HarmonyPrefix]
         private static void Prefix(TerrainComp __instance, TerrainOp modifier)
         {
+            // 0.2.1500 ([lead] perf audit row 17): everything below feeds only diagnostics (FatNativeTrace's step and the [FatDiag] Terraform line
+            // in OnRegenerated). With both off it built a trace string, a GetComponent and a dictionary entry on every terrain op (vanilla
+            // snow_walk footsteps included) for nothing; now it answers first.
+            if (!FatNativeTrace.On && !FatDiag.Terraform) return;
             try
             {
                 if (__instance == null || modifier == null) return;
@@ -4211,13 +4263,13 @@ namespace VerdantsAscent.Terrain.Voxel
         // renderer or paint mask). Session only; nothing is saved. Each switch logs one line with the wetness globals.
         internal static Shader VoxelShader;
 
-        [HarmonyLib.HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class ShaderCommand
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class ShaderCommand
         {
             private static bool s_registered;
 
-            [HarmonyLib.HarmonyPostfix]
-            private static void Register()
+            // 0.2.1501: [HarmonyPostfix] removed (not a patch any more)
+            internal static void Register()
             {
                 if (s_registered) return;
                 s_registered = true;

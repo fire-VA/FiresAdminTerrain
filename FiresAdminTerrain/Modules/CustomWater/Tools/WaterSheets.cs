@@ -72,7 +72,20 @@ namespace VerdantsAscent.Water.Tools
         }
 
         // Removes one sheet (synced). False when no sheet has that id here.
-        public static bool Remove(int id)
+        public static bool Remove(int id)   // 0.2.1502: FatUndo WaterSheetsRemove_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginPlayerEdit("a water sheet removal");
+                return Remove_Body(id);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool Remove_Body(int id)
         {
             if (id == 0 || !FindDisk(id, out _)) return false;
             WaterOperationRPC.RequestRemoveWater(id);

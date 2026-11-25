@@ -124,6 +124,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
             Adopt(Pack(mask), builds, locations);
             Save(world);
+            global::VerdantsAscent.Terrain.Performance.FatLoadClock.World("water guards freeze", clock.ElapsedMilliseconds);   // 0.2.1498
             FiresLogger.LogInfo($"[FiresVoxel] water guards frozen for '{world.m_name}': {Describe()} ({clock.ElapsedMilliseconds} ms"
                 + (converted ? $"; a converted world, so placed pieces count owner or not, except {leftToLocations:N0} owner-less "
                     + "piece(s) inside placed locations, which their location's guard already covers" : "") + "). "

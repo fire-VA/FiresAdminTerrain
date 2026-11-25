@@ -48,17 +48,18 @@ namespace VerdantsAscent.Water.Core
         internal static float TestRateScale = 1f;
         internal static bool TestForceFreezing;
 
-        internal static float Exposure => s_f;
+        internal static float Exposure => SeasonalIce.External ? SeasonalIce.Exposure : s_f;   // 0.2.1496: the registered seasonal provider's F when one is registered
         internal static int Revision => s_revision;
-        internal static float AppliedExposure => s_fApplied;
+        internal static float AppliedExposure => SeasonalIce.External ? SeasonalIce.Exposure : s_fApplied;   // 0.2.1496: the provider applies its own steps
         internal static void BumpRevision() => s_revision++;
         internal static void RequestSave() { s_savedF = -1f; s_nextSave = 0f; }
 
         // ---- per-column derivation (any thread) ----
-        internal static void Derive(float depth, bool river, out float cover, out float thick) => DeriveF(s_fApplied, depth, river, out cover, out thick);
+        internal static void Derive(float depth, bool river, out float cover, out float thick) => DeriveF(AppliedExposure, depth, river, out cover, out thick);
 
         private static void DeriveF(float fIn, float depth, bool river, out float cover, out float thick)
         {
+            if (SeasonalIce.External) { SeasonalIce.Derive(fIn, depth, river, out cover, out thick); return; }   // 0.2.1496: the provider's exposure x depth rule
             float f = fIn * (river ? RiverRate : 1f);
             float d = Mathf.Max(0f, depth);
             float need = NeedDays * Mathf.Clamp01(d / 4f);
@@ -74,7 +75,7 @@ namespace VerdantsAscent.Water.Core
         {
             if (IceBreaks.HoleExposure(x, z, out float fb))
             {
-                DeriveF(Mathf.Max(0f, s_fApplied - fb), depth, river, out cover, out thick);   // thread-safe: no shared state touched
+                DeriveF(Mathf.Max(0f, AppliedExposure - fb), depth, river, out cover, out thick);   // thread-safe: no shared state touched
                 return;
             }
             Derive(depth, river, out cover, out thick);
@@ -95,6 +96,7 @@ namespace VerdantsAscent.Water.Core
             var zn = ZNet.instance;
             if (zn == null) return;
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            SeasonalIce.Tick();   // 0.2.1496: a registered provider's revision refills / remeshes the ice
             if (zn.IsServer())
             {
                 if (!s_loaded) { s_loaded = true; Load(); }
@@ -102,6 +104,8 @@ namespace VerdantsAscent.Water.Core
                 if (s_lastT < 0) s_lastT = t;
                 double dt = t - s_lastT; s_lastT = t;
                 if (dt < 0) dt = 0;
+                if (!SeasonalIce.External)   // 0.2.1496: the built-in exposure integration (season, weather, thaw) only while no provider is registered
+                {
                 float dayLen = EnvMan.instance != null && EnvMan.instance.m_dayLengthSec > 0 ? EnvMan.instance.m_dayLengthSec : 1800f;
                 float days = (float)Math.Min(dt / dayLen, 1.0) * Mathf.Max(0f, TestRateScale);
                 bool freezing = TestForceFreezing || VanillaIce.SeasonFreezing, thawing = VanillaIce.SeasonThawing;
@@ -165,17 +169,21 @@ namespace VerdantsAscent.Water.Core
                 if (sIdx == 1 || sIdx == 2) s_f = 0f;
                 else s_f = Mathf.Clamp(s_f + days * s_rate, 0f, MaxF);
                 }
+                }
                 IceFrost.ServerTick((float)Math.Min(dt, 60.0));   // 0.2.1179: frost forms only while snowing; polished cells regrow after 10 min
-                if (Time.time >= s_nextSync && (Mathf.Abs(s_f - s_sentF) >= 0.005f || Time.time >= s_nextHeartbeat)) Broadcast(Mathf.Abs(s_f - s_sentF) >= 0.005f ? "change" : "heartbeat");
+                if (!SeasonalIce.External && Time.time >= s_nextSync && (Mathf.Abs(s_f - s_sentF) >= 0.005f || Time.time >= s_nextHeartbeat)) Broadcast(Mathf.Abs(s_f - s_sentF) >= 0.005f ? "change" : "heartbeat");
                 if ((Mathf.Abs(s_f - s_savedF) >= 0.01f || IceBreaks.Dirty || IceFrost.Dirty) && Time.time >= s_nextSave) { IceBreaks.Dirty = false; IceFrost.Dirty = false; Save(); }
             }
             int step = Mathf.FloorToInt(s_f / StepDays);
+            if (!SeasonalIce.External)   // 0.2.1496: the provider applies its own steps (its revision drives SeasonalIce.Tick)
+            {
             if (step != s_step) { if (s_step < 0) { s_fApplied = s_f; } else s_applyPending = true; s_step = step; }
             if (s_applyPending && Time.time >= s_nextApply)
             {
                 s_applyPending = false; s_nextApply = Time.time + (TestRateScale != 1f ? 1f : 60f);   // the test runs time x120: apply each step
                 s_fApplied = s_f;
                 s_revision++; WaterStateField.IceChanged();
+            }
             }
             {
                 if (!s_firstSaid && s_fApplied > 0f && step > 0)
@@ -394,6 +402,23 @@ namespace VerdantsAscent.Water.Core
                 FiresLogger.LogDebug($"[WaterIce] exposure {s_f:0.00} day(s) loaded from {p}");
             }
             catch (Exception e) { FiresLogger.LogWarning($"[WaterIce] could not read the ice exposure: {e.Message}"); }
+        }
+
+        // 0.2.1496 (winter split, FatApi.LegacyIceExposure): FAT's saved F (line 1 of _ice.txt) for the seasonal provider's ONE-TIME migration,
+        // read from disk, so it is the saved value whatever the live state. NaN = no world, no file or no readable value.
+        internal static float LegacyExposure()
+        {
+            try
+            {
+                string p = FilePath();
+                if (p == null || !File.Exists(p)) return float.NaN;
+                string[] lines = File.ReadAllLines(p);
+                string[] parts = lines.Length > 0 ? lines[0].Trim().Split(' ') : new string[0];
+                if (parts.Length > 0 && float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float f) && !float.IsNaN(f) && !float.IsInfinity(f))
+                    return Mathf.Clamp(f, 0f, MaxF);
+            }
+            catch (Exception e) { FiresLogger.LogDebug($"[WaterIce] LegacyIceExposure read failed: {e.Message}"); }
+            return float.NaN;
         }
 
         private static void Save()

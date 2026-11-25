@@ -62,6 +62,7 @@ namespace VerdantsAscent.Terrain
             public readonly List<DiskNote> Gone = new List<DiskNote>();                                         // Drawn disks the edit removed
             public readonly Dictionary<SheetSlot, IceState> IceBefore = new Dictionary<SheetSlot, IceState>();   // Ice / snow sheets
             public readonly Dictionary<PourSlot, PourState> PourBefore = new Dictionary<PourSlot, PourState>();   // Liquid pours
+            public readonly List<VegNote> Veg = new List<VegNote>();   // [ghost]: vegetation the carve cleared (FatUndoVeg)
         }
 
         // A drawn water disk the stroke created: its stable hash (undo removes it) and its serialized self (redo makes it again).
@@ -200,7 +201,8 @@ namespace VerdantsAscent.Terrain
             var gone = new List<DiskNote>(stroke.Gone);
             var ice = CloseIce(stroke);
             var pours = ClosePours(stroke);
-            if (before.Count == 0 && disks.Count == 0 && gone.Count == 0 && ice.Count == 0 && pours.Count == 0)
+            var veg = new List<VegNote>(stroke.Veg);   // [ghost]: cleared vegetation comes back on undo (FatUndoVeg)
+            if (before.Count == 0 && disks.Count == 0 && gone.Count == 0 && ice.Count == 0 && pours.Count == 0 && veg.Count == 0)
             {
                 FiresLogger.LogDebug($"[FatUndo] stroke {stroke.What} changed nothing ({stroke.Before.Count} chunk(s) looked at); no step");
                 return;
@@ -209,8 +211,11 @@ namespace VerdantsAscent.Terrain
             string what = disks.Count > 0 ? $"{stroke.What} ({before.Count} chunk(s), {disks.Count} water disk(s))" : $"{stroke.What} ({before.Count} chunk(s))";
             if (gone.Count > 0 || ice.Count > 0 || pours.Count > 0)
                 what = $"{stroke.What} ({before.Count} chunk(s), {disks.Count} water disk(s) drawn, {gone.Count} removed, {ice.Count} ice/snow sheet(s), {pours.Count} liquid pour(s))";
-            Record(what, ChunkBounds(before.Count > 0 ? (IEnumerable<Vector3Int>)before.Keys : stroke.Before.Keys), () => Lay(before, disks, false) + LayMore(gone, ice, false) + LayPours(pours, false),
-                         () => Lay(after, disks, true) + LayMore(gone, ice, true) + LayPours(pours, true));
+            // 0.2.1455 ([ghost], Voxheim diff P6): undo lays `before` only where the ground still is `after` (and redo the reverse), so an
+            // edit someone made since is kept; the water / pour / ice parts of the step are laid exactly as before.
+            if (veg.Count > 0) what += $", {veg.Count} plant(s) / tree(s) cleared";
+            Record(what, ChunkBounds(before.Count > 0 ? (IEnumerable<Vector3Int>)before.Keys : stroke.Before.Keys), () => Lay(before, disks, false, after) + LayMore(gone, ice, false) + LayPours(pours, false) + LayVeg(veg, false),
+                         () => Lay(after, disks, true, before) + LayMore(gone, ice, true) + LayPours(pours, true) + LayVeg(veg, true));
             // Late water (a pool laid once its bed shows) still joins this step: the lambdas above read the same list.
             s_recent.Add(new Closed { Keys = new HashSet<Vector3Int>(stroke.Before.Keys), Disks = disks, What = what, At = Time.unscaledTime });
             if (s_recent.Count > RecentKept) s_recent.RemoveAt(0);
@@ -218,18 +223,30 @@ namespace VerdantsAscent.Terrain
 
         // Every chunk back to the kept state, saved to its anchor (the record every peer restores from); the stroke's disks removed
         // (undo) or made again (redo).
-        private static string Lay(Dictionary<Vector3Int, ChunkState> chunks, List<DiskNote> disks, bool redo)
+        // 0.2.1455 (P6): `expected` = the state the step left each chunk in (the other side of the step); null = lay the whole blob (a
+        // step with no chunks). Samples someone changed since stay as they are, counted and shown on screen.
+        private static string Lay(Dictionary<Vector3Int, ChunkState> chunks, List<DiskNote> disks, bool redo, Dictionary<Vector3Int, ChunkState> expected = null)
         {
             s_laying = true;
             try
             {
-                int laid = 0, water = 0;
+                int laid = 0, water = 0, kept = 0;
                 foreach (var pair in chunks)
-                    if (pair.Value.Put(pair.Key)) laid++;
+                {
+                    ChunkState exp = default;
+                    bool merge = expected != null && expected.TryGetValue(pair.Key, out exp);
+                    if (merge ? pair.Value.PutMerged(pair.Key, exp, ref kept) : pair.Value.Put(pair.Key)) laid++;
+                }
                 foreach (var disk in disks)
                     if (redo ? Redraw(disk) : Remove(disk)) water++;
-                return disks.Count > 0 ? $"{laid} of {chunks.Count} chunk(s) of terrain laid back, {water} of {disks.Count} water disk(s) {(redo ? "drawn again" : "removed")}"
-                                       : $"{laid} of {chunks.Count} chunk(s) of terrain laid back";
+                string keptText = kept > 0 ? $"; {kept} terrain sample(s) changed by someone else since were left as they are" : "";
+                if (kept > 0)
+                {
+                    FiresLogger.LogInfo($"[FatUndo] {(redo ? "redo" : "undo")}: {kept} sample(s) changed since the stroke were not overwritten");
+                    Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, $"{(redo ? "Redo" : "Undo")}: kept {kept} spot(s) someone changed since", 0, null, false);
+                }
+                return (disks.Count > 0 ? $"{laid} of {chunks.Count} chunk(s) of terrain laid back, {water} of {disks.Count} water disk(s) {(redo ? "drawn again" : "removed")}"
+                                        : $"{laid} of {chunks.Count} chunk(s) of terrain laid back") + keptText;
             }
             finally { s_laying = false; }
         }
@@ -276,6 +293,19 @@ namespace VerdantsAscent.Terrain
                 VerdantsAscent.Water.Tools.ToolFalls.Restore(key, Falls);
                 return true;
             }
+
+            // 0.2.1455 (P6): this state laid only where the chunk is still `expected` (VoxelEditBlob.Merge); an unreadable blob falls back to
+            // the whole-blob Put. The falls are laid as before (they are not per sample).
+            public bool PutMerged(Vector3Int key, ChunkState expected, ref int kept)
+            {
+                var now = VoxelWorld.SnapshotEdits(key);
+                var merged = VoxelEditBlob.Merge(Blob, expected.Blob, now, out _, out int conflicts);
+                if (merged == null) return Put(key);
+                kept += conflicts;
+                if (!VoxelWorld.RestoreEdits(key, merged)) return false;
+                VerdantsAscent.Water.Tools.ToolFalls.Restore(key, Falls);
+                return true;
+            }
         }
 
         private static bool Same(byte[] a, byte[] b)
@@ -288,75 +318,28 @@ namespace VerdantsAscent.Terrain
 
         private static int Floor(int v, int cells) => v >= 0 ? v / cells : -((-v + cells - 1) / cells);
 
-        // ── where a player's edit starts (Harmony, so the tools' own files stay their owners') ───────────────────────────────
+        // ── where a player's edit starts ──────────────────────────────────────────────────────────────────────────────────
+        // 0.2.1502 ([2ic] / [lead] load-time cut, launch rows "FatUndo+IceWaterCommands_Undo 116.7 / 115.8 ms" etc.): these were 16 Harmony patch
+        // classes on FAT's OWN methods (about 60 methods patched at start-up). Each patched method now calls FatUndo directly, with the same
+        // arguments, in the same order and with the same exception handling as the patch had (prefix = first statements inside the try, finalizer =
+        // the finally, postfix = after a normal return). The call sites carry "0.2.1502: FatUndo <old patch class>". Mapping (old class -> call site):
+        //   VoxelBrushDrag_DispatchNow_Undo  -> VoxelBrushDrag.DispatchNow           scope "a V<tool> stroke"
+        //   SkyIsland_Reshape_Undo           -> FiresSkyIslandTerrainEdit.Reshape    scope "a sky-island <op>"
+        //   SkyIsland_Restore_Undo           -> FiresSkyIslandTerrainEdit.Restore    scope "a sky-island restore"
+        //   WaterPlacement_Undo              -> WaterPlacementTool.PlaceWater / PlaceWaterType   scope "a water placement" (outermost)
+        //   ToolFalls_RemoveNear_Undo        -> ToolFalls.RemoveNear                 prefix BeforeVoxelEdit("a Vfall removal", cursor, radius + 2, radius + 2)
+        //   WaterShapingTools_LayWater_Undo  -> WaterShapingTools.LayWater           LateBegin / LateEnd
+        //   WaterCreateInternal_Undo         -> WaterOperationRPC.RequestCreateWaterInternal         postfix DiskMade(result, disk, false)
+        //   WaterCreateCustom_Undo           -> WaterOperationRPC.RequestCreateWaterWithCustomType   postfix DiskMade(result, disk, true)
+        //   (FatUndoIce.cs / FatUndoPour.cs list theirs.)
 
-        // Every V-tool dab and click: VoxelBrushDrag.DispatchNow(tool, pos, carveMod).
-        [HarmonyPatch(typeof(VoxelBrushDrag), "DispatchNow")]
-        private static class VoxelBrushDrag_DispatchNow_Undo
-        {
-            private static void Prefix(object[] __args) => BeginPlayerEdit($"a V{(__args != null && __args.Length > 0 ? __args[0]?.ToString()?.ToLowerInvariant() : "tool")} stroke");
-            private static void Finalizer() => EndPlayerEdit();
-        }
+        /// <summary>WaterShapingTools.LayWater: a queued pool's disks are late (was WaterShapingTools_LayWater_Undo's prefix).</summary>
+        internal static void LateBegin() => s_late++;
 
-        // A sky-island op (Infinity Hammer / World Edit Commands' terrain line, or the hoe, on an island): voxels only, which IH's own
-        // undo cannot see.
-        [HarmonyPatch(typeof(FiresSkyIslandTerrainEdit), nameof(FiresSkyIslandTerrainEdit.Reshape))]
-        private static class SkyIsland_Reshape_Undo
-        {
-            private static void Prefix(string op) => BeginPlayerEdit($"a sky-island {op}");
-            private static void Finalizer() => EndPlayerEdit();
-        }
+        /// <summary>WaterShapingTools.LayWater's finally (was WaterShapingTools_LayWater_Undo's finalizer).</summary>
+        internal static void LateEnd() { if (s_late > 0) s_late--; }
 
-        [HarmonyPatch(typeof(FiresSkyIslandTerrainEdit), nameof(FiresSkyIslandTerrainEdit.Restore))]
-        private static class SkyIsland_Restore_Undo
-        {
-            private static void Prefix() => BeginPlayerEdit("a sky-island restore");
-            private static void Finalizer() => EndPlayerEdit();
-        }
-
-        // The console water placements (va_brush_water place / place type).
-        [HarmonyPatch]
-        private static class WaterPlacement_Undo
-        {
-            private static IEnumerable<MethodBase> TargetMethods()
-            {
-                foreach (string name in new[] { "PlaceWater", "PlaceWaterType" })
-                {
-                    var method = AccessTools.Method(typeof(VerdantsAscent.Water.Tools.WaterPlacementTool), name);
-                    if (method != null) yield return method;
-                }
-            }
-
-            private static void Prefix() => BeginPlayerEdit("a water placement");
-            private static void Finalizer() => EndPlayerEdit();
-        }
-
-        // A fall's removal changes only vv_falls (no carve): its chunks are kept before it.
-        [HarmonyPatch(typeof(VerdantsAscent.Water.Tools.ToolFalls), nameof(VerdantsAscent.Water.Tools.ToolFalls.RemoveNear))]
-        private static class ToolFalls_RemoveNear_Undo
-        {
-            private static void Prefix(Vector3 cursor, float radius) => BeforeVoxelEdit("a Vfall removal", cursor, radius + 2f, radius + 2f);
-        }
-
-        // A queued pool's water laid after its stroke (WaterShapingTools.DrainPendingWater -> LayWater): its disks are late.
-        [HarmonyPatch(typeof(VerdantsAscent.Water.Tools.WaterShapingTools), "LayWater")]
-        private static class WaterShapingTools_LayWater_Undo
-        {
-            private static void Prefix() => s_late++;
-            private static void Finalizer() { if (s_late > 0) s_late--; }
-        }
-
-        // Every drawn water disk is made through one of these two (WaterPlacementTool, CustomWaterManager's factories).
-        [HarmonyPatch(typeof(WaterOperationRPC), "RequestCreateWaterInternal")]
-        private static class WaterCreateInternal_Undo
-        {
-            private static void Postfix(WaterDisk disk, int __result) => NoteDisk(__result, disk, false);
-        }
-
-        [HarmonyPatch(typeof(WaterOperationRPC), nameof(WaterOperationRPC.RequestCreateWaterWithCustomType))]
-        private static class WaterCreateCustom_Undo
-        {
-            private static void Postfix(WaterDisk disk, int __result) => NoteDisk(__result, disk, true);
-        }
+        /// <summary>A drawn water disk was made (was WaterCreateInternal_Undo / WaterCreateCustom_Undo's postfix).</summary>
+        internal static void DiskMade(int hash, WaterDisk disk, bool custom) => NoteDisk(hash, disk, custom);
     }
 }

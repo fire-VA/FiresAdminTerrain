@@ -120,6 +120,7 @@ namespace VerdantsAscent.Water.Core
         // ghost / fish checks below use this, so the sea and tide water stay vanilla's (and other mods') call.
         internal static float FatOnlySurfaceAt(Vector3 p)
         {
+            if (global::VerdantsAscent.Water.Core.CustomWaterPatches.NoFatWaterAnywhere) return NoWater;   // 0.2.1500: no pours, placed water, legacy water or voxel chunk: every source below answers none
             float level = NoWater;
             FatWaterLevelGate.Apply(p, ref level);
             float generated = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(p);
@@ -422,6 +423,7 @@ namespace VerdantsAscent.Water.Core
 
         private static void Feed(IWaterInteractable who, Component c, float current)
         {
+            if (s_fed.Count == 0 && global::VerdantsAscent.Water.Core.CustomWaterPatches.NoFatWaterAnywhere) return;   // 0.2.1500 ([lead] perf audit row 10): no FAT water and nothing FAT put in water: the lookup below can only answer none
             int id = c.GetInstanceID();
             if ((Time.frameCount + id) % EveryFrames != 0) return;
             bool ours = s_fed.ContainsKey(id);
@@ -475,6 +477,7 @@ namespace VerdantsAscent.Water.Core
         // else) writes to the FAT surface at the object when that stands higher and the object is in it.
         internal static float RaiseToFatWater(Component c, float level)
         {
+            if (global::VerdantsAscent.Water.Core.CustomWaterPatches.NoFatWaterAnywhere) return level;   // 0.2.1500: no FAT water of any kind: the surface lookup below answers none
             if (c == null) return level;
             Vector3 p = c.transform.position;
             float surface = SurfaceMemo(c, p);

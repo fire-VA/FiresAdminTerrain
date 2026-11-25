@@ -26,12 +26,34 @@ namespace VerdantsAscent.Terrain.BcImport
         [ThreadStatic] private static long[] t_ticks;
         [ThreadStatic] private static int[] t_calls;
         [ThreadStatic] private static bool t_inBuild;
+        // 0.2.1483: set by FatFarGen.SampleZone around its HeightmapBuilder.Build call on a foreign worker (EBM's far vegetation): the build is
+        // timed as usual but never logs from that thread (Core's log writer is not thread-safe, and EBM runs several workers at once).
+        [ThreadStatic] internal static bool t_farApi;
         [ThreadStatic] private static int t_gc0, t_gc1, t_gc2;   // 0.2.1215: GC collections during this build (any thread caused them)
         private static readonly object s_lock = new object();
         private static readonly Stopwatch s_clock = Stopwatch.StartNew();
         private static long s_nextLogMs;
         private static double s_worstMs;
         private static string s_worst;
+
+        // 0.2.1500 ([lead] perf audit row 2): every timer patch class below has Prepare() => PatchesOn, so with [FiresAdminTerrain 99 Diagnostics]
+        // "Generator timing" off (default) none is installed and vanilla's samplers / builds run without them. Read once (the first Prepare), so the
+        // patch-time answer and the sync-wait helpers below always agree for the session. Begin/End callers elsewhere stay cheap: t_inBuild is never set.
+        private static int s_patchesOn = -1;
+        internal static bool PatchesOn
+        {
+            get
+            {
+                if (s_patchesOn < 0)
+                {
+                    s_patchesOn = VerdantsAscent.Terrain.Voxel.FatDiag.GenTimingPatches ? 1 : 0;
+                    FiresLogger.LogInfo(s_patchesOn == 1
+                        ? "[BcImport] generator timing ON: timers installed on vanilla's world generator samplers and heightmap builds (diagnostics key; 0.2.1500)"
+                        : "[BcImport] generator timing off: no timer patches on vanilla's world generator samplers or heightmap builds (turn on [FiresAdminTerrain 99 Diagnostics] Generator timing to get them; 0.2.1500)");
+                }
+                return s_patchesOn == 1;
+            }
+        }
 
         internal static long Begin() => t_inBuild ? Stopwatch.GetTimestamp() : 0L;
         internal static void End(int slot, long start)
@@ -64,6 +86,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         internal static void SyncQueueAtRequest(HeightmapBuilder b, Vector3 center, int width, float scale, bool distantLod, WorldGenerator wg)
         {
+            if (!PatchesOn) return;   // 0.2.1500: the queue walk (it takes the builder lock) is part of the diagnostics
             s_syncDepth = -1; s_syncPos = -1; s_distantQueued = 0;
             s_syncBuildsAtStart = System.Threading.Volatile.Read(ref s_buildsDone);
             s_syncBuildTicksAtStart = System.Threading.Interlocked.Read(ref s_buildTicksDone);
@@ -86,6 +109,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         internal static void SyncWaitDone(long ticks, Vector3 center)
         {
+            if (!PatchesOn) return;   // 0.2.1500
             double ms = ticks * 1000.0 / Stopwatch.Frequency;
             if (ms < SyncSlowMs) return;
             int builds = System.Threading.Volatile.Read(ref s_buildsDone) - s_syncBuildsAtStart;
@@ -106,7 +130,7 @@ namespace VerdantsAscent.Terrain.BcImport
             System.Threading.Interlocked.Add(ref s_buildTicksDone, Stopwatch.GetTimestamp() - start);
             System.Threading.Interlocked.Increment(ref s_buildsDone);
             t_inBuild = false;
-            if (t_ticks == null) return;
+            if (t_ticks == null || t_farApi) return;   // 0.2.1483: no slow-build log from a far-gen worker
             double ms = (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
             if (ms < SlowMs) return;
             var sb = new StringBuilder();
@@ -131,15 +155,17 @@ namespace VerdantsAscent.Terrain.BcImport
         [HarmonyPatch(typeof(HeightmapBuilder), "Build")]
         private static class BuildTimer
         {
+            static bool Prepare() => PatchesOn;   // 0.2.1500
             [HarmonyPriority(Priority.First)] private static void Prefix(out long __state) { BuildStart(); __state = Stopwatch.GetTimestamp(); }
             [HarmonyPriority(Priority.Last)] private static void Postfix(long __state) => BuildEnd(__state);
         }
 
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiome), typeof(float), typeof(float), typeof(float), typeof(bool))]
-        private static class T0 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(GetBiome, __state); }
+        private static class T0 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(GetBiome, __state); }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeHeight))]
         private static class T1
         {
+            static bool Prepare() => PatchesOn;   // 0.2.1500
             [HarmonyPriority(Priority.First)] static void Prefix(out long __state) { __state = Begin(); NoteGap(__state); }
             [HarmonyPriority(Priority.Last)] static void Postfix(long __state) { End(GetBiomeHeight, __state); if (__state != 0L) t_lastEnd = Stopwatch.GetTimestamp(); }
         }
@@ -160,29 +186,30 @@ namespace VerdantsAscent.Terrain.BcImport
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeHeight))]
         private static class HeightSegs
         {
+            static bool Prepare() => PatchesOn;   // 0.2.1500
             [HarmonyPriority(Priority.Last - 1)] static void Prefix() => t_mark = Begin();
             [HarmonyPriority(500)] static void Postfix() => Seg(HeightVanilla);
         }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeHeight))]
-        private static class HeightSegFat { [HarmonyPriority(300)] static void Postfix() => Seg(HeightFatPost); }
+        private static class HeightSegFat { static bool Prepare() => PatchesOn; [HarmonyPriority(300)] static void Postfix() => Seg(HeightFatPost); }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeHeight))]
-        private static class HeightSegRpgm { [HarmonyPriority(100)] static void Postfix() { Seg(HeightRpgmPost); t_mark = 0L; } }
+        private static class HeightSegRpgm { static bool Prepare() => PatchesOn; [HarmonyPriority(100)] static void Postfix() { Seg(HeightRpgmPost); t_mark = 0L; } }
         [HarmonyPatch(typeof(HeightmapBuilder), "Build")]
-        private static class BuildSegStart { [HarmonyPriority(500)] static void Prefix() => t_mark = Begin(); }
+        private static class BuildSegStart { static bool Prepare() => PatchesOn; [HarmonyPriority(500)] static void Prefix() => t_mark = Begin(); }
         [HarmonyPatch(typeof(HeightmapBuilder), "Build")]
-        private static class BuildSegEnd { [HarmonyPriority(300)] static void Prefix() { Seg(BuildPrefixes); t_mark = 0L; } }
+        private static class BuildSegEnd { static bool Prepare() => PatchesOn; [HarmonyPriority(300)] static void Prefix() { Seg(BuildPrefixes); t_mark = 0L; } }
         // 0.2.1215: vanilla Build also asks GetBiomeSector 4x a tile; FAT patches it four times and none were timed.
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiomeSector), typeof(float), typeof(float), typeof(bool))]
-        private static class T7 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(BiomeSector, __state); }
+        private static class T7 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(BiomeSector, __state); }
         [HarmonyPatch(typeof(WorldGenerator), "GetBaseHeight")]
-        private static class T2 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(GetBaseHeight, __state); }
+        private static class T2 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(GetBaseHeight, __state); }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetForestFactor))]
-        private static class T3 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(GetForestFactor, __state); }
+        private static class T3 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(GetForestFactor, __state); }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.IsDeepnorth))]
-        private static class T4 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(IsDeepnorth, __state); }
+        private static class T4 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(IsDeepnorth, __state); }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.IsAshlands))]
-        private static class T5 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(IsAshlands, __state); }
+        private static class T5 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(IsAshlands, __state); }
         [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetAshlandsOceanGradient), new[] { typeof(float), typeof(float) })]
-        private static class T6 { [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(AshGradient, __state); }
+        private static class T6 { static bool Prepare() => PatchesOn; [HarmonyPriority(Priority.First)] static void Prefix(out long __state) => __state = Begin(); [HarmonyPriority(Priority.Last)] static void Postfix(long __state) => End(AshGradient, __state); }
     }
 }

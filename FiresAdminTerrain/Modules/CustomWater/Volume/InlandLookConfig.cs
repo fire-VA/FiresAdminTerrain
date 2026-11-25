@@ -65,7 +65,7 @@ namespace VerdantsAscent.Water.Core
                 s_biome[b] = BindLook(cfg, "Inland look - Biome " + BiomeNames[b], d.tS, d.tD, d.see, d.turb, d.rip, d.refl, d.swell,
                     $"Lakes, ponds and rivers in {BiomeNames[b]}.");
                 s_biome[b].Churn = cfg.Bind("Inland look - Biome " + BiomeNames[b], "Churn", BiomeChurn[b],
-                    new ConfigDescription("Muddy sediment churned along the flow, stronger near the bed and banks. -1 = keep the global.", new AcceptableValueRange<float>(-1f, 2f)));
+                    new ConfigDescription("Muddy sediment churned along the flow, stronger near the bed and banks. -1 = keep the global." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(-1f, 2f)));
             }
             // hot-reload, like the global inland keys
             cfg.SettingChanged += (_, args) =>
@@ -83,18 +83,18 @@ namespace VerdantsAscent.Water.Core
             ColorUtility.TryParseHtmlString("#" + tD, out Color cD);
             return new Look
             {
-                Shallow = cfg.Bind(section, "Shallow tint", cS, what + " Shallow colour; its ALPHA is how strongly it replaces the global tint (0 = keep the global)."),
-                Deep = cfg.Bind(section, "Deep tint", cD, "Deep colour; its ALPHA is how strongly it applies (0 = keep the global)."),
+                Shallow = cfg.Bind(section, "Shallow tint", cS, what + " Shallow colour; its ALPHA is how strongly it replaces the global tint (0 = keep the global)." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey)),
+                Deep = cfg.Bind(section, "Deep tint", cD, "Deep colour; its ALPHA is how strongly it applies (0 = keep the global)." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey)),
                 SeeThrough = cfg.Bind(section, "See-through depth (m)", see,
-                    new ConfigDescription("Metres to reach the deep tint. 0 = keep the global.", new AcceptableValueRange<float>(0f, 40f))),
+                    new ConfigDescription("Metres to reach the deep tint. 0 = keep the global." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(0f, 40f))),
                 Turbidity = cfg.Bind(section, "Turbidity", turb,
-                    new ConfigDescription("Murk. -1 = keep the global.", new AcceptableValueRange<float>(-1f, 1f))),
+                    new ConfigDescription("Murk. -1 = keep the global." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(-1f, 1f))),
                 Ripple = cfg.Bind(section, "Ripple multiplier", rip,
-                    new ConfigDescription("× the global ripple (1 = no change). The Minimum ripple setting still applies.", new AcceptableValueRange<float>(0f, 3f))),
+                    new ConfigDescription("× the global ripple (1 = no change). The Minimum ripple setting still applies." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(0f, 3f))),
                 Reflection = cfg.Bind(section, "Reflection multiplier", refl,
-                    new ConfigDescription("× the global reflection strength (1 = no change).", new AcceptableValueRange<float>(0f, 3f))),
+                    new ConfigDescription("× the global reflection strength (1 = no change)." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(0f, 3f))),
                 Swell = cfg.Bind(section, "Swell multiplier", swell,
-                    new ConfigDescription("× the global swell (1 = no change).", new AcceptableValueRange<float>(0f, 3f))),
+                    new ConfigDescription("× the global swell (1 = no change)." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(0f, 3f))),
             };
         }
 
@@ -132,6 +132,7 @@ namespace VerdantsAscent.Water.Core
             // Minimum ripple, re-applied by the shader after the multipliers (a biome at 0.5x never drops under the floor)
             var floor = FiresInlandWaterConfig.MinRipple;
             m.SetFloat("_RippleFloor", floor != null ? floor.Value : 0.12f);
+            InlandVanillaMatch.AfterLook(m, Classes, Biomes);   // 0.2.1462: zeroed tables (one global look) when the vanilla-match key is on
         }
 
         // 0.2.1090: the largest "Swell multiplier" over every class and biome look (the shader takes the biome's when it is not 1,

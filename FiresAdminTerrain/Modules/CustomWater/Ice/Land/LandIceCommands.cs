@@ -39,7 +39,20 @@ namespace VerdantsAscent.Water.Tools
             FiresLogger.LogInfo("[LandIceCommands] Initialized - Land ice commands registered");
         }
 
-        private static bool RaiseLandIce(Terminal.ConsoleEventArgs args)
+        private static bool RaiseLandIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return RaiseLandIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool RaiseLandIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float amount = 0.5f;
@@ -59,7 +72,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool LowerLandIce(Terminal.ConsoleEventArgs args)
+        private static bool LowerLandIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return LowerLandIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool LowerLandIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float amount = 0.5f;
@@ -79,7 +105,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool LevelLandIce(Terminal.ConsoleEventArgs args)
+        private static bool LevelLandIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return LevelLandIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool LevelLandIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float level = float.MinValue;
@@ -100,7 +139,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool SmoothLandIce(Terminal.ConsoleEventArgs args)
+        private static bool SmoothLandIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return SmoothLandIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool SmoothLandIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float dummy = 0f;
@@ -120,7 +172,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool DeleteLandIce(Terminal.ConsoleEventArgs args)
+        private static bool DeleteLandIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return DeleteLandIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool DeleteLandIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float dummy = 0f;

@@ -352,6 +352,7 @@ namespace VerdantsAscent.Water.Core
             ForceImmediateSave();
 
             s_allCombiners.Remove(this);
+            WaterLookHost.Forget(_meshRenderer);   // 0.2.1455
 
             // CRITICAL: Disconnect mesh from components BEFORE destroying it.
             // During shutdown, Unity's RuntimeNavMeshBuilder tries to process meshes
@@ -633,6 +634,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void RemoveWaterDisk(WaterDisk disk)
         {
+            global::VerdantsAscent.Terrain.FatUndo.CombinerRemoveBefore(disk);   // 0.2.1502: FatUndo CombinerRemoveDisk_Undo, was a Harmony patch on this FAT method
             if (disk == null) return;
 
             if (_waterDisks.Remove(disk))
@@ -1795,6 +1797,7 @@ namespace VerdantsAscent.Water.Core
             {
                 _meshRenderer.material = _waterMaterial;
                 ToolWaterStencil.OnCombiner(_meshRenderer, transform.position);
+                WaterLookHost.Adopt(_meshRenderer, FatWaterKind.Body, IsPlacedFreshWater);   // 0.2.1455: the new liquid's material is FAT's original now
             }
 
             // Update damage handler

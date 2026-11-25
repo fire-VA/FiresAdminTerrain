@@ -37,8 +37,8 @@ namespace VerdantsAscent.Utilities
             w.Divider();
 
             w.SubHeader("Three Ways To Drive It");
-            w.Bullet("V-tools - eight voxel and water tools on the Chaos Hammer (Voxel category), for admins. Nothing " +
-                "else needed.");
+            w.Bullet("V-tools - the voxel and water tools on the Chaos Hammer (Voxel category), for admins. Nothing " +
+                "else needed. See Hammer V-Tools for the list and keys.");
             w.Bullet("Console commands (F5) - the va_*, place_*, ice_*, paint_* and fires_* commands below. Most " +
                 "need devcommands; on a dedicated server an admin needs a mod like ServerDevcommands to run them.");
             w.Bullet("Infinity Hammer (optional) - its ruler sets where a brush lands, the mouse wheel sets the " +
@@ -46,27 +46,29 @@ namespace VerdantsAscent.Utilities
             w.Divider();
 
             w.SubHeader("Before You Start");
-            w.Bullet("[Voxel Terrain - World] Terrain Mode decides what the mod does to the world. See " +
+            // 0.2.1454 ([ghost], Voxheim diff P3): the Terrain Mode key was removed in 0.2.1336 (the world's profile decides), and V-tool strokes have undo.
+            w.Bullet("Each world's terrain mode is chosen when the world is created and kept with it. See " +
                 "Terrain Mode & New Worlds.");
-            w.Bullet("va_tile_undo / va_tile_redo undo terrain brushes (100 steps, on this machine). Other edits " +
-                "have no undo, so back up the world before bulk commands.");
+            // 0.2.1455 ([ghost], Voxheim diff P6): the va_voxel_* brush commands are undo steps now, and undo keeps others' later changes.
+            w.Bullet("Numpad 7 / 9 undo and redo V-tool strokes and the va_voxel_* brush commands (50 steps, on this machine). An undo " +
+                "leaves anything someone else changed since as it is, and says so. va_tile_undo / va_tile_redo undo terrain brushes " +
+                "(100 steps). Other bulk commands have no undo, so back up the world first.");
         }
 
         private static void BuildTerrainMode(FiresCore.Help.HelpContentWriter w)
         {
             w.AdminHeader("Terrain Mode & New Worlds");
-            w.Paragraph("[Voxel Terrain - World] Terrain Mode is the master switch, and the server's value applies " +
-                "to everyone.");
-            w.Bullet("Off (default) - vanilla terrain. Brushes, water, ice and snow still work; voxel tools " +
-                "only add shapes.");
-            w.Bullet("ZoneReplace - vanilla ground until you edit it: a zone becomes voxel terrain on its first " +
+            // 0.2.1454 ([ghost], Voxheim diff P3): the old Terrain Mode key is gone since 0.2.1336 (FiresVoxelConfig: the world's .profile decides).
+            w.Paragraph("Each world's terrain mode is chosen on the New World screen and kept in the world's profile, so " +
+                "every player and the server build the same ground. There is no longer a config key for it.");
+            w.Bullet("Heightmap - vanilla ground until you edit it: a zone becomes voxel terrain on its first " +
                 "voxel brush or pickaxe dig.");
-            w.Bullet("FullVoxel - every nearby zone is voxel terrain with generated caves, caverns and " +
-                "sinkholes. Needed for FIRES worlds, sky islands and skylands.");
+            w.Bullet("Voxel (wrap / voxel only) - every nearby zone becomes voxel terrain automatically, with generated caves, " +
+                "caverns and sinkholes. Needed for FIRES worlds, sky islands and skylands.");
             w.Divider();
 
             w.SubHeader("Rivers & Lakes On Existing Worlds");
-            w.Bullet("In ZoneReplace on vanilla-generated worlds, Hydrology Enabled and Hydrology " +
+            w.Bullet("On a voxel-terrain world made with vanilla's generator, Hydrology Enabled and Hydrology " +
                 "Place Water (both on) carve winding rivers and dug-out lakes with beaches, and remove the trees " +
                 "and bushes standing in the new water. Turn both off if you only want tunnels.");
             w.Bullet("Shape them with River Threshold, River Width Min / Max, River Meander and Coarse Grid Bank " +
@@ -76,8 +78,8 @@ namespace VerdantsAscent.Utilities
             w.Divider();
 
             w.SubHeader("New Worlds");
-            w.Bullet("With Terrain Mode = FullVoxel, creating a world asks whether to generate it with FIRES " +
-                "terrain.");
+            w.Bullet("The New World panel sets the world's terrain (Heightmap or voxel) and its Terrain generator " +
+                "(Fires or vanilla).");
             w.Bullet("Creating a world also offers One Zone at a Time ([Zone Mode] Offer at world creation). A " +
                 "dedicated server starts a never-saved world that way with the -fireszones launch flag.");
             w.Bullet("Both choices are permanent. They live in the FiresWorldGen folder next to the world save, " +
@@ -91,23 +93,34 @@ namespace VerdantsAscent.Utilities
                 "them with [Voxel Terrain] Show tools in build menu.");
             w.Divider();
 
-            w.SubHeader("Tools");
-            w.Bullet("Vcarve / Vfill - carve or fill a sphere; after PgUp/PgDn, a cylinder of that height");
-            w.Bullet("Vdelete - remove voxel edits and bring back the original ground");
-            w.Bullet("Vcube / Vsphere - stamp at the 3D gizmo; hold Left Alt to carve; drag spheres for smooth " +
-                "tubes");
-            w.Bullet("Vriver - drag to carve a river bed");
-            w.Bullet("Vpour - drag to lay a ribbon of water");
-            w.Bullet("Vpool - click to dig and fill a pool; click again downstream to join the two with a " +
-                "channel. Switch tools to end the chain.");
+            // 0.2.1454 ([ghost], lead 11-17 Voxheim diff P3: this list said eight tools and missed six): written from the registered tools
+            // (VoxelToolPieces.Tools, menu order, each piece's own description) and the one keys table (VToolKeyHints.KeysFor), so it
+            // always matches what the hammer holds and the hint line shows.
+            var tools = VerdantsAscent.Terrain.Voxel.VoxelToolPieces.Tools;
+            int count = 0;
+            if (tools != null) foreach (var go in tools) if (go != null) count++;
+            w.SubHeader(count > 0 ? $"Tools ({count})" : "Tools");
+            if (count == 0) w.Bullet("The tool list fills in once a world is loaded.");
+            else
+                foreach (var go in tools)
+                {
+                    var piece = go != null ? go.GetComponent<Piece>() : null;
+                    if (piece == null) continue;
+                    w.Bullet(piece.m_name + " - " + piece.m_description);
+                    string keys = VerdantsAscent.Terrain.Voxel.VToolKeyHints.KeysFor(piece.m_name);
+                    if (keys != null) w.Bullet("   Keys: " + keys);
+                }
             w.Divider();
 
             w.SubHeader("Controls");
             w.Bullet("Mouse wheel - brush size (0.5 to 32 m); the camera stops zooming while a V-tool is selected");
-            w.Bullet("PgUp / PgDn - cylinder height (1 m steps, up to 24 m), or the water level for the water " +
-                "tools (0.5 m steps)");
-            w.Bullet("Hold left click and drag to apply continuously. [Voxel Terrain - World] Brush Draw Speed sets " +
-                "the pace.");
+            w.Bullet("Shift + wheel, or the ghost up / down keys ([Voxel Terrain - Tools], PgUp / PgDn by default) - the " +
+                "tool's height or offset in 0.5 m steps; Shift held = 0.1 m, Left Alt held = 5x, holding repeats faster");
+            w.Bullet("Ghost freeze key (Keypad 0 by default) - the ghost stops following the crosshair; press again to release");
+            w.Bullet("Numpad 7 / 9 - undo / redo the last strokes (50 steps, on this machine; shared with Server Devcommands' undo)");
+            w.Bullet("The first click after picking a tool or closing a menu never acts. Hold left click and drag to apply " +
+                "continuously; [Voxel Terrain - Tools] draw speeds set the pace per tool.");
+            w.Bullet("The keys for the selected tool also show above vanilla's build hints.");
         }
 
         private static void BuildBrushes(FiresCore.Help.HelpContentWriter w)
@@ -159,10 +172,10 @@ namespace VerdantsAscent.Utilities
                 "cylinder (shaft, trench, pillar or wall)");
             w.Bullet("va_voxel_delete [radius] - bring back the original ground");
             w.Bullet("va_voxel_cube / va_voxel_sphere - stamp at the gizmo, sized by the V-tool mouse wheel");
-            w.Bullet("va_voxel_wrapall - turn every loaded zone into voxel terrain now (Terrain Mode must not be Off)");
+            w.Bullet("va_voxel_wrapall - turn every loaded zone into voxel terrain now (needs [Voxel Terrain] Enabled)");
             w.Divider();
 
-            w.SubHeader("Generated Caves (FullVoxel)");
+            w.SubHeader("Generated Caves (voxel-terrain worlds)");
             w.Paragraph("Tunnels, caverns and sinkhole entrances with pools and a dark cave environment. Each cave is " +
                 "dressed for its biome by the server: pickables, ore nodes, wall and ceiling pieces, rubble, props, " +
                 "creature spawners and, in some zones, a loot chest. Each client also draws pebbles, roots and " +
@@ -233,7 +246,10 @@ namespace VerdantsAscent.Utilities
             w.Bullet("water_info / list_water - custom water here, or everywhere");
             w.Bullet("va_water_census - every water surface at your position");
             w.Bullet("va_rivers / va_streams / va_lakes - ping vanilla water on the map");
-            w.Bullet("va_water_dump - full report to config/FiresAdminTerrain/water_dump.txt");
+            w.Bullet("va_water_dump - full report to BepInEx/cache/FiresAdminTerrain/water_dump.txt");   // [ghost] (rivers diff): the cache folder, not config (FiresCachePaths)
+            w.Bullet("va_auto_water_status - auto water settings, plus how many water anchors the world holds and its undo backups");
+            w.Bullet("va_auto_water_generate - regenerate all auto water (the water it replaces is backed up first); " +
+                "va_auto_water_undo puts the replaced water back");
             w.Divider();
 
             w.Paragraph("With FiresTossinShade installed, the water look is tunable under [FiresLiquid Look] and " +
@@ -351,8 +367,8 @@ namespace VerdantsAscent.Utilities
         {
             w.AdminHeader("FIRES Worlds & Sky Islands");
             w.Paragraph("FIRES worlds replace Valheim's terrain generation with their own continents, erosion, " +
-                "climate-driven biomes, carved rivers, lakes, volcanoes and sky islands. They need Terrain Mode = " +
-                "FullVoxel, and apply to worlds named Fires..., worlds created with Terrain generator = Fires in the " +
+                "climate-driven biomes, carved rivers, lakes, volcanoes and sky islands. They need a voxel-terrain " +
+                "world, and apply to worlds named Fires..., worlds created with Terrain generator = Fires in the " +
                 "New World panel, " +
                 "and worlds with a baked cache.");
             w.AdminDivider();

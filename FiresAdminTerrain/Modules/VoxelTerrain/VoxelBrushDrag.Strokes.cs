@@ -239,6 +239,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 case GhostShape.Cube:
                     HideCylinderGizmo();
                     SetGizmo(Tool.Cube, g.Centre, g.Material == GhostMaterial.Lines);
+                    // 0.2.1455 ([ghost], Voxheim diff P4): the cube ghost turns with Vcube's Q / E (identity at 0, as before)
+                    if (_gizmoCube != null) _gizmoCube.transform.rotation = Quaternion.Euler(0f, VoxelBrushSoft.CubeYaw, 0f);
                     break;
                 case GhostShape.Disc:
                 case GhostShape.Cylinder:
@@ -678,6 +680,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 if (s.Alt)
                 {
+                    // 0.2.1455 ([ghost], Voxheim diff P2): a real smooth (VoxelSmooth: each column toward its neighbours, slopes kept),
+                    // at the brush strength (Numpad /). [Voxel Terrain - Tools] "Vlevel Alt is a true smooth" off = the old disc levelling below.
+                    if (VoxelBrushSoft.TrueSmoothOn) { FiresLogger.LogDebug(VoxelSmooth.Dab(s.HitGround, s.Radius, VoxelBrushSoft.Strength)); return; }
                     // Smooth: halfway from the centre's ground to the mean ground under the disc, each dab.
                     if (!SurveyMean(s.HitGround, s.Radius, out float mean)) return;
                     FiresLogger.LogDebug(LevelDab(s.HitGround, s.Radius, Mathf.Lerp(s.HitGround.y, mean, 0.5f)) + " (smooth)");

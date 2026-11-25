@@ -22,6 +22,9 @@ namespace VerdantsAscent.Terrain.Voxel
         public int KeyX, KeyZ; // chunk key (zone-edge face detection for border lips)
         public int SkirtTilted;   // 0.2.1117: orphan stand-in vertices tilted 15 deg down-outward this build (render meshes only)
         public Vector3 SkirtOrigin;   // 0.2.1117: the chunk's world origin this build (the skirt proof finds the +X/+Z planes from it)
+        public byte StitchMask;       // 0.2.1454: in = faces asked to stitch onto the vanilla neighbour; out = the faces actually stitched
+        public float[] StitchH;       // 0.2.1454: the neighbour heightmaps' edge vertex heights, 4 x 33 (face-major +X, -X, +Z, -Z)
+        public int StitchVerts;       // 0.2.1454: border vertices moved onto a vanilla edge this build (proof)
         public readonly List<Vector3> Verts = new List<Vector3>(4096);
         public readonly List<Vector3> Normals = new List<Vector3>(4096);
         public readonly List<Vector4> Tangents = new List<Vector4>(4096);
@@ -112,6 +115,29 @@ namespace VerdantsAscent.Terrain.Voxel
         }
         private static int CIdx(int x, int y, int z) => (x + 1) + 34 * ((y + 1) + 34 * (z + 1));
 
+        // 0.2.1454: the sample columns whose cells hold face f's border vertices (-X: x -1..1, +X: x 31..32, likewise z), all along the
+        // face: each must cross the surface at most once, solid below air (a column with no crossing holds ground in another Y chunk).
+        private static bool StitchColumnsSingle(sbyte[] d, int f)
+        {
+            bool xFace = f < 2, pos = (f & 1) == 0;
+            int a0 = pos ? C - 1 : -1, a1 = pos ? C : 1;
+            for (int a = a0; a <= a1; a++)
+                for (int t = -1; t <= C; t++)
+                {
+                    int crossings = 0;
+                    bool prev = (xFace ? d[DIdx(a, -1, t)] : d[DIdx(t, -1, a)]) > 0;
+                    bool bottomSolid = prev;
+                    for (int y = 0; y <= C; y++)
+                    {
+                        bool cur = (xFace ? d[DIdx(a, y, t)] : d[DIdx(t, y, a)]) > 0;
+                        if (cur != prev) crossings++;
+                        prev = cur;
+                    }
+                    if (crossings > 1 || (crossings == 1 && !bottomSolid)) return false;
+                }
+            return true;
+        }
+
         // EDGE-DRIVEN build. The old two-pass form gated
         // VERTICES on "cell edited", which dropped quads wherever a crossing
         // edge bordered a cell whose corners happened to equal seed (brush SDF
@@ -135,6 +161,35 @@ namespace VerdantsAscent.Terrain.Voxel
             System.Array.Clear(edited, 0, edited.Length);
 
             float[] cd = new float[8];
+
+            // 0.2.1454 (Fire 11-17, VA flat world: voxel / vanilla zone borders tear). Toward a vanilla heightmap zone the skin overhung
+            // the border by half a cell: -X / -Z cell -1 vertices sit 0.5 m inside the neighbour, flat and coplanar with its ground (z-fight
+            // on flat ground), and +X / +Z orphan stand-ins sit 0.5 m past it tilted 15 deg down (a crease). On a stitched face those
+            // vertices move ONTO the border at the neighbour heightmap's own edge height (linear between its edge vertices = its edge
+            // triangles' line), so the skin ends exactly on vanilla's edge: same topology, no overlap, no gap. A face stitches only when its
+            // border columns hold at most one ground surface (solid below, air above); caves / overhangs there keep the old border.
+            byte stitch = 0;
+            float[] sh = buf.StitchH;
+            buf.StitchVerts = 0;
+            const int SST = VoxelMeshPipeline.StitchStride;
+            if (buf.MeshAll && buf.StitchMask != 0 && sh != null && sh.Length >= 4 * SST)
+            {
+                for (int f = 0; f < 4; f++)
+                    if ((buf.StitchMask & (1 << f)) != 0 && StitchColumnsSingle(d, f)) stitch |= (byte)(1 << f);
+            }
+            buf.StitchMask = stitch;
+
+            // Height of face f's vanilla edge at world coordinate w along it (x for Z faces, z for X faces), linear between its integer
+            // edge vertices. Split in WORLD units (floor of w), so two chunks sharing an apron vertex compute the same pair and fraction.
+            float EdgeY(int f, float w, float originAlong)
+            {
+                float fl = Mathf.Floor(w), fr = w - fl;
+                int i = (int)fl - (int)originAlong + 1;   // index into t = -1..33
+                if (i < 0) { i = 0; fr = 0f; }
+                if (i > SST - 2) { i = SST - 2; fr = 1f; }
+                int b = f * SST + i;
+                return sh[b] + (sh[b + 1] - sh[b]) * fr;
+            }
 
             // Memoized "any of the cell's 8 corners differs from seed".
             bool CellEdited(int cx, int cy, int cz)
@@ -238,11 +293,22 @@ namespace VerdantsAscent.Terrain.Voxel
                 // the plane (~0.5 m: the stand-in vertex sits mid-cell), but the visible face runs from the last INSIDE vertex (mid-cell,
                 // ~0.5 m before the plane) to it - a 1 m run, so 0.134 m over 1 m = 7.6 deg. The drop is now tan15 x the run from the
                 // inside vertex one cell back (cells are 1 m): that face slopes 15 deg.
+                // 0.2.1454: a border vertex of a stitched face goes onto the vanilla edge (see the stitch note above). Colliders too, so
+                // the walkable ground ends where the drawn ground does.
+                bool onX = stitch != 0 && ((cx < 0 && (stitch & 2) != 0) || (cx >= C && (stitch & 1) != 0));
+                bool onZ = stitch != 0 && ((cz < 0 && (stitch & 8) != 0) || (cz >= C && (stitch & 4) != 0));
+                if (onX || onZ)
+                {
+                    if (onX) world.x = cx < 0 ? origin.x : origin.x + C;
+                    if (onZ) world.z = cz < 0 ? origin.z : origin.z + C;
+                    world.y = onX ? EdgeY(cx < 0 ? 1 : 0, world.z, origin.z) : EdgeY(cz < 0 ? 3 : 2, world.x, origin.x);
+                    buf.StitchVerts++;
+                }
                 float skirtX = 0f, skirtZ = 0f;
                 if (buf.MeshAll && !buf.CollidersOnly)
                 {
-                    if (cx >= C && (buf.OrphanMask & 1) != 0) skirtX = cx - C + 1f;
-                    if (cz >= C && (buf.OrphanMask & 4) != 0) skirtZ = cz - C + 1f;
+                    if (cx >= C && (buf.OrphanMask & 1) != 0 && (stitch & 1) == 0) skirtX = cx - C + 1f;   // 0.2.1454: a stitched face has no skirt
+                    if (cz >= C && (buf.OrphanMask & 4) != 0 && (stitch & 4) == 0) skirtZ = cz - C + 1f;
                     if (skirtX > 0f || skirtZ > 0f)
                     {
                         // 0.2.1125 (round #24 border_skirt): on DOWNHILL ground the flat apron copy, even tilted, stayed flatter than
@@ -407,6 +473,20 @@ namespace VerdantsAscent.Terrain.Voxel
                         EmitEdge(0, x, y, C);   // in-plane X-edges at z=32
                         EmitEdge(1, x, y, C);   // in-plane Y-edges at z=32
                     }
+            // 0.2.1466 (Fire 11-17 on SeamFlat with Vanilla Border Stitch on: "the seam is closed, but theres still a square of mesh missing
+            // from the corners"; holes at the zone corners (-2272,864) and (-2272,928), each where three voxel zones meet one vanilla zone).
+            // The Y-edge at the (+X,+Z) corner column belongs to the DIAGONAL chunk (its (0,0) edge), and both orphan loops above stop one short
+            // of it (z < C, x < C). That diagonal chunk is voxel here, but it stitches its OWN face toward the vanilla zone, and the stitch moves
+            // every border-row vertex of that face onto the border, including its corner cell (-1,-1), which lies in THIS chunk's zone, not in
+            // the vanilla one. So its corner quad starts at the border line, and the half cell between this chunk's last plane quad (cell row
+            // C-1, mid-cell) and the border is drawn by nobody: a 0.5 x 0.5 m hole on THIS side (x C-0.5..C, z C-0.5..C local, or the mirror).
+            // A stitched orphan face now also emits that corner column's Y-edge from its own cells (C-1 / C, the stand-ins already stitched
+            // onto the border): it spans the missing square exactly. Where the diagonal chunk also draws there, the two coincide on the ground
+            // (one quad of overlap, as at every voxel chunk seam); where the diagonal chunk is absent too (both faces orphan), this is the only
+            // quad there.
+            if (buf.MeshAll && (((buf.OrphanMask & 1) != 0 && (stitch & 1) != 0) || ((buf.OrphanMask & 4) != 0 && (stitch & 4) != 0)))
+                for (int y = 0; y < C; y++)
+                    EmitEdge(1, C, y, C);   // the (+X,+Z) corner column's Y-edge
 
             // ── SHINGLE LIPS. The in-plane
             // quads of every face belong to the neighbour on the positive

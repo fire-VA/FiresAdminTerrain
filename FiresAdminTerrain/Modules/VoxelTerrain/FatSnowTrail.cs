@@ -638,7 +638,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 string k = gate.StartsWith("snow ") ? "snow too shallow" : gate;
                 s_walkRefused[k] = s_walkRefused.TryGetValue(k, out int n) ? n + 1 : 1;
                 // 0.2.1309: every refused step is visible at Debug (rate-limited 1 / 2 s) - the census line only prints with Snow diagnostics on
-                if (c == Player.m_localPlayer && Time.unscaledTime >= s_refuseLogAt)
+                if (FiresLogger.DebugEnabled && c == Player.m_localPlayer && Time.unscaledTime >= s_refuseLogAt)   // 0.2.1500: Debug first (the line is Debug; its string was built either way)
                 {
                     s_refuseLogAt = Time.unscaledTime + 2f;
                     FiresLogger.LogDebug($"[SnowTrail] walk step refused at ({p.x:0.0},{p.z:0.0}): {gate} (snow {depth:0.00} m, on heightmap collider {c.IsOnHeightmap()}, voxel world {VoxelWorldHere(p)}) (0.2.1309)");

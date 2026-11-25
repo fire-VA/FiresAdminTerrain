@@ -307,6 +307,7 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!chunk.PendingGenerate) chunk.MirrorBordersNow(true);
             chunk.FrontierMask = ComputeFrontierMask(chunk, batchAlsoCovers);
             chunk.OrphanMask = ComputeOrphanMask(chunk, batchAlsoCovers);
+            chunk.Stitch = ComputeStitch(chunk, AllFaces, true);   // 0.2.1454 (null = no stitched face); 0.2.1458: every face, judged by its own zone test
             if (chunk.Queued) return;
             if (s_batchDepth > 0 && System.Threading.Thread.CurrentThread.ManagedThreadId == s_batchThread) { s_batched.Add(chunk); return; }
             if (!s_urgentKeys.ContainsKey(chunk.Key) && Defer(chunk)) { if (CarveTiming.On) CarveTiming.Deferred(chunk.Key); return; }
@@ -801,6 +802,93 @@ namespace VerdantsAscent.Terrain.Voxel
             return mask;
         }
 
+        // ---- 0.2.1454 vanilla border stitch (Fire 11-17, VA flat world tearing; VoxelMesherSurfaceNets has the geometry) ----
+        internal sealed class StitchEdges { public byte Mask; public float[] Heights; }   // immutable once published
+        internal const int StitchStride = VoxelChunk.CELLS + 3;   // heights per face: t = -1..33 (face-major +X, -X, +Z, -Z)
+        // 0.2.1458: the stitch no longer rides the frontier mask (it inherited that mask's zone off-by-one): each face is judged by
+        // ComputeStitch's own test (the face's zone is another zone, not voxel territory, its heightmap drawn).
+        internal const byte AllFaces = 0x0F;
+        internal static volatile bool AnyStitchShown;   // some applied mesh is stitched: the swap gate and heal look only then
+        internal static int s_stitchApplies, s_stitchVertsApplied;
+
+        // Main thread. The frontier faces whose neighbour is a VANILLA heightmap zone (outside this chunk's zone, not voxel territory -
+        // neither wrapping nor wrapped - with its heightmap drawn), with that heightmap's own edge vertex heights along each face
+        // (exact vertices: GetWorldHeight is vanilla's nearest-vertex read, and the face runs along the heightmap's edge column).
+        // withHeights false = the mask only (the heal's cheap re-check). Null when nothing stitches or [Vanilla Border Stitch] is off.
+        internal static StitchEdges ComputeStitch(VoxelChunk chunk, byte frontier, bool withHeights)
+        {
+            if (frontier == 0 || !chunk.MeshAll || FiresVoxelConfig.VanillaBorderStitch == null || !FiresVoxelConfig.VanillaBorderStitch.Value) return null;
+            const int C = VoxelChunk.CELLS;
+            var o = chunk.WorldOrigin;
+            var inside = ZoneSystem.GetZone(new Vector3(o.x + C * 0.5f, 0f, o.z + C * 0.5f));
+            byte mask = 0; float[] h = null;
+            for (int f = 0; f < 4; f++)
+            {
+                if ((frontier & (1 << f)) == 0) continue;
+                bool xFace = f < 2, pos = (f & 1) == 0;
+                float plane = xFace ? (pos ? o.x + C : o.x) : (pos ? o.z + C : o.z);
+                float outward = pos ? 1f : -1f;
+                var mid = xFace ? new Vector3(plane + outward, 0f, o.z + C * 0.5f) : new Vector3(o.x + C * 0.5f, 0f, plane + outward);
+                var zone = ZoneSystem.GetZone(mid);
+                if (zone == inside || VoxelZoneStreamer.IsZoneKnown(zone)) continue;
+                var hm = Heightmap.FindHeightmap(mid);
+                if (hm == null || !hm.isActiveAndEnabled) continue;
+                var mr = hm.GetComponent<MeshRenderer>();
+                if (mr == null || !mr.enabled) continue;
+                if (!withHeights) { mask |= (byte)(1 << f); continue; }
+                if (h == null) h = new float[4 * StitchStride];
+                bool ok = true;
+                // t = -1..33: one vertex past each end, so the apron vertices two chunks share along the face interpolate the same pair.
+                // Past this heightmap's corner the point is read from whichever heightmap holds it on the outward side, else extrapolated.
+                for (int t = -1; t <= C + 1 && ok; t++)
+                {
+                    var p = xFace ? new Vector3(plane, 0f, o.z + t) : new Vector3(o.x + t, 0f, plane);
+                    float y = float.NaN;
+                    try
+                    {
+                        if (t >= 0 && t <= C) { if (!hm.GetWorldHeight(p, out y)) y = float.NaN; }
+                        else
+                        {
+                            var q = xFace ? new Vector3(p.x + outward * 0.013f, 0f, p.z) : new Vector3(p.x, 0f, p.z + outward * 0.013f);
+                            if (!Heightmap.GetHeight(q, out y)) y = float.NaN;
+                        }
+                    }
+                    catch (System.ArgumentOutOfRangeException) { y = float.NaN; }   // a heightmap whose heights are not generated yet
+                    if (float.IsNaN(y) || float.IsInfinity(y))
+                    {
+                        if (t >= 0 && t <= C) ok = false;
+                        else y = float.NaN;   // filled by extrapolation below
+                    }
+                    h[f * StitchStride + t + 1] = y;
+                }
+                if (ok)
+                {
+                    int b = f * StitchStride;
+                    if (float.IsNaN(h[b])) h[b] = 2f * h[b + 1] - h[b + 2];
+                    if (float.IsNaN(h[b + C + 2])) h[b + C + 2] = 2f * h[b + C + 1] - h[b + C];
+                    mask |= (byte)(1 << f);
+                }
+            }
+            return mask == 0 ? null : new StitchEdges { Mask = mask, Heights = h };
+        }
+
+        // [Vanilla Border Stitch] flipped (main thread, config event): every chunk that can stitch (a frontier face) or is stitched re-meshes.
+        internal static void RemeshStitchCandidates()
+        {
+            int n = 0;
+            try
+            {
+                var list = new List<VoxelChunk>();
+                foreach (var c in VoxelWorld.AllChunks)
+                    if (c != null && c.Kind == ChunkKind.Full && c.MeshAll && !c.PendingGenerate
+                        && (c.AppliedStitchMask != 0 || c.Stitch != null || ComputeStitch(c, AllFaces, false) != null)) list.Add(c);   // 0.2.1458: not via FrontierMask
+                foreach (var c in list) { EnqueueRemesh(c); n++; }
+            }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] Vanilla Border Stitch re-mesh threw: {ex.Message}"); }
+            FiresLogger.LogWarning($"[FiresVoxel] Vanilla Border Stitch {(FiresVoxelConfig.VanillaBorderStitch.Value ? "ON" : "OFF")}: {n} border chunk(s) re-meshed (0.2.1454).");   // Warning: a rare, deliberate flip the leg log must carry at any Core log level
+            try { VoxelSeamAudit.OnStitchToggled(); } catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] stitch-flip audit threw: {ex.Message}"); }
+        }
+
         // Main-thread only (reads VoxelWorld). A face is a FRONTIER when the
         // horizontal neighbour that owns its in-plane border quads won't emit
         // them - absent, still generating, or a gated brush chunk.
@@ -833,7 +921,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 // on every hillside and the old chunk-at-Y test grew lip
                 // slivers along contour lines all over mid-land. Frontier = the ZONE beyond the face isn't
                 // solid yet.
-                var zone = new Vector2s(FloorDiv(x, 2), FloorDiv(z, 2));
+                // 0.2.1458 FIX ([lead] 11-17, stitch1457 leg: chunk (6,1,0)'s +X / +Z faces were never frontier): zone (zx, zy) covers chunk
+                // columns 2zx-1..2zx (VoxelZoneStreamer.ZoneOfChunk = FloorDiv(k + 1, 2)). This read FloorDiv(k, 2), one column off, so a
+                // zone's +X / +Z corner chunk saw its vanilla neighbour as its OWN (voxel) zone: "covered", no frontier bit.
+                var zone = new Vector2s(FloorDiv(x + 1, 2), FloorDiv(z + 1, 2));
                 return VoxelZoneStreamer.IsZoneSolid(zone) && !VoxelZoneStreamer.IsZoneDataOnly(zone);
             }
 
@@ -1043,6 +1134,9 @@ namespace VerdantsAscent.Terrain.Voxel
                         buf.FrontierLips = FiresVoxelConfig.FrontierLips != null && FiresVoxelConfig.FrontierLips.Value;
                         buf.FrontierMask = chunk.FrontierMask;
                         buf.OrphanMask = chunk.OrphanMask;
+                        var stitchEdges = chunk.Stitch;   // 0.2.1454: one read, a matched mask + heights
+                        buf.StitchMask = stitchEdges != null ? stitchEdges.Mask : (byte)0;
+                        buf.StitchH = stitchEdges?.Heights;
                         buf.KeyX = chunk.Key.x;
                         buf.KeyZ = chunk.Key.z;
                         buf.OriginX = chunk.WorldOrigin.x;
@@ -1309,6 +1403,8 @@ namespace VerdantsAscent.Terrain.Voxel
                 var spk = FatSpike.Start();
                 if (FatNativeTrace.On) FatNativeTrace.Step("apply begin", 0, r.Chunk.Key + " v" + r.Version + " verts " + r.Buffers.Verts.Count);
                 int meshId = view.ApplyBuffers(r.Buffers, r.Stage == 2, r.PreVerts, r.PreTris);   // 0.2.1197: Stage 2 = refined on the worker
+                r.Chunk.AppliedStitchMask = r.Buffers.StitchMask;   // 0.2.1454: the faces the mesh now shown is stitched on
+                if (r.Buffers.StitchMask != 0) { AnyStitchShown = true; s_stitchApplies++; s_stitchVertsApplied += r.Buffers.StitchVerts; }
                 if (FatNativeTrace.On) FatNativeTrace.Step("apply end", meshId, r.Chunk.Key.ToString());
                 FatSpike.Add(FatSpike.Stage.MeshApply, spk);
                 _sw.Stop();

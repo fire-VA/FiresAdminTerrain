@@ -87,10 +87,18 @@ namespace VerdantsAscent.Terrain.Voxel
             // InCaveUncached is always false. Answer before the height lookup and the cache, the same gate as VoxelCaveEnv.CaveRoofAbove.
             var skipKey = FiresVoxelConfig.CaveChecksSkipNoVoxel;
             bool noVoxel = (skipKey == null || skipKey.Value) && VoxelWorld.ChunkCount <= 0;
+            // 0.2.1500 ([lead] perf audit row 9; this runs inside FAT's GetBiome / GetBiomeSector postfixes): with no voxel ground the answer is false
+            // on every thread (both paths below return false for noVoxel). Without Debug the counters and caller sampling below feed no line, so answer
+            // first, before the thread id, the cache clock and the counters.
+            if (noVoxel && !FiresLogger.DebugEnabled)
+            {
+                if (!s_noVoxelSaid && Thread.CurrentThread.ManagedThreadId == s_mainThread) { s_noVoxelSaid = true; FiresLogger.LogInfo("[FiresCaveBiome] no voxel ground on this world yet: cave checks answer at once (0.2.1369; before the counters since 0.2.1500)"); }
+                return false;
+            }
             if (Thread.CurrentThread.ManagedThreadId != s_mainThread) return !noVoxel && InCaveUncached(p);   // the cache is main-thread only
             if (Time.time - s_inCaveAt >= 1f || s_inCave.Count > 4096) { s_inCave.Clear(); s_inCaveAt = Time.time; }
             s_inCaveCalls++;
-            if ((s_inCaveCalls & 1023) == 0) TallyCaller();   // Who asks 14k times a second (sampled 1 in 1024)
+            if ((s_inCaveCalls & 1023) == 0 && FiresLogger.DebugEnabled) TallyCaller();   // Who asks 14k times a second (sampled 1 in 1024); 0.2.1500: Debug only (its StackTrace fed only the Debug callers line)
             if (Time.unscaledTime >= s_inCaveLogAt)
             {
                 if (s_inCaveLogAt > 0f) FiresLogger.LogDebug($"[FiresCaveBiome] InCave /60s: {s_inCaveCalls} calls, {s_inCaveComputed} evaluated, {s_inCaveTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.00} ms; {s_inCaveNoVoxel} answered at once (no voxel ground); player state {s_playerEvals} evaluations");

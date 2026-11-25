@@ -61,6 +61,12 @@ namespace VerdantsAscent.Water.Core
         private static int s_vedr, s_vedrRev = int.MinValue;
         private static bool s_vedrBound;
         private static Func<Vector3, bool> s_vedrIce;
+        // 0.2.1500 ([lead] perf audit row 1, agreed with [seasons] option A): Vedr 0.8.303 (VedrApi 40) fills its lake ice for the whole rect in one call
+        // (FillLakeIce: each frozen sheet visited once, same answer as IsLakeIceAt at each texel centre). Winter log before: "Vedr lake 126.7 ms" per
+        // 16384-texel fill (~7.7 us per IsLakeIceAt). Bound by presence; an older Vedr keeps the per-texel call.
+        private static Func<float, float, float, int, byte[], byte, int> s_vedrFill;
+        private static readonly byte[] s_vedrBulk = new byte[Size * Size];
+        private static bool s_vedrBulkFilled;
         private static Func<int> s_vedrRevGet;
 
         // 0.2.1360 ([seasons] for Fire 11-03: "so we dont show the water and waves swelling over the ice"; fires_mesh_at -4170 9145 16: 6 vanilla IceShore_1 plates, top y 30.43, sea 30, none in the cover):
@@ -159,6 +165,9 @@ namespace VerdantsAscent.Water.Core
                 if (t == null) { FiresLogger.LogDebug("[IceCover] Vedr not loaded: _FiresIceCover holds FAT ice only"); return; }
                 var m = t.GetMethod("IsLakeIceAt", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static, null, new[] { typeof(Vector3) }, null);
                 if (m != null && m.ReturnType == typeof(bool)) s_vedrIce = (Func<Vector3, bool>)Delegate.CreateDelegate(typeof(Func<Vector3, bool>), m);
+                var fm = t.GetMethod("FillLakeIce", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static, null, new[] { typeof(float), typeof(float), typeof(float), typeof(int), typeof(byte[]), typeof(byte) }, null);   // 0.2.1500: VedrApi 40
+                if (fm != null && fm.ReturnType == typeof(int)) s_vedrFill = (Func<float, float, float, int, byte[], byte, int>)Delegate.CreateDelegate(typeof(Func<float, float, float, int, byte[], byte, int>), fm);
+                FiresLogger.LogInfo($"[IceCover] Vedr lake ice for the cover: {(s_vedrFill != null ? "FillLakeIce bound (one call per fill, VedrApi 40)" : "per-texel IsLakeIceAt (this Vedr has no FillLakeIce)")} (0.2.1500)");
                 var p = t.GetProperty("LakeIceRevision", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
                 if (p != null && p.PropertyType == typeof(int)) s_vedrRevGet = (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), p.GetGetMethod());
                 var f = s_vedrRevGet == null ? t.GetField("LakeIceRevision", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static) : null;
@@ -170,7 +179,7 @@ namespace VerdantsAscent.Water.Core
                 FiresLogger.LogInfo("[IceCover] Vedr sea ice (floes) stays OUT of _FiresIceCover: floes ride the real tide and waves, the cover holds fixed ice only (0.2.1446)");
                 FiresLogger.LogInfo($"[IceCover] Vedr lake ice joins _FiresIceCover: IsLakeIceAt {(s_vedrIce != null ? "bound" : "MISSING")}, LakeIceRevision {(s_vedrRevGet != null ? "bound" : "not in this Vedr (timer refresh only)")} (0.2.1260)");
             }
-            catch (Exception ex) { s_vedrIce = null; s_vedrRevGet = null; FiresLogger.LogDebug($"[IceCover] Vedr bind threw: {ex.Message}"); }
+            catch (Exception ex) { s_vedrIce = null; s_vedrRevGet = null; s_vedrFill = null; FiresLogger.LogDebug($"[IceCover] Vedr bind threw: {ex.Message}"); }
         }
 
         private static bool VedrIce(Vector3 p)
@@ -237,6 +246,15 @@ namespace VerdantsAscent.Water.Core
                 s_building = new Vector2(Mathf.Floor((c.x - SideM * 0.5f) / StepM) * StepM, Mathf.Floor((c.z - SideM * 0.5f) / StepM) * StepM);
                 s_row = 0; s_iced = 0; s_vedr = 0; s_plateTexels = 0; s_seaTexels = 0;
                 BeginReuse(cameraOnly, now);   // 0.2.1396: the texels both rects share are kept
+                s_vedrBulkFilled = false;   // 0.2.1500: Vedr lake ice for the whole new rect, one call (texel (i, j) = origin + (i + 0.5, j + 0.5) x step, the loop below)
+                if (s_vedrFill != null)
+                {
+                    long vb0 = Stopwatch.GetTimestamp();
+                    System.Array.Clear(s_vedrBulk, 0, s_vedrBulk.Length);
+                    try { s_vedrFill(s_building.x, s_building.y, StepM, Size, s_vedrBulk, (byte)255); s_vedrBulkFilled = true; }
+                    catch (Exception ex) { s_vedrFill = null; FiresLogger.LogDebug($"[IceCover] Vedr FillLakeIce threw, back to per-texel IsLakeIceAt: {ex.Message}"); }
+                    if (FiresLogger.DebugEnabled) s_tVedr += Stopwatch.GetTimestamp() - vb0;   // the Debug lookup split counts the one call as the Vedr lake time
+                }
                 s_hmByZone.Clear();   // 0.2.1402: heightmaps come and go with zones
             }
             var sw = Stopwatch.StartNew();
@@ -257,7 +275,7 @@ namespace VerdantsAscent.Water.Core
                     long t0 = prof ? Stopwatch.GetTimestamp() : 0, t1;
                     if (IceField.TryIceAt(new Vector3(x, water, z), out float cover, out _) && cover > 0f) { v = (byte)Mathf.Clamp(Mathf.RoundToInt(cover * 255f), 0, 255); s_iced++; }
                     if (prof) { t1 = Stopwatch.GetTimestamp(); s_tIce += t1 - t0; t0 = t1; }
-                    if (v == 0) { if (VedrIce(new Vector3(x, water, z))) { v = 255; s_iced++; s_vedr++; } if (prof) { t1 = Stopwatch.GetTimestamp(); s_tVedr += t1 - t0; t0 = t1; } }   // 0.2.1260: Vedr's lake ice counts as a full sheet
+                    if (v == 0) { if (s_vedrBulkFilled ? s_vedrBulk[s_row * Size + i] != 0 : VedrIce(new Vector3(x, water, z))) { v = 255; s_iced++; s_vedr++; } if (prof) { t1 = Stopwatch.GetTimestamp(); s_tVedr += t1 - t0; t0 = t1; } }   // 0.2.1260: Vedr's lake ice counts as a full sheet
                     if (v == 0) { if (PlateIce(x, z)) { v = 255; s_iced++; s_plateTexels++; } if (prof) { t1 = Stopwatch.GetTimestamp(); s_tPlate += t1 - t0; t0 = t1; } }   // 0.2.1360
                     // 0.2.1446 ([lead] / [seasons] for Fire's ice spec): Vedr's sea FLOES no longer join the cover. They float on the real tide and waves
                     // now, so the cover holds FIXED ice only (FAT ice, Vedr lake sheets, vanilla plates); with a floe in it the water shader zeroed tide

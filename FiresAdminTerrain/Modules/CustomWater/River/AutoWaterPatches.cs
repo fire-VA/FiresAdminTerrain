@@ -107,6 +107,7 @@ namespace VerdantsAscent.Water.Core
                 ZRoutedRpc.instance.Register(RPC_REQUEST_BUILD_CACHE, new System.Action<long>(RPC_HandleRequestBuildCache));
                 ZRoutedRpc.instance.Register(RPC_NOTIFY_GENERATION_COMPLETE, new System.Action<long, int, int>(RPC_HandleGenerationComplete));
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_STREAM_COMBINER, RPC_HandleStreamCombiner);
+                AutoWaterBackup.RegisterRpc();   // [ghost] (rivers diff): va_auto_water_undo's request
                 _rpcInitialized = true;
                 FiresLogger.LogInfo("[AutoWaterPatches] Auto water generation + clear + build cache + stream + notify RPCs registered");
             }
@@ -178,6 +179,9 @@ namespace VerdantsAscent.Water.Core
                 FiresLogger.LogWarning("[AutoWaterPatches] WorldGenerator not available - cannot generate");
                 return;
             }
+
+            // [ghost] (rivers diff): keep every water anchor before the wipe below, so va_auto_water_undo can put it back
+            AutoWaterBackup.TakeBeforeWipe($"va_auto_water_generate (requested by peer {sender})");
 
             // STEP 1: Clear ALL existing custom water first (clean slate)
             int existingCombiners = WaterMeshCombiner.AllCombiners.Count;

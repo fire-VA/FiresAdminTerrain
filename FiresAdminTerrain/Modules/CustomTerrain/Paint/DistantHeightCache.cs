@@ -24,6 +24,14 @@ namespace VerdantsAscent.Terrain.Paint
     ///            stores its edit as (final height - worldgen base height) per vertex, 65 x 65 shorts in centimetres. Zones with no
     ///            edit over 5 cm are not stored (an existing entry is removed only when its compiler is present and the edit is gone).
     ///            Nothing is touched while the compiler is not instantiated, so a zone loading in never erases good data.
+    ///            0.2.1517 ([lead] 11-23: zones flipped A <-> B as vanilla TerrainModifiers (locations, some pieces) spawned and
+    ///            despawned around zone load, and every flip bumped Revision, so EBM rebuilt all far tiles): the stored value is still
+    ///            final - base INCLUDING modifiers, but a zone is re-captured only when its signature changed (the compiler's ZDO data
+    ///            revision + the count and hash of the enabled level / smooth TerrainModifiers over this heightmap, the set vanilla's
+    ///            ApplyModifiers just used), and only when every valid ZDO in its 3x3 zones is instantiated and all 9 zones are loaded
+    ///            (vanilla's ZNetScene.IsAreaReady rule on our own list, plus the neighbours loaded so an unloading edge never counts).
+    ///            A half-loaded or half-unloaded zone keeps its earlier, fuller capture. Edge zones of the loaded area wait until the
+    ///            player is within one zone of them.
     ///   APPLY    in the same postfix on a DISTANT-LOD heightmap (vanilla TerrainLod tiles and FAT's FarTerrainVanilla ring), before
     ///            vanilla builds the mesh: each vertex adds the MEAN edit over its own footprint (vertex spacing x spacing, from a
     ///            per-zone summed-area table), so thin cuts never spike a coarse tile. FarQuilt tiles (Fires-generated worlds) add the
@@ -70,6 +78,15 @@ namespace VerdantsAscent.Terrain.Paint
         // stats (Debug every 60 s)
         private static int s_captures, s_changes, s_applied, s_regens;
         private static double s_captureMs, s_applyMs, s_regenMs;
+        // 0.2.1517: capture proof (Info every 60 s while captures run): calls seen, skipped (same signature), refused (zone objects
+        // still loading / unloading), revision bumps.
+        private static int s_seen, s_skipped, s_refused, s_bumps;
+
+        // 0.2.1517: per-zone signature of the last capture that ran (session memory only; cleared with the cache).
+        private struct Sig { public ZDOID Tc; public uint Rev; public int Mods; public uint ModHash; }
+        private static readonly Dictionary<Vector2s, Sig> s_sig = new Dictionary<Vector2s, Sig>();
+        private static readonly List<ZDO> s_areaZdos = new List<ZDO>(256);
+        private static readonly AccessTools.FieldRef<TerrainComp, ZNetView> s_tcView = AccessTools.FieldRefAccess<TerrainComp, ZNetView>("m_nview");
 
         private static readonly AccessTools.FieldRef<Heightmap, List<float>> s_heights = AccessTools.FieldRefAccess<Heightmap, List<float>>("m_heights");
         private static readonly AccessTools.FieldRef<Heightmap, HeightmapBuilder.HMBuildData> s_buildData = AccessTools.FieldRefAccess<Heightmap, HeightmapBuilder.HMBuildData>("m_buildData");
@@ -111,10 +128,19 @@ namespace VerdantsAscent.Terrain.Paint
         {
             if (hm.m_width != Res - 1 || Mathf.Abs(hm.m_scale - 1f) > 1e-3f) return;   // zone heightmaps only
             Vector3 pos = hm.transform.position;
-            if (TerrainComp.FindTerrainCompiler(pos) == null) return;                 // edits not loaded here: keep what we have
+            var tc = TerrainComp.FindTerrainCompiler(pos);
+            if (tc == null) return;                                                    // edits not loaded here: keep what we have
             var bd = s_buildData(hm);
             var heights = s_heights(hm);
             if (bd == null || bd.m_baseHeights == null || heights == null || bd.m_baseHeights.Count != Cells || heights.Count != Cells) return;
+
+            // 0.2.1517: re-capture only on a changed signature, and only with the zone's objects all in place.
+            s_seen++;
+            Vector2s sigZone = ZoneSystem.GetZone(pos);
+            if (!TrySignature(hm, tc, out Sig sig)) { s_refused++; return; }
+            if (s_sig.TryGetValue(sigZone, out Sig last) && SameSig(last, sig)) { s_skipped++; return; }
+            if (!AreaSettled(sigZone)) { s_refused++; return; }
+            s_sig[sigZone] = sig;
 
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             EnsureLoaded();
@@ -150,6 +176,74 @@ namespace VerdantsAscent.Terrain.Paint
                 s_changedZones.Add(zone);
             }
             s_captureMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        }
+
+        // 0.2.1517: the zone's capture signature. Compiler: its ZDOID and ZDO data revision (vanilla TerrainComp reads the same
+        // revision, TerrainComp.cs:194). Modifiers: the enabled TerrainModifiers that change height (level / smooth) and that this
+        // heightmap's ApplyModifiers applies (Heightmap.TerrainVSModifier, Heightmap.cs:537), as count + an order-free hash of what
+        // shapes their effect. Paint-only modifiers never move heights, so they are left out. False = no usable compiler ZDO yet.
+        private static bool TrySignature(Heightmap hm, TerrainComp tc, out Sig sig)
+        {
+            sig = default;
+            var view = s_tcView(tc);
+            ZDO zdo = view != null && view.IsValid() ? view.GetZDO() : null;
+            if (zdo == null) return false;
+            sig.Tc = zdo.m_uid;
+            sig.Rev = zdo.DataRevision;
+            uint sum = 0u, mix = 0u;
+            int count = 0;
+            var mods = TerrainModifier.GetAllInstances();
+            for (int i = 0; i < mods.Count; i++)
+            {
+                var m = mods[i];
+                if (m == null || !m.enabled || !(m.m_level || m.m_smooth) || !hm.TerrainVSModifier(m)) continue;
+                Vector3 p = m.transform.position;
+                uint h = 2166136261u;
+                h = Mix(h, Mathf.RoundToInt(p.x * 100f)); h = Mix(h, Mathf.RoundToInt(p.y * 100f)); h = Mix(h, Mathf.RoundToInt(p.z * 100f));
+                h = Mix(h, (m.m_level ? 1 : 0) | (m.m_smooth ? 2 : 0) | (m.m_square ? 4 : 0) | (m.m_playerModifiction ? 8 : 0));
+                h = Mix(h, Mathf.RoundToInt(m.m_levelOffset * 100f)); h = Mix(h, Mathf.RoundToInt(m.m_levelRadius * 100f));
+                h = Mix(h, Mathf.RoundToInt(m.m_smoothRadius * 100f)); h = Mix(h, Mathf.RoundToInt(m.m_smoothPower * 100f));
+                h = Mix(h, m.m_sortOrder);
+                sum += h; mix ^= h * 2654435761u;
+                count++;
+            }
+            sig.Mods = count;
+            sig.ModHash = sum ^ (mix << 1 | mix >> 31);
+            return true;
+        }
+
+        private static uint Mix(uint h, int v)
+        {
+            h = (h ^ (byte)v) * 16777619u; h = (h ^ (byte)(v >> 8)) * 16777619u;
+            h = (h ^ (byte)(v >> 16)) * 16777619u; h = (h ^ (byte)(v >> 24)) * 16777619u;
+            return h;
+        }
+
+        private static bool SameSig(Sig a, Sig b) => a.Tc == b.Tc && a.Rev == b.Rev && a.Mods == b.Mods && a.ModHash == b.ModHash;
+
+        // 0.2.1517: vanilla's "everything here is instantiated" rule (ZNetScene.IsAreaReady, ZNetScene.cs:156-174) on our own list
+        // (IsAreaReady fills ZNetScene's shared m_tempCurrentObjects, and other mods patch it), plus all 9 zones loaded, so neither a
+        // zone still streaming in nor one at the unloading edge (its neighbours' objects already gone) counts as settled. No polling:
+        // a refused zone is captured at its next ApplyModifiers (an arriving TerrainModifier pokes the heightmaps it touches,
+        // TerrainModifier.Awake; any other rebuild of that heightmap counts too). Until then the zone keeps what it had.
+        private static bool AreaSettled(Vector2s zone)
+        {
+            var zs = ZoneSystem.instance; var scene = ZNetScene.instance; var man = ZDOMan.instance;
+            if (zs == null || scene == null || man == null) return false;
+            for (int dz = -1; dz <= 1; dz++)
+                for (int dx = -1; dx <= 1; dx++)
+                    if (!zs.IsZoneLoaded(new Vector2s(zone.x + dx, zone.y + dz))) return false;
+            s_areaZdos.Clear();
+            man.FindSectorObjects(zone, new SimulationDistance(1, 0), s_areaZdos);
+            for (int i = 0; i < s_areaZdos.Count; i++)
+            {
+                ZDO z = s_areaZdos[i];
+                int prefab = z.GetPrefab();
+                if (prefab == 0 || scene.GetPrefab(prefab) == null) continue;   // vanilla IsPrefabZDOValid
+                if (scene.FindInstance(z) == null) { s_areaZdos.Clear(); return false; }
+            }
+            s_areaZdos.Clear();
+            return true;
         }
 
         private static bool Differs(short[] a, short[] b)
@@ -222,7 +316,7 @@ namespace VerdantsAscent.Terrain.Paint
         private static readonly Dictionary<short[], uint> s_printMemo = new Dictionary<short[], uint>();
 
         internal static int Revision => System.Threading.Volatile.Read(ref s_revision);
-        private static void BumpRevision() => System.Threading.Interlocked.Increment(ref s_revision);
+        private static void BumpRevision() { System.Threading.Interlocked.Increment(ref s_revision); s_bumps++; }   // 0.2.1517: + bump count (main thread only, see callers)
 
         private static void Publish(float now)
         {
@@ -397,6 +491,12 @@ namespace VerdantsAscent.Terrain.Paint
 
         private static void Stats()
         {
+            // 0.2.1517 ([lead] 11-23 proof line): Info, only in a minute where captures were asked or the revision moved. Expected on a
+            // run with no edits: 0 changed and 0 bumps once each zone has been seen.
+            if (s_seen > 0 || s_bumps > 0)
+                FiresLogger.LogInfo($"[DistantHeights] last 60 s: {s_seen} capture call(s), {s_skipped} skipped (same compiler revision + modifiers), "
+                                    + $"{s_refused} refused (zone objects still loading / unloading), {s_captures} captured, {s_changes} changed, {s_bumps} revision bump(s)");
+            s_seen = s_skipped = s_refused = s_bumps = 0;
             if (!FiresLogger.DebugEnabled) { s_captures = s_changes = s_applied = s_regens = 0; s_captureMs = s_applyMs = s_regenMs = 0; return; }
             long bytes = 0; int sats = 0;
             foreach (var e in s_cache.Values) { bytes += Cells * 2L; if (e.Sat != null) { bytes += (Res + 1) * (Res + 1) * 4L; sats++; } }
@@ -412,7 +512,7 @@ namespace VerdantsAscent.Terrain.Paint
             if (!on)
             {
                 Save();                    // keep what was learned, then go inert
-                s_cache.Clear(); s_changedZones.Clear(); s_regen.Clear(); s_regenSet.Clear();
+                s_cache.Clear(); s_changedZones.Clear(); s_regen.Clear(); s_regenSet.Clear(); s_sig.Clear();   // 0.2.1517: + s_sig
                 s_loadedPath = null; s_world = null;
                 s_pub = EmptyPub; BumpRevision();   // 0.2.1444
             }
@@ -457,7 +557,7 @@ namespace VerdantsAscent.Terrain.Paint
             string path = ResolvePath();
             if (path == null || path == s_loadedPath) return;
             if (s_loadedPath != null) Save();   // world changed in one session
-            s_cache.Clear(); s_changedZones.Clear(); s_regen.Clear(); s_regenSet.Clear();
+            s_cache.Clear(); s_changedZones.Clear(); s_regen.Clear(); s_regenSet.Clear(); s_sig.Clear();   // 0.2.1517: + s_sig
             s_dirty = false;
             s_pubDirty = true;   // 0.2.1444: the new world's set (or empty) is published on the next driver tick
             s_loadedPath = path;

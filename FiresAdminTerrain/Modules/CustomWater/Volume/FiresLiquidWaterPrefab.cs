@@ -180,8 +180,16 @@ namespace VerdantsAscent.Water.Core
             // and the `va_water_pour_shader 0` comparison skin.
             {
                 var born = GetSharedPourMaterial();
-                if (born == null) born = FindOrBuildWaterLiquidMaterial(clone);
-                if (born != null)
+                // 0.2.1478 (Fire 11-18): on a client, no pour material = [Shaders] Liquid shader off or Custom/FiresLiquid missing:
+                // pours stand down (renderers off; the swim trigger is untouched), no vanilla water_liquid stand-in.
+                bool standDown = born == null && SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null;
+                if (born == null && !standDown) born = FindOrBuildWaterLiquidMaterial(clone);
+                if (standDown)
+                {
+                    foreach (var r in clone.GetComponentsInChildren<MeshRenderer>(true)) r.enabled = false;
+                    FiresLogger.LogInfo("[FiresLiquidWater] poured water stood down: template renderers off (" + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey) + ")");
+                }
+                else if (born != null)
                 {
                     foreach (var r in clone.GetComponentsInChildren<MeshRenderer>(true))
                     {
@@ -535,6 +543,13 @@ namespace VerdantsAscent.Water.Core
         public static Material GetSharedPourMaterial()
         {
             if (s_pourMaterial != null) return s_pourMaterial;
+            // 0.2.1478 (Fire 11-18): poured water needs Custom/FiresLiquid. Key off or no shader on a client = null (stand down; no
+            // FiresWater-wrap fallback). A dedicated server draws nothing and keeps the old path quietly.
+            if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null)
+            {
+                bool keyOn = VerdantsAscent.Terrain.Voxel.FatShaders.Liquid == null || VerdantsAscent.Terrain.Voxel.FatShaders.Liquid.Value;
+                if (!VerdantsAscent.Terrain.Voxel.FatShaders.On(VerdantsAscent.Terrain.Voxel.FatShaders.Liquid, !keyOn || GetFiresLiquidShader() != null, "Poured liquid water", "Custom/FiresLiquid")) return null;
+            }
             var m = BuildFiresWaterPourMaterial();
             if (m != null && m.shader != null && m.shader.name == "Custom/FiresLiquid")
                 s_pourMaterial = m;   // only cache the real thing — wrap fallback retries later
@@ -655,6 +670,7 @@ namespace VerdantsAscent.Water.Core
         // surface so the swim patches can trigger swimming at the water top.
         private static readonly System.Collections.Generic.List<LiquidVolume> s_activePours =
             new System.Collections.Generic.List<LiquidVolume>();
+        internal static int ActivePourCount => s_activePours.Count;   // 0.2.1497: CustomWaterPatches.NoFatWaterAnywhere
 
         // The live pours, for the per-source water report (va_water_at).
         internal static System.Collections.Generic.IReadOnlyList<LiquidVolume> ActivePours => s_activePours;

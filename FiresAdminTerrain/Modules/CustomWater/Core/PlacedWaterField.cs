@@ -658,11 +658,11 @@ namespace VerdantsAscent.Water.Core
             return lines;
         }
 
-        [HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class Register
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Register
         {
             private static bool s_done;
-            private static void Postfix()
+            internal static void Postfix()
             {
                 if (s_done) return;
                 s_done = true;
@@ -876,11 +876,11 @@ namespace VerdantsAscent.Water.Core
     // surface at any 1 m point they cover.
     internal static class PlacedWaterLayersCommand
     {
-        [HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class Register
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Register
         {
             private static bool s_done;
-            private static void Postfix()
+            internal static void Postfix()
             {
                 if (s_done) return;
                 s_done = true;

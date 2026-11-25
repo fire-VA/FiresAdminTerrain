@@ -140,22 +140,20 @@ namespace VerdantsAscent.Terrain
 
         // The IH water-delete and mop tools: every pour the tool's ring can reach is kept before it is drained or destroyed
         // (the same reach test RemoveLiquidLocal uses).
-        [HarmonyPatch(typeof(VerdantsAscent.Water.Tools.WaterBrushCommands), "RemoveLiquidLocal")]
-        private static class RemoveLiquidLocal_Undo
+        // 0.2.1502: was the Harmony patch RemoveLiquidLocal_Undo (prefix on WaterBrushCommands.RemoveLiquidLocal, FAT's own method); that method now
+        // calls this as its first statement. Same body.
+        internal static void RemoveLiquidLocalBefore(Vector3 center, float radius)
         {
-            private static void Prefix(Vector3 center, float radius)
+            if (s_laying || s_scope == 0) return;
+            var centerXZ = new Vector2(center.x, center.z);
+            foreach (var lv in UnityEngine.Object.FindObjectsByType<LiquidVolume>(FindObjectsSortMode.None))
             {
-                if (s_laying || s_scope == 0) return;
-                var centerXZ = new Vector2(center.x, center.z);
-                foreach (var lv in UnityEngine.Object.FindObjectsByType<LiquidVolume>(FindObjectsSortMode.None))
-                {
-                    if (lv == null) continue;
-                    var root = lv.transform.root.gameObject;
-                    if (!root.name.StartsWith(FiresLiquidWaterPrefab.PrefabName, StringComparison.Ordinal)) continue;
-                    float reach = radius + lv.m_width * lv.m_scale * 0.5f;
-                    if (Vector2.Distance(new Vector2(root.transform.position.x, root.transform.position.z), centerXZ) > reach) continue;
-                    BeforePourEdit(root);
-                }
+                if (lv == null) continue;
+                var root = lv.transform.root.gameObject;
+                if (!root.name.StartsWith(FiresLiquidWaterPrefab.PrefabName, StringComparison.Ordinal)) continue;
+                float reach = radius + lv.m_width * lv.m_scale * 0.5f;
+                if (Vector2.Distance(new Vector2(root.transform.position.x, root.transform.position.z), centerXZ) > reach) continue;
+                BeforePourEdit(root);
             }
         }
     }

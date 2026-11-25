@@ -26,6 +26,15 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             private static bool Prefix(Character __instance)
             {
+                // 0.2.1500 ([lead] perf audit row 6): the 0.2.1369 "nothing can be held" skip now runs BEFORE the timer, the island report and the
+                // Unity == (it used to run inside Hold, after them), on every character every physics step. Same answer; the island report cannot
+                // change on such a world (no island chunks without islands or voxel ground). FatHooks' SkylandHold row no longer counts these calls.
+                var skipKey = FiresVoxelConfig.SkylandHoldSkipNoIslands;
+                if ((skipKey == null || skipKey.Value) && s_heldSince.Count == 0 && !FiresSkyIslands.Enabled && VoxelWorld.ChunkCount <= 0)
+                {
+                    if (!s_skipSaid) { s_skipSaid = true; FiresLogger.LogInfo("[FiresSkyIslands] no skylands and no voxel ground on this world: the character hold answers at once (0.2.1369; before its timer since 0.2.1500)"); }
+                    return true;
+                }
                 long t0 = FatHooks.Start();
                 bool run = true;
                 try { run = Hold(__instance); }

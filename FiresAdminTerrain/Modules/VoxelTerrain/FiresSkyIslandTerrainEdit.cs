@@ -50,7 +50,20 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // target(dx, dz, surface) = the height that column ends at (NaN: leave it). The line logged, also returned.
-        internal static string Reshape(string op, string route, Vector3 center, float radius, Func<float, float, float, float> target)
+        internal static string Reshape(string op, string route, Vector3 center, float radius, Func<float, float, float, float> target)   // 0.2.1502: FatUndo SkyIsland_Reshape_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginPlayerEdit($"a sky-island {op}");
+                return Reshape_Body(op, route, center, radius, target);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static string Reshape_Body(string op, string route, Vector3 center, float radius, Func<float, float, float, float> target)
         {
             float r = Mathf.Clamp(radius, StampRadius, MaxRadius);
             int filled = 0, cut = 0, already = 0, offIsland = 0, unloaded = 0, refused = 0, threw = 0;
@@ -103,7 +116,20 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Back to the island's generated shape over a circle: every brush edit in its columns, from just under its underside
         // to MaxStep above the op, is restored (WEC's `reset`). Restore never seeds a chunk.
-        internal static string Restore(string route, Vector3 center, float radius)
+        internal static string Restore(string route, Vector3 center, float radius)   // 0.2.1502: FatUndo SkyIsland_Restore_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginPlayerEdit("a sky-island restore");
+                return Restore_Body(route, center, radius);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static string Restore_Body(string route, Vector3 center, float radius)
         {
             float r = Mathf.Clamp(radius, StampRadius, MaxRadius);
             float low = float.MaxValue;

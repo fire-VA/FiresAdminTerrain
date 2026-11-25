@@ -137,6 +137,13 @@ namespace VerdantsAscent.Terrain.Voxel
         // appears - recomputed at every enqueue, compared by the heal.
         public byte OrphanMask;
 
+        // 0.2.1454 (Fire 11-17, VA flat world: "the zone borders between voxel and vanilla heightmap do not agree ... causing tearing"):
+        // faces whose overhanging border vertices are moved onto the edge of the vanilla heightmap zone next door (bits as FrontierMask),
+        // with that heightmap's own edge heights. One immutable object per enqueue (main thread), so the worker reads a matched pair.
+        // AppliedStitchMask = the faces the mesh now SHOWN is stitched on (set at apply; the swap gate and the heal read it).
+        internal VoxelMeshPipeline.StitchEdges Stitch;
+        public byte AppliedStitchMask;
+
         // Streamed chunks keep their RENDERER hidden until the zone's
         // swap moment (colliders bake first, then voxel-on/vanilla-off flips in
         // ONE frame). Kills the z-fight window where both terrains rendered
@@ -1248,15 +1255,22 @@ namespace VerdantsAscent.Terrain.Voxel
         public bool ApplyShape(Vector3 center, float radius, float height, VoxelBrushShape shape, VoxelBrushMode mode)
         {
             float halfH = shape == VoxelBrushShape.Cylinder ? height * 0.5f : radius;
+            // 0.2.1454 ([ghost], Voxheim diff P1): Softness / Strength of a V-tool shape stroke (VoxelBrushSoft; off = the exact old maths).
+            float softK = 0f, softStr = 1f;
+            bool soft = mode != VoxelBrushMode.Restore && VoxelBrushSoft.Active(out softK, out softStr);
+            float pad = 1f + VoxelBrushSoft.ExtraReach(shape, radius, mode);   // 0.2.1455: soft blend and a turned cube's corners, same reach as ApplyBrush
+            // 0.2.1455 ([ghost], Voxheim diff P4): Vcube's Q / E turn (0 = the old axis-aligned cube, the exact old maths)
+            float cubeYaw = shape == VoxelBrushShape.Cube ? VoxelBrushSoft.CubeYawNow() * Mathf.Deg2Rad : 0f;
+            float cubeCos = Mathf.Cos(cubeYaw), cubeSin = Mathf.Sin(cubeYaw);
 
             bool changed = false;
             // Sample-space AABB of the shape (+1 so boundary lerps update).
-            int minX = Mathf.FloorToInt(center.x - radius - 1f - WorldOrigin.x);
-            int maxX = Mathf.CeilToInt(center.x + radius + 1f - WorldOrigin.x);
-            int minY = Mathf.FloorToInt(center.y - halfH - 1f - WorldOrigin.y);
-            int maxY = Mathf.CeilToInt(center.y + halfH + 1f - WorldOrigin.y);
-            int minZ = Mathf.FloorToInt(center.z - radius - 1f - WorldOrigin.z);
-            int maxZ = Mathf.CeilToInt(center.z + radius + 1f - WorldOrigin.z);
+            int minX = Mathf.FloorToInt(center.x - radius - pad - WorldOrigin.x);
+            int maxX = Mathf.CeilToInt(center.x + radius + pad - WorldOrigin.x);
+            int minY = Mathf.FloorToInt(center.y - halfH - pad - WorldOrigin.y);
+            int maxY = Mathf.CeilToInt(center.y + halfH + pad - WorldOrigin.y);
+            int minZ = Mathf.FloorToInt(center.z - radius - pad - WorldOrigin.z);
+            int maxZ = Mathf.CeilToInt(center.z + radius + pad - WorldOrigin.z);
             if (minX > CELLS || maxX < -1 || minY > CELLS || maxY < -1 || minZ > CELLS || maxZ < -1)
                 return false;
             minX = Mathf.Max(minX, -1); maxX = Mathf.Min(maxX, CELLS);
@@ -1281,6 +1295,13 @@ namespace VerdantsAscent.Terrain.Voxel
                                                   halfH - Mathf.Abs(dy));
                                     break;
                                 case VoxelBrushShape.Cube:
+                                    if (cubeYaw != 0f)
+                                    {
+                                        // the sample in the turned cube's own axes (the ghost turns by Quaternion.Euler(0, yaw, 0))
+                                        float cx = dx * cubeCos - dz * cubeSin, cz = dx * cubeSin + dz * cubeCos;
+                                        s = Mathf.Min(radius - Mathf.Abs(cx), Mathf.Min(radius - Mathf.Abs(dy), radius - Mathf.Abs(cz)));
+                                        break;
+                                    }
                                     s = Mathf.Min(radius - Mathf.Abs(dx),
                                         Mathf.Min(radius - Mathf.Abs(dy), radius - Mathf.Abs(dz)));
                                     break;
@@ -1295,7 +1316,8 @@ namespace VerdantsAscent.Terrain.Voxel
                             {
                                 case VoxelBrushMode.Fill:
                                 {
-                                    var bound = (sbyte)Mathf.Clamp(Mathf.RoundToInt(s * QUANT), EditLoNone, EditHiNone);
+                                    var bound = soft ? VoxelBrushSoft.Bound(old, s, true, softK, softStr, QUANT)
+                                        : (sbyte)Mathf.Clamp(Mathf.RoundToInt(s * QUANT), EditLoNone, EditHiNone);
                                     if (bound <= old) continue;
                                     EnsureBrushEditsLocked();
                                     if (bound > _editLo[i]) _editLo[i] = bound;
@@ -1304,7 +1326,8 @@ namespace VerdantsAscent.Terrain.Voxel
                                 }
                                 case VoxelBrushMode.Carve:
                                 {
-                                    var bound = (sbyte)Mathf.Clamp(Mathf.RoundToInt(-s * QUANT), EditLoNone, EditHiNone);
+                                    var bound = soft ? VoxelBrushSoft.Bound(old, s, false, softK, softStr, QUANT)
+                                        : (sbyte)Mathf.Clamp(Mathf.RoundToInt(-s * QUANT), EditLoNone, EditHiNone);
                                     if (bound >= old) continue;
                                     EnsureBrushEditsLocked();
                                     if (bound < _editLo[i]) _editLo[i] = bound;
@@ -1333,6 +1356,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     HasBrushEdits = mode != VoxelBrushMode.Restore || AnyBrushEditsLocked();
                 }
             }
+            if (changed) VoxelEditRevision.Note(Key);   // 0.2.1469: FatApi.VoxelEditRevision
             return changed;
         }
 
@@ -1376,6 +1400,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     HasBrushEdits = true;
                 }
             }
+            if (changed) VoxelEditRevision.Note(Key);   // 0.2.1469: FatApi.VoxelEditRevision
             return changed;
         }
 
@@ -1409,6 +1434,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     HasBrushEdits = true;
                 }
             }
+            if (changed) VoxelEditRevision.Note(Key);   // 0.2.1469: FatApi.VoxelEditRevision
             return changed;
         }
 
@@ -1455,6 +1481,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     HasBrushEdits = AnyBrushEditsLocked();
                 }
             }
+            if (changed) VoxelEditRevision.Note(Key);   // 0.2.1469: FatApi.VoxelEditRevision
             return changed;
         }
 
@@ -1462,7 +1489,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // sample; the caller compresses) plus the water-mop tail
         // [0xF9][count lo][count hi][col lo, col hi]*. The ground re-derives on
         // restore, so only the edits travel.
-        private const byte MopTailMarker = 0xF9;
+        internal const byte MopTailMarker = 0xF9;   // 0.2.1454: internal for VoxelAnchorGuard (reads the same layout)
         internal const int SampleCount = SAMPLES * SAMPLES * SAMPLES;
 
         // ── Layered paint (paint keeps to the layer it is aimed at, like every tool) ─────────────────────────────────────
@@ -1470,7 +1497,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // nibble the biome it is turned to (VoxelLayerPaint.BiomeCode, 0 its own). Null until painted. A cave floor or a
         // skyland wears it instead of the ground column's paint mask; it rides the anchor blob as [0xFA] + SampleCount bytes
         // after the mop tail, so the paint syncs, saves and undoes with the chunk's edits.
-        private const byte PaintTailMarker = 0xFA;
+        internal const byte PaintTailMarker = 0xFA;   // 0.2.1454: internal for VoxelAnchorGuard
         private byte[] _paint;
         internal bool HasLayerPaint { get; private set; }
 
@@ -1648,6 +1675,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 SpreadGenWaterLocked();
                 Version++;
             }
+            VoxelEditRevision.Note(Key);   // 0.2.1469: synced / anchor / undo edits landed (FatApi.VoxelEditRevision)
             return true;
         }
 

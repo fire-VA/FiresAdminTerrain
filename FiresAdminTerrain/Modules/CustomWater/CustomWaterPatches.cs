@@ -194,8 +194,29 @@ namespace VerdantsAscent.Water.Core
         private static readonly WaterMemo[] s_waterMemo = new WaterMemo[32];
         private static int s_waterMemoNext;
         internal static int WaterMemoHits, WaterMemoMisses;
+
+        // 0.2.1497 ([lead] vf-pin-r1, summer town on a vanilla world: "WaterLiquid 1.33 (45270 calls, 11949 acted)", FAT water census "0 tracked",
+        // FatWaterLevel "0 combiner(s), 0 legacy"): with no FAT water of any kind the four lookups below can only answer "none" - legacy water and
+        // combiners through FatWaterLevelGate's index of AllWater / AllCombiners, pours through the active-pour list, generated water through the
+        // voxel chunks' stored columns (VoxelWaterSurface.SurfaceAtBase: no chunk, no water; the legacy mesh path when its key is on). So the
+        // answer is given before the memo and the timers. The first water placed, loaded or generated makes a list non-empty and the full path runs.
+        internal static int NoWaterAnswers;
+        internal static bool NoFatWaterAnywhere
+        {
+            get
+            {
+                if ((CustomWaterManager.AllWater?.Count ?? 0) != 0) return false;
+                if ((WaterMeshCombiner.AllCombiners?.Count ?? 0) != 0) return false;
+                if (FiresLiquidWaterPrefab.ActivePourCount != 0) return false;
+                if (global::VerdantsAscent.Terrain.Voxel.VoxelWorld.ChunkCount > 0) return false;
+                var legacyMesh = global::VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.LegacyMeshWater;
+                return legacyMesh == null || !legacyMesh.Value;
+            }
+        }
+
         private static float GetValidWaterLevelForCharacter(Vector3 pos, bool isLocalPlayer)
         {
+            if (NoFatWaterAnywhere) { NoWaterAnswers++; return float.MinValue; }   // 0.2.1497
             long t0 = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
             bool miss = false;
             try
@@ -1021,6 +1042,8 @@ namespace VerdantsAscent.Water.Core
             WaterCombinerCache.Update();
             VerdantsAscent.Water.Core.SeasonalWaterFreeze.Tick();   // Vedr winter freezes/thaws FAT custom water (2 s throttle inside)
             VerdantsAscent.Water.Core.FiresWaterAuthority.Tick();   // 0.2.1448: FAT's private water clock (no longer vanilla's UpdateWaterTime)
+            VerdantsAscent.Water.Core.WaterLookHost.Tick();   // 0.2.1455: water look hand-off (1 s provider check, coalesced surface event, 30 s census)
+            VerdantsAscent.Water.Core.InlandVanillaMatch.Tick();   // 0.2.1462: vanilla colours retry + sea level global (5 s, only while its key is on)
         }
 
         #endregion

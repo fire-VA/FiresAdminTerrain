@@ -40,11 +40,33 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static bool Active => s_has;
 
+        // 0.2.1479 RING SAFETY: the ring world's state lives only while one is up. Leaving (another world, or ZNet.OnDestroy through the
+        // ring-only patch) turns the ring sectors off, puts the vanilla sky tree back, drops the ring and its RPC state, and removes every
+        // ring patch, so the next world starts exactly as if no ring world had been loaded.
+        private static bool s_ringWorldOn;
+
+        internal static void LeaveRingWorld(string why)
+        {
+            if (!s_ringWorldOn) return;
+            s_ringWorldOn = false;
+            try { FatHaloSectors.Tick(); } catch (Exception ex) { FiresLogger.LogWarning($"[FatHalo] ring sectors off threw: {ex.Message}"); }   // RingOnly is false now: sectors re-file by x,z and unpatch
+            try { FatHaloWorldTree.Tick(false, null, Vector3.zero, Vector3.up); } catch { }   // vanilla tree pose back
+            try { FatHaloClutter.Tick(); } catch { }   // clears its ring patches (RingOnly false)
+            s_has = false; s_lastRaw = null; s_stateRaw = null; s_stateSource = "none";
+            s_rpcFor = null; s_serverLoaded = false; s_answered = false; s_nextAsk = 0f;
+            FatRingPatches.Remove();
+            FiresLogger.LogInfo($"[FatHalo] ring world left ({why}): ring state cleared");
+        }
+
         // MAIN THREAD ONLY (VoxelZoneStreamer.Update + the commands): global keys are read here and nowhere else, so the
         // generation workers only ever read the parsed s_arc. A change (a command here, or a client receiving the key) re-arms
         // the old and new ring areas, so their loaded zones regenerate in place.
         internal static void Tick()
         {
+            // 0.2.1479 RING SAFETY (Fire 11-18): nothing ring runs off a ring world. One cached bool; no RPC registration, no ring file
+            // read, no ask to the server, no ring patches (FatRingPatches) on any other world.
+            if (!FatRingPatches.RingWorld) { if (s_ringWorldOn) LeaveRingWorld("not a ring world"); return; }
+            if (!s_ringWorldOn) { s_ringWorldOn = true; FatRingPatches.Apply(); }
             EnsureHaloFlatKey();
             FatHaloSectors.Tick();   // ring object sectors on HaloFlat ([fgn] zone-key root fix)
             Arc old = s_arc; bool hadOld = s_has;
@@ -195,8 +217,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void EnsureHaloFlatKey() => ServerLoad();
 
-        [HarmonyLib.HarmonyPatch(typeof(Game), "FindSpawnPoint")]
-        private static class Game_FindSpawnPoint_Halo
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class Game_FindSpawnPoint_Halo
         {
 
             // Runs vanilla for a logout point (not after death) and for a bed; otherwise, on a world with a full ring, the ring
@@ -591,6 +613,8 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (ZoneSystem.instance == null || Player.m_localPlayer == null) { args.Context?.AddString("[FatHalo] no world"); return false; }
             if (!VerdantsAscent.FatApi.IsVoxelWorld()) { args.Context?.AddString("[FatHalo] needs a FAT voxel world"); return false; }
+            // 0.2.1479 RING SAFETY (Fire 11-18): ring commands work on a ring world only; a ring can no longer be laid over a normal world.
+            if (!FatRingPatches.RingWorld) { args.Context?.AddString("[FatHalo] not a ring world: ring commands only run on a ring world (0.2.1479)"); return false; }
             return true;
         }
 

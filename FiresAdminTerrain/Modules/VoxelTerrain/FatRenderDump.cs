@@ -15,11 +15,11 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly string[] Watch = { "Cultivated", "_FiresSnow", "_ClearedMaskTex", "_FiresLocalWater", "_DiffuseArrayTex", "_NormalArrayTex", "_FiresHeat", "_SnowNormal" };
         private static readonly string[] Globals = { "_FiresSnowCover", "_FiresSnowDepthScale", "_FiresSnowMaxDepth", "_FiresHeatCount", "_FiresSnowFieldOn" };
 
-        [HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class Command
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Command
         {
             private static bool s_registered;
-            private static void Postfix()
+            internal static void Postfix()
             {
                 if (s_registered) return;
                 s_registered = true;

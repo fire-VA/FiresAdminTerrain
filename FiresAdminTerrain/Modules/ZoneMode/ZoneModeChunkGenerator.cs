@@ -100,8 +100,10 @@ namespace VerdantsAscent.Terrain.Zones
             ZoneModePark.ZoneRestored -= OnZoneRestored;
             ZoneModePark.ZoneRestored += OnZoneRestored;
             RegisterCommand();
+#if FIRES_TESTS   // 0.2.1505: test files, compiled only in a test build (csproj FiresTests switch)
             ZoneModeChunkGeneratorTest.RegisterRpc();
             VerdantsAscent.Terrain.Testing.FatWaterPersistTests.RegisterRpc();   // 0.2.1339: add-only, test RPC
+#endif
             if (s_legacy.Count == 0)
                 foreach (var tier in ZoneModeChunkTiers.All)
                     if (!tier.RestoresOnly) s_legacy[tier.MachinePrefab.GetStableHashCode()] = tier;
@@ -467,7 +469,9 @@ namespace VerdantsAscent.Terrain.Zones
         {
             if (s_commandRegistered) return;
             s_commandRegistered = true;
+#if FIRES_TESTS   // 0.2.1505: test file, compiled only in a test build
             ZoneModeChunkGeneratorTest.Register();
+#endif
             new Terminal.ConsoleCommand(ForceBonusCommand,
                 "Admin test: the next biome-recipe batch of the Chunk Generator you look at (or the nearest within "
                 + $"{CommandReach:0} m) wins its hidden location-seed roll.",

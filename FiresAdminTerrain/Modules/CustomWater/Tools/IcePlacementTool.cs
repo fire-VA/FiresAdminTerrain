@@ -74,7 +74,20 @@ namespace VerdantsAscent.Water.Tools
 
         #region Place Ice
 
-        private static bool PlaceIce(Terminal.ConsoleEventArgs args)
+        private static bool PlaceIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return PlaceIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool PlaceIce_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -197,7 +210,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Places ice with forced mode (no auto-detection).
         /// </summary>
-        private static bool PlaceIceForced(Terminal.ConsoleEventArgs args, bool forceFloating)
+        private static bool PlaceIceForced(Terminal.ConsoleEventArgs args, bool forceFloating)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return PlaceIceForced_Body(args, forceFloating);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool PlaceIceForced_Body(Terminal.ConsoleEventArgs args, bool forceFloating)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -312,7 +338,20 @@ namespace VerdantsAscent.Water.Tools
 
         #region Delete Ice
 
-        private static bool DeleteIce(Terminal.ConsoleEventArgs args)
+        private static bool DeleteIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return DeleteIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool DeleteIce_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -391,7 +430,20 @@ namespace VerdantsAscent.Water.Tools
 
         #region Break Standalone Ice
 
-        private static bool BreakStandaloneIce(Terminal.ConsoleEventArgs args)
+        private static bool BreakStandaloneIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return BreakStandaloneIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool BreakStandaloneIce_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)

@@ -20,8 +20,16 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static bool RampSelected()
         {
             var piece = Player.m_localPlayer?.m_buildPieces?.GetSelectedPiece();
-            return piece != null && piece.m_name == RampPiece && Player.m_localPlayer.InPlaceMode();
+            // 0.2.1455 ([ghost], Voxheim diff P4): Vcube turns on Q / E too (VoxelBrushSoft), so vanilla's AutoRun / Use stay quiet for it as well
+            return piece != null && (piece.m_name == RampPiece || piece.m_name == VoxelBrushSoft.CubePiece) && Player.m_localPlayer.InPlaceMode();
         }
+
+        // 0.2.1455 ([ghost], Voxheim diff P4): ramp angle steps. Free = the rise is the tool's offset (as before); a step = the rise that
+        // gives that slope over the ramp's length (downhill when the offset is negative). Cycled with [Voxel Terrain - Tools] Vramp angle key.
+        private static readonly float[] RampAngles = { 0f, 10f, 20f, 30f, 45f };
+        private static int s_rampAngle;
+        private static float RampRise(float offset, float len)
+            => s_rampAngle == 0 ? offset : (offset < 0f ? -1f : 1f) * len * Mathf.Tan(RampAngles[s_rampAngle] * Mathf.Deg2Rad);
 
         // The ramp's run: along the view, snapped to a quarter, plus the Q/E turns.
         private static Vector3 RampDir(Vector3 view)
@@ -48,6 +56,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     Vector3 d = RampDir(s.View);
                     Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, $"Vramp turned: runs {Compass(d)}", 0, null, false);
                 }
+                if (VoxelBrushSoft.RampAngleKey != null && FatInput.KeyDown(VoxelBrushSoft.RampAngleKey.Value))
+                {
+                    s_rampAngle = (s_rampAngle + 1) % RampAngles.Length;
+                    Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, s_rampAngle == 0 ? "Vramp slope: free (Shift+wheel / PgUp/PgDn sets the rise)"
+                        : $"Vramp slope: {RampAngles[s_rampAngle]:0} degrees (offset sign = up or down)", 0, null, false);
+                }
                 return new Ghost { Shape = GhostShape.None };
             }
 
@@ -57,15 +71,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 float width = Mathf.Max(RampMinWidth, s.Radius), len = Mathf.Max(4f, s.Radius * RampLengthPerRadius);
                 float dabR = width * 0.5f, step = Mathf.Max(0.5f, dabR * 0.5f);
                 Vector3 start = s.HitGround;
+                float rise = RampRise(s.Offset, len);   // 0.2.1455: the angle step, or the offset as before
                 int dabs = 0;
                 for (float t = 0f; t <= len + 0.01f; t += step)
                 {
-                    float y = start.y + s.Offset * (t / len);
+                    float y = start.y + rise * (t / len);
                     Vector3 at = new Vector3(start.x + dir.x * t, y, start.z + dir.z * t);
                     LevelDab(at, dabR, y);
                     dabs++;
                 }
-                FiresLogger.LogDebug($"[FiresVoxel] ramp: from ({F(start.x)},{F(start.y)},{F(start.z)}) width {F(width)}, {dabs} dab(s) (len {F(len)}, rise {F(s.Offset)}, dir {Compass(dir)})");
+                FiresLogger.LogDebug($"[FiresVoxel] ramp: from ({F(start.x)},{F(start.y)},{F(start.z)}) width {F(width)}, {dabs} dab(s) (len {F(len)}, rise {F(rise)}{(s_rampAngle > 0 ? $" = {RampAngles[s_rampAngle]:0} degree step" : "")}, dir {Compass(dir)})");
             }
 
             public void Dab(in StrokeInput s) { }
@@ -75,7 +90,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 Vector3 dir = RampDir(s.View);
                 float width = Mathf.Max(RampMinWidth, s.Radius), len = Mathf.Max(4f, s.Radius * RampLengthPerRadius);
-                RampView.Draw(SharedLineMat(), s.HitGround, dir, width, len, s.Offset);
+                RampView.Draw(SharedLineMat(), s.HitGround, dir, width, len, RampRise(s.Offset, len));
             }
         }
 

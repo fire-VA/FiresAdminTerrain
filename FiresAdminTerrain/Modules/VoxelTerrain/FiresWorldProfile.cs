@@ -34,6 +34,9 @@ namespace VerdantsAscent.Terrain.Voxel
         // 0.2.1137: version 6 = version 5 plus SkySites3 (the pond-aware / mini site rule) and the list of EXISTING-world islands
         // the server switched to it (islands with no generated zone when decided; FatLocationReplan). Written only when either is set.
         private const byte VersionSkySites3 = 6;
+        // 0.2.1479 (ringworld tire, Option A): version 7 = version 6 plus the ring (bool + radius, band width, terrain height cap).
+        // Written ONLY for a ring world, so every other world stays 1..6 on the wire byte for byte (Fire 11-18 ring safety rule).
+        private const byte VersionRing = 7;
         internal const string CloneSourcePrefix = "clone of ";
 
         internal ProfileGenerator Generator;
@@ -60,6 +63,11 @@ namespace VerdantsAscent.Terrain.Voxel
         // FAT's reader skips keys it does not know (Read's switch has no default).
         internal long? WorldUid;
         internal readonly HashSet<int> SiteIslands3 = new HashSet<int>();
+        // 0.2.1479 (ringworld tire): the world is the ring's unrolled band, a flat strip drawn curved. Off on every other world.
+        internal bool Ring;
+        internal float RingRadius = RingDefaultRadius, RingBand = RingDefaultBand, RingHeightMax = RingDefaultHeightMax;
+        internal const float RingDefaultRadius = 4775f, RingDefaultBand = 3000f, RingDefaultHeightMax = 200f;   // Fire 11-18: 30 km ring, 200 m terrain
+        internal const float RingWorldRadius = 15100f, RingWorldEdge = 15600f;   // covers the strip's corners (z +-15,001 by x +-1,500)
         internal const float SuperFlatHeight = 50f;
         internal const float SuperFlatRadius = 2500f, SuperFlatEdge = 2625f;
 
@@ -94,6 +102,36 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // For unattended runs: `-fat-new-superflat <world>` on the SERVER. A world of that name with no profile
         // and no save data is created super flat - the same profile the New World toggle writes - instead of being inferred from config.
+        // 0.2.1479 (ringworld tire, P1): `-fat-new-ringtire <world>` on the SERVER makes a never-saved world of that name the ring:
+        // Fires generator + voxel wrap (caves are voxel), caves ON, sky islands OFF (Fire 11-18), rivers and lakes off, the world size
+        // past the strip's corners. The profile is the ONLY ring switch: every ring code path checks CurrentIsRing.
+        internal const string NewRingTireArgument = "-fat-new-ringtire";
+        internal static bool LaunchAsksRingTire(string worldName)
+        {
+            var args = Environment.GetCommandLineArgs();
+            int i = Array.IndexOf(args, NewRingTireArgument);
+            return i >= 0 && i + 1 < args.Length && string.Equals(args[i + 1], worldName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static FiresWorldProfile NewRingTire(string source)
+        {
+            var ring = new FiresWorldProfile
+            {
+                Generator = ProfileGenerator.Fires,
+                Terrain = ProfileTerrain.VoxelWrap,
+                ZoneMode = false,
+                SkyIslands = false,
+                Hydrology = false,
+                Caves = true,
+                SkySites2 = true,
+                SkySites3 = true,
+                Ring = true,
+                Source = source,
+            };
+            ring.RecordSize(new FatWorldSize.Size { Radius = RingWorldRadius, Edge = RingWorldEdge, Stretch = 1f, BiomeStretch = 1f });
+            return ring;
+        }
+
         internal const string NewSuperFlatArgument = "-fat-new-superflat";
         internal static bool LaunchAsksSuperFlat(string worldName)
         {
@@ -107,6 +145,9 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static string WorldName { get; private set; }
 
         internal static bool CurrentIsSuperFlat => s_current != null && s_current.SuperFlat;
+
+        /// <summary>0.2.1479: the current world is a ring world (server: its file; client: the server's handshake profile).</summary>
+        internal static bool CurrentIsRing => s_current != null && s_current.Ring;
 
         internal bool HasRecordedSize => WorldRadius.HasValue && WorldEdge.HasValue && WorldStretch.HasValue && BiomeStretch.HasValue;
 
@@ -281,6 +322,7 @@ namespace VerdantsAscent.Terrain.Voxel
             // the ring (FatHaloArc builds the ring key server-side on its first start).
             s_current = neverSaved && FatHaloArc.IsHaloFlatWorld(world.m_name)
                 ? NewSuperFlat("created (HaloFlat: the full-size halo ring test world)", ProfileTerrain.VoxelOnly, false, false, FatHaloArc.HaloFlatWorldRadius, FatHaloArc.HaloFlatWorldEdge)
+                : neverSaved && LaunchAsksRingTire(world.m_name) ? NewRingTire("created (" + NewRingTireArgument + ")")   // 0.2.1479
                 : neverSaved && LaunchAsksSuperFlat(world.m_name) ? NewSuperFlat("created (" + NewSuperFlatArgument + ")")
                 : neverSaved ? Infer(world.m_name, configMayChooseTheGenerator: true) : FromWorldRecords(world.m_name);
             s_current.WorldUid = world.m_uid;   // 0.2.1327
@@ -295,7 +337,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 FiresLogger.LogDebug($"[FiresWorldGen] pinned that profile beside '{world.m_name}'. Every client is sent it, "
                     + "so the world is built the same way everywhere from now on.");
             // 0.2.1327: the -fireszones flag makes a never-saved, unchosen world one zone at a time (ZoneModeRegistry, later this load).
-            bool flagZones = neverSaved && !FatHaloArc.IsHaloFlatWorld(world.m_name) && Zones.ZoneModeRegistry.LaunchFlagDecides(s_current);
+            bool flagZones = neverSaved && !FatHaloArc.IsHaloFlatWorld(world.m_name) && !s_current.Ring && Zones.ZoneModeRegistry.LaunchFlagDecides(s_current);
             string source = flagZones ? "-fireszones flag" : neverSaved ? "config defaults" : "config defaults (generator from the world's own records)";
             LogMode(world.m_name, s_current, s_current.ZoneMode || flagZones, ignored != null ? ignored + ", then " + source : source);
         }
@@ -325,7 +367,8 @@ namespace VerdantsAscent.Terrain.Voxel
             => $"{Generator} generation, {Terrain} terrain" + (ZoneMode ? ", one zone at a time" : "")
                + Flag("sky islands", SkyIslands) + Flag("water on sky islands", SkyIslandWater) + Flag("rivers & lakes", Hydrology) + Flag("caves", Caves)
                + (Generator == ProfileGenerator.Image ? $", image '{ImageBase}'" : "")
-               + (SizeIsNonVanilla ? $", world {RecordedSize}" : "") + (SuperFlat ? ", SUPER FLAT (admin build world)" : "") + $" ({Source})";
+               + (SizeIsNonVanilla ? $", world {RecordedSize}" : "") + (SuperFlat ? ", SUPER FLAT (admin build world)" : "")
+               + (Ring ? $", RING (R {RingRadius:0} m, band {RingBand:0} m, terrain cap {RingHeightMax:0} m)" : "") + $" ({Source})";
 
         private static string Flag(string name, bool? value) => value.HasValue ? $", {name} {(value.Value ? "on" : "off")}" : "";
 
@@ -360,6 +403,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 };
                 if (WorldUid.HasValue) lines.Add($"worldid={WorldUid.Value.ToString(CultureInfo.InvariantCulture)}");   // 0.2.1327
                 if (SuperFlat) lines.Add("superflat=true");   // Only on a super flat world (every other file stays as it was)
+                if (Ring)   // 0.2.1479: only on a ring world (every other file stays as it was)
+                {
+                    lines.Add("ring=true");
+                    lines.Add($"ringradius={RingRadius.ToString("R", CultureInfo.InvariantCulture)}");
+                    lines.Add($"ringband={RingBand.ToString("R", CultureInfo.InvariantCulture)}");
+                    lines.Add($"ringhmax={RingHeightMax.ToString("R", CultureInfo.InvariantCulture)}");
+                }
                 if (SkySites3) lines.Add("skysites=3");   // 0.2.1137: new worlds only (implies 2)
                 else if (SkySites2) lines.Add("skysites=2");   // 0.2.1102: new worlds only
                 if (SiteIslands3.Count > 0) lines.Add("skysites3islands=" + string.Join(",", SiteIslands3.OrderBy(v => v)));   // 0.2.1137
@@ -415,6 +465,10 @@ namespace VerdantsAscent.Terrain.Voxel
                         case "worldstretch": profile.WorldStretch = ParseSize(value); break;
                         case "biomestretch": profile.BiomeStretch = ParseSize(value); break;
                         case "superflat": profile.SuperFlat = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;
+                        case "ring": profile.Ring = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;   // 0.2.1479
+                        case "ringradius": profile.RingRadius = ParseSize(value) ?? RingDefaultRadius; break;
+                        case "ringband": profile.RingBand = ParseSize(value) ?? RingDefaultBand; break;
+                        case "ringhmax": profile.RingHeightMax = ParseSize(value) ?? RingDefaultHeightMax; break;
                         case "skysites": profile.SkySites2 = value.Trim() == "2" || value.Trim() == "3"; profile.SkySites3 = value.Trim() == "3"; break;
                         case "skysites3islands":
                             foreach (var id in value.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
@@ -457,7 +511,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             bool dryIslands = SkyIslandWater == false;
             bool sized = SizeIsNonVanilla;
-            byte version = SuperFlat && HasRecordedSize && (SkySites3 || SiteIslands3.Count > 0) ? VersionSkySites3 : SuperFlat && HasRecordedSize && SkySites2 ? VersionSkySites : SuperFlat && HasRecordedSize ? VersionSuperFlat : sized ? VersionWorldSize : dryIslands ? VersionIslandWater : Version;
+            byte version = Ring && HasRecordedSize ? VersionRing : SuperFlat && HasRecordedSize && (SkySites3 || SiteIslands3.Count > 0) ? VersionSkySites3 : SuperFlat && HasRecordedSize && SkySites2 ? VersionSkySites : SuperFlat && HasRecordedSize ? VersionSuperFlat : sized ? VersionWorldSize : dryIslands ? VersionIslandWater : Version;
             pkg.Write(version);
             pkg.Write((byte)Generator);
             pkg.Write((byte)Terrain);
@@ -485,13 +539,20 @@ namespace VerdantsAscent.Terrain.Voxel
                 pkg.Write(SiteIslands3.Count);
                 foreach (int v in SiteIslands3.OrderBy(v => v)) pkg.Write(v);
             }
+            if (version >= VersionRing)   // 0.2.1479
+            {
+                pkg.Write(Ring);
+                pkg.Write(RingRadius);
+                pkg.Write(RingBand);
+                pkg.Write(RingHeightMax);
+            }
         }
 
         internal static FiresWorldProfile Read(ZPackage pkg)
         {
             byte version = pkg.ReadByte();
-            if (version < Version || version > VersionSkySites3)
-                throw new InvalidDataException($"world profile version {version}, this build reads {Version}-{VersionSkySites3}");
+            if (version < Version || version > VersionRing)
+                throw new InvalidDataException($"world profile version {version}, this build reads {Version}-{VersionRing}");
             var profile = new FiresWorldProfile
             {
                 Generator = (ProfileGenerator)pkg.ReadByte(),
@@ -520,6 +581,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 profile.SkySites3 = pkg.ReadBool();
                 int n = pkg.ReadInt();
                 for (int i = 0; i < n; i++) profile.SiteIslands3.Add(pkg.ReadInt());
+            }
+            if (version >= VersionRing)   // 0.2.1479
+            {
+                profile.Ring = pkg.ReadBool();
+                profile.RingRadius = pkg.ReadSingle();
+                profile.RingBand = pkg.ReadSingle();
+                profile.RingHeightMax = pkg.ReadSingle();
             }
             return profile;
         }

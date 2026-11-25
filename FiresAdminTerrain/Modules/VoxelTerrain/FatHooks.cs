@@ -56,8 +56,11 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int j = 0; j < s_waterStage.Length; j++)
                     sb.Append($" {WaterStageNames[j]} {s_waterStage[j] * k:0.00} ms/s ({s_waterStageCalls[j]} timed)");
                 sb.Append(" (0.2.1196)");
+                // 0.2.1497: swim checks answered at once because this world has no FAT water at all (no timer on those)
+                sb.Append($"; WaterLiquid answered 'no FAT water on this world' without a lookup: {(global::VerdantsAscent.Water.Core.CustomWaterPatches.NoWaterAnswers)} (0.2.1497)");
                 FiresLogger.LogDebug(sb.ToString());
             }
+            global::VerdantsAscent.Water.Core.CustomWaterPatches.NoWaterAnswers = 0;
             System.Array.Clear(s_ticks, 0, s_ticks.Length);
             System.Array.Clear(s_playerTicks, 0, s_playerTicks.Length);
             System.Array.Clear(s_calls, 0, s_calls.Length);

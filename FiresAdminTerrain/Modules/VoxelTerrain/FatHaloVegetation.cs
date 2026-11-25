@@ -30,8 +30,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // rocks) settles an object along WORLD -Y onto GetSolidHeight/GetGroundHeight; on the ring wall world-down runs along the
         // wall, so everything slid. Inside the ring's field on a ring-only world it stands down: the object stays where the ring
         // placed it (seated along the ring's up).
-        [HarmonyLib.HarmonyPatch(typeof(StaticPhysics), nameof(StaticPhysics.SUpdate))]
-        private static class RingStaticPhysics
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class RingStaticPhysics
         {
             private static bool s_logged;
 

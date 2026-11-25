@@ -31,7 +31,7 @@ namespace VerdantsAscent.Terrain.Zones
             var generator = BcMigratedWorld.Generator;
             map = generator?.Maps?.Biome;
             settings = generator?.Settings;
-            return map != null && map.Biomes != null && settings != null;
+            return map != null && map.Indices != null && settings != null;
         }
 
         // Every black area: seed column, seed row, pixels. Largest first.
@@ -40,11 +40,11 @@ namespace VerdantsAscent.Terrain.Zones
             var areas = new List<int[]>();
             if (!TryMaps(out var map, out _)) return areas;
             int size = map.Size;
-            var seen = new bool[map.Biomes.Length];
+            var seen = new bool[map.Length];
             var stack = new Stack<int>();
-            for (int i = 0; i < map.Biomes.Length; i++)
+            for (int i = 0; i < map.Length; i++)
             {
-                if (seen[i] || map.Biomes[i] != Heightmap.Biome.None) continue;
+                if (seen[i] || map.At(i) != Heightmap.Biome.None) continue;
                 int pixels = 0;
                 seen[i] = true;
                 stack.Push(i);
@@ -66,7 +66,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static void Visit(BcBiomeMap map, bool[] seen, Stack<int> stack, int k)
         {
-            if (seen[k] || map.Biomes[k] != Heightmap.Biome.None) return;
+            if (seen[k] || map.At(k) != Heightmap.Biome.None) return;
             seen[k] = true;
             stack.Push(k);
         }
@@ -79,7 +79,7 @@ namespace VerdantsAscent.Terrain.Zones
                 if (m_ready) return true;
                 if (m_failed || !TryMaps(out var map, out var settings)) return false;
                 int size = map.Size, seed = SeedRow * size + SeedCol;
-                if (SeedCol < 0 || SeedRow < 0 || SeedCol >= size || SeedRow >= size || map.Biomes[seed] != Heightmap.Biome.None)
+                if (SeedCol < 0 || SeedRow < 0 || SeedCol >= size || SeedRow >= size || map.At(seed) != Heightmap.Biome.None)
                 {
                     m_failed = true;
                     FiresLogger.LogWarning($"[BiomePaint] a saved black map area's seed ({SeedCol},{SeedRow}) is not black on this world's map: it does nothing.");
@@ -90,7 +90,7 @@ namespace VerdantsAscent.Terrain.Zones
                 member.Add(seed);
                 stack.Push(seed);
                 int c0 = SeedCol, c1 = SeedCol, r0 = SeedRow, r1 = SeedRow;
-                void Try(int k) { if (map.Biomes[k] == Heightmap.Biome.None && member.Add(k)) stack.Push(k); }
+                void Try(int k) { if (map.At(k) == Heightmap.Biome.None && member.Add(k)) stack.Push(k); }
                 while (stack.Count > 0)
                 {
                     int k = stack.Pop();

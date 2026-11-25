@@ -53,27 +53,27 @@ namespace VerdantsAscent.Water.Core
             // see. A saturated blue there reads as "far too blue no matter what
             // I set" — the deep colours never get depth enough to show. These
             // defaults sit in fresh-water teal instead.
-            ColorTop     = cfg.Bind(S, "Color Top",            new Color(0.16f, 0.45f, 0.48f, 1f), "Surface top tint");
-            ColorBottom  = cfg.Bind(S, "Color Bottom (deep)",  new Color(0.06f, 0.24f, 0.26f, 1f), "Deep-water colour");
-            ColorShallow = cfg.Bind(S, "Color Bottom (shallow)", new Color(0.32f, 0.70f, 0.60f, 1f), "Shallow-water colour");
-            SurfaceColor = cfg.Bind(S, "Surface Color",        new Color(0.70f, 0.72f, 0.63f, 1f), "Surface reflection tint");
-            FoamColor    = cfg.Bind(S, "Foam Color",           new Color(1f, 1f, 1f, 1f),          "Foam colour");
+            ColorTop     = cfg.Bind(S, "Color Top",            new Color(0.16f, 0.45f, 0.48f, 1f), "Surface top tint" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey));
+            ColorBottom  = cfg.Bind(S, "Color Bottom (deep)",  new Color(0.06f, 0.24f, 0.26f, 1f), "Deep-water colour" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey));
+            ColorShallow = cfg.Bind(S, "Color Bottom (shallow)", new Color(0.32f, 0.70f, 0.60f, 1f), "Shallow-water colour" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey));
+            SurfaceColor = cfg.Bind(S, "Surface Color",        new Color(0.70f, 0.72f, 0.63f, 1f), "Surface reflection tint" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey));
+            FoamColor    = cfg.Bind(S, "Foam Color",           new Color(1f, 1f, 1f, 1f),          "Foam colour" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey));
             AbsorbExtinction = cfg.Bind(S, "Absorb Extinction", new Color(0.45f, 0.16f, 0.30f, 1f),
                 "FRESH-water depth extinction (rivers/ponds/far river sheets only — the ocean keeps its own "
                 + "curve, FiresTossinShade key 35). Per-channel: how fast each colour DIES per metre of depth, "
                 + "so this is an inverse — high red = red vanishes first. Fresh water plus tannins also eat "
                 + "BLUE, so with the default green survives longest and depths go olive/emerald instead of the "
                 + "ocean's blue-teal. Set equal to the ocean curve (993D21FF) to re-unify the two. Only active "
-                + "while AbsorbBlend (FiresTossinShade key 34) is above 0.");
+                + "while AbsorbBlend (FiresTossinShade key 34) is above 0." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey));
 
-            Glossiness   = cfg.Bind(S, "Smoothness",     0.88f, new ConfigDescription("", new AcceptableValueRange<float>(0f, 1f)));
-            Metallic     = cfg.Bind(S, "Metallic",       0.0f,  new ConfigDescription("", new AcceptableValueRange<float>(0f, 1f)));
-            Fresnel      = cfg.Bind(S, "Fresnel Strength", -0.33f, new ConfigDescription("Reflection falloff at grazing angles", new AcceptableValueRange<float>(-2f, 8f)));
-            Reflection   = cfg.Bind(S, "Reflection Strength", 0.7f, new ConfigDescription("Sky/environment reflection — lower = less mirror-like", new AcceptableValueRange<float>(0f, 2f)));
-            Specular     = cfg.Bind(S, "Specular Intensity", 0.6f, new ConfigDescription("Sun glint strength", new AcceptableValueRange<float>(0f, 2f)));
-            WaveAmplitude = cfg.Bind(S, "Wave Amplitude", 0.15f, new ConfigDescription("Surface wave height", new AcceptableValueRange<float>(0f, 2f)));
-            NormalPower  = cfg.Bind(S, "Ripple Power",   1.0f,  new ConfigDescription("Normal-map ripple strength", new AcceptableValueRange<float>(0f, 5f)));
-            NormalScale  = cfg.Bind(S, "Ripple Scale",   0.16f, new ConfigDescription("Normal-map tiling", new AcceptableValueRange<float>(0.01f, 2f)));
+            Glossiness   = cfg.Bind(S, "Smoothness",     0.88f, new ConfigDescription("" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 1f)));
+            Metallic     = cfg.Bind(S, "Metallic",       0.0f,  new ConfigDescription("" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 1f)));
+            Fresnel      = cfg.Bind(S, "Fresnel Strength", -0.33f, new ConfigDescription("Reflection falloff at grazing angles" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(-2f, 8f)));
+            Reflection   = cfg.Bind(S, "Reflection Strength", 0.7f, new ConfigDescription("Sky/environment reflection — lower = less mirror-like" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 2f)));
+            Specular     = cfg.Bind(S, "Specular Intensity", 0.6f, new ConfigDescription("Sun glint strength" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 2f)));
+            WaveAmplitude = cfg.Bind(S, "Wave Amplitude", 0.15f, new ConfigDescription("Surface wave height" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 2f)));
+            NormalPower  = cfg.Bind(S, "Ripple Power",   1.0f,  new ConfigDescription("Normal-map ripple strength" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 5f)));
+            NormalScale  = cfg.Bind(S, "Ripple Scale",   0.16f, new ConfigDescription("Normal-map tiling" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0.01f, 2f)));
             // ── RIPPLE NORMALS ───────────────────────────────────────────────
             // The two normal layers are the whole surface read, and until now
             // only their strength and tiling were reachable — the SCROLL and the
@@ -81,28 +81,28 @@ namespace VerdantsAscent.Water.Core
             // no way out. Vanilla's ocean normals are what produced the hard
             // lines on a river; ours replace them, and these expose the rest.
             UseFiresNormals = cfg.Bind(S, "Use Fires Water Normals", true,
-                new ConfigDescription("Use our water_nrm / water_nrm_detail maps instead of Valheim's ocean normals. Off = vanilla's (creased on shallow water)."));
+                new ConfigDescription("Use our water_nrm / water_nrm_detail maps instead of Valheim's ocean normals. Off = vanilla's (creased on shallow water)." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey)));
             NormalSpeedA = cfg.Bind(S, "Ripple Speed (coarse)", 1.0f,
-                new ConfigDescription("Scroll rate of the coarse ripple layer", new AcceptableValueRange<float>(0f, 5f)));
+                new ConfigDescription("Scroll rate of the coarse ripple layer" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 5f)));
             NormalSpeedB = cfg.Bind(S, "Ripple Speed (fine)", 1.0f,
-                new ConfigDescription("Scroll rate of the fine ripple layer", new AcceptableValueRange<float>(0f, 5f)));
+                new ConfigDescription("Scroll rate of the fine ripple layer" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 5f)));
             NormalAngleA = cfg.Bind(S, "Ripple Angle (coarse)", 20f,
-                new ConfigDescription("Drift heading of the coarse layer, degrees. Only used on still water — flowing water takes its direction from the river.", new AcceptableValueRange<float>(0f, 360f)));
+                new ConfigDescription("Drift heading of the coarse layer, degrees. Only used on still water — flowing water takes its direction from the river." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 360f)));
             NormalAngleB = cfg.Bind(S, "Ripple Angle (fine)", 115f,
-                new ConfigDescription("Drift heading of the fine layer, degrees. Keep it well away from the coarse angle or the two layers beat into visible bands.", new AcceptableValueRange<float>(0f, 360f)));
-            Refraction   = cfg.Bind(S, "Refraction",     0.04f, new ConfigDescription("See-through distortion", new AcceptableValueRange<float>(0f, 0.3f)));
-            DepthFade    = cfg.Bind(S, "Depth Fade (m)", 100f,  new ConfigDescription("Distance the deep colour ramps over", new AcceptableValueRange<float>(1f, 300f)));
-            EdgeSoftness = cfg.Bind(S, "Bank Edge Softness", 0.55f, new ConfigDescription("Soft wash-out at the bank (higher = softer)", new AcceptableValueRange<float>(0.1f, 0.9f)));
+                new ConfigDescription("Drift heading of the fine layer, degrees. Keep it well away from the coarse angle or the two layers beat into visible bands." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 360f)));
+            Refraction   = cfg.Bind(S, "Refraction",     0.04f, new ConfigDescription("See-through distortion" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 0.3f)));
+            DepthFade    = cfg.Bind(S, "Depth Fade (m)", 100f,  new ConfigDescription("Distance the deep colour ramps over" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(1f, 300f)));
+            EdgeSoftness = cfg.Bind(S, "Bank Edge Softness", 0.55f, new ConfigDescription("Soft wash-out at the bank (higher = softer)" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0.1f, 0.9f)));
 
             // FOAM controls. The HD foam texture is denser than the
             // vanilla one, so at the shared global intensity it blankets the
             // liquid white and the additive foam whites-out whatever is seen
             // through the surface. These override the shared _FiresFoam* globals
             // PER-MATERIAL (liquid only — the ocean keeps its own foam).
-            FoamDensity  = cfg.Bind(S, "Foam Density",   0.18f, new ConfigDescription("Foam texture strength — lower = less white foam on the surface", new AcceptableValueRange<float>(0f, 1.5f)));
-            FoamOpacity  = cfg.Bind(S, "Foam Opacity",   0.65f, new ConfigDescription("Foam whiteness — lower = foam is dimmer and you see through it more", new AcceptableValueRange<float>(0f, 1f)));
-            FoamSlope    = cfg.Bind(S, "Foam on Flow",   0.05f, new ConfigDescription("Extra foam on steep/flowing surface — lower = flowing water stays clear", new AcceptableValueRange<float>(0f, 1f)));
-            FoamAmount   = cfg.Bind(S, "Foam at Edges",  0.3f,  new ConfigDescription("Shore/edge foam amount", new AcceptableValueRange<float>(0f, 2f)));
+            FoamDensity  = cfg.Bind(S, "Foam Density",   0.18f, new ConfigDescription("Foam texture strength — lower = less white foam on the surface" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 1.5f)));
+            FoamOpacity  = cfg.Bind(S, "Foam Opacity",   0.65f, new ConfigDescription("Foam whiteness — lower = foam is dimmer and you see through it more" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 1f)));
+            FoamSlope    = cfg.Bind(S, "Foam on Flow",   0.05f, new ConfigDescription("Extra foam on steep/flowing surface — lower = flowing water stays clear" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 1f)));
+            FoamAmount   = cfg.Bind(S, "Foam at Edges",  0.3f,  new ConfigDescription("Shore/edge foam amount" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 2f)));
 
             // TURBIDITY (suspended sediment): a depth-scaled blur + murk that
             // dissolves hard seabed-mesh corners seen through the water AND
@@ -119,12 +119,12 @@ namespace VerdantsAscent.Water.Core
                 + "corners / 'two layers' you see through the water where the seabed mesh steps) and hazes "
                 + "deep water toward the murk colour. 0 = crystal clear (sharp bottom, old look), 1 = thick "
                 + "silty water. Works WITH Turbidity Full Depth and the Murk Color alpha — all three scale "
-                + "with the water column, so raising this alone does little in a shallow pond.",
+                + "with the water column, so raising this alone does little in a shallow pond." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0f, 1f)));
             TurbidityDepth = cfg.Bind(S, "Turbidity Full Depth", 1.5f, new ConfigDescription(
                 "Metres of water depth at which turbidity reaches full strength. Lower = even shallow water "
                 + "goes cloudy; higher = only deep water clouds over. Inland ponds and rivers are 2-6m deep, "
-                + "so a value near the ocean's scale leaves them crystal clear.",
+                + "so a value near the ocean's scale leaves them crystal clear." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0.5f, 30f)));
             // CAUSTICS, inland-only override of the FTS globals. Ocean scale on
             // a pond = one giant Worley cell = the concentric rings and long
@@ -132,29 +132,29 @@ namespace VerdantsAscent.Water.Core
             CausticStrength = cfg.Bind(S, "Caustic Strength", 0.35f, new ConfigDescription(
                 "Brightness of the light web cast on the bottom, for INLAND water only (the ocean keeps the "
                 + "FiresTossinShade value). SET THIS TO 0 TO TURN INLAND CAUSTICS OFF — that is the A/B for "
-                + "'is this weird pattern the caustics'.", new AcceptableValueRange<float>(0f, 4f)));
+                + "'is this weird pattern the caustics'." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 4f)));
             CausticScale   = cfg.Bind(S, "Caustic Scale", 0.05f, new ConfigDescription(
                 "Cell size of the caustic web: this is 1/metres, so HIGHER = smaller cells. The ocean runs "
                 + "0.007 (one cell per ~140m); at that scale a pond fits inside a single cell and you see its "
                 + "distance field as concentric rings with the cell boundary as a straight white line. 0.05 = "
-                + "one cell per ~20m, so a pond gets a web instead of one blob.",
+                + "one cell per ~20m, so a pond gets a web instead of one blob." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0.001f, 0.5f)));
             CausticSharp   = cfg.Bind(S, "Caustic Sharpness", 1.4f, new ConfigDescription(
                 "Line thickness/contrast — the shader raises the web to this power, so BELOW 1 brightens and "
-                + "fattens the bands (the washed-out look), above 1 thins them into crisper threads.",
+                + "fattens the bands (the washed-out look), above 1 thins them into crisper threads." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0.1f, 6f)));
             CausticWarp    = cfg.Bind(S, "Caustic Warp", 1.2f, new ConfigDescription(
                 "Domain warp — how irregular the cells are. 0 = regular lattice (reads as a grid), higher = "
-                + "organic blobs.", new AcceptableValueRange<float>(0f, 4f)));
+                + "organic blobs." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 4f)));
 
             TurbChurn      = cfg.Bind(S, "Sediment Churn", 0.4f, new ConfigDescription(
-                "How fast the suspended sediment drifts/shimmers. 0 = static haze, higher = livelier churn.",
+                "How fast the suspended sediment drifts/shimmers. 0 = static haze, higher = livelier churn." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0f, 3f)));
             MurkColor      = cfg.Bind(S, "Murk Color", new Color(0.30f, 0.40f, 0.36f, 0.85f), new ConfigDescription(
                 "Sediment haze colour the deep bottom fades into (RGB), and its max strength (ALPHA — this is "
                 + "the master on how murky water can ever get; the old 0.35 capped every pond at a third of "
                 + "the haze no matter what Turbidity said). A green-grey reads like silty fresh water; raise "
-                + "Alpha for murkier, lower for clearer.", null));
+                + "Alpha for murkier, lower for clearer." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), null));
 
             // Downhill FLOW (rivers): the gen-water sheet bakes the surface's
             // downhill gradient per vertex; the shader flow-maps its ripple
@@ -163,34 +163,34 @@ namespace VerdantsAscent.Water.Core
             FlowSpeed      = cfg.Bind(S, "Flow Speed",      1.0f, new ConfigDescription(
                 "Master scale on how fast river water visibly travels downhill. The rate already scales with "
                 + "terrain slope (steep = fast, flat = crawl, ponds = still); this multiplies it. 0.5 = lazy "
-                + "rivers, 2 = racing meltwater.", new AcceptableValueRange<float>(0.1f, 4f)));
+                + "rivers, 2 = racing meltwater." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0.1f, 4f)));
             FlowTurbulence = cfg.Bind(S, "Flow Turbulence", 1.0f, new ConfigDescription(
                 "How churned the surface ripple gets on steep, fast sections (boosts the normal-map relief "
-                + "with slope). 0 = steep water stays as calm as flat water.", new AcceptableValueRange<float>(0f, 3f)));
+                + "with slope). 0 = steep water stays as calm as flat water." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 3f)));
             FlowFoam       = cfg.Bind(S, "Flow Foam",       0.5f, new ConfigDescription(
-                "White-water foam on steep, fast sections — rapids churn white even without waves. 0 = off.",
+                "White-water foam on steep, fast sections — rapids churn white even without waves. 0 = off." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0f, 2f)));
             FlowFoamAdvect = cfg.Bind(S, "Flow Foam Drift", 1f, new ConfigDescription(
                 "Makes the foam/whitecaps visibly TRAVEL downstream with the current (vanilla flowing-water "
                 + "look) instead of sitting still or drifting on the wind. 0 = static/wind foam (old look); "
-                + "1 = full downstream drift at the flow speed. The single biggest 'reads as flowing' cue.",
+                + "1 = full downstream drift at the flow speed. The single biggest 'reads as flowing' cue." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0f, 1f)));
             FlowWaveAmp    = cfg.Bind(S, "Roll Height", 0.12f, new ConfigDescription(
                 "How high the river surface actually ROLLS — travelling swells that move downstream along the "
                 + "flow and heave the mesh (not static bumps). Scales with flow speed, so ponds stay glassy and "
                 + "fast water heaves. 0 = flat sheet. Visual only (boats float on the flat level), so keep it "
-                + "modest.", new AcceptableValueRange<float>(0f, 0.6f)));
+                + "modest." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0f, 0.6f)));
             FlowWaveLength = cfg.Bind(S, "Roll Length", 6f, new ConfigDescription(
                 "Wavelength (metres) of the rolling swells. Shorter = tighter, choppier rolls; longer = broad "
-                + "lazy swells.", new AcceptableValueRange<float>(2f, 20f)));
+                + "lazy swells." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(2f, 20f)));
             FlowWaveSpeed  = cfg.Bind(S, "Roll Speed", 1f, new ConfigDescription(
-                "How fast the rolls travel downstream. 0 = frozen ridges, higher = faster rolling.",
+                "How fast the rolls travel downstream. 0 = frozen ridges, higher = faster rolling." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey),
                 new AcceptableValueRange<float>(0f, 3f)));
 
             // Master surface transparency (drives the shader's
             // _FiresLiquidOpacity). Lower = the water is less opaque/glassy and
             // you see through it more. Foam/crests stay defined.
-            Opacity      = cfg.Bind(S, "Water Opacity",  0.85f, new ConfigDescription("Surface opacity — lower = more see-through, less solid sheet", new AcceptableValueRange<float>(0.1f, 1.2f)));
+            Opacity      = cfg.Bind(S, "Water Opacity",  0.85f, new ConfigDescription("Surface opacity — lower = more see-through, less solid sheet" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.LiquidKey), new AcceptableValueRange<float>(0.1f, 1.2f)));
 
             // Hot-reload — any change to our section re-skins the live pours.
             cfg.SettingChanged += (_, args) =>

@@ -205,6 +205,7 @@ namespace VerdantsAscent.Terrain.Voxel
             get
             {
                 if (s_material == null && !s_loadTried) Load();
+                if (!CurtainsOn()) return null;   // 0.2.1478 (Fire 11-18): [Shaders] Waterfall shader
                 return s_material;
             }
         }
@@ -215,9 +216,14 @@ namespace VerdantsAscent.Terrain.Voxel
             get
             {
                 if (s_material == null && !s_loadTried) Load();
+                if (!CurtainsOn()) return null;   // 0.2.1478
                 return s_materials;
             }
         }
+
+        // 0.2.1478 (Fire 11-18): falling water needs Custom/FiresWaterfall; key off or no shader = every falls builder stands down (they all
+        // skip on a null material). The bundle still loads, the mist rides on it.
+        private static bool CurtainsOn() => FatShaders.On(FatShaders.Waterfall, s_material != null, "Falling water curtains", "Custom/FiresWaterfall");
 
         // The mist shader is offered to Core's broker, so other mods (FDT's ghost) draw with the one live copy instead
         // of shipping their own; the falls take theirs from the broker too. The bundle loads once, whoever asks first.
@@ -359,6 +365,7 @@ namespace VerdantsAscent.Terrain.Voxel
             get
             {
                 if (s_material == null && !s_loadTried) Load();
+                if (!MistOn()) return null;   // 0.2.1478 (Fire 11-18): [Shaders] Waterfall mist shader
                 return s_mistMaterial;
             }
         }
@@ -368,9 +375,12 @@ namespace VerdantsAscent.Terrain.Voxel
             get
             {
                 if (s_material == null && !s_loadTried) Load();
+                if (!MistOn()) return null;   // 0.2.1478
                 return s_veilMaterial;
             }
         }
+
+        private static bool MistOn() => FatShaders.On(FatShaders.WaterfallMist, s_mistMaterial != null, "Waterfall mist", "Custom/FiresWaterfallMist");
 
         private static void LoadMist()
         {

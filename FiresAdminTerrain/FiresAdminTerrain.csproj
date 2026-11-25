@@ -49,61 +49,61 @@
         <GamePath Condition="!Exists('$(GamePath)')">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 892970', 'InstallLocation', null, RegistryView.Registry64, RegistryView.Registry32))</GamePath>
         <_SteamLibraryPath>$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\SOFTWARE\Valve\Steam', 'SteamPath', null, RegistryView.Registry32))</_SteamLibraryPath>
         <GamePath Condition="!Exists('$(GamePath)') AND '$(_SteamLibraryPath)' != ''">$(_SteamLibraryPath)\steamapps\common\Valheim</GamePath>
-        <GamePath Condition="!Exists('$(GamePath)')">C:\Program Files\Steam\steamapps\common\Valheim</GamePath>
         <GamePath Condition="!Exists('$(GamePath)')">C:\Program Files (x86)\Steam\steamapps\common\Valheim</GamePath>
       </PropertyGroup>
     </When>
   </Choose>
+  <PropertyGroup>
+    <GamePath Condition="'$(GamePath)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Valheim</GamePath>
+    <Managed>$(MSBuildProjectDirectory)\..\lib\valheim_1.0.30</Managed>   <!-- 1.0.30 game refs in-tree (Tools\Copy-GameRefs.ps1) -->
+    <ModLib Condition="'$(ModLib)' == ''">$(MSBuildProjectDirectory)\lib</ModLib>
+  </PropertyGroup>
   <ItemGroup>
     <Reference Include="0Harmony">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim dedicated server\BepInEx\core\0Harmony.dll</HintPath>
+      <HintPath>$(ModLib)\bepinex\0Harmony.dll</HintPath>
     </Reference>
     <Reference Include="assembly_guiutils">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\publicized_assemblies\assembly_guiutils_publicized.dll</HintPath>
+      <HintPath>$(Managed)\publicized_assemblies\assembly_guiutils_publicized.dll</HintPath>
     </Reference>
     <Reference Include="assembly_utils">
-      <HintPath>$(GamePath)\valheim_Data\Managed\assembly_utils.dll</HintPath>
+      <HintPath>$(Managed)\assembly_utils.dll</HintPath>
       <Private>False</Private>
       </Reference>
     <Reference Include="SoftReferenceableAssets">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\SoftReferenceableAssets.dll</HintPath>
+      <HintPath>$(Managed)\SoftReferenceableAssets.dll</HintPath>
     </Reference>
     <Reference Include="assembly_valheim">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\publicized_assemblies\assembly_valheim_publicized.dll</HintPath>
+      <HintPath>$(Managed)\publicized_assemblies\assembly_valheim_publicized.dll</HintPath>
     </Reference>
     <Reference Include="FiresUnifiedCore">
-      <HintPath>..\libs\FiresUnifiedCore.dll</HintPath>
+      <HintPath>$(ModLib)\FiresUnifiedCore\FiresUnifiedCore.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="BepInEx">
-      <HintPath>..\..\..\..\customspawnsmod\lib\BepInEx.dll</HintPath>
+      <HintPath>$(ModLib)\bepinex\BepInEx.dll</HintPath>
     </Reference>
     <Reference Include="gui_framework">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\gui_framework.dll</HintPath>
-    </Reference>
-    <Reference Include="Newtonsoft.Json">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
+      <HintPath>$(Managed)\gui_framework.dll</HintPath>
     </Reference>
     <Reference Include="Splatform, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\Splatform.dll</HintPath>
+      <HintPath>$(Managed)\Splatform.dll</HintPath>
     </Reference>
     <Reference Include="Unity.TextMeshPro, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+      <HintPath>$(Managed)\Unity.TextMeshPro.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.AnimationModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.AnimationModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.AnimationModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.AssetBundleModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\publicized_assemblies\UnityEngine.AssetBundleModule_publicized.dll</HintPath>
+      <HintPath>$(Managed)\publicized_assemblies\UnityEngine.AssetBundleModule_publicized.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.AudioModule.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
@@ -114,56 +114,52 @@
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Xml" />
     <Reference Include="UnityEngine.ClothModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.ClothModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.ClothModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.ImageConversionModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.ImageConversionModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.ImageConversionModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.IMGUIModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.InputLegacyModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.InputModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.InputModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.InputModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.ParticleSystemModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.ParticleSystemModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.PhysicsModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.AIModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.AIModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.AIModule.dll</HintPath>
 
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.TextRenderingModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.UI">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.UI.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.UIModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.UIModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestModule">
-      <HintPath>..\..\..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <HintPath>$(Managed)\UnityEngine.UnityWebRequestModule.dll</HintPath>
     </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="FiresAdminTerrain.cs" />
     <Compile Include="FatApi.cs" />
-    <Compile Include="Modules\FarForest\FarRng.cs" />
-    <Compile Include="Modules\FarForest\FarRngSelfTest.cs" />
-    <Compile Include="Modules\FarForest\FarForest.cs" />
-    <Compile Include="Modules\FarForest\FarReplay.cs" />
-    <Compile Include="Modules\FarForest\FarMatchTest.cs" />
-    <Compile Include="Modules\FarForest\FarBridge.cs" />
     <Compile Include="Modules\FarShade\FatFarShade.cs" />
+    <Compile Include="Modules\Shaders\FatShaders.cs" />
+    <Compile Include="Modules\Ring\FatRingPatches.cs" />
     <Compile Include="Modules\VoxelTerrain\FarTerrainVanilla.cs" />
     <Compile Include="Modules\FarShade\FatFarCanopy.cs" />
     <Compile Include="Modules\VoxelTerrain\ZoneReveal.cs" />
@@ -206,13 +202,12 @@
     <Compile Include="Modules\BcImport\BcImportCommands.cs" />
     <Compile Include="Modules\BcImport\BcRegenCommand.cs" />
     <Compile Include="Modules\Studio\FatStudioTerrain.cs" />
+    <Compile Include="Modules\Studio\FatStudioNotLoaded.cs" />
     <Compile Include="Modules\Studio\FatStudioLocations.cs" />
     <Compile Include="Modules\Studio\FatStudioRegion.cs" />
     <Compile Include="Modules\Studio\FatStudioPieces.cs" />
     <Compile Include="Modules\Studio\FatStudioWater.cs" />
     <Compile Include="Modules\Studio\FatStudioWaterTest.cs" />
-    <Compile Include="Modules\HeightmapSnow\FatTrailFieldTest.cs" />
-    <Compile Include="Modules\HeightmapSnow\FatZonePaintDump.cs" />
     <Compile Include="Modules\BcImport\BcNoise.cs" />
     <Compile Include="Modules\BcImport\BcWorldGen.cs" />
     <Compile Include="Modules\BcImport\FastNoiseLite.cs" />
@@ -227,6 +222,7 @@
     <Compile Include="Modules\CustomTerrain\Paint\DistantPaintCache.cs" />
     <Compile Include="Modules\CustomTerrain\Paint\DistantHeightCache.cs" />
     <Compile Include="Modules\VoxelTerrain\FatFarData.cs" />
+    <Compile Include="Modules\VoxelTerrain\FatFarGen.cs" />
     <Compile Include="Modules\CustomTerrain\Paint\FiresUnifiedPaint.cs" />
     <Compile Include="Modules\CustomTerrain\Biome\BiomeOverlayPainter.cs" />
     <Compile Include="Modules\CustomTerrain\Biome\BiomePaintPersistence.cs" />
@@ -278,6 +274,7 @@
     <Compile Include="Modules\CustomWater\Core\PlacedWaterSheets.cs" />
     <Compile Include="Modules\CustomWater\Core\PlacedWaterField.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterStateField.cs" />
+    <Compile Include="Modules\CustomWater\Core\WaterLookHost.cs" />
     <Compile Include="Modules\CustomWater\Core\IceGridClip.cs" />
     <Compile Include="Modules\CustomWater\Core\PlacedWaterSolids.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterSteam.cs" />
@@ -292,15 +289,16 @@
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidRiverController.cs" />
     <Compile Include="Modules\CustomWater\FiresWaterAuthority.cs" />
     <Compile Include="Modules\CustomWater\RavenWaterPatch.cs" />
-    <Compile Include="Modules\CustomWater\FishCheckCommand.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresLiquidConfig.cs" />
     <Compile Include="Modules\CustomWater\Volume\FiresInlandWaterConfig.cs" />
+    <Compile Include="Modules\CustomWater\Volume\InlandVanillaMatch.cs" />
     <Compile Include="Modules\CustomWater\Volume\InlandLakeProbe.cs" />
     <Compile Include="Modules\CustomWater\Volume\InlandLookConfig.cs" />
     <Compile Include="Modules\CustomWater\Volume\InlandSteam.cs" />
     <Compile Include="Modules\CustomWater\Volume\WaterVolumeSettle.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterMeshCombinerAnchor.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterOperationRPC.cs" />
+    <Compile Include="Modules\CustomWater\Core\WaterOpAck.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterRemovedDisks.cs" />
     <Compile Include="Modules\CustomWater\Ice\IceGridCheck.cs" />
     <Compile Include="Modules\CustomWater\Core\WaterPaintController.cs" />
@@ -325,7 +323,6 @@
     <Compile Include="Modules\VoxelTerrain\WaterCensus.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCavePopGuard.cs" />
     <Compile Include="Modules\VoxelTerrain\FatNoClip.cs" />
-    <Compile Include="Modules\VoxelTerrain\FarVegImpostors.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelLiquidBridge.cs" />
     <Compile Include="Modules\VoxelTerrain\DeepNorthSnowMask.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldGenBase.cs" />
@@ -469,7 +466,6 @@
     <Compile Include="Modules\ZoneMode\ZoneModeBorderWalls.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkTiers.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkMachines.cs" />
-    <Compile Include="Modules\ZoneMode\ZoneModeChunkGeneratorTest.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkGeneratorApi.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkGeneratorWindows.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkGeneratorLook.cs" />
@@ -502,10 +498,12 @@
     <Compile Include="Modules\ZoneMode\ZoneModeParkZoneFiles.cs" />
     <Compile Include="Utilities\Crc32.cs" />
     <Compile Include="Utilities\StepTimes.cs" />
+    <Compile Include="Utilities\FatTypeLookup.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeLandmarks.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeRavenHints.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeRegistryMirror.cs" />
     <Compile Include="Modules\FatVanillaHooks.cs" />
+    <Compile Include="Modules\FatTerminalCommands.cs" />
     <Compile Include="Modules\FatNetGuard.cs" />
     <Compile Include="Modules\FatInflate.cs" />
     <Compile Include="Modules\FatSoftTypes.cs" />
@@ -538,7 +536,6 @@
     <Compile Include="Modules\VoxelTerrain\FatHaloArc.cs" />
     <Compile Include="Modules\VoxelTerrain\FatLoginSpawn.cs" />
     <Compile Include="Modules\VoxelTerrain\FatHaloSky.cs" />
-    <Compile Include="Modules\VoxelTerrain\FatHaloFarTrees.cs" />
     <Compile Include="Modules\VoxelTerrain\FatHaloWorldTree.cs" />
     <Compile Include="Modules\VoxelTerrain\BodyHold.cs" />
     <Compile Include="Modules\VoxelTerrain\FatHaloMap.cs" />
@@ -579,6 +576,11 @@
     <Compile Include="Modules\VoxelTerrain\HomesteadScanCommand.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelAnchorPrefab.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelChunkAnchor.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelAnchorGuard.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelBrushSoft.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelEditBlob.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelSmooth.cs" />
+    <Compile Include="Modules\VoxelTerrain\VoxelSeamDump.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelCaveEnv.cs" />
     <Compile Include="Modules\VoxelTerrain\GenWaterField.cs" />
     <Compile Include="Modules\VoxelTerrain\VoxelHydrology.cs" />
@@ -592,6 +594,7 @@
     <Compile Include="Modules\FatUndoFlash.cs" />
     <Compile Include="Modules\FatUndoIce.cs" />
     <Compile Include="Modules\FatUndoPour.cs" />
+    <Compile Include="Modules\FatUndoVeg.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChaosHammer.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkTools.cs" />
     <Compile Include="Modules\ZoneMode\ZoneModeChunkRemoval.cs" />
@@ -616,8 +619,8 @@
     <Compile Include="Modules\ZoneMode\BiomePaint.Holds.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Outline.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.MapMask.cs" />
-    <Compile Include="Modules\Testing\FatBlackPaintTest.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Ground.cs" />
+    <Compile Include="Modules\ZoneMode\BiomePaint.Far.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.Locations.cs" />
     <Compile Include="Modules\ZoneMode\BiomePaint.LocationPieces.cs" />
     <Compile Include="Modules\ZoneMode\FatBiomeMapTool.cs" />
@@ -631,6 +634,7 @@
     <Compile Include="Modules\VoxelTerrain\FatSuperFlatBiomeProbe.cs" />
     <Compile Include="Modules\Performance\FatPerfCensus.cs" />
     <Compile Include="Modules\Performance\FatZnetTiming.cs" />
+    <Compile Include="Modules\Performance\FatLoadClock.cs" />
     <Compile Include="Modules\Performance\TerrainCompAwakeTiming.cs" />
     <Compile Include="Modules\VoxelTerrain\FatSuperFlatGrid.cs" />
     <Compile Include="Modules\VoxelTerrain\FiresWorldRecords.cs" />
@@ -649,6 +653,7 @@
     <Compile Include="Modules\CustomWater\Ice\SeasonalWaterFreeze.cs" />
     <Compile Include="Modules\CustomWater\Ice\VanillaIce.cs" />
     <Compile Include="Modules\CustomWater\Ice\IceField.cs" />
+    <Compile Include="Modules\CustomWater\Ice\SeasonalIce.cs" />
     <Compile Include="Modules\CustomWater\Ice\IceCoverTexture.cs" />
     <Compile Include="Modules\CustomWater\Ice\IceBreaks.cs" />
     <Compile Include="Modules\CustomWater\Ice\IceFrost.cs" />
@@ -676,6 +681,7 @@
     <Compile Include="Modules\CustomWater\Core\WaterMaterialManager.cs" />
     <Compile Include="Modules\CustomWater\River\AutoWaterGenerator.cs" />
     <Compile Include="Modules\CustomWater\River\AutoWaterPatches.cs" />
+    <Compile Include="Modules\CustomWater\River\AutoWaterBackup.cs" />
     <Compile Include="Modules\CustomWater\River\BCHeightmapWaterDetector.cs" />
     <Compile Include="Modules\CustomWater\River\CustomRiverController.cs" />
     <Compile Include="Modules\CustomWater\River\WorldGeneratorAccess.cs" />
@@ -685,7 +691,9 @@
     <Compile Include="Modules\CustomWater\Tools\WaterBrushCommands.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterShapingTools.cs" />
     <Compile Include="Modules\CustomWater\Tools\PondTool.cs" />
+    <Compile Include="Modules\CustomWater\Tools\PlacedFalls.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterToolDriver.cs" />
+    <Compile Include="Modules\CustomWater\Tools\RiverGhostPath.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterCleanupCommand.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterAtCommand.cs" />
     <Compile Include="Modules\CustomWater\Tools\WaterSheets.cs" />
@@ -710,48 +718,10 @@
     <Compile Include="Utilities\VAFatLoadSummary.cs" />
     <Compile Include="Utilities\VATileRestoreBatch.cs" />
   </ItemGroup>
-  <!--
-    Source-link block - shared utility files that live in sibling Fires-* mods.
-    Uses <Link> to expose them inside this project's tree without copying files.
-    Pattern documented in reference_source_link_pattern.md (first applied to
-    PlayerSpawnGate 2026-05-20). FAP holds the newer/better implementations.
-
-    To re-enable after FAP is on disk at the expected sibling path, uncomment.
-    Currently commented out so the initial standalone build passes without
-    pulling in FAP's transitive dependencies (VerdantsAscent.Managers types
-    that FAP's clutter touches don't all exist here yet). Will be wired up
-    in the clutter-replacement phase.
-
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\ShaderReplacement.cs">
-      <Link>SourceLinked\FAP\ShaderReplacement.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\MaterialSwapper.cs">
-      <Link>SourceLinked\FAP\MaterialSwapper.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\VAClutterRegistry.cs">
-      <Link>SourceLinked\FAP\VAClutterRegistry.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\VAClutterStandinFactory.cs">
-      <Link>SourceLinked\FAP\VAClutterStandinFactory.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\VAClutterPaintTool.cs">
-      <Link>SourceLinked\FAP\VAClutterPaintTool.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\VAClutterClearTool.cs">
-      <Link>SourceLinked\FAP\VAClutterClearTool.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\VAClutterBrushIndicator.cs">
-      <Link>SourceLinked\FAP\VAClutterBrushIndicator.cs</Link>
-    </Compile>
-    <Compile Include="..\..\..\FiresAdminPrefabs\FiresAdminPrefabs\Utilities\VAClutterShaderRepair.cs">
-      <Link>SourceLinked\FAP\VAClutterShaderRepair.cs</Link>
-    </Compile>
-  -->
   <ItemGroup>
     <EmbeddedResource Include="adminterrain" />
     <EmbeddedResource Include="fatvoxelshader" />
     <EmbeddedResource Include="fathalofar" />
-    <EmbeddedResource Include="fatimpostorgpu" />
     <EmbeddedResource Include="fatfarshade" />
     <EmbeddedResource Include="Assets\Underwater\deep_meadows.png" LogicalName="FAT.Underwater.deep_meadows.png" />
     <EmbeddedResource Include="Assets\Underwater\deep_mountain.png" LogicalName="FAT.Underwater.deep_mountain.png" />
@@ -778,12 +748,22 @@
 
   <!-- Test-only tools (in-game F5 tests and the overnight-round helpers). They are not part of the public source: a fresh
        clone builds without them, and a build that has them defines FIRES_TESTS and compiles them in. -->
-  <PropertyGroup Condition="Exists('Modules\Testing\AdminToolsTest.cs')">
+  <!-- 0.2.1505 (Fire 11-20, build switch): the tests are compiled in ONLY when the build asks for them (/p:FiresTests=true, the
+       rig / dev build) AND the Testing folder exists. Default = release: no FIRES_TESTS, no test patches (FatCircleTest's
+       Player.SetControls, the bot's Chat.OnNewChatMessage, FatWaterPersistTests ...), no test commands. -->
+  <PropertyGroup>
+    <FiresTests Condition="'$(FiresTests)' == ''">false</FiresTests>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(FiresTests)' == 'true' AND Exists('Modules\Testing\AdminToolsTest.cs')">
     <DefineConstants>$(DefineConstants);FIRES_TESTS</DefineConstants>
   </PropertyGroup>
-  <ItemGroup Condition="Exists('Modules\Testing\AdminToolsTest.cs')">
+  <ItemGroup Condition="'$(FiresTests)' == 'true' AND Exists('Modules\Testing\AdminToolsTest.cs')">
     <Compile Include="Modules\Testing\*.cs" />
     <Compile Include="Modules\VoxelTerrain\FatWetMemoCheck.cs" />
     <Compile Include="Modules\VoxelTerrain\FatShorePoses.cs" />
     <Compile Include="Modules\ZoneMode\FatContentTests.cs" />
+    <Compile Include="Modules\ZoneMode\ZoneModeChunkGeneratorTest.cs" />   <!-- 0.2.1505 ([lead]): plain test, behind the switch -->
+    <Compile Include="Modules\HeightmapSnow\FatTrailFieldTest.cs" />   <!-- 0.2.1505 ([lead]): fat_trail_field_test, behind the switch -->
+    <Compile Include="Modules\HeightmapSnow\FatZonePaintDump.cs" />   <!-- 0.2.1505 (Fire 11-20): fat_zone_paint_dump, test-build only -->
+    <Compile Include="Modules\CustomWater\FishCheckCommand.cs" />   <!-- 0.2.1505 (Fire 11-20): va_fish_check / va_fish_spawn, test-build only (3 F5 tests use it) -->
   </ItemGroup></Project>

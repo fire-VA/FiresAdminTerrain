@@ -56,6 +56,8 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             if (s_failed || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
             if (!active || Mathf.Abs(dir.y) < 0.999f) return;   // the full vertical ring only (HaloFlat)
+            // 0.2.1478 (Fire 11-18): the far ring needs its shader; [Shaders] Far ring shader off, or no shader = stand down (no CPU path).
+            if (!FatShaders.On(FatShaders.FarRing, FarShader != null, "Far ring (halo worlds)", "Custom/FiresHaloFar")) return;
             var cam = Camera.main;
             if (cam == null) return;
             try
@@ -70,34 +72,11 @@ namespace VerdantsAscent.Terrain.Voxel
                     s_nextLight = Time.unscaledTime + LightEvery;
                     s_tint = DayTint();
                 }
-                if (Gpu)
-                {
-                    // phase 2: the GPU squeezes; only the far-clip target and the light/fog globals change.
-                    s_mat.SetFloat("_FarTarget", cam.farClipPlane * FarShare);
-                    if (lightDue) PushLight();
-                    // 0.2.1047 phase 3: the far tree silhouettes (same shader, own meshes)
-                    FatHaloFarTrees.Tick(ringKey, cam, origin, radius + thickness * 0.5f, halfLength, cam.farClipPlane * FarShare);
-                }
-                else if (lightDue || (c - s_lastCam).sqrMagnitude > MoveSq || float.IsNaN(s_lastCam.x))
-                {
-                    s_lastCam = c;
-                    float far = cam.farClipPlane * FarShare;
-                    Color fog = RenderSettings.fog ? RenderSettings.fogColor : Ground;
-                    Color near = s_map != null ? s_tint : Ground;
-                    for (int i = 0; i < s_world.Length; i++)
-                    {
-                        Vector3 v0 = s_world[i] - c;
-                        float d0 = v0.magnitude;
-                        Vector3 v = v0 + s_out[i] * Mathf.Max(MinGap, GapPerMetre * d0);   // behind the real shell
-                        float d = v.magnitude;
-                        float k = d <= NearKeep || d < 1e-3f ? 1f : Compress(d, far) / d;
-                        s_draw[i] = c + v * k;
-                        s_colors[i] = Color.Lerp(near, fog, Mathf.Clamp01(d / 9000f) * 0.85f);
-                    }
-                    s_mesh.vertices = s_draw;
-                    s_mesh.colors = s_colors;
-                    s_mesh.RecalculateBounds();
-                }
+                // phase 2: the GPU squeezes; only the far-clip target and the light/fog globals change.
+                // (0.2.1478: the CPU squeeze fallback is gone; without the shader the ring stands down above.)
+                s_mat.SetFloat("_FarTarget", cam.farClipPlane * FarShare);
+                if (lightDue) PushLight();
+                // 0.2.1480: the far tree silhouettes (FatHaloFarTrees, from FAT's far billboard bakes) are removed with them (Fire 11-18).
                 Graphics.DrawMesh(s_mesh, Matrix4x4.identity, s_mat, 0, cam, 0, null, false, false, false);
                 if (!s_logged && s_map != null)
                 {
@@ -365,14 +344,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 s_mat.SetFloat("_HideNear", 0f);
                 if (s_map != null) s_mat.mainTexture = s_map;
             }
-            if (s_mat == null)
-            {
-                var sh = Shader.Find("Sprites/Default");
-                if (sh == null) { s_failed = true; FiresLogger.LogWarning("[FatHalo] sky hoop off: no Sprites/Default shader"); return; }
-                s_mat = new Material(sh) { name = "FatHaloSkyHoop", renderQueue = 2450 };   // after opaque geometry: real ground wins depth
-                s_mat.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
-                if (s_map != null) s_mat.mainTexture = s_map;
-            }
+            // 0.2.1478: no Sprites/Default fallback; Tick stands the ring down when Custom/FiresHaloFar is off or missing.
             FiresLogger.LogDebug($"[FatHalo] sky hoop built: {Segments} x {Rows} quads at radius {r:F0} m, uv u0 {u0:F4} step {du:F6}");
         }
     }

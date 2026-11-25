@@ -137,11 +137,11 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             if (l == null) return "?";
             if (!string.IsNullOrEmpty(l.m_prefabName)) return l.m_prefabName;
-            if (l.m_prefab.IsValid) return l.m_prefab.Name;
+            if (l.m_prefab.IsValid) return l.m_prefab.name;
             return l.m_name ?? "?";
         }
         private static bool AnyName(ZoneSystem.ZoneLocation l, HashSet<string> set)
-            => set != null && (set.Contains(LocName(l)) || (!string.IsNullOrEmpty(l.m_name) && set.Contains(l.m_name)) || (l.m_prefab.IsValid && set.Contains(l.m_prefab.Name)));
+            => set != null && (set.Contains(LocName(l)) || (!string.IsNullOrEmpty(l.m_name) && set.Contains(l.m_name)) || (l.m_prefab.IsValid && set.Contains(l.m_prefab.name)));
         private static int s_vegSkipped;
         // 0.2.1355 (Fire 11-03: "an argument to ignore safezones, so we can reset the whole deep north without worrying about anything that had been built there or explored so far"): the zone stops off. Built objects are never removed: pieces stay standing and the reset happens around them.
         private static bool s_ignoreProtect;
@@ -1154,8 +1154,8 @@ namespace VerdantsAscent.Terrain.BcImport
                 if (want == null) say($"{Command} loc: new location types: none requested (add types=a,b or newfrom=<file.yaml> to plan new types)");
                 else
                 {
-                    var loaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase); foreach (var l in zs.m_locations) if (l != null) { loaded.Add(LocName(l)); if (!string.IsNullOrEmpty(l.m_name)) loaded.Add(l.m_name); if (l.m_prefab.IsValid) loaded.Add(l.m_prefab.Name); }
-                    if (FiresLogger.DebugEnabled) { var sb2 = new StringBuilder(); int k2 = 0; foreach (var l in zs.m_locations) { if (l == null || k2++ >= 400) continue; if ((l.m_name ?? "").IndexOf("Shrine", StringComparison.OrdinalIgnoreCase) < 0 && (l.m_prefabName ?? "").IndexOf("Shrine", StringComparison.OrdinalIgnoreCase) < 0) continue; sb2.Append($"[name {l.m_name} prefabName {l.m_prefabName} prefab {(l.m_prefab.IsValid ? l.m_prefab.Name : "invalid")} enabled {l.m_enable} qty {l.m_quantity}] "); } FiresLogger.LogDebug($"[BcImport] {Command} loc: shrine-like location entries: {(sb2.Length > 0 ? sb2.ToString() : "none")}"); }
+                    var loaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase); foreach (var l in zs.m_locations) if (l != null) { loaded.Add(LocName(l)); if (!string.IsNullOrEmpty(l.m_name)) loaded.Add(l.m_name); if (l.m_prefab.IsValid) loaded.Add(l.m_prefab.name); }
+                    if (FiresLogger.DebugEnabled) { var sb2 = new StringBuilder(); int k2 = 0; foreach (var l in zs.m_locations) { if (l == null || k2++ >= 400) continue; if ((l.m_name ?? "").IndexOf("Shrine", StringComparison.OrdinalIgnoreCase) < 0 && (l.m_prefabName ?? "").IndexOf("Shrine", StringComparison.OrdinalIgnoreCase) < 0) continue; sb2.Append($"[name {l.m_name} prefabName {l.m_prefabName} prefab {(l.m_prefab.IsValid ? l.m_prefab.name : "invalid")} enabled {l.m_enable} qty {l.m_quantity}] "); } FiresLogger.LogDebug($"[BcImport] {Command} loc: shrine-like location entries: {(sb2.Length > 0 ? sb2.ToString() : "none")}"); }
                     var missing = new List<string>(); foreach (string n in want) if (!loaded.Contains(n)) missing.Add(n);
                     say($"{Command} loc: new types requested {want.Count}{(s_chainNote != null ? " from " + s_chainNote : "")}: {newTypes.Count} loaded and without instances; {missing.Count} NOT loaded by the game{(missing.Count > 0 ? " (" + string.Join(", ", missing.GetRange(0, Math.Min(8, missing.Count))) + (missing.Count > 8 ? ", ..." : "") + ") - is EWD 'Location data' on?" : "")}");
                 }

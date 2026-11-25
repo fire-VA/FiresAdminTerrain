@@ -140,8 +140,8 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // The HUD and every biome query on the ring read the same field.
-        [HarmonyPatch(typeof(WorldGenerator), nameof(WorldGenerator.GetBiome), typeof(Vector3))]
-        private static class RingBiomeQuery
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class RingBiomeQuery
         {
             [HarmonyPriority(Priority.Last)]
             private static void Postfix(Vector3 point, ref Heightmap.Biome __result)

@@ -125,8 +125,8 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         // World shutdown: the map and the patches go with the world, so the next world never files a ZDO into ring sectors.
-        [HarmonyPatch(typeof(ZNet), "OnDestroy")]
-        private static class ZNet_OnDestroy_ClearSectors
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class ZNet_OnDestroy_ClearSectors
         {
             private static void Postfix()
             {

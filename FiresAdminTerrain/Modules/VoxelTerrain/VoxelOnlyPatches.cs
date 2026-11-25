@@ -599,34 +599,50 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float s_nextReport;
         private static readonly double TicksToMicros = 1e6 / System.Diagnostics.Stopwatch.Frequency;
 
+        // 0.2.1497 ([lead] vf-pin-r1, summer town on a vanilla world: "263192 call(s)/min: cave check 0.27 µs, skyland check 0.60 µs" = ~3.8 ms/s):
+        // (1) the split timer reads the clock on 1 call in 64 (three timestamps on every call were part of what it measured); the counts stay
+        // exact, the µs per call come from the timed calls. (2) The skyland check (and the transform read it needs) runs only while the world has
+        // a skyland island or a rising skyland: IsOnZoneSkyland is false whenever FiresSkyIslands.Enabled is false (TryBottomAt's first test)
+        // and RisingAt is false with no rising disc, so the answer is the same, without the work.
+        private static long s_timedCalls;
+        private static int s_sample;
+
         private static bool Prefix(StaticPhysics __instance)
         {
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            bool result = Decide(__instance, t0);
+            bool timed = (++s_sample & 63) == 0;
+            long t0 = timed ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            bool result = Decide(__instance, t0, timed);
             s_calls++;
+            if (timed) s_timedCalls++;
             Report();
             return result;
         }
 
-        private static bool Decide(StaticPhysics __instance, long t0)
+        private static bool Decide(StaticPhysics __instance, long t0, bool timed)
         {
             bool cave = VoxelCaveContent.IsCaveContent(__instance);
-            long t1 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tCave += t1 - t0;
+            long t1 = 0L;
+            if (timed) { t1 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tCave += t1 - t0; }
             if (cave) { s_cave++; return false; }
             // A prop dressed onto a skyland never falls or pushes up at all. Vanilla measures the ground it should sit on
             // with ZoneSystem.GetGroundHeight (GetSolidHeight only when m_checkSolids, which these rocks do not set), and
             // that is the heightmap 150 m below: every rock and stone dropped out of the sky once its area loaded. It
             // keeps the height the dressing placed it at, and so does anything under a skyland the server has announced
             // but whose island set has not reached this client yet.
-            Vector3 position = __instance.transform.position;
-            bool sky = FiresSkyIslands.IsOnZoneSkyland(position) || Zones.ZoneModeSkylands.RisingAt(position);
-            long t2 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tSky += t2 - t1;
-            if (sky) { s_sky++; return false; }
+            long t2 = t1;
+            if (FiresSkyIslands.Enabled || Zones.ZoneModeSkylands.AnyRising)   // 0.2.1497
+            {
+                Vector3 position = __instance.transform.position;
+                bool sky = FiresSkyIslands.IsOnZoneSkyland(position) || Zones.ZoneModeSkylands.RisingAt(position);
+                if (timed) { t2 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tSky += t2 - t1; }
+                if (sky) { s_sky++; return false; }
+            }
+            else if (timed) { t2 = System.Diagnostics.Stopwatch.GetTimestamp(); s_tSky += t2 - t1; }
             if (!FiresWorldGenBase.Active) return true;
             // Solid AND settled for 3s — bounce reports persisted with the
             // bare solid gate; the settle window outlasts collider bake races.
-            bool solid = VoxelZoneStreamer.IsZoneSolidFor(ZoneSystem.GetZone(position), 3f);
-            s_tZone += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
+            bool solid = VoxelZoneStreamer.IsZoneSolidFor(ZoneSystem.GetZone(__instance.transform.position), 3f);
+            if (timed) s_tZone += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
             if (!solid) s_waiting++;
             return solid;
         }
@@ -637,15 +653,17 @@ namespace VerdantsAscent.Terrain.Voxel
             if (now < s_nextReport) return;
             bool first = s_nextReport == 0f;
             s_nextReport = now + 60f;
-            if (!first && s_calls > 0)
+            if (!first && s_calls > 0 && s_timedCalls > 0)
             {
-                double per = TicksToMicros / s_calls;
+                double per = TicksToMicros / s_timedCalls;
+                bool skyPossible = FiresSkyIslands.Enabled || Zones.ZoneModeSkylands.AnyRising;
                 FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                    "[FatStaticPhysics] {0} call(s)/min: cave check {1:0.00} µs, skyland check {2:0.00} µs, zone-solid check {3:0.00} µs per call; " +
-                    "{4} held as cave content, {5} held on a skyland, {6} waiting for solid ground, the rest released",
-                    s_calls, s_tCave * per, s_tSky * per, s_tZone * per, s_cave, s_sky, s_waiting));
+                    "[FatStaticPhysics] {0} call(s)/min: cave check {1:0.00} µs, skyland check {2:0.00} µs, zone-solid check {3:0.00} µs per call ({7} timed, 1 in 64); " +
+                    "{4} held as cave content, {5} held on a skyland, {6} waiting for solid ground, the rest released; skyland check {8} (0.2.1497)",
+                    s_calls, s_tCave * per, s_tSky * per, s_tZone * per, s_cave, s_sky, s_waiting, s_timedCalls,
+                    skyPossible ? "runs (islands or a rising skyland)" : "skipped: no skyland on this world"));
             }
-            s_tCave = s_tSky = s_tZone = s_calls = s_cave = s_sky = s_waiting = 0;
+            s_tCave = s_tSky = s_tZone = s_calls = s_cave = s_sky = s_waiting = s_timedCalls = 0;
         }
     }
 
@@ -1147,6 +1165,7 @@ namespace VerdantsAscent.Terrain.Voxel
     {
         internal static bool Single(Vector3 p, ref float __result)
         {
+            if (DediVoxelRead.ReadsGround(p, out float dy)) { __result = dy; return false; }   // 0.2.1471: a dedi in a zone with voxel edit records
             if (!VoxelOnlyMode.Active) return true;
             if (!VoxelGroundTruth.Sample(p, out float y)) return true;
             __result = y;
@@ -1155,6 +1174,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static bool WithOut(Vector3 p, ref float height, ref bool __result)
         {
+            if (DediVoxelRead.ReadsGround(p, out float dy)) { height = dy; __result = true; return false; }   // 0.2.1471
             if (!VoxelOnlyMode.Active) return true;
             if (!VoxelGroundTruth.Sample(p, out float y)) return true;
             height = y;

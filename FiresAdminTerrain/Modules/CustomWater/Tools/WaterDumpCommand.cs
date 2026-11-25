@@ -28,7 +28,7 @@ namespace VerdantsAscent.Water.Core
     ///
     /// Output goes to:
     ///   1. Console terminal (truncated to 50 lines so it stays readable)
-    ///   2. Full report file: BepInEx/config/FiresAdminTerrain/water_dump.txt
+    ///   2. Full report file: BepInEx/cache/FiresAdminTerrain/water_dump.txt (FiresCachePaths; [ghost] fixed the stale config path)
     /// </summary>
     public static class WaterDumpCommand
     {
@@ -46,7 +46,7 @@ namespace VerdantsAscent.Water.Core
             new Terminal.ConsoleCommand(
                 CommandName,
                 "Dumps every water-like renderer/volume/object in the scene, sorted by Y. " +
-                "Full report written to BepInEx/config/FiresAdminTerrain/water_dump.txt",
+                "Full report written to BepInEx/cache/FiresAdminTerrain/water_dump.txt",
                 args => Execute(args), isCheat: false);
         }
 

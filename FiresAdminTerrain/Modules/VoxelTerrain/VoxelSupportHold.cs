@@ -55,6 +55,9 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (!__runOriginal) return false;   // 0.2.1410: an earlier prefix already skipped this pass; nothing to hold
                 if (__instance == null) return true;
+                // 0.2.1500 ([lead] perf audit row 19): with the streamer off GroundNotReady is false for every piece; with nothing held or released
+                // the remove and the summary do nothing either. So answer before GetInstanceID and the transform read, on every piece's support pass.
+                if (!FiresVoxelConfig.StreamerRuns && s_held.Count == 0 && s_released == 0) return true;
                 int id = __instance.GetInstanceID();
                 bool hold = GroundNotReady(__instance.transform.position, id);
                 if (hold)

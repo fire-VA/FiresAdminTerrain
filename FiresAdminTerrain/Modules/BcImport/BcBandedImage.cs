@@ -98,14 +98,36 @@ namespace VerdantsAscent.Terrain.BcImport
 
         // Every band decodes on its own thread, so `onRow` runs for several rows at once, each call with its own row (row 0
         // is the image's top). The buffer is reused after the call: copy out what is needed.
-        internal static void DecodeRows(byte[] data, Layout layout, Action<int, byte[]> onRow) =>
-            Parallel.For(0, layout.Bands, band => DecodeBand(data, layout, band, onRow));
+        internal static void DecodeRows(byte[] data, Layout layout, Action<int, byte[]> onRow)
+        {
+            Interlocked.Increment(ref s_decodesRunning);
+            try
+            {
+                Parallel.For(0, layout.Bands, band =>
+                {
+                    if (!s_pool.TryTake(out BandScratch scratch)) scratch = new BandScratch();
+                    try { DecodeBand(data, layout, band, onRow, scratch); }
+                    finally { s_pool.Add(scratch); }
+                });
+            }
+            finally
+            {
+                // The last decode running empties the pool, so nothing outlives the world's load.
+                if (Interlocked.Decrement(ref s_decodesRunning) == 0) while (s_pool.TryTake(out _)) { }
+            }
+        }
 
-        // Each worker thread keeps its band buffers (about 2 MB for a 16-bit 8192² map) instead of allocating them per band:
-        // a world's decode was about 450 MB of short-lived arrays for the game's garbage collector.
-        [ThreadStatic] private static byte[] t_filtered;
-        [ThreadStatic] private static byte[] t_above;
-        [ThreadStatic] private static byte[] t_row;
+        // Band buffers are reused across bands (about 2 MB for a 16-bit 8192² map) instead of allocated per band: a world's decode
+        // was about 450 MB of short-lived arrays for the game's garbage collector.
+        // 0.2.1487 ([lead] RAM audit 11-19): they were [ThreadStatic], so every thread-pool worker that decoded a band kept its
+        // ~2.1 MB set for the life of the process (pool threads never exit; Core's census counted only the main thread's copy,
+        // "BcBandedImage.t_filtered 2097280", on client and dedi). Now a shared pool hands one set to each band being decoded and
+        // is emptied when the last DecodeRows finishes: the same reuse during the load, nothing kept after it. A set is only
+        // ever used by one band at a time (taken before, returned after), and the pool never holds more sets than bands that
+        // ran at once.
+        private sealed class BandScratch { public byte[] Filtered, Above, Row; }
+        private static readonly System.Collections.Concurrent.ConcurrentBag<BandScratch> s_pool = new System.Collections.Concurrent.ConcurrentBag<BandScratch>();
+        private static int s_decodesRunning;
 
         private static byte[] Scratch(ref byte[] buffer, int length)
         {
@@ -113,18 +135,18 @@ namespace VerdantsAscent.Terrain.BcImport
             return buffer;
         }
 
-        private static void DecodeBand(byte[] data, Layout layout, int band, Action<int, byte[]> onRow)
+        private static void DecodeBand(byte[] data, Layout layout, int band, Action<int, byte[]> onRow, BandScratch scratch)
         {
             int rowBytes = layout.RowBytes;
             int stride = rowBytes + 1;
             int first = band * layout.RowsPerBand;
             int rows = Math.Min(layout.RowsPerBand, layout.Height - first);
-            var filtered = Scratch(ref t_filtered, rows * stride);
+            var filtered = Scratch(ref scratch.Filtered, rows * stride);
             using (var inflater = FatInflate.DeflateReader(new MemoryStream(data, layout.BandStarts[band], layout.BandLengths[band], false),
                 "banded map band", rows * (long)stride))   // 0.2.1333: limit = this band's exact size
                 ReadFully(inflater, filtered, rows * stride);
-            var above = Scratch(ref t_above, rowBytes);
-            var row = Scratch(ref t_row, rowBytes);
+            var above = Scratch(ref scratch.Above, rowBytes);
+            var row = Scratch(ref scratch.Row, rowBytes);
             Array.Clear(above, 0, rowBytes);
             for (int at = 0; at < rows; at++)
             {

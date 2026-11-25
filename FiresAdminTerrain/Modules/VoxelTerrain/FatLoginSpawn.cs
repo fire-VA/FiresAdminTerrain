@@ -65,6 +65,51 @@ namespace VerdantsAscent.Terrain.Voxel
         private static bool ColliderUnder(Vector3 p, out RaycastHit hit)
             => Physics.Raycast(p + Vector3.up * 0.5f, Vector3.down, out hit, ColliderReach + 0.5f, Mask, QueryTriggerInteraction.Ignore);
 
+        // 0.2.1504 ([2ic] / [lead] 11-20): the "raised" hold may end before its 20 s ONLY when no kind of support can still appear under the saved
+        // point. Why the hold exists (history):
+        //  - 0.2.1138: voxel cave floors and sky islands, whose chunks / island set reach the peer after vanilla would spawn.
+        //  - 0.2.1430 ("raised"): a building, a platform or a logout while flying, after Fire's 26 m fall. Vanilla keeps the saved Y even with
+        //    nothing under it yet, and EBM's RespawnNet can force "area ready" before objects exist.
+        // Each way support can arrive late, and what rules it out here:
+        //  1. networked objects (built pieces, ships / carts, trees, rocks, a location's proxy and the static meshes it spawns, any mod's
+        //     networked object): every valid ZDO in the 3x3 zones around the point already has its instance. That's vanilla's own IsAreaReady rule
+        //     (ZNetScene.IsAreaReady: FindSectorObjects(zone, SimulationDistance(1, 0)) + IsPrefabZDOValid + FindInstance), re-checked here
+        //     because other mods patch IsAreaReady (EBM forces it). The ray above found no collider under the point.
+        //  2. objects this peer has not received yet: only on the server / single player, where every ZDO comes from the save; a client keeps the full wait.
+        //  3. voxel ground (caves, overhangs, edited zones) that meshes after the area is ready: no voxel chunk anywhere, not voxel-only, zone not swapped.
+        //  4. sky islands: none on this world (FiresSkyIslands.Enabled false) and the island set is in (ZoneSkylandsReady).
+        //  5. terrain raised by edits: TerrainComp clamps a level delta to +-8 m and a smooth delta to +-1 m, so the point must be more than 9.5 m above the ground.
+        // When all hold, the player lands where the 20 s timeout would have put them (on the ground), just without the wait. Checked at most every 0.5 s.
+        private const float TerrainEditReach = 9.5f, NothingCheckEvery = 0.5f;
+        private static float s_nothingCheckAt;
+        private static readonly System.Collections.Generic.List<ZDO> s_nearZdos = new System.Collections.Generic.List<ZDO>();
+
+        private static bool NothingCanArrive(Vector3 saved, float ground, out string why)
+        {
+            why = null;
+            if (Time.unscaledTime < s_nothingCheckAt) return false;
+            s_nothingCheckAt = Time.unscaledTime + NothingCheckEvery;
+            if (ZNet.instance == null || !ZNet.instance.IsServer() || ZDOMan.instance == null || ZNetScene.instance == null || ZoneSystem.instance == null) return false;   // 2
+            if (FiresSkyIslands.Enabled || !FiresSkyIslands.ZoneSkylandsReady) return false;   // 4
+            Vector2s zone = ZoneSystem.GetZone(saved);
+            if (VoxelWorld.ChunkCount > 0 || VoxelOnlyMode.Active || VoxelZoneStreamer.ZoneSwapped(zone)) return false;   // 3
+            if (float.IsNaN(ground) || saved.y - ground <= TerrainEditReach) return false;   // 5
+            if (!ZoneSystem.instance.IsZoneLoaded(zone)) return false;   // 1
+            s_nearZdos.Clear();
+            ZDOMan.instance.FindSectorObjects(zone, new SimulationDistance(1, 0), s_nearZdos);
+            int objects = 0;
+            foreach (var zdo in s_nearZdos)
+            {
+                int prefab = zdo.GetPrefab();
+                if (prefab == 0 || ZNetScene.instance.GetPrefab(prefab) == null) continue;   // vanilla IsPrefabZDOValid
+                if (ZNetScene.instance.FindInstance(zdo) == null) return false;   // 1: an object that can still appear
+                objects++;
+            }
+            why = $"host / single player; all {objects} object(s) in the 3x3 zones exist and none is under the point; no voxel ground; no sky islands; "
+                + $"{saved.y - ground:0.0} m above the ground > {TerrainEditReach:0.0} m terrain-edit reach";
+            return true;
+        }
+
         [HarmonyLib.HarmonyPatch(typeof(Game), "FindSpawnPoint")]
         private static class Game_FindSpawnPoint_Login
         {
@@ -130,14 +175,19 @@ namespace VerdantsAscent.Terrain.Voxel
                 {
                     Vector3 saved = logout;
                     bool support = ColliderUnder(saved, out RaycastHit sup);
-                    if (!support && !timedOut) return false;   // the piece / platform under the saved point is not there yet
+                    // 0.2.1504 ([2ic] / [lead] 11-20: every rig load leg waited the full 20 s here for a logout point 16.7 m up over nothing): release at once
+                    // when nothing can still arrive under the saved point (NothingCanArrive: every way support can appear late is ruled out). Otherwise wait as before.
+                    string nothingWhy = null;
+                    if (!support && !timedOut && !NothingCanArrive(saved, s_rawGround, out nothingWhy)) return false;   // the piece / platform under the saved point is not there yet
                     ___m_playerProfile.ClearLoguoutPoint();
                     point = support ? new Vector3(saved.x, sup.point.y + 0.25f, saved.z) : new Vector3(saved.x, s_rawGround + 0.25f, saved.z);
                     usedLogoutPoint = true; __result = true;
                     s_restored = point; s_restoredByUs = true; s_waitSince = -1f;
                     FiresLogger.LogInfo(support
-                        ? $"[Spawn] restored at ({point.x:0.0},{point.y:0.0},{point.z:0.0}) on a structure {logout.y - s_rawGround:0.0} m above the ground; held {waited:0.0} s for the collider under it"
-                        : $"[Spawn] restored at ({point.x:0.0},{point.y:0.0},{point.z:0.0}) ON THE GROUND: the saved point was {logout.y - s_rawGround:0.0} m up with nothing under it after {Timeout:0} s (a building not loaded, or a logout while flying); not dropped");
+                        ? $"[Spawn] restored at ({point.x:0.0},{point.y:0.0},{point.z:0.0}) on a structure {logout.y - s_rawGround:0.0} m above the ground; held {waited:0.0} s for the collider under it (hold ended: support found)"
+                        : nothingWhy != null
+                            ? $"[Spawn] restored at ({point.x:0.0},{point.y:0.0},{point.z:0.0}) ON THE GROUND: the saved point was {logout.y - s_rawGround:0.0} m up with nothing under it; hold ended after {waited:0.0} s: nothing can arrive ({nothingWhy}) (0.2.1504)"
+                            : $"[Spawn] restored at ({point.x:0.0},{point.y:0.0},{point.z:0.0}) ON THE GROUND: the saved point was {logout.y - s_rawGround:0.0} m up with nothing under it after {Timeout:0} s (a building not loaded, or a logout while flying); not dropped (hold ended: timeout)");
                     return false;
                 }
 
@@ -192,6 +242,7 @@ namespace VerdantsAscent.Terrain.Voxel
             private static void Postfix(Player __instance)
             {
                 if (__instance != Player.m_localPlayer || s_spawnedAt != -2f) return;
+                global::VerdantsAscent.Terrain.Performance.FatLoadClock.EndWorld();   // 0.2.1498: FAT's measured load contribution, once
                 s_spawnedAt = Time.unscaledTime;
                 s_lastPos = __instance.transform.position; s_maxDrop = 0f;
                 if (s_restoredByUs) StartHold(__instance);

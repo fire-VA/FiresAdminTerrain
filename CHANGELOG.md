@@ -1,3 +1,12 @@
+## 0.2.1520
+Requires Valheim 1.0.30 or newer.
+- Works with Valheim 1.0.30.
+- The optional FAT far forest is removed; far trees come from Fires Easy Bake Meshes if installed. FAT still draws its own far ground, and skips it only while Fires Easy Bake Meshes draws the distance.
+- Fixed snow seams along chunk borders on HD ground.
+- Logging in no longer leaves you waiting in the air when nothing can load under you.
+- The New World panel is easier to read.
+- Faster re-colouring after biome paint changes, and less winter work when no snow is lying.
+
 ## 0.2.1452
 
 ### New

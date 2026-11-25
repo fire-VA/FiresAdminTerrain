@@ -266,7 +266,22 @@ namespace VerdantsAscent.Terrain.BcImport
         // This cost a world: the cloned ButtonYes still carried FejdStartup.OnButtonRemoveWorldYes, so every
         // "Clone and convert" click also ran World.RemoveWorld -> SaveSystem.Delete on the selected world and
         // deleted its .db and .fwl. Persistent calls can only be switched off one by one, by index.
-        private static void Silence(UnityEventBase raised)
+        // 0.2.1510 ([saddles], [2ic] review: one method): the vanilla public-server toggle clone, shared with
+        // FiresNewWorldOptions.Check. Scene listeners silenced, off, interactable, gamepad hint removed. Null if vanilla's is missing.
+        internal static Toggle CloneVanillaToggle(FejdStartup fejd, Transform parent)
+        {
+            if (fejd == null || fejd.m_publicServerToggle == null) return null;
+            var toggle = Instantiate(fejd.m_publicServerToggle.gameObject, parent).GetComponent<Toggle>();
+            Silence(toggle.onValueChanged);
+            toggle.onValueChanged.RemoveAllListeners();
+            toggle.isOn = false;
+            toggle.interactable = true;
+            var hint = toggle.transform.Find(GamepadHintName);
+            if (hint != null) Destroy(hint.gameObject);
+            return toggle;
+        }
+
+        internal static void Silence(UnityEventBase raised)   // 0.2.1510: internal (was private), one copy for FAT
         {
             if (raised == null) return;
             for (int index = 0; index < raised.GetPersistentEventCount(); index++)
@@ -334,14 +349,8 @@ namespace VerdantsAscent.Terrain.BcImport
 
         private Toggle CloneToggle(FejdStartup fejd, RectTransform dialog, string caption, float y, float x, float width)
         {
-            if (fejd.m_publicServerToggle == null) return null;
-            var toggle = Instantiate(fejd.m_publicServerToggle.gameObject, dialog).GetComponent<Toggle>();
-            Silence(toggle.onValueChanged);
-            toggle.onValueChanged.RemoveAllListeners();
-            toggle.isOn = false;
-            toggle.interactable = true;
-            var hint = toggle.transform.Find(GamepadHintName);
-            if (hint != null) Destroy(hint.gameObject);
+            var toggle = CloneVanillaToggle(fejd, dialog);
+            if (toggle == null) return null;
             var label = toggle.GetComponentInChildren<TMP_Text>(true);
             if (label != null) label.text = caption;
             Place((RectTransform)toggle.transform, x, y, width, RowHeight);

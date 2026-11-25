@@ -35,6 +35,8 @@ namespace VerdantsAscent
         // "peak used N MB after <step>", or "" without TrackHeap.
         internal string PeakSummary => TrackHeap && _peakStep != null ? $"peak used {_peakUsed / 1048576L:N0} MB after '{_peakStep}'" : "";
 
+        internal long TotalMs => _clock.ElapsedMilliseconds;   // 0.2.1498: FatLoadClock world-entry steps
+
         public override string ToString() => string.Join(", ", _laps.ToArray());
     }
 }

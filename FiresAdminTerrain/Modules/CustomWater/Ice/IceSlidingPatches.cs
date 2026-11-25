@@ -45,6 +45,8 @@ namespace VerdantsAscent.Water.Core
         {
             "ice1", "ice_floor", "StandaloneIce", "ice1(Clone)", "ice_floor(Clone)", "StandaloneIce(Clone)"
         };
+        private static readonly int s_ice1Hash = "ice1".GetStableHashCode(), s_iceFloorHash = "ice_floor".GetStableHashCode();   // 0.2.1500
+        private static readonly Dictionary<int, bool> s_nameMatchByPrefab = new Dictionary<int, bool>();   // 0.2.1500: main thread (ZNetView.Awake)
 
         /// <summary>
         /// Patch ZNetView.Awake to detect ice1 prefabs with custom ice data.
@@ -57,25 +59,22 @@ namespace VerdantsAscent.Water.Core
         {
             if (__instance == null || __instance.GetZDO() == null) return;
 
-            // Quick name check to avoid ZDO reads on every object
-            string goName = __instance.gameObject.name;
-            bool nameMatch = false;
-            foreach (var name in s_icePrefabNames)
+            // 0.2.1500 ([lead] perf audit row 11, measured 0.48 ms/s): the name test (gameObject.name allocates, then a HashSet walk with
+            // Contains + culture StartsWith) and two GetStableHashCode calls ran on EVERY spawn. Same test, decided once per prefab: an object's
+            // name is its prefab's name + "(Clone)", so the answer is kept per ZDO prefab hash; the two ice hashes are computed once.
+            int prefabHash = __instance.GetZDO().GetPrefab();
+            if (prefabHash != s_ice1Hash && prefabHash != s_iceFloorHash)
             {
-                if (goName.Contains(name) || goName.StartsWith(name))
+                if (!s_nameMatchByPrefab.TryGetValue(prefabHash, out bool nameMatch))
                 {
-                    nameMatch = true;
-                    break;
+                    string goName = __instance.gameObject.name;
+                    nameMatch = false;
+                    foreach (var name in s_icePrefabNames)
+                        if (goName.Contains(name) || goName.StartsWith(name)) { nameMatch = true; break; }
+                    if (s_nameMatchByPrefab.Count > 4096) s_nameMatchByPrefab.Clear();
+                    s_nameMatchByPrefab[prefabHash] = nameMatch;
                 }
-            }
-
-            // Also check the prefab hash for ice1/ice_floor
-            if (!nameMatch)
-            {
-                int prefabHash = __instance.GetZDO().GetPrefab();
-                if (prefabHash != "ice1".GetStableHashCode()
-                    && prefabHash != "ice_floor".GetStableHashCode())
-                    return;
+                if (!nameMatch) return;
             }
 
             // Check for new FloatingIceController data first

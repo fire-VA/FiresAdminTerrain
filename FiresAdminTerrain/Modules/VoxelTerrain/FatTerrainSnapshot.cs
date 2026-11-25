@@ -201,7 +201,9 @@ namespace VerdantsAscent.Terrain.Voxel
         private const byte PreCampInline = 0x50, PreCampRef = 0x52;   // 'P', 'R'
         private const int PreCampRefOver = 16 * 1024;
         private const float PreCampMargin = 2f;
+#if FIRES_TESTS   // 0.2.1506: only fat_precamp_check (test builds) reads it
         private static byte[] s_lastRestored;   // for fat_precamp_check
+#endif
 
         public static byte[] CapturePreCamp(Vector3 centre, float radius)
         {
@@ -288,8 +290,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
                 int comps = Commit(touched, new Vector3(ox, cy, oz), r);
                 VoxelBrushDrag.ScheduleBorderHeal(ox, oz, r + 2f, r + 2f, cy - 24f, cy + 24f, "camp pre-camp restore");
+#if FIRES_TESTS
                 s_lastRestored = blob;
-                return PcSay(string.Format(CultureInfo.InvariantCulture, "ok: pre-camp restore at ({0},{1}) r {2:0.0}: {3} vertex(es) written exact, {4} TerrainComp(s) saved{5}; border heal scheduled; prove it with fat_precamp_check after the rebuild",
+#endif
+                return PcSay(string.Format(CultureInfo.InvariantCulture, "ok: pre-camp restore at ({0},{1}) r {2:0.0}: {3} vertex(es) written exact, {4} TerrainComp(s) saved{5}; border heal scheduled; test builds only: fat_precamp_check proves it after the rebuild",
                     ox, oz, r, written, comps, unread > 0 ? $", {unread} with no loaded heightmap (NOT restored)" : ""));
             }
             catch (Exception ex) { return PcSay($"fail: {ex.GetType().Name}: {ex.Message}"); }
@@ -428,6 +432,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
 
+#if FIRES_TESTS   // 0.2.1505 (Fire 11-20): fat_precamp_check is test-build only (csproj FiresTests switch)
         // `fat_precamp_check [tol=0.02]`: after the last RestorePreCamp's rebuild, compare each restored vertex's heightmap height,
         // voxel surface and paint with the capture. 0 compared points = FAIL.
         internal static void RegisterPreCampCheck()
@@ -478,6 +483,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return string.Format(CultureInfo.InvariantCulture, "{0} fat_precamp_check {1}: heightmap {2} compared, {3} over {4:0.000} m (max {5:0.000}); voxel surface {6} compared, {7} over (p95 {8:0.000}, max {9:0.000} m); paint {10} compared, {11} differ{12}",
                 Tag, pass ? "PASS" : "FAIL", cmpH, badH, tol, maxH, cmpV, badV, p95, maxV, cmpH, badP, cmpH == 0 || cmpV == 0 ? " (0 compared = FAIL)" : "");
         }
+#endif
 
         // ── the TerrainComp layer ─────────────────────────────────────────────────────────────────────────────────────
         private static int Quarter(float yaw) => ((Mathf.RoundToInt(yaw / 90f) % 4) + 4) % 4;
@@ -601,12 +607,14 @@ namespace VerdantsAscent.Terrain.Voxel
         // a chunk the Restore returned to pristine could drop and come back between the two. v3 never writes brush edits, so the
         // clear now runs only where a brush edit actually exists in the footprint (an old v1/v2 site): no longer from Apply, only from the admin command fat_camp_residue_clear (ran on every
         // Apply before, and the wrapped world has anchors in nearly every column, so a "has edits" test could not narrow it).
+#if FIRES_TESTS   // 0.2.1505: only fat_camp_residue_clear (test-build only) calls this
         private static void ClearResidue(Vector3 at, float radius)
         {
             FiresLogger.LogDebug(string.Format(CultureInfo.InvariantCulture, "{0} clearing old voxel-brush edits in the footprint at ({1:0},{2:0}) r {3:0}", Tag, at.x, at.z, radius + 1f));
             try { VoxelWorld.ApplyBrush(new Vector3(at.x, at.y, at.z), radius + 1f, ResidueHeight, VoxelBrushShape.Cylinder, VoxelBrushMode.Restore); }
             catch (Exception ex) { FiresLogger.LogWarning($"{Tag} voxel residue clear failed: {ex.Message}"); }
         }
+#endif
 
         private static string Report(string verb, Vector3 at, float yaw, int written, int exact, int unread, int comps)
         {
@@ -616,6 +624,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return line;
         }
 
+#if FIRES_TESTS   // 0.2.1505 (Fire 11-20): fat_camp_residue_clear + fat_snapshot_test are test-build only; Capture / Stamp / Apply above stay
         // `fat_camp_residue_clear <x> <z> <radius>` (admin): the one-time clear of the voxel-brush edits an early camp
         // snapshot left at a site (floating slabs, holes, ground the tools cannot level). The ground there falls back to the
         // TerrainComp layer and rebuilds once.
@@ -650,5 +659,6 @@ namespace VerdantsAscent.Terrain.Voxel
                     FiresLogger.LogInfo(line); args.Context?.AddString(line);
                 });
         }
+#endif
     }
 }

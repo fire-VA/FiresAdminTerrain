@@ -186,6 +186,8 @@ namespace VerdantsAscent.Water.Tools
                 s_active = this; _drawnFrame = Time.frameCount;
                 ChainKeys();
                 RiverChainView.Draw(Lines, _chain, _radii, s.HitGround, s.Radius);
+                // [ghost] (rivers diff R1): the river this chain WOULD carve, from the points to the crosshair (a dry run, nothing dug)
+                RiverGhostPath.Draw(Lines, _chain, _radii, s.HitGround, s.Radius, s.Offset);
             }
 
             // The press waits: a release with no drag is a chain click (End), a drag carves from the press point on (Dab).

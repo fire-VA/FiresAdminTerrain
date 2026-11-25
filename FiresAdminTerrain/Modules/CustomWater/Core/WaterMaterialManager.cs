@@ -988,6 +988,17 @@ namespace VerdantsAscent.Water.Core
         }
 
         /// <summary>
+        /// 0.2.1455 (water look hand-off): true for FAT's own non-water liquid materials (tar, ice, lava, snow, boiling, freezing).
+        /// Compares the cached slots only (no capture, no scene search). WaterLookHost never offers these to a look mod.
+        /// </summary>
+        internal static bool IsNonWaterLiquid(Material m)
+        {
+            if (m == null) return false;
+            return m == s_tarMaterial || m == s_iceMaterial || m == s_lavaMaterial || m == s_snowMaterial
+                || m == s_boilingMaterial || m == s_freezingMaterial;
+        }
+
+        /// <summary>
         /// Forces re-capture of materials. Call after world load if initial capture failed.
         /// </summary>
         public static void RefreshMaterials()

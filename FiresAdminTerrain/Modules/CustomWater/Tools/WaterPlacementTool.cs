@@ -142,7 +142,22 @@ namespace VerdantsAscent.Water.Tools
         /// - depth=D : Max depth below surface
         /// - tar : Use tar instead of water
         /// </summary>
-        private static bool PlaceWater(Terminal.ConsoleEventArgs args)
+        private static bool PlaceWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo WaterPlacement_Undo + IceWaterCommands_Undo (that patch order), was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginPlayerEdit("a water placement");
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return PlaceWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool PlaceWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -367,7 +382,20 @@ namespace VerdantsAscent.Water.Tools
         /// - from=X,Z,Y : Position from IH <area> expansion
         /// - circle=R : Radius from IH <area> expansion
         /// </summary>
-        private static bool MopWater(Terminal.ConsoleEventArgs args)
+        private static bool MopWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return MopWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool MopWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -466,7 +494,20 @@ namespace VerdantsAscent.Water.Tools
         /// - from=X,Z,Y : Position from IH <area> expansion
         /// - circle=R : Radius from IH <area> expansion
         /// </summary>
-        private static bool DeleteWater(Terminal.ConsoleEventArgs args)
+        private static bool DeleteWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return DeleteWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool DeleteWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -564,7 +605,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Clears all custom water in the current zone.
         /// </summary>
-        private static bool ClearZoneWater(Terminal.ConsoleEventArgs args)
+        private static bool ClearZoneWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return ClearZoneWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool ClearZoneWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -604,7 +658,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Sets the max depth of water at cursor position.
         /// </summary>
-        private static bool SetWaterDepth(Terminal.ConsoleEventArgs args)
+        private static bool SetWaterDepth(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return SetWaterDepth_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool SetWaterDepth_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -639,7 +706,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Sets the surface Y level of water at cursor position.
         /// </summary>
-        private static bool SetWaterSurface(Terminal.ConsoleEventArgs args)
+        private static bool SetWaterSurface(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return SetWaterSurface_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool SetWaterSurface_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -672,7 +752,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Converts water type between water and tar.
         /// </summary>
-        private static bool ConvertWater(Terminal.ConsoleEventArgs args)
+        private static bool ConvertWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return ConvertWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool ConvertWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -721,7 +814,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Shows information about water at cursor position.
         /// </summary>
-        private static bool WaterInfo(Terminal.ConsoleEventArgs args)
+        private static bool WaterInfo(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return WaterInfo_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool WaterInfo_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -790,7 +896,20 @@ namespace VerdantsAscent.Water.Tools
         /// Converts the combiner's liquid type to Ice, which triggers
         /// FrozenWaterController creation.
         /// </summary>
-        private static bool FreezeWater(Terminal.ConsoleEventArgs args)
+        private static bool FreezeWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return FreezeWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool FreezeWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -836,7 +955,20 @@ namespace VerdantsAscent.Water.Tools
         /// <summary>
         /// Thaws frozen ice back to water.
         /// </summary>
-        private static bool ThawWater(Terminal.ConsoleEventArgs args)
+        private static bool ThawWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return ThawWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool ThawWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -885,7 +1017,20 @@ namespace VerdantsAscent.Water.Tools
         /// - from=X,Z,Y : Position from IH area expansion
         /// - circle=R : Hole radius
         /// </summary>
-        private static bool BreakIce(Terminal.ConsoleEventArgs args)
+        private static bool BreakIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return BreakIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool BreakIce_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -1007,7 +1152,20 @@ namespace VerdantsAscent.Water.Tools
         /// - from=X,Z,Y : Position from IH area expansion
         /// - circle=R : Radius from IH area expansion
         /// </summary>
-        private static bool SmoothWater(Terminal.ConsoleEventArgs args)
+        private static bool SmoothWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return SmoothWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool SmoothWater_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -1203,7 +1361,22 @@ namespace VerdantsAscent.Water.Tools
         /// - depth=D : Max depth
         /// - First positional arg: liquid type name
         /// </summary>
-        private static bool PlaceWaterType(Terminal.ConsoleEventArgs args)
+        private static bool PlaceWaterType(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo WaterPlacement_Undo + IceWaterCommands_Undo (that patch order), was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginPlayerEdit("a water placement");
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return PlaceWaterType_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool PlaceWaterType_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)

@@ -432,7 +432,7 @@ namespace VerdantsAscent.Terrain.Zones
 
         private static bool Near(Vector3 a, Vector3 b) => ZoneModeStartSpots.FlatDistanceSquared(a, b) <= SameSpot * SameSpot;
 
-        private static string LocationName(ZoneSystem.ZoneLocation location) => location.m_prefab.Name;
+        private static string LocationName(ZoneSystem.ZoneLocation location) => location.m_prefab.name;
 
         private static bool HasIcon(ZoneSystem.ZoneLocation location) => location != null && (location.m_iconPlaced || location.m_iconAlways);
 

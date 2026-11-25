@@ -84,6 +84,7 @@ namespace VerdantsAscent.Water.Core
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_DISK_SYNC_RESPONSE, RPC_HandleDiskSyncResponse);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_CLEAR_ALL_WATER, RPC_HandleClearAllWater);
                 ZRoutedRpc.instance.Register<ZPackage>(RPC_REMOVED_LIST, RPC_HandleRemovedList);   // 0.2.1336
+                WaterOpAck.Register(ZRoutedRpc.instance);   // [ghost] rivers diff R11: server -> sender ack of each water edit
                 ZRoutedRpc.instance.m_onNewPeer = (Action<long>)Delegate.Combine(ZRoutedRpc.instance.m_onNewPeer, new Action<long>(SendRemovedList));   // 0.2.1336: the join event, once per bus
 
                 _initialized = true;
@@ -131,7 +132,14 @@ namespace VerdantsAscent.Water.Core
         /// Client applies locally for instant feedback, then sends request to server.
         /// Server validates, caches, persists, and broadcasts confirmed to all clients.
         /// </summary>
-        private static int RequestCreateWaterInternal(WaterDisk disk)
+        private static int RequestCreateWaterInternal(WaterDisk disk)   // 0.2.1502: FatUndo WaterCreateInternal_Undo, was a Harmony patch on this FAT method
+        {
+            var __r = RequestCreateWaterInternal_Body(disk);
+            global::VerdantsAscent.Terrain.FatUndo.DiskMade(__r, disk, false);
+            return __r;
+        }
+
+        private static int RequestCreateWaterInternal_Body(WaterDisk disk)
         {
             int stableHash = disk.StableHash;
             WaterRemovedDisks.ForgetLocal(stableHash);   // 0.2.1336: an undo re-lays a removed hash
@@ -155,6 +163,7 @@ namespace VerdantsAscent.Water.Core
             else
             {
                 // Send to server only (NOT Everybody)
+                WaterOpAck.Track(WaterOpAck.Create, stableHash, disk.Position);   // [ghost] R11
                 ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_CREATE_WATER, pkg);
             }
 
@@ -167,7 +176,14 @@ namespace VerdantsAscent.Water.Core
         /// so the correct material/behavior is used from the first frame - no "flash of water then swap".
         /// </summary>
         /// <returns>The stable hash of the created disk</returns>
-        public static int RequestCreateWaterWithCustomType(Vector3 position, WaterDisk disk, CustomLiquidType customType)
+        public static int RequestCreateWaterWithCustomType(Vector3 position, WaterDisk disk, CustomLiquidType customType)   // 0.2.1502: FatUndo WaterCreateCustom_Undo, was a Harmony patch on this FAT method
+        {
+            var __r = RequestCreateWaterWithCustomType_Body(position, disk, customType);
+            global::VerdantsAscent.Terrain.FatUndo.DiskMade(__r, disk, true);
+            return __r;
+        }
+
+        private static int RequestCreateWaterWithCustomType_Body(Vector3 position, WaterDisk disk, CustomLiquidType customType)
         {
             Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
@@ -200,6 +216,7 @@ namespace VerdantsAscent.Water.Core
             }
             else
             {
+                WaterOpAck.Track(WaterOpAck.Create, stableHash, disk.Position);   // [ghost] R11
                 ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_CREATE_WATER, pkg);
             }
 
@@ -211,6 +228,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void RequestRemoveWater(int stableHash)
         {
+            global::VerdantsAscent.Terrain.FatUndo.WaterRemoveBefore(stableHash);   // 0.2.1502: FatUndo WaterRemove_Undo, was a Harmony patch on this FAT method
             Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // 0.2.1336: where the disk is, so the server only opens the anchors whose bounds hold it (null = this peer does not hold it)
@@ -230,6 +248,7 @@ namespace VerdantsAscent.Water.Core
                 pkg.Write(GetLocalPlayerId());
                 pkg.Write(at.HasValue);   // 0.2.1336 add-only
                 if (at.HasValue) pkg.Write(at.Value);
+                WaterOpAck.Track(WaterOpAck.Remove, stableHash, at ?? (Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : Vector3.zero));   // [ghost] R11
                 ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_REMOVE_WATER, pkg);
             }
         }
@@ -319,6 +338,7 @@ namespace VerdantsAscent.Water.Core
                 pkg.Write(newSurfaceY.HasValue);
                 if (newSurfaceY.HasValue) pkg.Write(newSurfaceY.Value);
                 pkg.Write(GetLocalPlayerId());
+                WaterOpAck.Track(WaterOpAck.Modify, stableHash, PositionOfDisk(stableHash) ?? (Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : Vector3.zero));   // [ghost] R11
                 ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_MODIFY_WATER, pkg);
             }
         }
@@ -329,6 +349,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public static void RequestClearZoneWater(Vector3 center, float radius)
         {
+            global::VerdantsAscent.Terrain.FatUndo.WaterClearZoneBefore(center, radius);   // 0.2.1502: FatUndo WaterClearZone_Undo, was a Harmony patch on this FAT method
             Initialize();   // cheap; re-registers on a new ZRoutedRpc
 
             // Apply locally first for instant feedback
@@ -344,6 +365,7 @@ namespace VerdantsAscent.Water.Core
                 pkg.Write(center);
                 pkg.Write(radius);
                 pkg.Write(GetLocalPlayerId());
+                WaterOpAck.Track(WaterOpAck.ClearZone, WaterOpAck.ClearZoneHash(center, radius), center);   // [ghost] R11
                 ZRoutedRpc.instance.InvokeRoutedRPC(GetServerPeerId(), RPC_CLEAR_ZONE_WATER, pkg);
             }
         }
@@ -374,19 +396,24 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleCreateWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
-            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "create"); return; }
-
+            // [ghost] R11: every outcome is acked to the sender (WaterOpAck). Authorise FIRST, parse second ([worldgen]): a refusal is acked
+            // with hash 0 (the client clears its oldest pending edit of that kind), so a non-admin's bytes are never read.
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "create"); WaterOpAck.Send(sender, WaterOpAck.Create, 0, false, "only an admin can place water here"); return; }
+            int hash = 0;
             try
             {
                 byte[] diskData = pkg.ReadByteArray();
                 long originPlayerId = pkg.ReadLong();
 
                 var disk = WaterDisk.Deserialize(diskData);
+                hash = disk.StableHash;
                 ServerHandleCreateAndBroadcast(disk, originPlayerId);
+                WaterOpAck.Send(sender, WaterOpAck.Create, hash, true, null);
             }
             catch (Exception ex)
             {
                 FiresLogger.LogWarning($"[WaterOperationRPC] Error handling create water request: {ex.Message}");
+                if (hash != 0) WaterOpAck.Send(sender, WaterOpAck.Create, hash, false, "the server could not place it (" + ex.Message + ")");
             }
         }
 
@@ -396,11 +423,12 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleRemoveWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
-            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "remove"); return; }
-
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "remove"); WaterOpAck.Send(sender, WaterOpAck.Remove, 0, false, "only an admin can remove water here"); return; }   // [ghost] R11: authorise first
+            int ackHash = 0;
             try
             {
                 int stableHash = pkg.ReadInt();
+                ackHash = stableHash;
                 long originPlayerId = pkg.ReadLong();
                 // 0.2.1336: add-only trailing position; absent (older client) or not finite = every anchor is opened
                 Vector3? at = null;
@@ -410,10 +438,12 @@ namespace VerdantsAscent.Water.Core
                     if (!float.IsNaN(p.x + p.z) && !float.IsInfinity(p.x + p.z)) at = p;
                 }
                 ServerHandleRemoveAndBroadcast(stableHash, originPlayerId, at);
+                WaterOpAck.Send(sender, WaterOpAck.Remove, stableHash, true, null);
             }
             catch (Exception ex)
             {
                 FiresLogger.LogWarning($"[WaterOperationRPC] Error handling remove water request: {ex.Message}");
+                if (ackHash != 0) WaterOpAck.Send(sender, WaterOpAck.Remove, ackHash, false, "the server could not remove it (" + ex.Message + ")");
             }
         }
 
@@ -423,11 +453,12 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleModifyWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
-            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "modify"); return; }
-
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "modify"); WaterOpAck.Send(sender, WaterOpAck.Modify, 0, false, "only an admin can change water here"); return; }   // [ghost] R11: authorise first
+            int ackHash = 0;
             try
             {
                 int stableHash = pkg.ReadInt();
+                ackHash = stableHash;
                 bool hasRadius = pkg.ReadBool();
                 float? newRadius = hasRadius ? pkg.ReadSingle() : (float?)null;
                 bool hasDepth = pkg.ReadBool();
@@ -437,10 +468,12 @@ namespace VerdantsAscent.Water.Core
                 long originPlayerId = pkg.ReadLong();
 
                 ServerHandleModifyAndBroadcast(stableHash, newRadius, newDepth, newSurfaceY, originPlayerId);
+                WaterOpAck.Send(sender, WaterOpAck.Modify, stableHash, true, null);
             }
             catch (Exception ex)
             {
                 FiresLogger.LogWarning($"[WaterOperationRPC] Error handling modify water request: {ex.Message}");
+                if (ackHash != 0) WaterOpAck.Send(sender, WaterOpAck.Modify, ackHash, false, "the server could not change it (" + ex.Message + ")");
             }
         }
 
@@ -450,18 +483,21 @@ namespace VerdantsAscent.Water.Core
         private static void RPC_HandleClearZoneWater(long sender, ZPackage pkg)
         {
             if (pkg == null || !IsServer()) return;
-            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "clear zone"); return; }
-
+            if (!AdminCheck.IsAdmin(sender)) { RejectNonAdmin(sender, "clear zone"); WaterOpAck.Send(sender, WaterOpAck.ClearZone, 0, false, "only an admin can clear water here"); return; }   // [ghost] R11: authorise first
+            int ackHash = 0;
             try
             {
                 Vector3 center = pkg.ReadVector3();
                 float radius = pkg.ReadSingle();
+                ackHash = WaterOpAck.ClearZoneHash(center, radius);
                 long originPlayerId = pkg.ReadLong();
                 ServerHandleClearZoneAndBroadcast(center, radius, originPlayerId);
+                WaterOpAck.Send(sender, WaterOpAck.ClearZone, ackHash, true, null);
             }
             catch (Exception ex)
             {
                 FiresLogger.LogWarning($"[WaterOperationRPC] Error handling clear zone water request: {ex.Message}");
+                if (ackHash != 0) WaterOpAck.Send(sender, WaterOpAck.ClearZone, ackHash, false, "the server could not clear it (" + ex.Message + ")");
             }
         }
 
@@ -752,6 +788,9 @@ namespace VerdantsAscent.Water.Core
         }
 
         // 0.2.1336: one removal on this peer, whoever asked: the add dedupe entry goes with the disk, so a later re-lay of the hash is not skipped.
+        // [ghost] R11: WaterOpAck takes back a refused / unconfirmed create on this client before it asks the server for its copy
+        internal static void ApplyRemovalLocal(int stableHash) => ApplyRemoval(stableHash);
+
         private static void ApplyRemoval(int stableHash)
         {
             _appliedDiskHashes.Remove(stableHash);

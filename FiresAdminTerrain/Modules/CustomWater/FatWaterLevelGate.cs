@@ -58,6 +58,7 @@ namespace VerdantsAscent.Water
         // The Floating.GetWaterLevel postfix body: pours, the (indexed or full) combiner/legacy scan, the generated field; timed per part.
         internal static void Apply(Vector3 p, ref float result)
         {
+            if (global::VerdantsAscent.Water.Core.CustomWaterPatches.NoFatWaterAnywhere) return;   // 0.2.1500 ([lead] perf audit row 10): pours, combiners, legacy water and the voxel-column field all empty: nothing can raise result
             CustomWaterPatches.RaiseToPourSurface(p, ref result);   // cheap (0.03 µs) and reads the caller's own result: never memoised
             // 0.2.1167 (Fire: "fixed update is over 100ms/f"; 1166 log "[FatWaterLevel] 244976 call(s)/min: combiner+legacy lookup
             // 3.67 µs"): Floating, Character.InWater/IsSwimming/GetLiquidLevel and the feeders ask the same point many times in one

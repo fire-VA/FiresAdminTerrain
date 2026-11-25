@@ -136,7 +136,7 @@ namespace VerdantsAscent.Terrain.Zones
                 var pkg = new ZPackage();
                 yield return FatLocationAccelerator.Place(zs, l, pkg);
                 int after = zs.m_locationInstances.Values.Count(i => i.m_location == l);
-                if (after > before) added[l.m_prefab.Name] = after - before;
+                if (after > before) added[l.m_prefab.name] = after - before;
             }
             int total = added.Values.Sum();
             string by = string.Join(", ", added.OrderByDescending(k => k.Value).Select(k => $"{k.Key} {k.Value}"));

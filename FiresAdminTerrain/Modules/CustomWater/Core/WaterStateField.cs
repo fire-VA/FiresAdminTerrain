@@ -453,7 +453,7 @@ namespace VerdantsAscent.Water.Core
         // ---- the per-chunk state texture on a sheet renderer's MPB ----
         internal static readonly int TexId = Shader.PropertyToID("_FiresWaterStateTex"), RectId = Shader.PropertyToID("_FiresWaterStateRect");
         private const int Px = 34;
-        private sealed class Entry { public Texture2D Tex; public int Version, FrostV; public Vector3 Origin; public float Y; public Renderer R; public float[] Levels; public GridSrc Src; public uint LevelSum; }   // 0.2.1313: + the column levels
+        private sealed class Entry { public Texture2D Tex; public int Version, FrostV; public Vector3 Origin; public float Y; public Renderer R; public float[] Levels; public GridSrc Src; public uint LevelSum; public bool AnyState; }   // 0.2.1313: + the column levels; 0.2.1455: + AnyState
         private static readonly Dictionary<int, Entry> s_entries = new Dictionary<int, Entry>();
         private static readonly Color32[] s_px = new Color32[Px * Px];
         private static MaterialPropertyBlock s_mpb;
@@ -469,6 +469,11 @@ namespace VerdantsAscent.Water.Core
         // MPB value an older shader doesn't read is simply ignored, so binding it is harmless there.
         internal static bool ShaderReads(Material m)
             => m != null && m.shader != null && (m.HasProperty(TexId) || m.shader.name == "Custom/FiresInlandWater");
+
+        // 0.2.1455 (water look hand-off): true when this renderer's bound state texture holds ANY ice, lava or crust texel. Only FAT's
+        // shader draws that state, so WaterLookHost keeps such a sheet on FAT's material. False = no state bound (or all open water).
+        internal static bool HoldsIceLavaCrust(Renderer r)
+            => r != null && s_entries.TryGetValue(r.GetInstanceID(), out var e) && ReferenceEquals(e.R, r) && e.AnyState;
         private static bool s_notBoundSaid;
         private static float s_iceMaxLast = -1f;
 
@@ -482,7 +487,7 @@ namespace VerdantsAscent.Water.Core
             if (r == null) return;
             if (s_mpb == null) s_mpb = new MaterialPropertyBlock();
             r.GetPropertyBlock(s_mpb);
-            if (!ShaderReads(r.sharedMaterial))
+            if (!ShaderReads(WaterLookHost.FatMaterialOf(r)))   // 0.2.1455: FAT's own material, also while a look mod's draws this sheet (= sharedMaterial otherwise)
             {
                 s_mpb.SetVector(RectId, Vector4.zero);   // on = 0: the shader (if it declares it at all) draws plain water
                 r.SetPropertyBlock(s_mpb);
@@ -531,6 +536,7 @@ namespace VerdantsAscent.Water.Core
         {
             {
                 float iceMax = 0f;
+                bool any = false;   // 0.2.1455: any ice / lava / crust texel (WaterLookHost eligibility)
                 Grid g = e.Levels != null ? BuildGrid(e.Src, chunkOrigin.x - 1f, chunkOrigin.z - 1f, e.Levels, y) : null;   // 0.2.1313 one source
                 if (g != null) SayOneSource(e.Src == GridSrc.Placed ? "placed" : "generated");
                 for (int j = 0; j < Px; j++)
@@ -542,8 +548,10 @@ namespace VerdantsAscent.Water.Core
                         // 0.2.1179 A = frost (contract: 0 = legacy / no ice; on ice 128 + 127 x frost = 0.5 polished clear .. 1 full frost haze)
                         byte a = s.Ice > 0.004f ? (byte)(128 + Mathf.RoundToInt(127f * IceFrost.FrostSmoothAt(chunkOrigin.x - 1f + i, chunkOrigin.z - 1f + j))) : (byte)0;   // 0.2.1183: tent-smoothed (no hard polish edge)
                         s_px[i + Px * j] = new Color32((byte)(s.Ice * 255f + 0.5f), (byte)(s.Lava * 255f + 0.5f), (byte)(s.Crust * 255f + 0.5f), a);
+                        if ((s_px[i + Px * j].r | s_px[i + Px * j].g | s_px[i + Px * j].b) != 0) any = true;
                     }
                 s_iceMaxLast = iceMax;
+                if (any != e.AnyState) { e.AnyState = any; WaterLookHost.StateChanged(e.R); }   // 0.2.1455: the state rebound with / without ice, lava or crust
                 // 0.2.1183 proof: each chunk's border texels (the ones its neighbour also samples) with its height band, so a round shows
                 // whether two neighbouring chunks of one pond disagree (a different band / ice / frost at the shared edge = a hard cut).
                 if (FiresLogger.DebugEnabled && Time.realtimeSinceStartup >= s_edgeLogAt && iceMax > 0f)

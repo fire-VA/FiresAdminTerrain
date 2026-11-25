@@ -25,7 +25,13 @@ namespace VerdantsAscent.Terrain.Voxel
             height = 0f;
             WorldGenerator wg = WorldGenerator.instance;
             if (wg == null || FiresWorld) return false;
-            height = ZoneHeight(wg, wx, wz);
+            // 0.2.1483 FIX ([worldgen], thread audit 11-18): the vanilla builder thread asks GetBiome / GetBiomeHeight inside BiomePaint's corner
+            // scope, where FatBiomeResolver's redirect (an unlocked TileAnchorRegistry Dictionary read, FatBiomeResolver.cs:271), BiomeOverride and
+            // super-flat island answers stand aside. EBM's tile thread calls this, so it runs in the same scope: thread-safe, and the same heights
+            // the zones' Heightmaps get.
+            BiomePaint.EnterCornerScope();
+            try { height = ZoneHeight(wg, wx, wz); }
+            finally { BiomePaint.ExitCornerScope(); }
             return true;
         }
 
@@ -59,6 +65,20 @@ namespace VerdantsAscent.Terrain.Voxel
             color = SectorSplat(wg.GetBiomeSector(wx, wz));
             if (BiomePaint.TryGround(wx, wz, out var ground)) color = SplatOf(ground);
             color = FatSeasons.WinterizeAnyThread(color, wx, wz, wg);
+            return true;
+        }
+
+        /// <summary>
+        /// 0.2.1492 (FatApi v5, [lead] + [visual] EBM 1.2.470 draws far snow in its shader as class x Vedr fill): TryColor WITHOUT the winter
+        /// step: the vanilla distant-LOD colour (biome sector) then FAT biome paint, the TRUE ground colour. Any thread (pure tables).
+        /// </summary>
+        internal static bool TryTrueColor(float wx, float wz, out Color32 color)
+        {
+            color = default;
+            WorldGenerator wg = WorldGenerator.instance;
+            if (wg == null || FiresWorld) return false;
+            color = SectorSplat(wg.GetBiomeSector(wx, wz));
+            if (BiomePaint.TryGround(wx, wz, out var ground)) color = SplatOf(ground);
             return true;
         }
 

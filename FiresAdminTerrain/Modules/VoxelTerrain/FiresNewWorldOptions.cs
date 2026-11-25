@@ -43,10 +43,15 @@ namespace VerdantsAscent.Terrain.Voxel
         private const int FullVoxelChoice = 2;
         private const float RowHeight = 34f;
         private const float RowGap = 6f;
-        private const float StatusHeight = 24f;
+        // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): two lines of status, never into the buttons.
+        private const float StatusHeight = 44f;
+        private const float StatusMinFontSize = 11f;
+        private const float LabelRowPad = 4f;   // above + below a wrapped label
         private const float Padding = 10f;
         private const float LabelGap = 6f;
         private const float EdgeMargin = 12f;
+        private const float LabelShare = 0.45f;   // 0.2.1512: label column = 45% of the row (was ~30%, set by vanilla's seed field)
+        private const float MinFieldWidth = 180f;   // 0.2.1512: room for the longest dropdown choice; the shot confirms
         private const float ControlFontSize = 15f;
         private const float StatusFontSize = 15f;
         private const float FallbackLabelFontSize = 18f;
@@ -67,12 +72,18 @@ namespace VerdantsAscent.Terrain.Voxel
         private static Toggle s_oneZoneAtATime;
         private static Toggle s_skyIslands;
         private static Toggle s_islandWater;
-        private static GameObject s_islandWaterLabel;
         private static Toggle s_rivers;
         private static Toggle s_caves;
         private static Toggle s_superFlat;   // The admin build world
         private static TextMeshProUGUI s_status;
         private static string s_conflict;
+        // 0.2.1513 ([saddles], [lead] 11-21 shots 08/09): a row that can't be changed right now stays in place, greyed (label and
+        // control); nothing is hidden, so no gap. Each control's own label, recorded as the row is built.
+        private const float DimAlpha = 0.4f;
+        private const string GeneratorLockedCaption = "Set by Super flat";
+        private static readonly Dictionary<Selectable, TMP_Text> s_rowLabel = new Dictionary<Selectable, TMP_Text>();
+        private static TMP_Text s_lastLabel;
+        private static readonly Dictionary<TMP_Text, Color> s_builtInk = new Dictionary<TMP_Text, Color>();
         private static string s_newName;
         private static FiresWorldProfile s_pendingProfile;
         private static RectTransform s_panel;
@@ -106,6 +117,49 @@ namespace VerdantsAscent.Terrain.Voxel
             s_gaeaBaked = false;
             ResetToDefaults();
             ApplyGaeaLayout(s_gaea);
+        }
+
+        // 0.2.1512 ([lead] 11-21, kept from the 0.2.1511 diagnostic at Debug): Fire's 1510 session hit a NullReferenceException in
+        // TMP_Dropdown.AlphaFadeList < Show twice; TMP creates m_AlphaTweenRunner only in Start (Unity.TextMeshPro decomp :440-443)
+        // and the install-copy repro never reproduced it (Start ran 1 frame after open). This names the state on the next hit.
+        private static readonly System.Reflection.FieldInfo DropdownRunner = AccessTools.Field(typeof(TMP_Dropdown), "m_AlphaTweenRunner");
+
+        [HarmonyPatch(typeof(TMP_Dropdown), nameof(TMP_Dropdown.Show))]
+        private static class DropdownShowState
+        {
+            private static void Prefix(TMP_Dropdown __instance)
+            {
+                if (__instance == null || (__instance != s_generator && __instance != s_terrain)) return;
+                FiresLogger.LogDebug($"[FiresWorldGen] New World dropdown Show ({(__instance == s_generator ? "generator" : "terrain")}, frame " +
+                    $"{Time.frameCount}): enabled {__instance.enabled}, activeInHierarchy {__instance.gameObject.activeInHierarchy}, " +
+                    $"isActiveAndEnabled {__instance.isActiveAndEnabled}, interactable {__instance.interactable}, " +
+                    $"Start ran {(DropdownRunner != null && DropdownRunner.GetValue(__instance) != null)}.");
+            }
+        }
+
+        // 0.2.1512 ([lead] 11-21, kept from the 0.2.1511 diagnostic at Debug): Fire's 1510 session, "pressed start on my existing world
+        // and nothing happened", logged no world load at all. First / last around vanilla's OnWorldStart: no 'called' line = the click
+        // never reached it; 'called' with loading off = an early out or a prefix (listed with owner + priority).
+        [HarmonyPatch(typeof(FejdStartup), nameof(FejdStartup.OnWorldStart))]
+        private static class WorldStartState
+        {
+            private static readonly System.Reflection.FieldInfo WorldRef = AccessTools.Field(typeof(FejdStartup), "m_world");
+
+            [HarmonyPriority(Priority.First)]
+            private static void Prefix(FejdStartup __instance)
+            {
+                var w = WorldRef?.GetValue(__instance) as World;
+                var info = Harmony.GetPatchInfo(AccessTools.Method(typeof(FejdStartup), nameof(FejdStartup.OnWorldStart)));
+                var owners = new System.Text.StringBuilder();
+                if (info != null) foreach (var p in info.Prefixes) owners.Append(owners.Length > 0 ? ", " : "").Append(p.owner).Append(" (").Append(p.priority).Append(')');
+                FiresLogger.LogDebug($"[FiresWorldGen] OnWorldStart called (frame {Time.frameCount}): world '{(w != null ? w.m_name : "null")}' " +
+                    $"dataError {(w != null ? w.m_dataError.ToString() : "-")}; prefixes [{owners}].");
+            }
+
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix(FejdStartup __instance) =>
+                FiresLogger.LogDebug($"[FiresWorldGen] OnWorldStart after (frame {Time.frameCount}): loading panel " +
+                    $"{(__instance.m_loading != null && __instance.m_loading.activeInHierarchy)}.");
         }
 
         [HarmonyPatch(typeof(FejdStartup), nameof(FejdStartup.OnNewWorldBack))]
@@ -243,6 +297,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 return;
             }
             s_laidOut.Clear();
+            s_rowLabel.Clear();
+            s_builtInk.Clear();
+            s_lastLabel = null;
             s_gaeaRow.Clear();
             s_gaeaFolder = null;
             s_gaeaPeak = null;
@@ -251,59 +308,83 @@ namespace VerdantsAscent.Terrain.Voxel
             s_panel = panel;
             var template = panel.Find(SeedLabelName)?.GetComponent<TMP_Text>();
             bool offerZones = ZoneModeConfig.OfferAtWorldCreation == null || ZoneModeConfig.OfferAtWorldCreation.Value;
-            int rows = offerZones ? 8 : 7;   // + Super flat
-            float height = Padding * 2f + rows * RowHeight + (rows - 1) * RowGap + StatusHeight;
             float seedBottom = seed.localPosition.y - seed.rect.height * seed.pivot.y;
             float doneTop = done.localPosition.y + done.rect.height * (1f - done.pivot.y);
             float fieldLeft = seed.localPosition.x - seed.rect.width * seed.pivot.x - panel.rect.center.x;
             float pivotY = panel.pivot.y;
-            Grow(panel, height, (seedBottom + doneTop) * 0.5f);
 
-            float gapCenter = (seedBottom + height * (1f - pivotY) + doneTop - height * pivotY) * 0.5f;
+            // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): rows are laid out first with a running cursor
+            // from the container's top edge (y = 0), each row as tall as its measured label; the panel then grows by the
+            // measured sum and every cell is moved into the container's centre-based frame (s_laidOut too, so the Gaea shift
+            // at ApplyGaeaLayout still restores the right places). All sizes are canvas units, so any resolution fits.
             s_container = new GameObject(ContainerName, typeof(RectTransform)).GetComponent<RectTransform>();
             s_container.SetParent(panel, false);
             s_container.anchorMin = s_container.anchorMax = new Vector2(0.5f, pivotY);
             s_container.pivot = new Vector2(0.5f, 0.5f);
-            s_container.sizeDelta = new Vector2(panel.rect.width, height);
-            s_container.anchoredPosition = new Vector2(0f, gapCenter);
+            s_container.sizeDelta = new Vector2(panel.rect.width, 0f);
 
             float fieldRight = fieldLeft + seed.rect.width;
             float labelLeft = -panel.rect.width * 0.5f + EdgeMargin;
+            // 0.2.1512 ([saddles], Fire 11-21 "still shit": labels wrapped to 3 lines): our rows' controls start at LabelShare of
+            // the row width instead of under vanilla's seed field (~30 %), so the label column is wider and labels take 1-2 lines.
+            // fieldRight stays vanilla's; fieldLeft moves RIGHT to LabelShare, capped so a field keeps MinFieldWidth ([2ic]).
+            fieldLeft = Mathf.Min(Mathf.Max(fieldLeft, labelLeft + (fieldRight - labelLeft) * LabelShare), fieldRight - MinFieldWidth);
             float labelRight = fieldLeft - LabelGap;
-            float top = height * 0.5f - Padding;
-            int row = 0;
+            float cursor = -Padding;
+            Color valueInk = SeedTextInk(fejd, template);
 
-            s_generator = UIBuilderHelper.CreateDropdown(Cell("Generator", fieldLeft, fieldRight, RowCenter(top, row)), "Choice",
-                GeneratorChoices, 0, Vector2.zero, Vector2.one, _ => Refresh(), ControlFontSize);
-            Label(template, "Terrain generator", labelLeft, labelRight, RowCenter(top, row++));
-            s_terrain = UIBuilderHelper.CreateDropdown(Cell("Terrain", fieldLeft, fieldRight, RowCenter(top, row)), "Choice",
-                TerrainChoices, 0, Vector2.zero, Vector2.one, _ => Refresh(), ControlFontSize);
-            Label(template, "Terrain", labelLeft, labelRight, RowCenter(top, row++));
+            LabelRow(template, "Terrain generator", labelLeft, labelRight, ref cursor, out float c);
+            s_generator = Dropdown("Generator", GeneratorChoices, fieldLeft, fieldRight, c, valueInk);
+            LabelRow(template, "Terrain", labelLeft, labelRight, ref cursor, out c);
+            s_terrain = Dropdown("Terrain", TerrainChoices, fieldLeft, fieldRight, c, valueInk);
             if (offerZones)
             {
-                s_oneZoneAtATime = Check("OneZoneAtATime", fieldLeft, fieldRight, RowCenter(top, row));
-                Label(template, "One zone at a time", labelLeft, labelRight, RowCenter(top, row++));
+                LabelRow(template, "One zone at a time", labelLeft, labelRight, ref cursor, out c);
+                s_oneZoneAtATime = Check(fejd, "OneZoneAtATime", labelLeft, fieldLeft, fieldRight, c);
             }
-            s_skyIslands = Check("SkyIslands", fieldLeft, fieldRight, RowCenter(top, row));
-            Label(template, "Sky islands", labelLeft, labelRight, RowCenter(top, row++));
+            LabelRow(template, "Sky islands", labelLeft, labelRight, ref cursor, out c);
+            s_skyIslands = Check(fejd, "SkyIslands", labelLeft, fieldLeft, fieldRight, c);
             // Only under Sky islands. Off = islands are born dry (no ponds, rivers or
             // falls carved, no water placed), to shape water on them by hand with the chaos hammer.
-            s_islandWater = Check("SkyIslandWater", fieldLeft, fieldRight, RowCenter(top, row));
-            Label(template, "Auto-place water on sky islands", labelLeft, labelRight, RowCenter(top, row++));
-            s_islandWaterLabel = s_laidOut[s_laidOut.Count - 1].Key.gameObject;
-            s_rivers = Check("Rivers", fieldLeft, fieldRight, RowCenter(top, row));
-            Label(template, "Rivers and lakes", labelLeft, labelRight, RowCenter(top, row++));
-            s_caves = Check("Caves", fieldLeft, fieldRight, RowCenter(top, row));
-            Label(template, "Caves", labelLeft, labelRight, RowCenter(top, row++));
+            LabelRow(template, "Auto-place water on sky islands", labelLeft, labelRight, ref cursor, out c);
+            s_islandWater = Check(fejd, "SkyIslandWater", labelLeft, fieldLeft, fieldRight, c);
+            LabelRow(template, "Rivers and lakes", labelLeft, labelRight, ref cursor, out c);
+            s_rivers = Check(fejd, "Rivers", labelLeft, fieldLeft, fieldRight, c);
+            LabelRow(template, "Caves", labelLeft, labelRight, ref cursor, out c);
+            s_caves = Check(fejd, "Caves", labelLeft, fieldLeft, fieldRight, c);
             // An admin build / test / blueprint world, linked through Dimensions so build yards and big ZDO counts
             // stay off the main server. It overrides every row above (stock heightmap, nothing extra) and the world's size.
-            s_superFlat = Check("SuperFlat", fieldLeft, fieldRight, RowCenter(top, row));
-            Label(template, "Super flat (admin build world)", labelLeft, labelRight, RowCenter(top, row++));
+            LabelRow(template, "Super flat (admin build world)", labelLeft, labelRight, ref cursor, out c);
+            s_superFlat = Check(fejd, "SuperFlat", labelLeft, fieldLeft, fieldRight, c);
 
-            float statusCenter = RowCenter(top, row) + (RowHeight - StatusHeight) * 0.5f;
-            s_status = UIBuilderHelper.CreateLabel(Cell("Status", labelLeft, fieldRight, statusCenter, StatusHeight), "Text", "",
+            // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): two-line status box that wraps, shrinks to
+            // StatusMinFontSize and then ellipsizes, so it stays inside its own cell above the buttons.
+            s_status = UIBuilderHelper.CreateLabel(Cell("Status", labelLeft, fieldRight, cursor - StatusHeight * 0.5f, StatusHeight), "Text", "",
                 StatusFontSize, NoteInk, Vector2.zero, Vector2.one, TextAlignmentOptions.Center);
             s_status.raycastTarget = false;
+            s_status.enableWordWrapping = true;      // UNCONFIRMED: TMP version may name it textWrappingMode instead
+            s_status.enableAutoSizing = true;
+            s_status.fontSizeMin = StatusMinFontSize;
+            s_status.fontSizeMax = StatusFontSize;
+            s_status.overflowMode = TextOverflowModes.Ellipsis;
+            cursor -= StatusHeight + Padding;
+
+            // 0.2.1510: the measured height; the panel grows by it and every cell moves from the top-edge frame to the
+            // container's centre frame (+height/2).
+            float height = -cursor;
+            Grow(panel, height, (seedBottom + doneTop) * 0.5f);
+            float gapCenter = (seedBottom + height * (1f - pivotY) + doneTop - height * pivotY) * 0.5f;
+            s_container.sizeDelta = new Vector2(panel.rect.width, height);
+            s_container.anchoredPosition = new Vector2(0f, gapCenter);
+            for (int i = 0; i < s_laidOut.Count; i++)
+            {
+                var laid = s_laidOut[i];
+                float y = laid.Value + height * 0.5f;
+                laid.Key.anchoredPosition = new Vector2(laid.Key.anchoredPosition.x, y);
+                s_laidOut[i] = new KeyValuePair<RectTransform, float>(laid.Key, y);
+            }
+
+            float top = height * 0.5f - Padding;
             BuildGaeaRows(fejd, template, labelLeft, labelRight, fieldLeft, fieldRight, top);
             FiresLogger.LogInfo("[FiresWorldGen] New World shows the world options (generator, terrain"
                 + (offerZones ? ", one zone at a time" : "") + ", sky islands, rivers and lakes, caves).");
@@ -421,17 +502,142 @@ namespace VerdantsAscent.Terrain.Voxel
             return cell;
         }
 
-        private static void Label(TMP_Text template, string text, float left, float right, float centerY)
+        private static TextMeshProUGUI Label(TMP_Text template, string text, float left, float right, float centerY, float height = RowHeight)
         {
-            var label = UIBuilderHelper.CreateLabel(Cell(text, left, right, centerY), "Text", text,
+            var label = UIBuilderHelper.CreateLabel(Cell(text, left, right, centerY, height), "Text", text,
                 template != null ? template.fontSize : FallbackLabelFontSize, template != null ? template.color : FallbackLabelInk,
                 Vector2.zero, Vector2.one, template != null ? template.alignment : TextAlignmentOptions.MidlineRight);
             if (template != null) label.font = template.font;
             label.raycastTarget = false;
+            return label;
         }
 
-        private static Toggle Check(string name, float left, float right, float centerY)
-            => UIBuilderHelper.CreateToggle(Cell(name, left, right, centerY), "Check", false, Vector2.zero, Vector2.one, _ => Refresh());
+        // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): one row at the running cursor (top-edge frame,
+        // y down from 0). The label is measured at its cell width; the row is max(RowHeight, wrapped height + pad), so a
+        // wrapped label never overlaps the next row. `center` is where the row's control goes.
+        private static float LabelRow(TMP_Text template, string text, float left, float right, ref float cursor, out float center)
+        {
+            var label = Label(template, text, left, right, 0f);
+            s_lastLabel = label;   // 0.2.1513: the next control built (Check / Dropdown) takes it as its row label; a row without one is overwritten by the next LabelRow
+            label.enableWordWrapping = true;  // [2ic] MUST: measure what draws (wrapped). UNCONFIRMED name, as the status's (:310)
+            // UNCONFIRMED: TMP_Text.GetPreferredValues(string, float, float) measures without changing the label's text;
+            // it is the standard TMP API but its exact behaviour in Valheim's TMP build is not read here.
+            float wrapped = label.GetPreferredValues(text, right - left, 0f).y;
+            float height = Mathf.Max(RowHeight, wrapped + LabelRowPad * 2f);
+            center = cursor - height * 0.5f;
+            var cell = s_laidOut[s_laidOut.Count - 1].Key;
+            cell.sizeDelta = new Vector2(cell.sizeDelta.x, height);
+            cell.anchoredPosition = new Vector2(cell.anchoredPosition.x, center);
+            s_laidOut[s_laidOut.Count - 1] = new KeyValuePair<RectTransform, float>(cell, center);
+            cursor -= height + RowGap;
+            return height;
+        }
+
+        // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): vanilla's seed input text colour, the light ink
+        // vanilla uses on this same wood. Falls back to the seed label's colour, then FallbackLabelInk.
+        private static Color SeedTextInk(FejdStartup fejd, TMP_Text template)
+        {
+            // UNCONFIRMED: m_newWorldSeed's component type; GetComponent<TMP_InputField> works whatever field type it is.
+            var input = fejd.m_newWorldSeed.GetComponent<TMP_InputField>();
+            if (input != null && input.textComponent != null) return input.textComponent.color;
+            return template != null ? template.color : FallbackLabelInk;
+        }
+
+        // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): UIBuilderHelper.CreateDropdown paints caption and
+        // arrow ParchmentInk (dark, UIBuilderHelper.cs:395,402) over ParchmentField (0.22 alpha, :391) = dark on wood.
+        // Caption, arrow and item text take vanilla's light seed ink (item background is ParchmentButton dark brown, :463).
+        private static TMP_Dropdown Dropdown(string name, string[] choices, float left, float right, float centerY, Color ink)
+        {
+            var dropdown = UIBuilderHelper.CreateDropdown(Cell(name, left, right, centerY), "Choice",
+                choices, 0, Vector2.zero, Vector2.one, _ => Refresh(), ControlFontSize);
+            if (dropdown.captionText != null) dropdown.captionText.color = ink;
+            if (dropdown.itemText != null) dropdown.itemText.color = ink;
+            var arrow = dropdown.transform.Find("Arrow")?.GetComponent<TMP_Text>();   // name from UIBuilderHelper.cs:402
+            if (arrow != null) arrow.color = ink;
+            TakeRowLabel(dropdown);
+            return dropdown;
+        }
+
+        // 0.2.1510 ([saddles], Fire 11-21: New World panel unreadable): a clone of vanilla's own public-server toggle (clear
+        // on/off checkbox), the same way BcWorldListMenu.CloneToggle does (BcWorldListMenu.cs:335-350): scene listeners
+        // silenced, gamepad hint removed, its own caption emptied (our label sits left of it). Sits at the cell's left at
+        // vanilla's own size. Falls back to UIBuilderHelper.CreateToggle if vanilla's toggle is missing.
+        private static Toggle Check(FejdStartup fejd, string name, float rowLeft, float left, float right, float centerY)
+        {
+            var cell = Cell(name, left, right, centerY);
+            var toggle = VerdantsAscent.Terrain.BcImport.BcConvertDialog.CloneVanillaToggle(fejd, cell);   // [2ic]: one method
+            if (toggle == null)
+            {
+                var fallback = UIBuilderHelper.CreateToggle(cell, "Check", false, Vector2.zero, Vector2.one, _ => Refresh());
+                TakeRowLabel(fallback);
+                return fallback;
+            }
+            toggle.name = "Check";
+            // [2ic] SHOULD 2: vanilla's toggle may carry Explicit navigation to its own neighbours; gamepad focus must stay on our rows.
+            toggle.navigation = new Navigation { mode = Navigation.Mode.Automatic };
+            // 0.2.1512 ([saddles], 1511 dump on the install copy: isOn True but the Checkmark's alpha 0.17 at panel open): the clone is set
+            // off then on in the same frame (CloneVanillaToggle, ResetToDefaults) under vanilla's Fade transition; whether Fire's faint
+            // ticks were a fade caught mid-way or a frozen fade is UNCONFIRMED ([2ic]). No transition = the tick shows at once (no fade),
+            // so the Checkmark always matches isOn.
+            toggle.toggleTransition = Toggle.ToggleTransition.None;
+            var caption = toggle.GetComponentInChildren<TMP_Text>(true);
+            if (caption != null) caption.text = "";
+            // UNCONFIRMED: vanilla's toggle child Localize could re-write the emptied caption; GaeaInput (:343) strips Localize
+            // the same way, so do it here too.
+            foreach (var localize in toggle.GetComponentsInChildren<Localize>(true)) Object.Destroy(localize);
+            var rect = (RectTransform)toggle.transform;
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 0.5f);
+            rect.pivot = new Vector2(0f, 0.5f);
+            rect.anchoredPosition = Vector2.zero;   // keeps vanilla's sizeDelta
+            // 0.2.1513 ([lead] 11-21: a Super flat off-click got eaten once [generator]): the clone keeps vanilla's small box as
+            // its only click target. An invisible Image under the toggle spans the whole row (label + field cell), so a click
+            // anywhere on the row reaches the Toggle (the pointer event goes up to the first handler in the parents).
+            // Whether the eaten click was a miss beside the box is UNCONFIRMED; the row-wide target covers it either way.
+            var hit = new GameObject("RowHitArea", typeof(RectTransform), typeof(Image)).GetComponent<RectTransform>();
+            hit.SetParent(rect, false);
+            hit.SetAsFirstSibling();   // drawn first = under the box and tick
+            hit.anchorMin = hit.anchorMax = new Vector2(0f, 0.5f);
+            hit.pivot = new Vector2(0f, 0.5f);
+            hit.sizeDelta = new Vector2(right - rowLeft, cell.sizeDelta.y);
+            hit.anchoredPosition = new Vector2(rowLeft - left, 0f);
+            var hitImage = hit.GetComponent<Image>();
+            hitImage.color = new Color(0f, 0f, 0f, 0f);   // invisible; an Image at alpha 0 still takes raycasts
+            hitImage.raycastTarget = true;
+            toggle.onValueChanged.AddListener(_ => Refresh());
+            TakeRowLabel(toggle);
+            return toggle;
+        }
+
+        // 0.2.1513: links a control to the label LabelRow just made, for Dim.
+        private static void TakeRowLabel(Selectable control)
+        {
+            if (s_lastLabel != null)
+            {
+                s_rowLabel[control] = s_lastLabel;
+                s_builtInk[s_lastLabel] = s_lastLabel.color;   // [2ic]: usable = exactly the colour as built
+            }
+            if (control is TMP_Dropdown dropdown && dropdown.captionText != null)
+                s_builtInk[dropdown.captionText] = dropdown.captionText.color;   // the seed ink Dropdown() set
+            s_lastLabel = null;
+        }
+
+        // 0.2.1513 ([lead] 11-21: greyed dependent rows): interactable plus the row label's alpha, so an unavailable row reads as
+        // unavailable. The control's stored value is never changed here ([2ic]): turning the parent back on restores the choice.
+        private static void Dim(Selectable control, bool usable)
+        {
+            if (control == null) return;
+            control.interactable = usable;
+            if (s_rowLabel.TryGetValue(control, out var label)) Shade(label, usable);
+            if (control is TMP_Dropdown dropdown) Shade(dropdown.captionText, usable);   // the caption greys with its row
+        }
+
+        // Built colour when usable; the built colour at DimAlpha x its own alpha when not.
+        private static void Shade(TMP_Text text, bool usable)
+        {
+            if (text == null || !s_builtInk.TryGetValue(text, out var built)) return;
+            if (!usable) built.a *= DimAlpha;
+            text.color = built;
+        }
 
         // ── Values ──────────────────────────────────────────────────────────
         private static void ResetToDefaults()
@@ -483,16 +689,22 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void Refresh()
         {
+            // 0.2.1513 ([lead] 11-21, shot 08): the auto-water row stays in place, greyed while Sky islands is off (was hidden,
+            // leaving a gap). Its value is kept; ChosenFromRows reads it only when Sky islands is on (SkyIslandWater below).
             bool islands = s_skyIslands.isOn;
-            s_islandWater.gameObject.SetActive(islands);
-            s_islandWater.interactable = islands;
-            if (s_islandWaterLabel != null) s_islandWaterLabel.SetActive(islands);
             // Super flat decides every other row, so they stop taking input while it is on
             bool flat = s_superFlat != null && s_superFlat.isOn;
-            s_generator.interactable = !flat;   // Super flat keeps the Terrain row (heightmap / voxel wrap / full voxel)
-            if (s_oneZoneAtATime != null) s_oneZoneAtATime.interactable = !flat;
-            s_rivers.interactable = !flat;   // Sky islands + Caves stay choosable on super flat (voxel terrain only); rivers never
-            s_islandWater.interactable = islands && !flat;
+            // 0.2.1513: Gaea mode's generator lock (ApplyGaeaLayout) is kept here too; this line used to undo it (!flat only).
+            Dim(s_generator, !flat && !s_gaea);   // Super flat keeps the Terrain row (heightmap / voxel wrap / full voxel)
+            // 0.2.1513 ([lead] 11-21, shot 09: "never opens" looked broken): while Super flat locks it, the caption says so.
+            if (s_generator.captionText != null)
+            {
+                if (flat) s_generator.captionText.text = GeneratorLockedCaption;
+                else s_generator.RefreshShownValue();
+            }
+            Dim(s_oneZoneAtATime, !flat);
+            Dim(s_rivers, !flat);   // Sky islands + Caves stay choosable on super flat (voxel terrain only); rivers never
+            Dim(s_islandWater, islands && !flat);
             var profile = ChosenProfile();
             s_conflict = profile.Conflict() ?? (s_gaea && s_gaeaFolder != null ? GaeaProblem() : null);
             s_status.color = s_conflict != null ? ConflictInk : NoteInk;

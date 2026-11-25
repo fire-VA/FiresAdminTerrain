@@ -71,8 +71,8 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
 
-        [HarmonyPatch(typeof(SpawnSystem), "IsSpawnPointGood")]
-        private static class SpawnSystem_IsSpawnPointGood
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class SpawnSystem_IsSpawnPointGood
         {
             // Last: FAT's RavenWaterPatch IsSpawnPointGood prefixes (water/fish) keep their own say off the ring.
             [HarmonyPriority(Priority.Last)]
@@ -85,8 +85,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        [HarmonyPatch(typeof(SpawnSystem), "FindBaseSpawnPoint")]
-        private static class SpawnSystem_FindBaseSpawnPoint
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class SpawnSystem_FindBaseSpawnPoint
         {
             private static MethodInfo s_isGood;
 
@@ -126,8 +126,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        [HarmonyPatch(typeof(SpawnSystem), "Spawn")]
-        private static class SpawnSystem_Spawn
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class SpawnSystem_Spawn
         {
             // UpdateSpawnList called Spawn(point + Vector3.up * groundOffset) right after a good ring point: move that offset onto the
             // ring's up. Only when the point is that same ring point (the offset is along world Y, so x and z still match).
@@ -163,8 +163,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static Quaternion GravityFrame(Vector3 up) => Quaternion.FromToRotation(Vector3.up, up);
 
-        [HarmonyPatch(typeof(CreatureSpawner), "Spawn")]
-        private static class CreatureSpawner_Spawn
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class CreatureSpawner_Spawn
         {
             // Vanilla: FindFloor (a world-down ray) + a world yaw. On the ring: the floor under the spawner along -up, upright on it.
             private static void Postfix(CreatureSpawner __instance, ZNetView __result)
@@ -184,8 +184,8 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
-        [HarmonyPatch(typeof(Character), nameof(Character.InInterior), typeof(Vector3))]
-        private static class Character_InInterior
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class Character_InInterior
         {
             private static bool Prefix(Vector3 position, ref bool __result)
             {

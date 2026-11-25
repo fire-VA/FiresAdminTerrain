@@ -752,6 +752,7 @@ namespace VerdantsAscent.Water.Core
             // 0.2.1097: the per-column ice / lava / crust state on the sheet (Core FiresInlandWater draws it; WaterStateField)
             // 0.2.1313: + the per-column levels: the texture and the placed ice collider (PlacedWaterSolids) read ONE column grid.
             if (any && go != null) WaterStateField.Bind(go.GetComponent<MeshRenderer>(), origin, sLo <= sHi ? (sLo + sHi) * 0.5f : origin.y, "placed", s_levels);
+            if (any && go != null) WaterLookHost.Adopt(go.GetComponent<MeshRenderer>(), FatWaterKind.PlacedSheet);   // 0.2.1455: water look hand-off (after its state is bound)
             if (FiresLogger.DebugEnabled && wet > 0 && Time.unscaledTime >= s_rimLogAt)
             {
                 s_rimLogAt = Time.unscaledTime + 2f;
@@ -946,7 +947,8 @@ namespace VerdantsAscent.Water.Core
                 }
             }
             var mat = VoxelChunkView.ResolveSheetMaterial();
-            if (renderer != null && mat != null && renderer.sharedMaterial != mat) renderer.sharedMaterial = mat;
+            if (renderer != null && mat != null && renderer.sharedMaterial != mat && !WaterLookHost.Keeps(renderer, mat)) renderer.sharedMaterial = mat;   // 0.2.1455: a look mod's material on FAT's own stays
+            if (renderer != null && mat == null && renderer.sharedMaterial == null) renderer.enabled = false;   // 0.2.1478: stood down ([Shaders] Inland water shader); a look mod's own material keeps drawing
             SayMaterial("placed water sheet", renderer);
             ToolWaterStencil.OnSheet(renderer, key);   // 0.2.1068: stable draw order + the stencil proof toggle
             return go.GetComponent<MeshFilter>().sharedMesh;
@@ -1152,6 +1154,7 @@ namespace VerdantsAscent.Water.Core
             s_live.Remove(key); s_builtAt.Remove(key);   // 0.2.1344 (a slice in progress for it sees it is no longer wanted)
             if (s_drawn.TryGetValue(key, out var go) && go != null)
             {
+                WaterLookHost.Forget(go.GetComponent<MeshRenderer>());   // 0.2.1455
                 var mf = go.GetComponent<MeshFilter>();
                 if (mf != null && mf.sharedMesh != null) Object.Destroy(mf.sharedMesh);
                 Object.Destroy(go);

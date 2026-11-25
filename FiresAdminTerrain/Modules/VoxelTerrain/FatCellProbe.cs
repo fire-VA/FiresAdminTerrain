@@ -12,14 +12,14 @@ namespace VerdantsAscent.Terrain.Voxel
     //   * the super-flat clutter gate for its grass patch;
     //   * placed water: its surface and the floor under it (the bed), and the voxel floor probe the water sheets use.
     // Client only, read-only, a cheat command. One line to the log and a short version on screen.
-    [HarmonyPatch(typeof(Terminal), "InitTerminal")]
+    // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
     internal static class FatCellProbe
     {
         private static bool s_registered;
         private static readonly AccessTools.FieldRef<Heightmap, Texture2D> s_paint = AccessTools.FieldRefAccess<Heightmap, Texture2D>("m_paintMask");
 
-        [HarmonyPostfix]
-        private static void Postfix()
+        // 0.2.1501: [HarmonyPostfix] removed (not a patch any more)
+        internal static void Postfix()
         {
             if (s_registered) return;
             s_registered = true;

@@ -37,7 +37,7 @@ namespace VerdantsAscent.Water.Core
             if (!s_paintBound)
             {
                 s_paintBound = true;
-                var p = AccessTools.TypeByName("VerdantsAscent.Terrain.Zones.BiomePaint")?.GetProperty("BiomePaintVersion", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetGetMethod(true);
+                var p = global::VerdantsAscent.FatTypeLookup.Fat("VerdantsAscent.Terrain.Zones.BiomePaint")?.GetProperty("BiomePaintVersion", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetGetMethod(true);
                 if (p != null && p.ReturnType == typeof(int)) s_paintVersion = (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), p);
             }
             try { return s_paintVersion != null ? s_paintVersion() : 0; } catch { return 0; }
@@ -65,7 +65,7 @@ namespace VerdantsAscent.Water.Core
             _registered = true;
             try
             {
-                var sb = AccessTools.TypeByName("FiresCore.Bridge.SeasonBridge");
+                var sb = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Bridge.SeasonBridge");
                 var reg = sb?.GetMethod("RegisterWaterOwner", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(Func<Vector3, bool>) }, null);
                 if (reg != null) reg.Invoke(null, new object[] { new Func<Vector3, bool>(OwnsWater) });
                 FiresLogger.LogInfo($"[WaterIce] water owner {(reg != null ? "registered with Core SeasonBridge" : "NOT registered (SeasonBridge.RegisterWaterOwner missing)")}");

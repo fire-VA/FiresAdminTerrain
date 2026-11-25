@@ -24,8 +24,8 @@ namespace VerdantsAscent.Terrain.Zones
         private const float ServerCheckSeconds = 2f;
         private const float ClientTickSeconds = 0.5f;
         private const float VisualRange = 1600f;
-        private const float FallFade = 0.8f;
-        private const float FallLipOut = 0.6f;
+        internal const float FallFade = 0.8f;   // 0.2.1491: also Vfall's (ToolFalls.AppendSkylandCurtain), so a placed fall is the Skylands fall
+        internal const float FallLipOut = 0.6f;   // 0.2.1491: also Vfall's
         private const string RisingRpc = "FiresZones_SkylandsRising";
 
         private static int s_lastVersion = -1;
@@ -346,7 +346,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static ZoneSystem.ZoneLocation FindLocation(ZoneSystem zoneSystem, string name)
         {
             foreach (var location in zoneSystem.m_locations)
-                if (location.m_enable && location.m_prefab.IsValid && location.m_prefab.Name == name) return location;
+                if (location.m_enable && location.m_prefab.IsValid && location.m_prefab.name == name) return location;
             return null;
         }
 
@@ -1086,6 +1086,8 @@ namespace VerdantsAscent.Terrain.Zones
             FiresLogger.LogInfo($"[FiresZones] island set arrived: {s_rising.Count} rising skyland(s) handed to the voxel wear gate.");
             s_rising.Clear();
         }
+
+        internal static bool AnyRising => s_rising.Count > 0;   // 0.2.1497: StaticPhysics skips its skyland check when none rises
 
         internal static bool RisingAt(Vector3 point)
         {

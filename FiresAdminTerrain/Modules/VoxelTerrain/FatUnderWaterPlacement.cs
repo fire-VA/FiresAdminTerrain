@@ -129,7 +129,7 @@ namespace VerdantsAscent.Terrain.Voxel
             return true;
         }
 
-        // 0.2.1413: the decision alone, no tally (FarForest's replay calls it at the same step, one implementation).
+        // 0.2.1413: the decision alone, no tally (the old FarForest replay, removed in 0.2.1482, called it at the same step).
         internal static bool FilterDecision(bool insideClearArea, ZoneSystem.ZoneVegetation veg, Vector3 p)
         {
             if (insideClearArea || veg == null || veg.m_prefab == null || !FiresVegWaterEcology.Enabled) return insideClearArea;

@@ -27,6 +27,20 @@ namespace VerdantsAscent.Terrain.Voxel
         private static int s_pieceMask;
         private static readonly Collider[] s_hits = new Collider[16];
 
+        // 0.2.1500 ([lead] perf audit row 13): the wheel ring asks this every frame with a weapon out and discards the name; the name string and
+        // the drop prefab's .name (a new managed string each read) were built every time. Same answer, kept for the last weapon (shared data and
+        // drop prefab, compared by reference); the name is built only where a caller logs it.
+        private static object s_lastShared, s_lastDrop;
+        private static bool s_lastIsShovel;
+        internal static bool IsSnowShovel(ItemDrop.ItemData w)
+        {
+            if (w == null) return false;
+            if (ReferenceEquals(w.m_shared, s_lastShared) && ReferenceEquals(w.m_dropPrefab, s_lastDrop)) return s_lastIsShovel;
+            bool r = IsSnowShovel(w, out _);
+            s_lastShared = w.m_shared; s_lastDrop = w.m_dropPrefab; s_lastIsShovel = r;
+            return r;
+        }
+
         internal static bool IsSnowShovel(ItemDrop.ItemData w, out string name)
         {
             name = w == null ? "none" : $"{w.m_shared?.m_name} / {(w.m_dropPrefab != null ? w.m_dropPrefab.name : "?")}";
@@ -376,7 +390,7 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             at = Vector3.zero;
             if (p == null || p != Player.m_localPlayer || p.IsDead() || InventoryGui.IsVisible() || Menu.IsVisible()) return false;
-            if (!IsSnowShovel(p.GetCurrentWeapon(), out _)) return false;
+            if (!IsSnowShovel(p.GetCurrentWeapon())) return false;   // 0.2.1500: no name string per frame
             if (!FatSnowTrail.SnowTrailBiome(p.transform.position)) return false;   // 0.2.1154: snow depth, any biome
             float range = p.GetCurrentWeapon().m_shared?.m_attack?.m_attackRange ?? 1.5f;
             at = p.transform.position + p.transform.forward * range;   // vanilla's GetSnowShovelPoint, on the ground

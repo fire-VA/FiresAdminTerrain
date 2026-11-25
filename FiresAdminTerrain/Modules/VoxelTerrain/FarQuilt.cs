@@ -56,11 +56,13 @@ namespace VerdantsAscent.Terrain.Voxel
             // 0.2.1431 (Fire 11-10 4:17 AM: "any other far rendering code would default off"): FiresFarWater had no key and ran on every
             // Fires-generated world. Off = no far-water tiles built, ticked or kept (existing ones are destroyed). Per machine, not synced.
             FarWater = cfg.Bind("Far Terrain", "FarWater", false,
-                "Far water: rivers and lakes drawn past the loaded area, out to about 3 km, on Fires-generated worlds (render only). Default off; off = no far-water work at all.");
+                "Far water: rivers and lakes drawn past the loaded area, out to about 3 km, on Fires-generated worlds (render only). Default off; off = no far-water work at all." + " " + FatShaders.Needs(FatShaders.InlandWaterKey));
         }
         internal static BepInEx.Configuration.ConfigEntry<bool> FarWater;
 
-        private static bool ExtOn => ExtendedReach != null && ExtendedReach.Value;
+        // 0.2.1509 ([lead] 11-21: one rule, never two far grounds on any world): rings 2/3 also stand down while EBM owns the far ground
+        // (EbmFarGround.Owned, refreshed once per tick at the top of Tick); off -> line 264 drops the live ring-2/3 tiles, back on -> rebuilt.
+        private static bool ExtOn => ExtendedReach != null && ExtendedReach.Value && !EbmFarGround.OwnedNow;
         private static float RingSize(int ring) => ring == 0 ? 64f : ring == 1 ? 256f : ring == 2 ? 512f : 1024f;
         private static float RingRadius(int ring, float near, float far)
         {
@@ -188,6 +190,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void Tick()
         {
+            EbmFarGround.Refresh();            // 0.2.1509: re-reads EBM's bool only when its event marked it stale
             FarTerrainVanilla.Tick(Enabled);   // 0.2.1418: ExtendedReach on worlds the far quilt doesn't draw (vanilla TerrainLod)
             if (!Enabled)
             {
@@ -789,20 +792,35 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static void RecolourForSeason()
         {
             if (WorldGenerator.instance == null) return;
+            foreach (var kv in s_tiles) RecolourTile(kv.Value);
+        }
+
+        // 0.2.1492 (gradual snow: a recolour per 0.05 of fill): each live tile as one job in FatSeasons' nearest-first queue, a few a frame,
+        // instead of every tile in one frame. A job finds its tile again when it runs (Key) and skips one released meanwhile.
+        internal static void CollectSeasonRecolours(List<FatSeasons.Recolour> jobs)
+        {
+            if (WorldGenerator.instance == null) return;
             foreach (var kv in s_tiles)
             {
                 var t = kv.Value;
                 if (t == null || t.Go == null || t.Mesh == null) continue;
-                Vector3 origin = t.Go.transform.position;
-                t.Mesh.GetVertices(s_recolourVerts);
-                s_recolourCols.Clear();
-                foreach (var v in s_recolourVerts)
-                {
-                    float wx = origin.x + v.x, wz = origin.z + v.z;
-                    s_recolourCols.Add(FatSeasons.Winterize(Zones.BiomePaint.Tint(BiomeCornerBlend.Sample(wx, wz), wx, wz), wx, wz));
-                }
-                t.Mesh.SetColors(s_recolourCols);
+                var key = kv.Key;
+                jobs.Add(new FatSeasons.Recolour(t.Go.transform.position, () => { if (s_tiles.TryGetValue(key, out var live)) RecolourTile(live); }));
             }
+        }
+
+        private static void RecolourTile(Tile t)
+        {
+            if (t == null || t.Go == null || t.Mesh == null) return;
+            Vector3 origin = t.Go.transform.position;
+            t.Mesh.GetVertices(s_recolourVerts);
+            s_recolourCols.Clear();
+            foreach (var v in s_recolourVerts)
+            {
+                float wx = origin.x + v.x, wz = origin.z + v.z;
+                s_recolourCols.Add(FatSeasons.Winterize(Zones.BiomePaint.Tint(BiomeCornerBlend.Sample(wx, wz), wx, wz), wx, wz));
+            }
+            t.Mesh.SetColors(s_recolourCols);
         }
 
         // 0.2.1440 DistantHeightCache: edge normals sample the same edited height as the vertices.

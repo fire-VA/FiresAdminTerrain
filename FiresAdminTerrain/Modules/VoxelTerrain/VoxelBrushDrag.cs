@@ -50,6 +50,8 @@ namespace VerdantsAscent.Terrain.Voxel
         private static float s_levelHeldSince;
         private static float s_levelOffset;   // Vlevel's height over the ground under the crosshair (PgUp/PgDn, Shift+wheel)
         private static float s_heightWheelNotches;   // this frame's Shift+wheel notches, for the tool's one height value
+        private static string s_fallWhySaid;           // 0.2.1468: the last Vfall refusal reason told to the player
+        private static float s_fallWhyAt;
 
         // Cylinder-tool state, armed by the console command.
         private static VoxelBrushMode s_cylMode;
@@ -425,11 +427,14 @@ namespace VerdantsAscent.Terrain.Voxel
         {
             RegisterLevelVerify();
             VoxelPaintCommand.Register();   // va_voxel_paint (FDT's pads)
+#if FIRES_TESTS   // 0.2.1505 (Fire 11-20): test / diag commands, compiled only in a test build (csproj FiresTests switch)
             FatTerrainSnapshot.RegisterCommand();   // fat_snapshot_test (camp terrain snapshots)
             VerdantsAscent.Terrain.Testing.FatBlackPaintTest.Register();   // 0.2.1378
             VerdantsAscent.Terrain.HeightmapSnow.FatTrailFieldTest.Register();   // 0.2.1288 fat_trail_field_test
             VerdantsAscent.Terrain.HeightmapSnow.FatZonePaintDump.Register();   // 0.2.1306 fat_zone_paint_dump
-            FatTerrainSnapshot.RegisterResidueCommand(); FatTerrainSnapshot.RegisterPreCampCheck(); FiresWorldGenBase.RegisterPackAbCommand(); FatStudioRoundtrip.Register(); global::VerdantsAscent.Terrain.Studio.FatStudioTerrain.RegisterCommand(); global::VerdantsAscent.Terrain.Studio.FatStudioLocations.RegisterCommand(); global::VerdantsAscent.Terrain.Studio.FatStudioWaterTest.RegisterCommand();   // fat_camp_residue_clear, fat_studio_terrain_test (0.2.1242)
+            FatTerrainSnapshot.RegisterResidueCommand(); FatTerrainSnapshot.RegisterPreCampCheck();   // fat_camp_residue_clear, fat_precamp_check
+#endif
+            FiresWorldGenBase.RegisterPackAbCommand(); FatStudioRoundtrip.Register(); global::VerdantsAscent.Terrain.Studio.FatStudioTerrain.RegisterCommand(); global::VerdantsAscent.Terrain.Studio.FatStudioLocations.RegisterCommand(); global::VerdantsAscent.Terrain.Studio.FatStudioWaterTest.RegisterCommand();   // fat_camp_residue_clear, fat_studio_terrain_test (0.2.1242)
             new Terminal.ConsoleCommand(LevelCommand,
                 "<x> <z> <sizeX> <sizeZ> <y|auto> [depth: ignored since 0.2.807] [skirt=auto] - level a rectangular pad to y with the V-tool brush, sloped edges, any height (admin)",
                 args =>
@@ -1102,7 +1107,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             if (tool != Tool.Pond && !IsWaterTool(tool)) PondTool.Hide();
-            if (tool != Tool.Fall) ToolFalls.HidePreview();   // 0.2.1086: the Vfall ghost shows only while Vfall is held
+            if (tool != Tool.Fall) { ToolFalls.HidePreview(); ToolFalls.ForgetFacing(); }   // 0.2.1086: the Vfall ghost shows only while Vfall is held; 0.2.1467: its facing restarts at the camera's heading next time
             if (tool == Tool.None || refused
                 || (FiresVoxelConfig.Enabled != null && !FiresVoxelConfig.Enabled.Value))
             {
@@ -1145,11 +1150,29 @@ namespace VerdantsAscent.Terrain.Voxel
                     || UnityEngine.EventSystems.EventSystem.current == null
                     || !UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject()))
             {
-                if (VerdantsAscent.Terrain.FatInput.ShiftHeld)
+                if (tool == Tool.Fall)
+                {
+                    // 0.2.1467 (Fire 11-18: "scroll wheel should ROTATE the waterfall and shift scroll should scale it"): Vfall's wheel turns
+                    // the fall's facing (15 deg a notch), Shift+wheel sizes its width (ToolRadius = half the width). No Ctrl / Alt wheel (above).
+                    Vector3 camFwd = GameCamera.instance != null ? GameCamera.instance.transform.forward
+                        : player != null ? player.transform.forward : Vector3.forward;
+                    if (VerdantsAscent.Terrain.FatInput.ShiftHeld)
+                    {
+                        VoxelToolPieces.ToolRadius = Mathf.Clamp(VoxelToolPieces.ToolRadius * (1f + scroll * 1.4f), 1f, 32f);
+                        if (player != null) player.Message(MessageHud.MessageType.TopLeft, $"Waterfall width {VoxelToolPieces.ToolRadius * 2f:0.0} m", 0, null, false);
+                    }
+                    else
+                    {
+                        float deg = ToolFalls.Rotate(Mathf.Sign(scroll) * Mathf.Max(1f, Mathf.Round(Mathf.Abs(scroll) / 0.1f)), camFwd);
+                        if (player != null) player.Message(MessageHud.MessageType.TopLeft, $"Waterfall facing {deg:0} deg", 0, null, false);
+                    }
+                }
+                else if (VerdantsAscent.Terrain.FatInput.ShiftHeld)
                     s_heightWheelNotches = Mathf.Sign(scroll) * Mathf.Max(1f, Mathf.Round(Mathf.Abs(scroll) / 0.1f));
                 else
                     VoxelToolPieces.ToolRadius = Mathf.Clamp(VoxelToolPieces.ToolRadius * (1f + scroll * 1.4f), 0.5f, 32f);
             }
+            VoxelBrushSoft.Tick(piece, player);   // 0.2.1454 ([ghost], Voxheim diff P1): softness / strength keys, before any dab this frame
 
             // Sculpting tools at a manageable draw speed: a tool with
             // a stroke driver (VoxelBrushDrag.Strokes.cs) runs its preview, offset and click-and-drag stroke there. The
@@ -1202,16 +1225,29 @@ namespace VerdantsAscent.Terrain.Voxel
                 // Lines-only ring of the fall's width at the cursor (vanilla Remove = middle mouse removes falls in it).
                 s_cylRadius = VoxelToolPieces.ToolRadius;
                 s_cylSignedHeight = LevelGhostThickness;
-                SetGizmo(Tool.Cylinder, cursor, true);
+                // 0.2.1467 (Fire's shot 1119: the big dashed ring and spokes): Vfall shows only its own preview (the curtain, the
+                // spillway ring), not the cylinder brush gizmo; Vmop keeps its ring.
+                SetGizmo(tool == Tool.Fall ? Tool.None : Tool.Cylinder, cursor, true);
                 UpdateHintRay(tool, cursor);
                 if (tool == Tool.Fall)
                 {
                     // 0.2.1086 (Fire: "v fall should show an actual ghost preview of what the fall will look like so we can position it"):
                     // the fall the click would lay (spillway ring, see-through curtain down to the landing, pool ring), from the
                     // same plan as the click; red spillway ring and no curtain when the click would be refused.
-                    Vector3 ghostView = GameCamera.instance != null ? GameCamera.instance.transform.forward
+                    // 0.2.1467: facing from the wheel (ToolFalls.Facing), not the camera; the click below uses the same facing.
+                    Vector3 camFwd = GameCamera.instance != null ? GameCamera.instance.transform.forward
                         : Player.m_localPlayer != null ? Player.m_localPlayer.transform.forward : Vector3.forward;
-                    ToolFalls.Preview(cursor, ghostView, VoxelToolPieces.ToolRadius, SharedLineMat());
+                    // 0.2.1469: the cursor ray passes through FAT water (no collider on the pointer's layers); lift it onto the water it crosses
+                    Vector3 fallCursor = ToolFalls.AimAtWater(cursor, out bool fallOnWater);
+                    string fallWhy = ToolFalls.Preview(fallCursor, fallOnWater, ToolFalls.Facing(camFwd), VoxelToolPieces.ToolRadius, SharedLineMat());
+                    // 0.2.1468: when no fall fits here, SAY why (a red ring alone read as "no preview"); once per new reason, at most every 2 s
+                    if (fallWhy != null && player != null && (fallWhy != s_fallWhySaid || Time.unscaledTime >= s_fallWhyAt))
+                    {
+                        s_fallWhySaid = fallWhy; s_fallWhyAt = Time.unscaledTime + 2f;
+                        string shortWhy = fallWhy.Length > 140 ? fallWhy.Substring(0, 140) + "..." : fallWhy;
+                        player.Message(MessageHud.MessageType.TopLeft, "No waterfall here: " + shortWhy, 0, null, false);
+                    }
+                    else if (fallWhy == null) s_fallWhySaid = null;
                 }
                 if (tool == Tool.Fall && ZInput.GetButtonDown("Remove"))
                 {
@@ -1490,7 +1526,20 @@ namespace VerdantsAscent.Terrain.Voxel
         // Building is allowed over a closed chunk, so V tools are too: every V-tool edit runs inside
         // VoxelWorld.VToolScope, the one case ApplyBrush lets reach over a closed zone (hoe / IH / WEC stay refused there).
         // FatUndo's prefix keeps targeting DispatchNow by name.
-        private void DispatchNow(Tool tool, Vector3 pos, bool carveMod)
+        private void DispatchNow(Tool tool, Vector3 pos, bool carveMod)   // 0.2.1502: FatUndo VoxelBrushDrag_DispatchNow_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginPlayerEdit($"a V{tool.ToString().ToLowerInvariant()} stroke");
+                DispatchNow_Body(tool, pos, carveMod);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private void DispatchNow_Body(Tool tool, Vector3 pos, bool carveMod)
         {
             VoxelWorld.VToolScope++;
             try { DispatchCore(tool, pos, carveMod); }
@@ -1594,7 +1643,10 @@ namespace VerdantsAscent.Terrain.Voxel
                         Vector3 view = GameCamera.instance != null ? GameCamera.instance.transform.forward
                             : Player.m_localPlayer != null ? Player.m_localPlayer.transform.forward : Vector3.forward;
                         // 0.2.1072: a click only places; remove is vanilla's Remove input (see the Fall preview), Numpad 7 undoes.
-                        string line = ToolFalls.Place(pos, view, VoxelToolPieces.ToolRadius);
+                        // 0.2.1467: the preview's facing (the wheel's), so the click lays exactly what the preview showed.
+                        // 0.2.1469: the same water-lifted cursor as the ghost, and the fall's top AT it (no edge needed)
+                        Vector3 fallAt = ToolFalls.AimAtWater(pos, out bool fallOnWater);
+                        string line = ToolFalls.Place(fallAt, fallOnWater, ToolFalls.Facing(view), VoxelToolPieces.ToolRadius);
                         FiresLogger.LogDebug(line);
                         // 0.2.1072: one line per Vfall click with the outcome (placed / removed / refused and why).
                         FiresLogger.LogDebug(string.Format(System.Globalization.CultureInfo.InvariantCulture,

@@ -204,13 +204,13 @@ namespace VerdantsAscent.Terrain.Zones
                         FatLocationsReport.NoteCavePass(pass.Tally.CaveNoRoom, pass.Tally.CaveTooDeep, pass.Tally.CaveNoAccess, pass.Tally.CaveBiome, pass.Tally.CaveCover, pass.Tally.CaveOther);
                     if (pass.Failed > 0)
                     {
-                        FiresLogger.LogWarning($"[LocationAccel] {location.m_prefab.Name}: the threaded pass stopped on an error ({pass.FailMessage}); "
+                        FiresLogger.LogWarning($"[LocationAccel] {location.m_prefab.name}: the threaded pass stopped on an error ({pass.FailMessage}); "
                             + $"{placed}/{location.m_quantity} placed, vanilla's own loop finishes it. First error:\n{pass.FailStack}");
                         failed = true;
                         break;
                     }
                     if (step > 0)
-                        FiresLogger.LogDebug($"[LocationAccel] {location.m_prefab.Name} relaxed (step {step}: altitude {pass.Rules.MinAlt:0.#}..{pass.Rules.MaxAlt:0.#}, "
+                        FiresLogger.LogDebug($"[LocationAccel] {location.m_prefab.name} relaxed (step {step}: altitude {pass.Rules.MinAlt:0.#}..{pass.Rules.MaxAlt:0.#}, "
                             + $"terrain delta {pass.Rules.MinDelta:0.##}..{pass.Rules.MaxDelta:0.##}): now {placed}/{location.m_quantity}.");
                 }
             }
@@ -229,11 +229,11 @@ namespace VerdantsAscent.Terrain.Zones
                 iterations += vanillaPkg.ReadInt();
                 int before = placed;
                 placed = CountOwn(zs, location);
-                FiresLogger.LogWarning($"[LocationAccel] {location.m_prefab.Name}: vanilla's loop placed {placed - before} more, now {placed}/{location.m_quantity}.");
+                FiresLogger.LogWarning($"[LocationAccel] {location.m_prefab.name}: vanilla's loop placed {placed - before} more, now {placed}/{location.m_quantity}.");
             }
             pkg.Write(iterations);
             pkg.SetPos(0);
-            string line = $"[LocationAccel] {location.m_prefab.Name}: placed {placed}/{location.m_quantity} in {clock.Elapsed.TotalMilliseconds:0} ms "
+            string line = $"[LocationAccel] {location.m_prefab.name}: placed {placed}/{location.m_quantity} in {clock.Elapsed.TotalMilliseconds:0} ms "
                 + $"on {threads} thread(s){single}, {iterations:N0} site check(s); refused by: {tallies.FirstOrDefault()}";
             if (placed < location.m_quantity) FiresLogger.LogDebug(line + " (short)");
             else FiresLogger.LogDebug(line);
@@ -244,7 +244,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (step == 0) return l.m_quantity;
             if (l.m_prioritized) return Math.Min(1, l.m_quantity);
             var names = (HalfQuotaLocations?.Value ?? "").Split(',').Select(s => s.Trim());
-            return names.Contains(l.m_prefab.Name) ? (l.m_quantity + 1) / 2 : 0;
+            return names.Contains(l.m_prefab.name) ? (l.m_quantity + 1) / 2 : 0;
         }
 
         private static Pass Start(ZoneSystem zs, ZoneSystem.ZoneLocation l, int placed, int step)
@@ -348,7 +348,7 @@ namespace VerdantsAscent.Terrain.Zones
             var tally = new Tally();
             try
             {
-                var rng = new System.Random(unchecked(WorldGenerator.instance.GetSeed() * 31 + pass.Location.m_prefab.Name.GetStableHashCode() * 7
+                var rng = new System.Random(unchecked(WorldGenerator.instance.GetSeed() * 31 + pass.Location.m_prefab.name.GetStableHashCode() * 7
                     + index * 7919 + Environment.TickCount));
                 var l = pass.Location;
                 var wg = WorldGenerator.instance;

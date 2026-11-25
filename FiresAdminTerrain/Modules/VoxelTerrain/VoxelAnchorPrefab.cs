@@ -120,6 +120,73 @@ namespace VerdantsAscent.Terrain.Voxel
             return null;
         }
 
+        // 0.2.1470 (FatApi on a dedicated server): whether any chunk anchor (a saved voxel edit record) lies in the zone / sector of `at`.
+        internal static bool AnyInSector(Vector3 at)
+        {
+            var zdoMan = ZDOMan.instance;
+            if (zdoMan == null) return false;
+            var bySector = ObjectsBySectorRef(zdoMan);
+            if (bySector == null) return false;
+            uint sector = ZoneSystem.GetSectorIndex(at).Sector;
+            if (sector >= bySector.Length) return false;
+            var inSector = bySector[sector];
+            if (inSector == null) return false;
+            foreach (var zdo in inSector)
+                if (zdo != null && zdo.GetPrefab() == PrefabHash) return true;
+            return false;
+        }
+
+        // 0.2.1473 (dedi read cost): the chunk columns (kx, kz packed as (long)kx << 32 ^ (uint)kz) of every anchor in the sector of `at`.
+        internal static void CollectColumns(Vector3 at, System.Collections.Generic.HashSet<long> into)
+        {
+            var zdoMan = ZDOMan.instance;
+            if (zdoMan == null) return;
+            var bySector = ObjectsBySectorRef(zdoMan);
+            if (bySector == null) return;
+            uint sector = ZoneSystem.GetSectorIndex(at).Sector;
+            if (sector >= bySector.Length) return;
+            var inSector = bySector[sector];
+            if (inSector == null) return;
+            foreach (var zdo in inSector)
+            {
+                if (zdo == null || zdo.GetPrefab() != PrefabHash) continue;
+                int kx = zdo.GetInt(ZDO_KX, int.MinValue), kz = zdo.GetInt(ZDO_KZ, int.MinValue);
+                if (kx == int.MinValue || kz == int.MinValue) continue;
+                into.Add(((long)kx << 32) ^ (uint)kz);
+            }
+        }
+
+        // 0.2.1474 (dedi proof dump): every anchor ZDO in the sector of `at`.
+        internal static void AnchorsInSector(Vector3 at, System.Collections.Generic.List<ZDO> into)
+        {
+            var zdoMan = ZDOMan.instance;
+            if (zdoMan == null) return;
+            var bySector = ObjectsBySectorRef(zdoMan);
+            if (bySector == null) return;
+            uint sector = ZoneSystem.GetSectorIndex(at).Sector;
+            if (sector >= bySector.Length || bySector[sector] == null) return;
+            foreach (var zdo in bySector[sector])
+                if (zdo != null && zdo.GetPrefab() == PrefabHash) into.Add(zdo);
+        }
+
+        // 0.2.1474: every anchor ZDO in every sector list (one-shot dump only: walks all loaded ZDOs). Returns the sector-list count too.
+        internal static int AllAnchors(System.Collections.Generic.List<ZDO> into)
+        {
+            var zdoMan = ZDOMan.instance;
+            if (zdoMan == null) return 0;
+            var bySector = ObjectsBySectorRef(zdoMan);
+            if (bySector == null) return 0;
+            int lists = 0;
+            foreach (var list in bySector)
+            {
+                if (list == null) continue;
+                lists++;
+                foreach (var zdo in list)
+                    if (zdo != null && zdo.GetPrefab() == PrefabHash) into.Add(zdo);
+            }
+            return lists;
+        }
+
         private static readonly AccessTools.FieldRef<ZDOMan, System.Collections.Generic.List<ZDO>[]> ObjectsBySectorRef =
             AccessTools.FieldRefAccess<ZDOMan, System.Collections.Generic.List<ZDO>[]>("m_objectsBySector");
 

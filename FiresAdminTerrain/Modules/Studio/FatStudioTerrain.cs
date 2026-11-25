@@ -96,7 +96,7 @@ namespace VerdantsAscent.Terrain.Studio
             {
                 s_maps.Clear();
                 Heightmap.FindHeightmap(p, radius + 2f, s_maps);
-                if (s_maps.Count == 0) { reason = $"not loaded: no heightmap at ({p.x:0},{p.z:0})"; return false; }
+                if (s_maps.Count == 0) { reason = FatStudioNotLoaded.Log($"not loaded: no heightmap at ({p.x:0},{p.z:0})", p); return false; }
                 foreach (var hm in s_maps) if (hm != null) maps[ZoneSystem.GetZone(hm.transform.position)] = hm;
                 if (maps.Count > MaxZones) { reason = $"tooLarge: the stroke reaches more than {MaxZones} zones, split it"; return false; }
             }
@@ -114,7 +114,7 @@ namespace VerdantsAscent.Terrain.Studio
                 TerrainComp comp = null;
                 try { comp = kv.Value.GetAndCreateTerrainCompiler(); } catch { }
                 var nview = comp != null ? CompNview(comp) : null;
-                if (nview == null || !nview.IsValid()) { reason = $"not loaded: no terrain compiler in zone {kv.Key.x},{kv.Key.y}"; return false; }
+                if (nview == null || !nview.IsValid()) { reason = FatStudioNotLoaded.Log($"not loaded: no terrain compiler in zone {kv.Key.x},{kv.Key.y}", FatStudioNotLoaded.ZoneCentre(kv.Key.x, kv.Key.y)); return false; }
                 if (!nview.IsOwner()) nview.ClaimOwnership();
                 if (!nview.IsOwner()) { reason = $"not owner: zone {kv.Key.x},{kv.Key.y}"; return false; }
                 comps[kv.Key] = comp;
@@ -164,7 +164,7 @@ namespace VerdantsAscent.Terrain.Studio
                 Heightmap.FindHeightmap(zp, 1f, s_maps);
                 Heightmap hm = null;
                 foreach (var m in s_maps) if (m != null && ZoneSystem.GetZone(m.transform.position) == e.Zone) { hm = m; break; }
-                if (hm == null) { reason = $"not loaded: zone {e.Zone.x},{e.Zone.y}"; return false; }
+                if (hm == null) { reason = FatStudioNotLoaded.Log($"not loaded: zone {e.Zone.x},{e.Zone.y}", FatStudioNotLoaded.ZoneCentre(e.Zone.x, e.Zone.y)); return false; }
                 var comp = TerrainComp.FindTerrainCompiler(hm.transform.position);
                 byte[] now = comp != null ? Sha(Data(comp)) : null;
                 if (!force && !SameHash(now, e.AfterHash)) { reason = $"stale: zone {e.Zone.x},{e.Zone.y} changed since the edit"; return false; }
@@ -177,7 +177,7 @@ namespace VerdantsAscent.Terrain.Studio
                 var comp = TerrainComp.FindTerrainCompiler(hm.transform.position);
                 if (comp == null) continue;   // created and already gone: nothing to do
                 var nview = CompNview(comp);
-                if (nview == null || !nview.IsValid()) { reason = $"not loaded: zone {e.Zone.x},{e.Zone.y}"; return false; }
+                if (nview == null || !nview.IsValid()) { reason = FatStudioNotLoaded.Log($"not loaded: zone {e.Zone.x},{e.Zone.y}", FatStudioNotLoaded.ZoneCentre(e.Zone.x, e.Zone.y)); return false; }
                 if (!nview.IsOwner()) nview.ClaimOwnership();
                 if (e.Before != null)
                 {
@@ -213,14 +213,14 @@ namespace VerdantsAscent.Terrain.Studio
             foreach (var e in entries)
             {
                 var hm = MapOf(e.Zone);
-                if (hm == null) { reason = $"not loaded: zone {e.Zone.x},{e.Zone.y}"; return false; }
+                if (hm == null) { reason = FatStudioNotLoaded.Log($"not loaded: zone {e.Zone.x},{e.Zone.y}", FatStudioNotLoaded.ZoneCentre(e.Zone.x, e.Zone.y)); return false; }
                 var comp = TerrainComp.FindTerrainCompiler(hm.transform.position);
                 if (comp == null)
                 {
                     if (e.Before == null && !force) continue;   // created by the edit and already gone
                     if (!force) { reason = $"stale: zone {e.Zone.x},{e.Zone.y} lost its terrain data since the edit"; return false; }
                     try { comp = hm.GetAndCreateTerrainCompiler(); } catch { }
-                    if (comp == null) { reason = $"not loaded: zone {e.Zone.x},{e.Zone.y}"; return false; }
+                    if (comp == null) { reason = FatStudioNotLoaded.Log($"not loaded: zone {e.Zone.x},{e.Zone.y}", FatStudioNotLoaded.ZoneCentre(e.Zone.x, e.Zone.y)); return false; }
                 }
                 // 0.2.1255 (round N: undo refused "stale" while it snowed: the snow refill touched an UNCHANGED footprint vertex): only the
                 // vertices the edit changed (before != after) are checked and written back; a refill on their neighbours is not the edit's.
@@ -235,7 +235,7 @@ namespace VerdantsAscent.Terrain.Studio
             {
                 if (!found.TryGetValue(e.Zone, out var comp)) continue;
                 var nview = CompNview(comp);
-                if (nview == null || !nview.IsValid()) { reason = $"not loaded: zone {e.Zone.x},{e.Zone.y}"; return false; }
+                if (nview == null || !nview.IsValid()) { reason = FatStudioNotLoaded.Log($"not loaded: zone {e.Zone.x},{e.Zone.y}", FatStudioNotLoaded.ZoneCentre(e.Zone.x, e.Zone.y)); return false; }
                 if (!nview.IsOwner()) nview.ClaimOwnership();
                 SaveMethod.Invoke(comp, new object[] { false });   // a deferred save must not land over the write-back
                 if (e.Foot != null) foreach (var f in e.Foot) { if (f.Idx < ModifiedHeight(comp).Length && (force || !Same(f.B, f.A))) { Write(comp, f.Idx, f.B); vertices++; } }
@@ -308,13 +308,13 @@ namespace VerdantsAscent.Terrain.Studio
         {
             reason = null;
             var hm = MapOf(zone);
-            if (hm == null) { reason = $"not loaded: zone {zone.x},{zone.y}"; return false; }
+            if (hm == null) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y}", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }
             var comp = TerrainComp.FindTerrainCompiler(hm.transform.position);
             bool had = data.Length > 0 && data[0] == 1;
             if (comp == null && !had) return true;
             if (comp == null) { try { comp = hm.GetAndCreateTerrainCompiler(); } catch { } }
             var nview = comp != null ? CompNview(comp) : null;
-            if (nview == null || !nview.IsValid()) { reason = $"not loaded: zone {zone.x},{zone.y}"; return false; }
+            if (nview == null || !nview.IsValid()) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y}", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }
             if (!nview.IsOwner()) nview.ClaimOwnership();
             SaveMethod.Invoke(comp, new object[] { false });
             int len = ModifiedHeight(comp).Length;
@@ -371,12 +371,12 @@ namespace VerdantsAscent.Terrain.Studio
         {
             reason = null;
             var hm = MapOf(zone);
-            if (hm == null) { reason = $"not loaded: zone {zone.x},{zone.y}"; return false; }
+            if (hm == null) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y}", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }
             var comp = TerrainComp.FindTerrainCompiler(hm.transform.position);
             if (comp == null && before == null) return true;
             if (comp == null) { try { comp = hm.GetAndCreateTerrainCompiler(); } catch { } }
             var nview = comp != null ? CompNview(comp) : null;
-            if (nview == null || !nview.IsValid()) { reason = $"not loaded: zone {zone.x},{zone.y}"; return false; }
+            if (nview == null || !nview.IsValid()) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y}", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }
             if (!nview.IsOwner()) nview.ClaimOwnership();
             if (before != null)
             {
@@ -524,7 +524,7 @@ namespace VerdantsAscent.Terrain.Studio
             s_maps.Clear();
             Heightmap.FindHeightmap(c, r, s_maps);
             var maps = new List<Heightmap>(s_maps);
-            if (maps.Count == 0) return $"reset ({x:0},{z:0}) r {r:0}: not loaded (no heightmap there)";
+            if (maps.Count == 0) return FatStudioNotLoaded.Log($"reset ({x:0},{z:0}) r {r:0}: not loaded (no heightmap there)", c);
             int verts = 0, hadH = 0, hadP = 0, comps = 0, removed = 0;
             foreach (var hm in maps)
             {

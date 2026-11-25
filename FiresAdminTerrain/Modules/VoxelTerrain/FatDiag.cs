@@ -23,7 +23,15 @@ namespace VerdantsAscent.Terrain.Voxel
             s_biomePaint = B(cfg, "Biome paint", "[BiomePaint] tint / deep-ground lines and [FatSuperFlat] per-entry biome lines.");
             s_perfCensus = B(cfg, "Perf census", "[FatPerf] draws / objects census, [FatSpike] spike lines.");
             s_looks = B(cfg, "Looks", "[Rainbow] per-show lines, [Cultivated] per-op lines, [VoxelZoneLook] per-zone lines.");
+            // 0.2.1500 ([lead] perf audit row 2): FatGenTiming's read-only timers wrapped every WorldGenerator sampler (prefix + postfix) and every
+            // HeightmapBuilder.Build in normal play, ~10 clock reads per height sample inside every vanilla build. They are now installed only when
+            // this key is on at game start (Harmony Prepare), so normal play runs vanilla's samplers without them.
+            s_genTiming = cfg.Bind(S, "Generator timing", false, "Diagnostic timers on vanilla's world generator samplers and heightmap builds ([BcImport] slow build / sync wait lines). Takes effect at the next game start. OFF = not installed (no cost). ON (with Core's Debug log level) = the timing lines.");
         }
+
+        private static ConfigEntry<bool> s_genTiming;
+        // Read once while FAT applies its patches: the timer patch classes install only when this is on (0.2.1500).
+        internal static bool GenTimingPatches => s_genTiming != null && s_genTiming.Value;
 
         private static ConfigEntry<bool> B(ConfigFile cfg, string key, string what)
             => cfg.Bind(S, key, false, "Diagnostic log lines (player-facing: no). OFF = quiet. ON (with Core's Debug log level) = " + what);

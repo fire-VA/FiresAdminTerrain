@@ -227,96 +227,47 @@ namespace VerdantsAscent.Terrain
             }
         }
 
-        // ── scopes: the ice / snow / water console commands (IH runs these) ──────────────────────────────────────────────
-        [HarmonyPatch]
-        private static class IceWaterCommands_Undo
-        {
-            private static IEnumerable<MethodBase> TargetMethods()
-            {
-                foreach (var type in new[] { typeof(LandIceCommands), typeof(LandSnowCommands), typeof(FloatingIceCommands), typeof(IcePlacementTool),
-                                             typeof(WaterBrushCommands), typeof(WaterPlacementTool) })
-                    foreach (var method in AccessTools.GetDeclaredMethods(type))
-                    {
-                        if (!method.IsStatic || method.Name == "ParseArgs") continue;
-                        var ps = method.GetParameters();
-                        if (ps.Length == 0 || ps[0].ParameterType != typeof(Terminal.ConsoleEventArgs)) continue;
-                        if (Array.Exists(ps, p => p.IsOut || p.ParameterType.IsByRef)) continue;
-                        yield return method;
-                    }
-            }
+        // ── scopes: the ice / snow / water console commands (IH runs these) ────────────────────────────
+        // 0.2.1502: these were Harmony patches on FAT's own methods (see FatUndo.cs for why); each call site now calls the hook below.
+        //   IceWaterCommands_Undo  -> every static ConsoleEventArgs command of LandIceCommands, LandSnowCommands, FloatingIceCommands,
+        //                             IcePlacementTool, WaterBrushCommands, WaterPlacementTool (the old TargetMethods filter: static, not ParseArgs,
+        //                             first parameter Terminal.ConsoleEventArgs, no out / ref): scope BeginCommandEdit(args) / EndPlayerEdit()
+        //   WaterSheetsRemove_Undo -> WaterSheets.Remove: scope "a water sheet removal"
+        //   IceSheetEdits_Undo     -> LandIce / LandSnow ModifyHeights, LevelHeights, SmoothHeights, AddFootprint, Remove; FloatingIce ModifyTopHeights,
+        //                             SmoothTopHeights, BreakIceAt, AddFootprint, Remove: prefix IceSheetBefore(this, false)
+        //   IceSheetMade_Undo      -> LandIce / LandSnow Initialize, FloatingIce InitializeFloating: prefix IceSheetBefore(this, true)
+        //   WaterRemove_Undo       -> WaterOperationRPC.RequestRemoveWater: prefix WaterRemoveBefore(stableHash)
+        //   WaterClearZone_Undo    -> WaterOperationRPC.RequestClearZoneWater: prefix WaterClearZoneBefore(center, radius)
+        //   CombinerRemoveDisk_Undo-> WaterMeshCombiner.RemoveWaterDisk: prefix CombinerRemoveBefore(disk)
 
-            private static void Prefix(Terminal.ConsoleEventArgs __0) => BeginPlayerEdit($"the {(__0?.Args != null && __0.Args.Length > 0 ? __0.Args[0] : "ice/water")} command");
-            private static void Finalizer() => EndPlayerEdit();
+        /// <summary>An ice / snow / water console command starts (was IceWaterCommands_Undo's prefix; same text).</summary>
+        internal static void BeginCommandEdit(Terminal.ConsoleEventArgs args)
+            => BeginPlayerEdit($"the {(args?.Args != null && args.Args.Length > 0 ? args.Args[0] : "ice/water")} command");
+
+        /// <summary>An ice / snow sheet is about to be edited or made (was IceSheetEdits_Undo / IceSheetMade_Undo's prefix).</summary>
+        internal static void IceSheetBefore(Component sheet, bool made) => BeforeIceEdit(sheet, made);
+
+        /// <summary>WaterOperationRPC.RequestRemoveWater is about to remove a disk (was WaterRemove_Undo's prefix; same body).</summary>
+        internal static void WaterRemoveBefore(int stableHash)
+        {
+            if (s_laying || s_scope == 0) return;
+            foreach (var disk in DisksWhere(d => d.StableHash == stableHash)) { NoteGone(disk); break; }
         }
 
-        [HarmonyPatch(typeof(WaterSheets), nameof(WaterSheets.Remove))]
-        private static class WaterSheetsRemove_Undo
+        /// <summary>WaterOperationRPC.RequestClearZoneWater is about to clear disks (was WaterClearZone_Undo's prefix; same body).</summary>
+        internal static void WaterClearZoneBefore(Vector3 center, float radius)
         {
-            private static void Prefix() => BeginPlayerEdit("a water sheet removal");
-            private static void Finalizer() => EndPlayerEdit();
-        }
-
-        // ── what the commands change ────────────────────────────────────────────────────────────────────────────
-        [HarmonyPatch]
-        private static class IceSheetEdits_Undo
-        {
-            private static IEnumerable<MethodBase> TargetMethods()
-            {
-                foreach (var name in new[] { "ModifyHeights", "LevelHeights", "SmoothHeights", "AddFootprint", "Remove" })
-                {
-                    yield return AccessTools.Method(typeof(LandIceController), name);
-                    yield return AccessTools.Method(typeof(LandSnowController), name);
-                }
-                foreach (var name in new[] { "ModifyTopHeights", "SmoothTopHeights", "BreakIceAt", "AddFootprint", "Remove" })
-                    yield return AccessTools.Method(typeof(FloatingIceController), name);
-            }
-
-            private static void Prefix(Component __instance) => BeforeIceEdit(__instance, false);
-        }
-
-        [HarmonyPatch]
-        private static class IceSheetMade_Undo
-        {
-            private static IEnumerable<MethodBase> TargetMethods()
-            {
-                yield return AccessTools.Method(typeof(LandIceController), nameof(LandIceController.Initialize));
-                yield return AccessTools.Method(typeof(LandSnowController), nameof(LandSnowController.Initialize));
-                yield return AccessTools.Method(typeof(FloatingIceController), nameof(FloatingIceController.InitializeFloating));
-            }
-
-            private static void Prefix(Component __instance) => BeforeIceEdit(__instance, true);
-        }
-
-        [HarmonyPatch(typeof(WaterOperationRPC), nameof(WaterOperationRPC.RequestRemoveWater))]
-        private static class WaterRemove_Undo
-        {
-            private static void Prefix(int stableHash)
-            {
-                if (s_laying || s_scope == 0) return;
-                foreach (var disk in DisksWhere(d => d.StableHash == stableHash)) { NoteGone(disk); break; }
-            }
-        }
-
-        [HarmonyPatch(typeof(WaterOperationRPC), nameof(WaterOperationRPC.RequestClearZoneWater))]
-        private static class WaterClearZone_Undo
-        {
-            private static void Prefix(Vector3 center, float radius)
-            {
-                if (s_laying || s_scope == 0) return;
-                foreach (var disk in DisksWhere(d => Vector3.Distance(d.Position, center) <= radius)) NoteGone(disk);
-            }
+            if (s_laying || s_scope == 0) return;
+            foreach (var disk in DisksWhere(d => Vector3.Distance(d.Position, center) <= radius)) NoteGone(disk);
         }
 
         // The player's water delete (va_brush_water_delete, the IH water-delete tool) takes disks out of
         // their combiner directly, never through RequestRemoveWater, so the disk is noted where every removal ends.
-        [HarmonyPatch(typeof(WaterMeshCombiner), nameof(WaterMeshCombiner.RemoveWaterDisk))]
-        private static class CombinerRemoveDisk_Undo
+        /// <summary>WaterMeshCombiner.RemoveWaterDisk is about to drop a disk (was CombinerRemoveDisk_Undo's prefix; same body).</summary>
+        internal static void CombinerRemoveBefore(WaterDisk disk)
         {
-            private static void Prefix(WaterDisk disk)
-            {
-                if (s_laying || s_scope == 0) return;
-                NoteGone(disk);
-            }
+            if (s_laying || s_scope == 0) return;
+            NoteGone(disk);
         }
     }
 }

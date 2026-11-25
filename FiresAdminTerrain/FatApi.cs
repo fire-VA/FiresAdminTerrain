@@ -160,6 +160,31 @@ namespace VerdantsAscent
         // Bumped whenever the ice forms or breaks (each step of the timed ice, 0.05 day of exposure). No event: re-query on change.
         public static int IceRevision => global::VerdantsAscent.Water.Core.IceField.Revision;
 
+        // ── 0.2.1496 WINTER SPLIT step 1 ([seasons] agreed; Fire: "all special winter code [should] live in ONLY vedr") ──
+        // The SEASONAL ice decision for FAT water comes from a registered provider (Vedr). FAT keeps Deep North biome ice (always frozen,
+        // no Vedr needed), caves (never), fire melt, broken holes (F - fb), frost cells, the walkable threshold, look and colliders. Until a
+        // provider registers, FAT's built-in rule answers (unchanged). Call on EVERY peer (each derives the same field from the synced F).
+        //   biomeMask(): Heightmap.Biome bits whose water may seasonally ice now (never Ocean / AshLands; Deep North is FAT's biome ice).
+        //   exposure(): F, in-game freezing days 0..1.5, synced by the provider; any thread.
+        //   derive(f, depthM, river) -> (cover 0..1, thickness m): PURE, any thread, no Unity calls.
+        //   revision(): bumps when the applied F step, biomeMask or the provider's freeze setting changes.
+        //   snowing(): server, main thread: frost grows (may be null = never).
+        // Returns false + a Warning line when a required delegate is null. Signature frozen.
+        public const int SeasonalIceApiVersion = 1;
+
+        public static bool RegisterSeasonalIce(string owner, System.Func<int> biomeMask, System.Func<float> exposure,
+            System.Func<float, float, bool, UnityEngine.Vector2> derive, System.Func<int> revision, System.Func<bool> snowing)
+        {
+            try { return global::VerdantsAscent.Water.Core.SeasonalIce.Register(owner, biomeMask, exposure, derive, revision, snowing, out _); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[SeasonalIce] (FatApi) RegisterSeasonalIce failed: {ex.Message}"); return false; }
+        }
+
+        /// <summary>FAT's saved freeze exposure (line 1 of the world's _ice.txt), for a provider's ONE-TIME migration. NaN = none. Server.</summary>
+        public static float LegacyIceExposure
+        {
+            get { try { return global::VerdantsAscent.Water.Core.IceField.LegacyExposure(); } catch { return float.NaN; } }
+        }
+
         // FAT's generated river/lake water at a world x/z, loaded or not (the field the water sheet is drawn from).
         // true = generated water there: level = its surface Y, depth = surface minus ground. false = none (level = float.MinValue).
         public static bool TryWaterAt(float x, float z, out float level, out float depth)
@@ -194,11 +219,37 @@ namespace VerdantsAscent
             catch (System.Exception) { return false; }
         }
 
+        // 0.2.1486 ([seasons] Vedr tide, lead-approved): true when vanilla's AddRivers carves this world's river and stream
+        // lists into its terrain. False on a converted BetterContinents world whose own data turns rivers off, and on a FAT-generated
+        // world (FAT's erosion valleys and hydrology replace them): FAT's AddRivers prefix returns the height unchanged for both
+        // (FiresWorldGenBase.cs, Patch_WorldGenerator_AddRivers_FiresGen), while vanilla's pre-generation still builds the lists, so
+        // m_rivers / m_streams and GetRiverWeight name channels the ground never gets. Any thread. Both inputs are set by FAT's
+        // WorldGenerator.Initialize prefixes, before vanilla's pre-generation, on a dedicated server and on a client (after the
+        // join sync); before the first world (and on the menu world) it is true, vanilla's own behaviour.
+        public static bool RiversCarved
+        {
+            get
+            {
+                try
+                {
+                    return !(global::VerdantsAscent.Terrain.BcImport.BcMigratedWorld.RiversDisabled
+                             || global::VerdantsAscent.Terrain.Voxel.FiresWorldGenBase.Active);
+                }
+                catch (System.Exception) { return true; }
+            }
+        }
+
         // 0.2.1026 ([ghost]'s SnowField): FAT owns this zone's terrain (voxel territory, wrapping or wrapped), so vanilla's
         // Heightmap paint mask is not what draws it. A zone can turn voxel after its Heightmap built: ask again on change.
         public static bool IsFatZone(Vector2s zone)
         {
-            try { return global::VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.IsZoneKnown(zone); }
+            try
+            {
+                if (global::VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.IsZoneKnown(zone)) return true;
+                // 0.2.1470: a dedicated server wraps nothing where the players are (no GameObjects there), so it answers from the zone's saved
+                // voxel edit records instead (DediVoxelRead.ZoneHasEdits; a swap-on-edit zone is voxel exactly when it holds edits).
+                return global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.Active && global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.ZoneHasEdits(zone);
+            }
             catch (System.Exception) { return false; }
         }
 
@@ -341,6 +392,54 @@ namespace VerdantsAscent
                 return true;
             }
             catch (System.Exception ex) { report = "FAT error: " + ex.Message; FiresLogger.LogWarning($"[BiomePaint] (FatApi) RequestBiomePaintArea failed: {ex.Message}"); return false; }
+        }
+
+        // ── 0.2.1494 God Complex Phase 1 ([ghost]): biome paint undo / redo / list. SERVER side (a dedi, or the host), main thread; a client gets
+        // false + report. Handles are the paint ids (uint): a stroke = the ids issued between two reads of BiomePaintLastId (read it before a
+        // stroke's first RequestBiomePaint and after its last answer). Undo takes paint back (its ground regrows as the older paint or the
+        // world has it) and keeps it on a FatApi redo stack (64 groups); Redo lays the newest kept group back as the newest paint, with NEW ids
+        // (returned). The Chaos Hammer's own Undo/Redo is a separate history. Every change reaches the clients as usual (the server's list).
+        // Signatures frozen once bound.
+
+        /// <summary>How many paint circles / areas the world has now (server: the saved list; client: the last list the server sent).</summary>
+        public static int BiomePaintCount
+        {
+            get { try { return global::VerdantsAscent.Terrain.Zones.BiomePaint.CircleCount; } catch { return 0; } }
+        }
+
+        /// <summary>The id the newest paint was given (0 = none this session). Ids only grow; a redo gives new ids.</summary>
+        public static uint BiomePaintLastId
+        {
+            get { try { return global::VerdantsAscent.Terrain.Zones.BiomePaint.LastIssuedId; } catch { return 0u; } }
+        }
+
+        /// <summary>One paint, oldest first (index 0..BiomePaintCount-1): its id, brush key (as TryGetBiomeBrushes), centre, radius (the
+        /// bounding circle for an area), blend width (below 0 = the server's default) and whether it is a drawn / map area.</summary>
+        public static bool TryGetBiomePaint(int index, out uint id, out string key, out float x, out float z, out float radius, out float blendWidth, out bool isArea)
+        {
+            try { return global::VerdantsAscent.Terrain.Zones.BiomePaint.TryGetCircle(index, out id, out key, out x, out z, out radius, out blendWidth, out isArea); }
+            catch (System.Exception ex) { id = 0u; key = string.Empty; x = z = radius = 0f; blendWidth = -1f; isArea = false; FiresLogger.LogWarning($"[BiomePaint] (FatApi) TryGetBiomePaint failed: {ex.Message}"); return false; }
+        }
+
+        /// <summary>Takes back the newest paint, whoever laid it.</summary>
+        public static bool BiomePaintUndo(out string report)
+        {
+            try { return global::VerdantsAscent.Terrain.Zones.BiomePaint.ApiUndoLast(out report); }
+            catch (System.Exception ex) { report = "FAT error: " + ex.Message; FiresLogger.LogWarning($"[BiomePaint] (FatApi) BiomePaintUndo failed: {ex.Message}"); return false; }
+        }
+
+        /// <summary>Takes back these paints (a stroke) as one redo group; ids already gone are counted in the report, not an error.</summary>
+        public static bool BiomePaintUndoIds(uint[] ids, out string report)
+        {
+            try { return global::VerdantsAscent.Terrain.Zones.BiomePaint.ApiUndoIds(ids, out report); }
+            catch (System.Exception ex) { report = "FAT error: " + ex.Message; FiresLogger.LogWarning($"[BiomePaint] (FatApi) BiomePaintUndoIds failed: {ex.Message}"); return false; }
+        }
+
+        /// <summary>Lays the newest group BiomePaintUndo / BiomePaintUndoIds took back again; newIds = the ids it has now.</summary>
+        public static bool BiomePaintRedo(out uint[] newIds, out string report)
+        {
+            try { return global::VerdantsAscent.Terrain.Zones.BiomePaint.ApiRedo(out newIds, out report); }
+            catch (System.Exception ex) { newIds = new uint[0]; report = "FAT error: " + ex.Message; FiresLogger.LogWarning($"[BiomePaint] (FatApi) BiomePaintRedo failed: {ex.Message}"); return false; }
         }
 
         private static bool CanRequestPaint(string key, out string report)
@@ -606,7 +705,54 @@ namespace VerdantsAscent
         // ── World Studio (0.2.1242, Fire 10-29 "Studio FAT first"; signatures settled with [visual], plan §0d.4a/§0d.4b) ──────
         // Server/host only, main thread only. false + reason when refused ("not host", "not loaded", "tooLarge: split it",
         // "stale", "unsupported: ...", "bad args: ..."). Feature detection: StudioApiVersion.
-        public const int StudioApiVersion = 5;   // 1 = terrain (1242), 2 = + locations (1245), 3 = + water + vegetation (1246), 4 = + PieceHits / ConfirmPieces / pieces in undo (1261), 5 = + FatLocationArgs.Creator (1262)
+        public const int StudioApiVersion = 7;   // 7 = + BiomePaintCount / BiomePaintLastId / TryGetBiomePaint / BiomePaintUndo / BiomePaintUndoIds / BiomePaintRedo (1494); 1 = terrain (1242), 2 = + locations (1245), 3 = + water + vegetation (1246), 4 = + PieceHits / ConfirmPieces / pieces in undo (1261), 5 = + FatLocationArgs.Creator (1262), 6 = + TryGroundSurfaceY, VoxelEditRevision / VoxelEditRevisionAt (1469)
+
+        // 0.2.1469 ([lead] for FiresGodComplex's Studio 3D view on a dedicated server, which drew the hidden vanilla heightmap / super-flat
+        // generator instead of FAT's voxel ground; [generator]'s proof): the VOXEL ground surface at (x, z), the same answer as FAT's own
+        // ground truth (VoxelOnlyPatches.cs VoxelGroundTruth.Sample): the base ground h (a live heightmap where one exists; else the zone's
+        // heightmap build data, which a dedicated server keeps instead of heightmaps (VoxelZoneStreamer.TryGroundHeight); else the
+        // generator's ground), then the highest voxel surface in [h - 200, h + 24] (VoxelWorld.TrySampleSurfaceY: reads the density, no
+        // physics, so it answers on a dedicated server). The window anchors near the ground, so a sky island overhead is never taken.
+        // False where the column holds no voxel data (not a voxel zone, or not loaded on this peer): use your own ground there.
+        // Main thread.
+        // 0.2.1469 ([generator] / FiresGodComplex 0.8.74): voxel edit revisions. VoxelSwapRevision moves only when a zone swaps; these move
+        // whenever voxel density edits land on THIS peer (a local brush / stamp, or edits synced in through the chunk anchor, undo / redo),
+        // on a client, host or dedicated server. Global, and per zone. Any thread, no allocation. Re-read your zone's terrain when its
+        // number changes. StudioApiVersion 6.
+        public static int VoxelEditRevision => global::VerdantsAscent.Terrain.Voxel.VoxelEditRevision.Global;
+        public static int VoxelEditRevisionAt(Vector2s zone) => global::VerdantsAscent.Terrain.Voxel.VoxelEditRevision.At(zone);
+
+        public static bool TryGroundSurfaceY(float x, float z, out float y)
+        {
+            y = 0f;
+            try
+            {
+                var p = new UnityEngine.Vector3(x, 0f, z);
+                // 0.2.1472: on a dedicated server the base ground falls back to WorldGenerator.GetHeight (DediVoxelRead.TryBaseGround); the
+                // first two are empty there on a Vanilla-generation world without caves / sky islands, which made every column false.
+                bool dedi = global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.Active;
+                // 0.2.1473: on a dedi holding no live chunks (VoxelWorld empty, so only the records can answer), a column whose 32 m chunk
+                // column has no record is false before any ground work (TrySurface needs a record; same answer, no GetHeight).
+                if (dedi && global::VerdantsAscent.Terrain.Voxel.VoxelWorld.ChunkCount == 0
+                    && !global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.ColumnHasRecords(x, z))
+                    return false;
+                float baseG = float.NaN;   // 0.2.1473: TryBaseGround's number, handed to TrySurface so it is not computed twice
+                if (!Heightmap.GetHeight(p, out float h))
+                {
+                    if (dedi) { if (!global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.TryBaseGround(x, z, out h)) return false; baseG = h; }
+                    else if (!global::VerdantsAscent.Terrain.Voxel.VoxelZoneStreamer.TryGroundHeight(x, z, out h)
+                             && !global::VerdantsAscent.Terrain.Voxel.FiresWorldGenBase.TryGetGenGround(x, z, out h))
+                        return false;
+                }
+                if (global::VerdantsAscent.Terrain.Voxel.VoxelWorld.TrySampleSurfaceY(x, z, h + 24f, h - 200f, out float vs, out _)) { y = vs; return true; }
+                // 0.2.1470: on a dedicated server VoxelWorld holds no chunks where the players are; read the column's saved edit records
+                // (read-only, cached per record revision) over its base ground (DediVoxelRead).
+                if (global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.Active
+                    && global::VerdantsAscent.Terrain.Voxel.DediVoxelRead.TrySurface(x, z, h + 24f, h - 200f, out float ds, baseG)) { y = ds; return true; }
+                return false;
+            }
+            catch (System.Exception) { y = 0f; return false; }
+        }
         private static class P   // 0.2.1261 piece warn / restore, FatStudioPieces
         {
             internal static global::VerdantsAscent.Terrain.Studio.FatStudioPieces.Reach Of(UnityEngine.Vector3[] p, float r) => global::VerdantsAscent.Terrain.Studio.FatStudioPieces.Of(p, r);
@@ -867,7 +1013,7 @@ namespace VerdantsAscent
         // Doc: Tools\FARLANDS_TERRAIN_SOURCE_READ_20261116.md §5.
 
         /// <summary>Version of the far-data calls below. 1 = 0.2.1444; 2 = 0.2.1446: TryFarHeight / TryFarEditDelta / TryFarColor are thread-safe (no call to a vanilla method another mod patches with shared state; 1444-1445 raced Vedr's GetBiomeColor counter).</summary>
-        public const int FarDataApiVersion = 2;   // 0.2.1446
+        public const int FarDataApiVersion = 5;   // 0.2.1492 = 5: + TryFarTrueColor (no winter; every v4 call unchanged). 0.2.1446 = 2; 0.2.1483 = 3: + FarGen* (world generation for EBM's far vegetation workers); TryFarHeight runs in the builder's corner scope; 0.2.1489 = 4: + FarVegetationCounts / FarVegetationDensity / FarVegetationRevision (every v3 call unchanged)
 
         /// <summary>True on a Fires-generated (voxel-only) world: FAT draws the far ground there, the far-data calls answer false.</summary>
         public static bool FarFiresWorld => global::VerdantsAscent.Terrain.Voxel.FatFarData.FiresWorld;
@@ -907,8 +1053,106 @@ namespace VerdantsAscent
             catch (System.Exception) { color = default; return false; }
         }
 
+        /// <summary>
+        /// v5 (0.2.1492): the TRUE ground splat colour at (x, z): vanilla distant colour (biome sector, alt-biome override) -> FAT biome paint,
+        /// with NO winter snow (TryFarColor minus its Vedr winter step), for a renderer that draws snow itself (EBM 1.2.470: shader class x
+        /// Vedr fill). Changes only with biome paint (PaintVersion), never with FarWinterRevision. Any thread. False without a world or on a
+        /// Fires-generated world. Signature frozen.
+        /// </summary>
+        public static bool TryFarTrueColor(float x, float z, out UnityEngine.Color32 color)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarData.TryTrueColor(x, z, out color); }
+            catch (System.Exception) { color = default; return false; }
+        }
+
         /// <summary>Bumps when Vedr's snow biomes change (TryFarColor answers change). Biome paint changes: PaintVersion.</summary>
         public static int FarWinterRevision => global::VerdantsAscent.Terrain.Voxel.FatSeasons.WinterRevision;
+
+        // ── 0.2.1483 world generation for EBM's far vegetation (FarDataApiVersion 3; Fire 11-18 "ebm would need to be able to properly read the world
+        // information from FAT when both are installed"; contract agreed with [visual]). Every call below except FarGenInit is safe from any thread:
+        // no Unity API, no unguarded shared mutable state. Each runs FAT's own code (Modules\VoxelTerrain\FatFarGen.cs explains the path per call).
+        // All answer false / null when FarGenInit is not done or refused (a game update moved the entry points out of HeightmapBuilder.Build; 0.2.1484:
+        // not-ours patches on the builder-thread path are included, as vanilla runs them off the main thread too; FarGenForeignPatches lists them).
+
+        /// <summary>FarGenFlags bits: what FAT changes in world generation on this world.</summary>
+        public const int FarGenFiresGenerator = 1, FarGenBetterContinents = 2, FarGenZoneMode = 4, FarGenSuperFlat = 8, FarGenRing = 16,
+                         FarGenVoxelOnly = 32, FarGenPaintOrProviders = 64, FarGenOceanGapRemoved = 128;
+
+        /// <summary>Any thread. What FAT changes in world generation here (FarGen* bits); 0 = vanilla generation (FAT still answers the calls).</summary>
+        public static int FarGenFlags { get { try { return global::VerdantsAscent.Terrain.Voxel.FatFarGen.Flags; } catch (System.Exception) { return 0; } } }
+
+        /// <summary>MAIN thread, every world start. Null = the far-gen calls are ready; else why not.</summary>
+        public static string FarGenInit()
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarGen.Init(); }
+            catch (System.Exception e) { return "threw: " + e.Message; }
+        }
+
+        /// <summary>Not-ours Harmony patches on the builder-thread path the far-gen calls run (null = none). 0.2.1484: informational only; vanilla's own builder thread runs them off the main thread, so they are included, not a reason to stand down.</summary>
+        public static string FarGenForeignPatches => global::VerdantsAscent.Terrain.Voxel.FatFarGen.OffThreadForeignPatches;   // 0.2.1484: informational (included; vanilla's builder thread runs them too)
+
+        /// <summary>
+        /// Any thread. Zone (zoneX, zoneZ)'s generated ground as its Heightmap gets it from HeightmapBuilder.Build (before player edits):
+        /// heights and mask alphas, (width+1)^2 each, row-major by z, vertex (0,0) at (zoneX*64 - width*scale/2, zoneZ*64 - width*scale/2);
+        /// corners4 = the corner BiomeSectors (-,-), (+,-), (-,+), (+,+); edge = Heightmap.IsBiomeEdge; painted = biomes paint adds over the zone (HaveBiome).
+        /// </summary>
+        public static bool FarSampleZone(int zoneX, int zoneZ, int width, float scale, float[] heights, float[] maskAlpha, BiomeSector[] corners4, out bool edge, out Heightmap.Biome painted)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarGen.SampleZone(zoneX, zoneZ, width, scale, heights, maskAlpha, corners4, out edge, out painted); }
+            catch (System.Exception) { edge = false; painted = Heightmap.Biome.None; return false; }
+        }
+
+        /// <summary>Any thread. GetBiomeSector(Vector3) at (x, z) as PlaceVegetation sees it (zone gate, vanilla sectors, FAT paint / providers). Null = not usable.</summary>
+        public static BiomeSector FarSampleSector(float x, float z)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarGen.SampleSector(x, z); }
+            catch (System.Exception) { return null; }
+        }
+
+        /// <summary>Any thread. The point biome Heightmap.GetBiome returns at (x, z), given its corner-weighted answer (FAT paint, then territories).</summary>
+        public static Heightmap.Biome FarBiomeAt(float x, float z, Heightmap.Biome cornerWeighted)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarGen.BiomeAt(x, z, cornerWeighted); }
+            catch (System.Exception) { return cornerWeighted; }
+        }
+
+        /// <summary>Any thread. WorldGenerator.GetForestFactor at (x, z) as FAT makes it (vanilla noise; BetterContinents scale + map on BC worlds).</summary>
+        public static float FarForestFactor(float x, float z)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarGen.ForestFactor(x, z); }
+            catch (System.Exception) { return 0f; }
+        }
+
+        // ── 0.2.1489 vegetation counts for EBM's far vegetation replay (FarDataApiVersion 4; [lead] G5e, contract agreed with [visual]) ──
+        // FAT's "Vegetation density scale" multiplies m_min / m_max of every non-exempt ZoneVegetation entry inside PlaceVegetation and restores
+        // them after (Modules\Performance\VegetationDensity.cs), so a reader of ZoneSystem.m_vegetation outside that call sees vanilla counts.
+        // These answer with the counts the generating peer's PlaceVegetation uses, by the same code. The key is server-synced from 0.2.1489,
+        // so on a joined client k is the server's (a dedi's) value once the server's config has arrived (FarVegetationRevision bumps then).
+        // Not covered here (none of it applies on a BetterContinents / vanilla-height world such as VADN): FAT's water-ecology altitude rules,
+        // which run only on a Fires-generated world (GenWaterField.Ready = FiresWorldGenBase.Active; FarGenFlags bit FarGenFiresGenerator).
+
+        /// <summary>
+        /// MAIN thread (the exempt test reads the prefab's components). The m_min / m_max PlaceVegetation uses for this entry on this world:
+        /// entry.m_min * k and entry.m_max * k (k = the clamped density scale, the same float multiply), or the entry's own values when k is 1
+        /// or the prefab is exempt (a Pickable, SpawnArea, MineRock or MineRock5 in its children, inactive included). False (min / max = the
+        /// entry's own values) when the entry is null or FAT cannot answer.
+        /// </summary>
+        public static bool FarVegetationCounts(ZoneSystem.ZoneVegetation entry, out float min, out float max)
+        {
+            min = entry != null ? entry.m_min : 0f; max = entry != null ? entry.m_max : 0f;
+            if (entry == null) return false;
+            try { global::VerdantsAscent.Terrain.Performance.ZoneSystem_PlaceVegetation_Density.EffectiveCounts(entry, out min, out max); return true; }
+            catch (System.Exception) { min = entry.m_min; max = entry.m_max; return false; }
+        }
+
+        /// <summary>Any thread. The density scale k PlaceVegetation applies on this world (1 = vanilla counts). Informational: use FarVegetationCounts for an entry.</summary>
+        public static float FarVegetationDensity
+        {
+            get { try { return global::VerdantsAscent.Terrain.Performance.ZoneSystem_PlaceVegetation_Density.CurrentScale; } catch (System.Exception) { return 1f; } }
+        }
+
+        /// <summary>Any thread. Bumps when k changes (a cfg edit, or the server's synced value arriving on join): FarVegetationCounts answers change.</summary>
+        public static int FarVegetationRevision => global::VerdantsAscent.Terrain.Performance.ZoneSystem_PlaceVegetation_Density.Revision;
 
         // ── 0.2.1447 enclosed-water calm for CPU water readers (Fire's ice rule; contract agreed with [seasons] + [visual]) ──
         /// <summary>
@@ -934,6 +1178,78 @@ namespace VerdantsAscent
         {
             try { return global::VerdantsAscent.Water.Core.IceCoverTexture.TryIceProxAt(x, z, out prox01); }
             catch (System.Exception) { prox01 = 0f; return false; }
+        }
+
+        // ── 0.2.1519 shovel patch size for Vedr's ground dig ([seasons] 11-24, Fire's shovel report). ADD-ONLY. Main thread, read-only. ──
+        public const int ShovelPatchApiVersion = 1;
+        // The live mouse-wheel patch width / 2 in metres (the ring FAT draws, FatShovelPatch.cs:415). The op's paint radius is this
+        // plus FAT's tiny radius tag (FatShovelPatch.RadiusFor).
+        public static float ShovelPatchRadius
+        {
+            get { try { return global::VerdantsAscent.Terrain.Voxel.FatShovelPatch.PatchWidth * 0.5f; } catch (System.Exception) { return 1f; } }
+        }
+        // Where FAT draws its ring for a hit at 'at': snapped to the whole-metre paint texel (FatShovelPatch.cs:415). The op itself snaps
+        // to the half metre when its template has m_halfOffset (FatShovelPatch.cs:192 / :225).
+        public static UnityEngine.Vector3 ShovelPatchCentre(UnityEngine.Vector3 at)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatShovelPatch.SnapToTexel(at, false); }
+            catch (System.Exception) { return at; }
+        }
+
+        // ── 0.2.1455 water look hand-off (Fire: "re target our custom water to use the ebm water or vedr water"; contract frozen with
+        // [visual] + [seasons], Tools\DESIGN_fat_water_handoff_20261117.md 3.1b). ADD-ONLY. Look mods register; FAT swaps ITS OWN water
+        // renderers (generated sheets, placed sheets, combiner bodies) to the top live provider's material (highest priority whose active()
+        // is true: EBM 300, Vedr 200) and puts its own back when it withdraws. Never offered: lava / tar / ice, built pieces, waterfalls,
+        // sheets holding ice / lava / crust state. [Custom Water] Hand Off To Look Mods (default on) gates it. Main thread; never throws.
+        public const int WaterLookApiVersion = 1;
+
+        // build may return a SHARED material (FAT asks once per (provider, FAT material)); null = "not yet": FAT keeps its own and asks again
+        // on RefreshWaterLook. applyBody runs per renderer after FAT assigns the material: MERGE into the renderer's property block
+        // (GetPropertyBlock, set, SetPropertyBlock), FAT keeps its own values there. release gets each material build returned, once no
+        // renderer of FAT's wears it. A provider whose delegate throws is dropped for the session. Re-registering an owner replaces it.
+        public static void RegisterWaterLook(string owner, int priority, System.Func<bool> active,
+            System.Func<FatWaterLookRequest, UnityEngine.Material> build,
+            System.Action<UnityEngine.Renderer, FatWaterLookRequest> applyBody,
+            System.Action<UnityEngine.Material> release)
+        {
+            try { global::VerdantsAscent.Water.Core.WaterLookHost.Register(owner, priority, active, build, applyBody, release); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresWater] (FatApi) RegisterWaterLook failed: {ex.Message}"); }
+        }
+
+        public static void UnregisterWaterLook(string owner)
+        {
+            try { global::VerdantsAscent.Water.Core.WaterLookHost.Unregister(owner); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresWater] (FatApi) UnregisterWaterLook failed: {ex.Message}"); }
+        }
+
+        // The provider's active() or look template changed: FAT re-asks (re-reads active(); the top provider's materials are released and built again).
+        public static void RefreshWaterLook(string owner)
+        {
+            try { global::VerdantsAscent.Water.Core.WaterLookHost.Refresh(owner); }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresWater] (FatApi) RefreshWaterLook failed: {ex.Message}"); }
+        }
+
+        // Bumps when FAT adds or removes a water renderer AND when a body's level or size changes. WaterSurfacesChanged is raised once on
+        // the next main-thread frame after a bump (never from inside FAT's mesh apply); each listener runs in its own try/catch.
+        public static int WaterSurfacesRevision
+        {
+            get { try { return global::VerdantsAscent.Water.Core.WaterLookHost.Revision; } catch (System.Exception) { return 0; } }
+        }
+
+        public static event System.Action WaterSurfacesChanged
+        {
+            add { try { global::VerdantsAscent.Water.Core.WaterLookHost.AddListener(value); } catch (System.Exception) { } }
+            remove { try { global::VerdantsAscent.Water.Core.WaterLookHost.RemoveListener(value); } catch (System.Exception) { } }
+        }
+
+        // FAT's DATA, not its renderers (answers on a dedicated server and whoever draws). Tool water first: the smallest water body whose
+        // bounds and disks cover p.xz (surfaceY = its surface there, size = max horizontal extent, kind = (int)FatWaterKind.Body); else
+        // generated water above the sea (kind = (int)FatWaterKind.InlandSheet, size = an extent estimate). false = neither (kind -1).
+        // Main thread (false off it), allocation-free in steady state.
+        public static bool TryWaterBodyAt(UnityEngine.Vector3 p, out float surfaceY, out float size, out int kind)
+        {
+            try { return global::VerdantsAscent.Water.Core.WaterLookHost.TryWaterBodyAt(p, out surfaceY, out size, out kind); }
+            catch (System.Exception) { surfaceY = 0f; size = 0f; kind = -1; return false; }
         }
     }
 
@@ -1027,6 +1343,19 @@ namespace VerdantsAscent
             handle = new FatWaterHandle { Kind = kind, Position = h.Position, Radius = 0f };
             return true;
         }
+    }
+
+    // 0.2.1455 water look hand-off contract types (FatApi.RegisterWaterLook; frozen v1, add-only: new fields only, never rename).
+    public enum FatWaterKind { InlandSheet = 0, Body = 1, PlacedSheet = 2 }        // lake / river / pond detail goes in Shape
+    public enum FatWaterShape { Unknown = 0, Lake = 1, River = 2, Pond = 3 }
+
+    public struct FatWaterLookRequest
+    {
+        public UnityEngine.Material Original; public FatWaterKind Kind; public FatWaterShape Shape;
+        public UnityEngine.Bounds RendererBounds;   // this renderer (a chunk piece for sheets)
+        public float BodySize;                      // FAT's own body extent, m (max horizontal); 0 = unknown, use the bounds
+        public float Level;                         // surface Y
+        public UnityEngine.Vector2 Flow;            // m/s, world xz; zero until FAT has flow per body (reserved, no version bump later)
     }
 
     public enum FatVegMode { Remove = 0, Thin = 1, Paint = 2 }

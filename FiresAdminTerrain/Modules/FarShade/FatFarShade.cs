@@ -47,13 +47,13 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_bound || cfg == null) return;
             s_bound = true;
             MountainShadows = cfg.Bind("Far Shadows", "Mountain shadows", false,
-                "FarLands: distant mountains cast the sun's shadow across far land beyond the game's own shadow distance. Default off.");
+                "FarLands: distant mountains cast the sun's shadow across far land beyond the game's own shadow distance. Default off. " + FatShaders.Needs(FatShaders.FarSunShadeKey));
             CanopyShade = cfg.Bind("Far Shadows", "Canopy shade", false,
-                "FarLands: distant forests shade the ground under them (needs the far forest). Default off.");
+                "FarLands: distant forests shade the ground under them (needs the far forest). Default off. " + FatShaders.Needs(FatShaders.FarSunShadeKey));
             CanopyStrength = cfg.Bind("Far Shadows", "Canopy strength", 0.6f,
-                new ConfigDescription("How dark the far forest shade is (0 = none, 1 = full).", new AcceptableValueRange<float>(0f, 1f)));
+                new ConfigDescription("How dark the far forest shade is (0 = none, 1 = full). " + FatShaders.Needs(FatShaders.FarSunShadeKey), new AcceptableValueRange<float>(0f, 1f)));
             Reach = cfg.Bind("Far Shadows", "Reach", 4096f,
-                new ConfigDescription("How far a mountain's shadow is followed (m).", new AcceptableValueRange<float>(1024f, 6000f)));
+                new ConfigDescription("How far a mountain's shadow is followed (m). " + FatShaders.Needs(FatShaders.FarSunShadeKey), new AcceptableValueRange<float>(1024f, 6000f)));
             if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null) return;
             var go = new GameObject("FAT_FarShade") { hideFlags = HideFlags.HideAndDontSave };
             UnityEngine.Object.DontDestroyOnLoad(go);
@@ -95,7 +95,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (!AnyOn) { Detach(); return; }
                 string why = Why();
-                if (why != null) { Detach(); if (!_saidWhy || why != _lastWhy) { _saidWhy = true; _lastWhy = why; FiresLogger.LogInfo($"[FarShade] stood down: {why}"); } return; }
+                if (why != null) { Detach(); _saidOn = false;   if (!_saidWhy || why != _lastWhy) { _saidWhy = true; _lastWhy = why; FiresLogger.LogInfo($"[FarShade] stood down: {why}"); } return; }   // 0.2.1479: _saidOn reset, so the return says "[FarShade] on" again
                 var cam = Camera.main; var sun = EnvMan.instance != null ? EnvMan.instance.m_dirLight : null;
                 if (cam == null || sun == null) return;
 
@@ -117,7 +117,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 Attach(sun);
                 if (!_saidOn)
                 {
-                    _saidOn = true;
+                    _saidOn = true; _saidWhy = false; _lastWhy = null;   // 0.2.1479: a later stand-down logs again
                     FiresLogger.LogInfo($"[FarShade] on: mountain shadows {(MountainShadows.Value ? "on" : "off")}, canopy shade {(CanopyShade.Value ? "on" : "off")} "
                         + $"(strength {CanopyStrength.Value:0.##}); grid {N}² x {Cell:0} m, canopy {FatFarCanopy.Size}² x {FatFarCanopy.Texel:0} m, reach {Reach.Value:0} m; "
                         + $"heights from {(_gridOnWorker ? "FarQuilt.FarHeight (worker)" : "WorldGenerator (main thread slices)")}; applied on the sun's shadow mask past {QualitySettings.shadowDistance * 0.8f:0} m");
@@ -127,6 +127,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
             private static string Why()
             {
+                if (FatShaders.FarSunShade != null && !FatShaders.FarSunShade.Value) return $"needs [{FatShaders.Section}] {FatShaders.FarSunShadeKey} = true";   // 0.2.1478 (Fire 11-18)
                 if (s_shader == null) return s_shaderWhy;
                 if (FatHaloSectors.On || FatHaloArc.Active) return "ring / zone-mode world (the FAT halo path draws its own far land; far shade follows the world up, which ring worlds bend)";
                 if (QualitySettings.shadows == ShadowQuality.Disable) return "the game's shadows are off (the sun has no shadow mask to darken)";

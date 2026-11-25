@@ -44,6 +44,7 @@ namespace VerdantsAscent.Terrain.BcImport
             RegisterDnCensus();   // 0.2.1205
             BcRegenCommand.Register();   // 0.2.1216
             global::VerdantsAscent.Terrain.FatMeshAtCommand.Register();   // 0.2.1207
+            global::VerdantsAscent.Terrain.Voxel.VoxelSeamDump.Register();   // 0.2.1455 ([ghost], Voxheim diff P12)
         }
 
         private const string HeightCommand = "fires_bc_height";
@@ -298,15 +299,16 @@ namespace VerdantsAscent.Terrain.BcImport
         private static void DescribeBiomeCoverage(List<string> lines, BcBiomeMap map)
         {
             var counts = new Dictionary<Heightmap.Biome, int>();
-            foreach (Heightmap.Biome biome in map.Biomes)
+            for (int at = 0; at < map.Length; at++)
             {
+                Heightmap.Biome biome = map.At(at);
                 counts.TryGetValue(biome, out int count);
                 counts[biome] = count + 1;
             }
 
             lines.Add($"biome map {map.Size} x {map.Size}, {counts.Count} distinct biome(s):");
             foreach (KeyValuePair<Heightmap.Biome, int> entry in counts)
-                lines.Add($"   {entry.Key} ({(int)entry.Key}): {entry.Value * 100f / map.Biomes.Length:0.##}%");
+                lines.Add($"   {entry.Key} ({(int)entry.Key}): {entry.Value * 100f / map.Length:0.##}%");
         }
     }
 }

@@ -74,23 +74,23 @@ namespace VerdantsAscent.Terrain.Voxel
                 new AcceptableValueRange<float>(0.5f, 4f)));
             // Defaults are the tuned values (this intensity, a single rainbow).
             s_secondary = config.Bind(Section, "Secondary bow", false, "Draw the secondary bow (about 51 degrees, colours reversed) and the dark band between the two.");
-            s_skyEnabled = config.Bind(Section, "Sky rainbow", true, "A rainbow in the sky when rain ends while the sun is out.");
+            s_skyEnabled = config.Bind(Section, "Sky rainbow", true, "A rainbow in the sky when rain ends while the sun is out." + " " + FatShaders.Needs(FatShaders.SkyRainbowKey));
             s_skyChance = config.Bind(Section, "Sky rainbow chance", 0.6f, new ConfigDescription(
-                "Chance that a rain ending gives a sky rainbow.", new AcceptableValueRange<float>(0f, 1f)));
+                "Chance that a rain ending gives a sky rainbow." + " " + FatShaders.Needs(FatShaders.SkyRainbowKey), new AcceptableValueRange<float>(0f, 1f)));
             s_skyMinutes = config.Bind(Section, "Sky rainbow minutes", 6f, new ConfigDescription(
-                "How long a sky rainbow lasts after the rain ends (real minutes), fades included.", new AcceptableValueRange<float>(1f, 30f)));
+                "How long a sky rainbow lasts after the rain ends (real minutes), fades included." + " " + FatShaders.Needs(FatShaders.SkyRainbowKey), new AcceptableValueRange<float>(1f, 30f)));
             s_skyIntensity = config.Bind(Section, "Sky rainbow intensity", 0.28f, new ConfigDescription(
-                "Brightness of the sky rainbow.", new AcceptableValueRange<float>(0f, 3f)));
+                "Brightness of the sky rainbow." + " " + FatShaders.Needs(FatShaders.SkyRainbowKey), new AcceptableValueRange<float>(0f, 3f)));
             s_skyBowSize = config.Bind(Section, "Sky bow size", 0f, new ConfigDescription(
-                "Sky rainbow only: overrides Bow size (0 = use Bow size).", new AcceptableValueRange<float>(0f, 2f)));
+                "Sky rainbow only: overrides Bow size (0 = use Bow size)." + " " + FatShaders.Needs(FatShaders.SkyRainbowKey), new AcceptableValueRange<float>(0f, 2f)));
             s_skyBandThickness = config.Bind(Section, "Sky band thickness", 0f, new ConfigDescription(
-                "Sky rainbow only: overrides Band thickness (0 = use Band thickness).", new AcceptableValueRange<float>(0f, 4f)));
+                "Sky rainbow only: overrides Band thickness (0 = use Band thickness)." + " " + FatShaders.Needs(FatShaders.SkyRainbowKey), new AcceptableValueRange<float>(0f, 4f)));
             s_mistIntensity = config.Bind(Section, "Mist rainbow intensity", 1f, new ConfigDescription(
-                "Brightness of the rainbow in waterfall mist.", new AcceptableValueRange<float>(0f, 3f)));
+                "Brightness of the rainbow in waterfall mist." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey), new AcceptableValueRange<float>(0f, 3f)));
             s_mistBowSize = config.Bind(Section, "Mist bow size", 0f, new ConfigDescription(
-                "Waterfall mist only: overrides Bow size (0 = use Bow size).", new AcceptableValueRange<float>(0f, 2f)));
+                "Waterfall mist only: overrides Bow size (0 = use Bow size)." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey), new AcceptableValueRange<float>(0f, 2f)));
             s_mistBandThickness = config.Bind(Section, "Mist band thickness", 0f, new ConfigDescription(
-                "Waterfall mist only: overrides Band thickness (0 = use Band thickness).", new AcceptableValueRange<float>(0f, 4f)));
+                "Waterfall mist only: overrides Band thickness (0 = use Band thickness)." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey), new AcceptableValueRange<float>(0f, 4f)));
 
             BuildTable();
             if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null) return;
@@ -249,11 +249,17 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void DrawSky(Camera camera, Vector3 toSun, float fade)
         {
-            if (fade <= 0f || camera == null)
+            // 0.2.1478 (Fire 11-18): the sky bow needs Custom/FiresRainbowSky; [Shaders] Sky rainbow shader off = stand down (load failures log in Create).
+            bool keyOn = fade <= 0f || camera == null || FatShaders.On(FatShaders.SkyRainbow, true, "Sky rainbow", "Custom/FiresRainbowSky");
+            if (fade <= 0f || camera == null || !keyOn)
             {
                 if (s_sky != null && s_sky.activeSelf) s_sky.SetActive(false);
+                // 0.2.1479 PROBE (near2 leg 11-18: a bow stayed on screen with the key off): name every bow drawer once per key change.
+                if (fade > 0f && camera != null && s_probeSaid != false) { s_probeSaid = false; FiresLogger.LogInfo("[Rainbow] PROBE key off: " + BowDrawers()); }
                 return;
             }
+            if (s_probeSaid != true && s_probeSaid != null) { s_probeSaid = true; FiresLogger.LogInfo("[Rainbow] PROBE key back on: " + BowDrawers()); }
+            if (s_probeSaid == null) s_probeSaid = true;
             if (s_sky == null && !Create()) return;
             float distance = Mathf.Min(SkyDistance, camera.farClipPlane * 0.5f);
             Vector3 antisolar = -toSun;
@@ -269,6 +275,41 @@ namespace VerdantsAscent.Terrain.Voxel
                     : RenderSettings.fogMode == FogMode.Exponential ? 2f : 3f);
             }
             if (!s_sky.activeSelf) s_sky.SetActive(true);
+        }
+
+        // 0.2.1479 PROBE: every enabled renderer in the scene whose material is a bow (shader or material named *Rainbow*, or a material
+        // carrying the bow shape property), with its path, active state, layer, shader and queue; plus FAT's own sky bow object's state.
+        // Called once per Sky rainbow key change while a bow runs, and in the Looks report. Read-only.
+        private static bool? s_probeSaid;
+
+        private static string BowDrawers()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"FAT sky bow object {(s_sky == null ? "none" : $"activeSelf {s_sky.activeSelf}, inHierarchy {s_sky.activeInHierarchy}, renderer enabled {(s_sky.GetComponent<MeshRenderer>() is MeshRenderer mr ? mr.enabled.ToString() : "none")}")}; drawers:");
+            int n = 0;
+            try
+            {
+                foreach (var r in Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+                {
+                    if (r == null || !r.enabled || !r.gameObject.activeInHierarchy) continue;
+                    foreach (var m in r.sharedMaterials)
+                    {
+                        if (m == null) continue;
+                        string sh = m.shader != null ? m.shader.name : "?";
+                        bool bow = sh.IndexOf("Rainbow", System.StringComparison.OrdinalIgnoreCase) >= 0
+                                   || m.name.IndexOf("Rainbow", System.StringComparison.OrdinalIgnoreCase) >= 0
+                                   || m.HasProperty(ShapeId);
+                        if (!bow) continue;
+                        if (++n > 12) break;
+                        var t = r.transform; string path = t.name;
+                        for (var p = t.parent; p != null && path.Length < 120; p = p.parent) path = p.name + "/" + path;
+                        sb.Append($" [{path} | {r.GetType().Name} | layer {LayerMask.LayerToName(r.gameObject.layer)} | material '{m.name}' shader '{sh}' queue {m.renderQueue}{(s_sky != null && r.gameObject == s_sky ? " | FAT SKY BOW" : "")}]");
+                    }
+                }
+            }
+            catch (System.Exception ex) { sb.Append(" probe threw: " + ex.Message); }
+            if (n == 0) sb.Append(" none active");
+            return sb.ToString();
         }
 
         private static bool Create()
@@ -305,6 +346,8 @@ namespace VerdantsAscent.Terrain.Voxel
             if (FatDiag.Looks) FiresLogger.LogDebug($"[Rainbow] sky bow: sun alt {altitude:0.0} deg, antisolar ({antisolar.x:0.00},{antisolar.y:0.00},{antisolar.z:0.00}), "
                 + $"primary radius {s_primaryRed * skySize:0.0} deg (size {skySize:0.00}, thickness {skyThick:0.00}), fade {fade:0.00} (x{SkyBrightness:0.0} brightness), "
                 + $"camera at y {camera.transform.position.y:0}, drawn on the sky (far plane) as an arc fading out over the last 12 deg above the horizon; {why}");
+
+            if (FatDiag.Looks && fade > 0f) FiresLogger.LogDebug("[Rainbow] PROBE: " + BowDrawers());   // 0.2.1479: who draws a bow right now
 
             // The mist bow's view rule, then and now: what the old shader took as the sun (Valheim's directional light) against
             // the true sun, and where the camera looks from the antisolar point.

@@ -58,7 +58,7 @@ namespace VerdantsAscent.Terrain.Studio
                     w.Write(zones.Count);
                     foreach (var zone in zones)
                     {
-                        if (!FatStudioTerrain.CaptureFoot(zone, circles, out byte[] tc)) { reason = $"not loaded: zone {zone.x},{zone.y}"; return false; }   // 0.2.1249: the footprint, not the whole zone
+                        if (!FatStudioTerrain.CaptureFoot(zone, circles, out byte[] tc)) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y}", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }   // 0.2.1249: the footprint, not the whole zone
                         w.Write((int)zone.x); w.Write((int)zone.y);
                         w.Write(tc == null ? -1 : tc.Length);
                         if (tc != null) w.Write(tc);
@@ -113,7 +113,7 @@ namespace VerdantsAscent.Terrain.Studio
             }
             catch (Exception ex) when (ex is EndOfStreamException || ex is IOException) { reason = $"bad snapshot: {ex.GetType().Name}"; return false; }
 
-            foreach (var (zone, _) in zones) if (FatStudioTerrain.MapOf(zone) == null) { reason = $"not loaded: zone {zone.x},{zone.y}"; return false; }
+            foreach (var (zone, _) in zones) if (FatStudioTerrain.MapOf(zone) == null) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y}", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }
             foreach (var (zone, tc) in zones) if (!(foot ? FatStudioTerrain.WriteFoot(zone, circles, tc ?? new byte[] { 0 }, out reason) : FatStudioTerrain.WriteZone(zone, tc, out reason))) return false;
 
             // objects: an unchanged captured one stays; anything else in the region goes and the captured set comes back

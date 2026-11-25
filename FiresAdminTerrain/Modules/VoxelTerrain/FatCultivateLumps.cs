@@ -247,11 +247,11 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // fat_cultivate_probe: 5 x 5 heights around the crosshair at 1 m spacing, the voxel surface and the hidden vanilla
         // heightmap side by side, plus the cultivated paint (g) and this cell's jitter. Run it before and after cultivating.
-        [HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class Command
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Command
         {
             private static bool s_registered;
-            private static void Postfix()
+            internal static void Postfix()
             {
                 if (s_registered) return;
                 s_registered = true;

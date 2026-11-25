@@ -1,5 +1,7 @@
 # Fires Admin Terrain
 
+**Requires Valheim 1.0.30 or newer.**
+
 ## What's new in 0.2.1452
 
 - **World Convert / clone** (right-click a world in Select World) works on every world, also one converted before, and the copy keeps painted biomes, removed water and ice.

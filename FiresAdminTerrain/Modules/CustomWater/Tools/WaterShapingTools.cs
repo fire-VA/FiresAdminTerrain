@@ -1416,7 +1416,20 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                 click.x, click.z, floor, spill, spillBearing, level, waterRadius);
         }
 
-        private static void LayWater(Vector3 center, float radius, float depth)
+        private static void LayWater(Vector3 center, float radius, float depth)   // 0.2.1502: FatUndo WaterShapingTools_LayWater_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.LateBegin();
+                LayWater_Body(center, radius, depth);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.LateEnd();
+            }
+        }
+
+        private static void LayWater_Body(Vector3 center, float radius, float depth)
         {
             WaterDisk disk = null;
             CustomWaterManager.NextKind = s_layKind;   // 0.2.1091: River from the river tools' queue, Pond for everything else
@@ -1488,6 +1501,7 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                 if (zdo != null && zdo.GetLong(ZDOVars.s_creator) != 0L) continue;
                 doomed.Add(go);
             }
+            foreach (var go in doomed) VerdantsAscent.Terrain.FatUndo.NoteVegetationCleared(go);   // [ghost]: the stroke's undo spawns them again (FatUndoVeg)
             foreach (var go in doomed) FiresCore.Net.NetworkObjectHelper.SafeDestroy(go);
             if (doomed.Count > 0)
             {
@@ -1674,11 +1688,11 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
     // 0.2.1348: one river, all four fixes read at the player's spot. Console only (not an FDT direct command). "repaint" also writes the bed paint there again.
     internal static class RiverCheckCommand
     {
-        [HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class Register
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Register
         {
             private static bool s_done;
-            private static void Postfix()
+            internal static void Postfix()
             {
                 if (s_done) return;
                 s_done = true;
@@ -1731,18 +1745,21 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
 
     // ── Vfall: a waterfall the player places (own waterfalls and rivers, also
     // on the sky islands) ─────────────────────────────────────────────────
-    // A click near a drop finds the lip (walking out along the view until the ground falls away), the landing (straight
-    // down past the lip), cuts a small spillway notch at the lip and hangs a curtain of the brush's width from it to the
-    // landing, with mist (FiresWaterfalls / FiresWaterfallMist curtain), a source pour at the lip and
-    // a pool where it lands. Remove (middle mouse) removes the falls whose lip is in the brush.
+    // 0.2.1491 (Fire 11-17, verbatim: "waterfall tool should not dig anything. its meant for us to be able to place JUST A WATERFALL
+    // wherever we want ... were just placing the waterfall visual ... they need to look like the waterfalls from our skylands"):
+    // the PLAYER's Vfall places only the visual. No spillway notch, no landing pool (the "Vfall digs a landing pool" option is gone),
+    // no voxel edit and no zone mark. The fall is its own saved object, a "fires_vfall" ZDO (PlacedFalls.cs), drawn with the
+    // Skylands falls' own arguments (AppendSkylandCurtain). Remove (middle mouse) and Numpad 7/9 work on those objects.
     //
-    // PERSISTENCE rides the spillway's chunk anchor (VAVoxel): the falls of a chunk are one more key on its ZDO, written
-    // with the chunk's edits by VoxelWorld.SaveChunk and read back by VoxelChunkAnchor.Apply on every peer and on load. So a
-    // fall saves, syncs and streams exactly like the notch under it. Older FAT ignores the key.
+    // The PROGRAM callers (Vpour / pond / channel / river falls: Place(cursor, view, radius), PlaceAt, PlaceRiverFinal) are part of the
+    // carving water tools and are unchanged: they cut a small spillway notch and keep their falls on the notch's chunk anchor (VAVoxel,
+    // key vv_falls, written by VoxelWorld.SaveChunk, read by VoxelChunkAnchor.Apply). Falls the player's Vfall saved there before
+    // 0.2.1491 (Straight = true) still load from that record and are drawn the Skylands way too.
     internal static class ToolFalls
     {
         internal const string ZdoFalls = "vv_falls";
-        private const int FormatVersion = 1;
+        // 0.2.1467: format 2 adds Straight per fall (a Vfall-tool curtain that falls straight down; format 1 falls read as not straight).
+        private const int FormatVersion = 2;
         private const float LipWalkStep = 0.5f, LipWalkReach = 12f, LipDrop = 2f, LipSurfaceReach = 4f;
         private const float MinDrop = 2f, LandingReach = 1200f, LandingOut = 1.5f;
         private const float NotchDepth = 0.6f, NotchMaxRadius = 2f;
@@ -1755,7 +1772,39 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
             internal float Width;
             internal float LandY;
             internal bool OntoGround;
+            internal bool Straight;      // 0.2.1467: drawn straight down from the lip (no terrain-hugging profile)
         }
+
+        // ── 0.2.1467 (Fire 11-18: "it should show a preview waterfall, scroll wheel should ROTATE the waterfall and shift scroll should
+        // scale it, and then obviously it falls until it hits land or water"). The fall's FACING is the tool's own state, turned by the
+        // wheel (FacingStep a notch), no longer the camera's view; Shift+wheel is the width (VoxelToolPieces.ToolRadius, half the width).
+        // It starts at the camera's heading each time Vfall is picked up (ForgetFacing when another tool is held).
+        private const float FacingStep = 15f;
+        private static float s_facingDeg;
+        private static bool s_facingSet;
+
+        internal static Vector3 Facing(Vector3 cameraForward)
+        {
+            if (!s_facingSet)
+            {
+                var f = new Vector2(cameraForward.x, cameraForward.z);
+                s_facingDeg = f.sqrMagnitude > 1e-4f ? Mathf.Atan2(f.x, f.y) * Mathf.Rad2Deg : 0f;
+                s_facingDeg = Mathf.Round(s_facingDeg / FacingStep) * FacingStep;
+                s_facingSet = true;
+            }
+            float a = s_facingDeg * Mathf.Deg2Rad;
+            return new Vector3(Mathf.Sin(a), 0f, Mathf.Cos(a));
+        }
+
+        // Wheel notches (+ = clockwise seen from above). Returns the new facing in degrees (0 = north).
+        internal static float Rotate(float notches, Vector3 cameraForward)
+        {
+            Facing(cameraForward);
+            s_facingDeg = Mathf.Repeat(s_facingDeg + notches * FacingStep, 360f);
+            return s_facingDeg;
+        }
+
+        internal static void ForgetFacing() => s_facingSet = false;
 
         // Every chunk this peer knows falls for (read from its anchor, or placed here); an entry, even empty, means this
         // peer's list is the truth for that chunk's anchor.
@@ -1789,33 +1838,133 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
         }
 
         // The Vfall click. Returns the Debug line (starts "[FiresWater] Vfall refused" when nothing was placed).
+        // 0.2.1469: program callers (ConnectChannel, the admin tools test) keep the edge-walk plan: a ground point before an edge + a direction.
         internal static string Place(Vector3 cursor, Vector3 view, float radius)
         {
             string why = Plan(cursor, view, true, out Vector3 lip, out Vector2 flat, out float landY, out bool onto);
             if (why != null) return Refused(why);
-            var out3 = new Vector3(flat.x, 0f, flat.y);
+            return Lay(lip, flat, landY, onto, lip, false, radius);
+        }
 
+        // The player's Vfall click: the fall at the cursor (PlanAt), exactly as the ghost shows it.
+        // 0.2.1491: the visual only, saved as its own fires_vfall object (PlacedFalls.Place); nothing is dug.
+        internal static string Place(Vector3 cursor, bool onWater, Vector3 facing, float radius)
+        {
+            string why = PlanAt(cursor, onWater, facing, true, out Vector3 lip, out Vector2 flat, out float landY, out bool onto, out _);
+            if (why != null) return Refused(why);
+            var fall = new Fall { Lip = TopOf(lip, true), Out = flat, Width = Mathf.Max(2f, radius * 2f), LandY = landY, OntoGround = onto, Straight = true };
+            return PlacedFalls.Place(fall);
+        }
+
+        private static string Lay(Vector3 lip, Vector2 flat, float landY, bool onto, Vector3 notchAt, bool atCursor, float radius)
+        {
             // The spillway: the notch the water leaves by. It is also what makes the chunk an edited one, whose anchor
             // carries the fall.
             float notchR = Mathf.Min(radius, NotchMaxRadius);
-            Vector3 notch = new Vector3(lip.x, lip.y - NotchDepth * 0.5f, lip.z);
+            Vector3 notch = new Vector3(notchAt.x, notchAt.y - NotchDepth * 0.5f, notchAt.z);   // 0.2.1469: on water, in the bed under the top
             string cut = (WaterShapingTools.StudioHeightmap && !WaterShapingTools.OnVoxel(notch)) ? "notch skipped (Studio heightmap carve, 0.2.1256)" : VoxelWorld.ApplyBrush(notch, notchR, NotchDepth, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
             var key = ChunkOf(notch);
             if (!VoxelWorld.TryGetChunk(key, out var chunk) || chunk == null || !chunk.HasBrushEdits)
                 return Refused(F("the spillway notch at ({0:0.0},{1:0.0},{2:0.0}) did not take ({3}), so there is no chunk record to keep the fall in",
                     notch.x, notch.y, notch.z, cut));
 
-            var fall = new Fall { Lip = new Vector3(lip.x, lip.y - NotchDepth, lip.z), Out = flat, Width = Mathf.Max(2f, radius * 2f), LandY = landY, OntoGround = onto };
+            var fall = new Fall { Lip = TopOf(lip, atCursor), Out = flat, Width = Mathf.Max(2f, radius * 2f), LandY = landY, OntoGround = onto, Straight = true };
             ListFor(key).Add(fall);
             VoxelWorld.RequestSave(key);
             Rebuild(key);
 
-            // The fall is only its curtain (and mist), falling down the steep terrain under it; no river mesh. No pour at the lip and no
-            // plunge pool at the foot: water above or below it is drawn with the water tools when it is wanted.
+            // The fall is only its curtain (and mist), falling down the steep terrain under it; no river mesh, no pour at the lip and no
+            // plunge pool at the foot (0.2.1491: the "Vfall digs a landing pool" option is gone, Fire: "waterfall tool should not dig anything").
             return F("[FiresWater] Vfall placed: lip ({0:0.0},{1:0.0},{2:0.0}) out ({3:0.00},{4:0.00}) width {5:0.0} m, drop {6:0.0} m onto {7} at y {8:0.0}; chunk {9} holds {10} fall(s)",
                 fall.Lip.x, fall.Lip.y, fall.Lip.z, flat.x, flat.y, fall.Width, fall.Lip.y - landY, onto ? "ground" : "water", landY, key, s_byChunk[key].Count);
         }
 
+        // 0.2.1469 (Fire on 1468, his words taken literally: "the fucking problem isnt the preview its exactly what i said, that it only
+        // raycasts when looking at ground making it fucking useless to place in a river"; and his spec: "it should show a preview waterfall,
+        // scroll wheel should ROTATE the waterfall and shift scroll should scale it, and then obviously it falls until it hits land or water").
+        //
+        // WHY THE RAY MISSED WATER (code-proven): the Vfall cursor is TileBrush.TryGetPointerTarget, a Physics.Raycast with the mask
+        // "Default, static_solid, Default_small, piece, terrain, WaterVolume". FAT's water has nothing on those layers: the generated sheets
+        // ("genwater", VoxelChunkView) and the placed sheets ("fires_placed_water_*", PlacedWaterSheets) carry a MeshFilter + MeshRenderer and
+        // NO collider, and the only FAT water colliders are the combiners' swim triggers on the "Water" layer (WaterMeshCombiner.cs:336,
+        // WaterMeshCombiner.MeshGen.cs:3071; FatWaterChecks: "triggers and water, which live on the Water layer"). So the ray went through
+        // every FAT river and lake to the bed. AimAtWater now lifts the cursor onto the water surface along the same camera ray.
+        //
+        // PLACEMENT (no lip walk, no walk-back, no edge snap: no automatic placement at all): the fall's top is WHERE THE CURSOR POINTS
+        // (ground or water), it faces the wheel's facing, its width is Shift+wheel's, and it falls straight down from there until it meets
+        // ground or water. The one physical limit is the curtain's own: FiresWaterfalls.AppendCurtain draws nothing under MinFallLength
+        // (2 m), so less than MinDrop below the top is told, not hidden.
+        private const float TopRayAbove = 60f, TopRayLength = 160f;
+        private static readonly float[] s_aimIter = new float[3];
+
+        // The camera ray's first FAT / sea water surface in front of the ground hit (the ray itself passes through FAT water, see above).
+        internal static Vector3 AimAtWater(Vector3 groundHit, out bool onWater)
+        {
+            onWater = false;
+            var cam = GameCamera.instance;
+            if (cam == null) return groundHit;
+            Vector3 o = cam.transform.position, dir = cam.transform.forward;
+            if (dir.y > -0.01f) return groundHit;
+            if (!FatWaterChecks.TryWaterAt(groundHit.x, groundHit.z, 0.05f, true, out float w, out _) || w <= groundHit.y + 0.02f || o.y <= w) return groundHit;
+            Vector3 q = groundHit;
+            for (int i = 0; i < s_aimIter.Length; i++)
+            {
+                float t = (w - o.y) / dir.y;
+                if (t <= 0f) break;
+                q = o + dir * t;
+                if (!FatWaterChecks.TryWaterAt(q.x, q.z, 0.05f, true, out float w2, out _)) { q.y = w; break; }   // shore: keep the last surface
+                if (Mathf.Abs(w2 - w) < 0.25f) { q.y = w2; onWater = true; return q; }
+                w = w2;
+            }
+            onWater = true;
+            return new Vector3(q.x, w, q.z);
+        }
+
+        // The fall at the cursor: top (lip), facing, landing straight down, and where its spillway notch goes (the ground at the top, or the
+        // bed under it when the top is on water: the fall rides that chunk's anchor, as every placed fall does). Null = it fits, else why not.
+        private static string PlanAt(Vector3 cursor, bool onWater, Vector3 facing, bool log, out Vector3 lip, out Vector2 flat, out float landY, out bool onto, out Vector3 notchAt)
+        {
+            lip = cursor; landY = cursor.y; onto = true; notchAt = cursor;
+            flat = new Vector2(facing.x, facing.z);
+            if (flat.sqrMagnitude < 0.01f) flat = Vector2.up;
+            flat.Normalize();
+            var out3 = new Vector3(flat.x, 0f, flat.y);
+
+            // Fire: "there should be no "find the cliff lip" or any auto logic to a manually placed fucking waterfall, we select the size and
+            // the position and it places where we select". The top IS the cursor point; nothing moves it.
+            if (log) FiresLogger.LogDebug(F("[FiresWater] Vfall top at the cursor ({0:0.0},{1:0.0},{2:0.0}) on {3} (0.2.1469)", lip.x, lip.y, lip.z, onWater ? "water" : "ground"));
+            notchAt = lip;
+            if (onWater && TopAt(lip.x, lip.z, lip.y, out float bedY) && bedY < lip.y) notchAt = new Vector3(lip.x, bedY, lip.z);
+
+            // straight down in front of the top (where the curtain hangs), onto ground or into water
+            Vector3 probe = lip + out3 * LandingOut;
+            int mask = LayerMask.GetMask("terrain", "Default", "static_solid");
+            if (!Physics.Raycast(new Vector3(probe.x, lip.y + 0.25f, probe.z), Vector3.down, out var hit, LandingReach, mask, QueryTriggerInteraction.Ignore))
+                return F("nothing below ({0:0.0},{1:0.0},{2:0.0}) within {3:0} m", probe.x, lip.y, probe.z, LandingReach);
+            landY = hit.point.y;
+            onto = true;
+            if (FatWaterChecks.TryWaterAt(hit.point.x, hit.point.z, 0.05f, true, out float water, out _) && water > landY && water < lip.y - 0.1f)
+            {
+                landY = water;
+                onto = false;
+            }
+            float drop = lip.y - landY;
+            if (drop < MinDrop) return F("only {0:0.0} m to fall here (a curtain needs {1:0} m): point at the top of a drop, or turn the fall to face over it", drop, MinDrop);
+            return null;
+        }
+
+        // The top solid surface of the column (x, z): a ray straight down from well above `near` (terrain, voxel and static colliders;
+        // water and swim volumes are triggers or have no collider and are skipped). False = nothing within reach.
+        private static bool TopAt(float x, float z, float near, out float y)
+        {
+            int mask = LayerMask.GetMask("terrain", "Default", "static_solid");
+            if (Physics.Raycast(new Vector3(x, near + TopRayAbove, z), Vector3.down, out var hit, TopRayLength, mask, QueryTriggerInteraction.Ignore))
+            { y = hit.point.y; return true; }
+            y = near; return false;
+        }
+
+        // 0.2.1469: the old edge-walk plan stays for the PROGRAM callers only (ConnectChannel's falls along a routed channel, the admin
+        // tools test), which hand in a ground point before an edge and a direction; the player's Vfall uses PlanAt above.
         // 0.2.1086 (Fire: "v fall should show an actual ghost preview of what the fall will look like so we can position it"): the lip
         // walk + landing ray, shared by the click (Place) and the held-tool ghost (Preview), so the ghost is exactly what the click
         // lays. Returns null when a fall fits, else why not. Reads only; writes nothing.
@@ -1884,11 +2033,11 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
         private static string s_ghostWhy;
         private static float s_ghostLogAt;
         private const int GhostRingPoints = 32;
-        private const float GhostAlpha = 0.45f;
+        private const float GhostAlpha = 0.75f;   // 0.2.1467: the real look, lightly ghosted (was 0.45: Fire read it as no preview at all)
         private static readonly Color GhostGood = new Color(0.35f, 1f, 0.45f, 0.9f), GhostBad = new Color(1f, 0.35f, 0.3f, 0.9f);
 
         // Returns null when the ghost shows a fall that fits, else why the click would be refused (the rings go red).
-        internal static string Preview(Vector3 cursor, Vector3 view, float radius, Material lineMat)
+        internal static string Preview(Vector3 cursor, bool onWater, Vector3 view, float radius, Material lineMat)
         {
             if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return null;
             var v = new Vector2(view.x, view.z);
@@ -1900,44 +2049,34 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
             if (!changed) return s_ghostOk ? null : s_ghostWhy;
             s_ghostCursor = cursor; s_ghostView = v; s_ghostRadius = radius;
 
-            string why = Plan(cursor, view, false, out Vector3 lip, out Vector2 flat, out float landY, out bool onto);
+            string why = PlanAt(cursor, onWater, view, false, out Vector3 lip, out Vector2 flat, out float landY, out bool onto, out _);
             s_ghostOk = why == null; s_ghostWhy = why;
             s_ghostMesh.Clear();
             if (!s_ghostOk)
             {
                 s_ghostRenderer.enabled = false;
                 s_ghostPool.gameObject.SetActive(false);
-                Ring(s_ghostSpill, new Vector3(cursor.x, cursor.y + 0.1f, cursor.z), Mathf.Min(radius, NotchMaxRadius), GhostBad);
+                // 0.2.1468: the red ring sits ON the water when the cursor is under it (it was drawn on the bed, out of sight)
+                float ry = cursor.y;
+                if (FatWaterChecks.TryWaterAt(cursor.x, cursor.z, 0.05f, false, out float wy, out _) && wy > ry && wy - ry < 40f) ry = wy;
+                Ring(s_ghostSpill, new Vector3(cursor.x, ry + 0.1f, cursor.z), Mathf.Min(radius, NotchMaxRadius), GhostBad);
                 return why;
             }
 
             // The same fall Place records and Rebuild draws.
-            var f = new Fall { Lip = new Vector3(lip.x, lip.y - NotchDepth, lip.z), Out = flat, Width = Mathf.Max(2f, radius * 2f), LandY = landY, OntoGround = onto };
+            var f = new Fall { Lip = TopOf(lip, true), Out = flat, Width = Mathf.Max(2f, radius * 2f), LandY = landY, OntoGround = onto, Straight = true };
             var out3 = new Vector3(f.Out.x, 0f, f.Out.y);
-            var across = new Vector3(-f.Out.y, 0f, f.Out.x);
-            int n = Mathf.Max(2, Mathf.RoundToInt(f.Width) + 1);
-            s_columns.Clear();
-            for (int c = 0; c < n; c++)
-            {
-                float t = -f.Width * 0.5f + f.Width * c / (n - 1);
-                s_columns.Add(new FiresWaterfalls.Column
-                {
-                    Base = f.Lip + across * t,
-                    LipY = f.Lip.y,
-                    FallLength = f.Lip.y - f.LandY + (f.OntoGround ? 0f : FiresWaterfalls.PlungeDepth),
-                    Outward = Vector3.zero,
-                    OntoGround = f.OntoGround,
-                });
-            }
             int verts = 0;
             bool drew = false;
             if (s_ghostMats != null)
             {
+                // 0.2.1491: the same Skylands-argument curtain the click's fires_vfall draws (AppendSkylandCurtain)
                 FiresWaterfalls.BeginMesh();
-                drew = FiresWaterfalls.AppendCurtain(s_columns, out3, FiresWaterfalls.EdgeLipOut, 0f, 0f, FiresWaterfalls.TerrainProfile, approach: false, placed: true);
+                drew = AppendSkylandCurtain(f, out _);
                 verts = FiresWaterfalls.EndMesh(s_ghostMesh);
             }
             s_ghostRenderer.enabled = drew;
+            // 0.2.1491: the ring at the top marks the cursor (there is no spillway notch any more); the ring below marks where it lands.
             Ring(s_ghostSpill, new Vector3(lip.x, lip.y + 0.05f, lip.z), Mathf.Min(radius, NotchMaxRadius), GhostGood);
             s_ghostPool.gameObject.SetActive(true);
             Ring(s_ghostPool, new Vector3(lip.x + out3.x * LandingOut, landY + 0.05f, lip.z + out3.z * LandingOut), f.Width * 0.5f + 1f, GhostGood);
@@ -1974,9 +2113,14 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                 {
                     if (src[i] == null) continue;
                     var m = new Material(src[i]) { name = src[i].name + " (Vfall ghost)" };
+                    string applied = "";
                     foreach (var prop in new[] { "_Color", "_TintColor", "_BaseColor" })
-                        if (m.HasProperty(prop)) { var c = m.GetColor(prop); c.a *= GhostAlpha; m.SetColor(prop, c); }
-                    if (m.HasProperty("_Alpha")) m.SetFloat("_Alpha", m.GetFloat("_Alpha") * GhostAlpha);
+                        if (m.HasProperty(prop)) { var c = m.GetColor(prop); c.a *= GhostAlpha; m.SetColor(prop, c); applied += prop + " "; }
+                    if (m.HasProperty("_Alpha")) { m.SetFloat("_Alpha", m.GetFloat("_Alpha") * GhostAlpha); applied += "_Alpha "; }
+                    // 0.2.1468 ([lead]: "is it at 75% opacity?"): say which property took the ghost alpha; none = the ghost draws at the
+                    // falls' own opacity (the shader exposes no alpha property, so GhostAlpha cannot reach it)
+                    FiresLogger.LogInfo(F("[FiresWater] Vfall ghost material '{0}' (shader {1}, queue {2}): ghost alpha {3:0.00} applied via {4} (0.2.1468)",
+                        m.name, m.shader != null ? m.shader.name : "?", m.renderQueue, GhostAlpha, applied.Length > 0 ? applied.Trim() : "NO alpha property (drawn at full opacity)"));
                     s_ghostMats[i] = m;
                 }
                 s_ghostRenderer.sharedMaterials = s_ghostMats;
@@ -2071,6 +2215,7 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
         // Vfall Remove (vanilla middle mouse; 0.2.1072; was LeftAlt, which our key rules forbid): the falls whose lip is within the brush.
         internal static string RemoveNear(Vector3 cursor, float radius)
         {
+            global::VerdantsAscent.Terrain.FatUndo.BeforeVoxelEdit("a Vfall removal", cursor, radius + 2f, radius + 2f);   // 0.2.1502: FatUndo ToolFalls_RemoveNear_Undo, was a Harmony patch on this FAT method
             int removed = 0;
             var r = radius + 2f;
             var lo = ChunkOf(cursor - Vector3.one * r);
@@ -2087,12 +2232,55 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                         VoxelWorld.RequestSave(key);
                         Rebuild(key);
                     }
+            removed += PlacedFalls.RemoveNear(cursor, r);   // 0.2.1491: the player's falls saved as fires_vfall objects
             return removed > 0
                 ? F("[FiresWater] Vfall removed {0} fall(s) within {1:0.0} m of ({2:0.0},{3:0.0},{4:0.0})", removed, r, cursor.x, cursor.y, cursor.z)
                 : Refused(F("no fall within {0:0.0} m of ({1:0.0},{2:0.0},{3:0.0}) to remove", r, cursor.x, cursor.y, cursor.z));
         }
 
         private static string Refused(string why) => "[FiresWater] Vfall refused: " + why;
+
+        // 0.2.1469: the curtain's top. On ground it starts in the spillway notch (NotchDepth under the ground, as before); on water it
+        // starts AT the water surface (as a river's own fall does, PlaceRiverFinal).
+        // Fire's rule (no automatic placement): the player's fall keeps its top exactly at the cursor; only the program callers' edge-walk
+        // falls start in their notch as before.
+        private static Vector3 TopOf(Vector3 lip, bool atCursor) => atCursor ? lip : new Vector3(lip.x, lip.y - NotchDepth, lip.z);
+
+        // 0.2.1467: a Vfall-tool fall hangs straight down from its lip to the landing the click measured (no profile: AppendCurtain
+        // keeps every row at the lip offset plus the curl). River falls and format-1 falls keep the terrain-hugging profile.
+        // Why (Fire's shot 1119, "flat white slabs hanging over the river channels"): with TerrainProfile every row moves out to the
+        // first air in front of the face (FiresWaterfalls.TerrainProfile, march up to ProbeReach 12 m), so on a gentle bank (log:
+        // "drop 2.5 m onto ground") the 1.5 m thick slab (Thickness, SlabThickness) followed the bank outward and lay nearly flat.
+        private static readonly FiresWaterfalls.OutwardProfile s_terrainProfile = FiresWaterfalls.TerrainProfile;
+        private static FiresWaterfalls.OutwardProfile ProfileOf(Fall f) => f.Straight ? null : s_terrainProfile;
+
+        // 0.2.1491 (Fire: "they need to look like the waterfalls from our skylands"): a player's fall drawn with the Skylands falls'
+        // OWN AppendCurtain arguments (ZoneModeSkylands.Build: 5 columns across the width, lip out FallLipOut, fade-out over
+        // FallFade of the drop, approach rows on, the seed from the lip position). In the waterfall shader the fade (uv1.z > 0) is what
+        // gives the Skylands look: the lower part breaks up into streaks (thin -> lerp(1, streak, thin)) and there is no 4 m plunge-foam
+        // band at the foot (plunge = 0 when fadeLength > 0); the approach rows bring the sheet in over the lip. Two differences from the
+        // Skylands call, both Fire's earlier rules for this tool: no profile (straight down, 0.2.1467) so no lip snap (no automatic
+        // placement, 0.2.1469), and the length runs to the landing the click measured, so it reaches the pond or river.
+        // Appends to the open mesh (BeginMesh / EndMesh are the caller's); leaves its mist in FiresWaterfalls.LastSite.
+        private static readonly System.Collections.Generic.List<FiresWaterfalls.Column> s_skyColumns = new System.Collections.Generic.List<FiresWaterfalls.Column>(5);
+
+        internal static bool AppendSkylandCurtain(Fall f, out Vector3 sound)
+        {
+            var out3 = new Vector3(f.Out.x, 0f, f.Out.y);
+            var across = new Vector3(-f.Out.y, 0f, f.Out.x);
+            float drop = f.Lip.y - f.LandY;
+            s_skyColumns.Clear();
+            for (int k = 0; k <= 4; k++)
+            {
+                float offset = (k / 4f - 0.5f) * f.Width;
+                s_skyColumns.Add(new FiresWaterfalls.Column { Base = f.Lip + across * offset, LipY = f.Lip.y, FallLength = drop });
+            }
+            float seed = Mathf.Repeat(f.Lip.x * 0.37f + f.Lip.z * 0.11f, 97f);
+            bool drew = FiresWaterfalls.AppendCurtain(s_skyColumns, out3, VerdantsAscent.Terrain.Zones.ZoneModeSkylands.FallLipOut,
+                drop * VerdantsAscent.Terrain.Zones.ZoneModeSkylands.FallFade, seed, null, approach: true, placed: true);
+            sound = drew ? FiresWaterfalls.SoundSite(s_skyColumns, out3) : Vector3.zero;
+            return drew;
+        }
 
         // admintools_test's FallsNear probe: falls whose lip is within `radius` of `at`, as this peer holds them.
         internal static int CountNear(Vector3 at, float radius)
@@ -2131,7 +2319,18 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
             s_byChunk[key] = list;
             Rebuild(key);
             FiresLogger.LogDebug($"[FiresWater] applied {list.Count} fall(s) from chunk {key}'s shared record.");
+            // 0.2.1479 ([lead] 11-18: the waterfall proof leg found an EMPTY record at Fire's falls only by Debug lines): one Info line per
+            // chunk each time its loaded fall count changes, saying plainly whether the record holds falls.
+            if (!s_saidRecord.TryGetValue(key, out int said) || said != list.Count)
+            {
+                s_saidRecord[key] = list.Count;
+                FiresLogger.LogInfo(list.Count > 0
+                    ? $"[FiresWater] fall record for chunk {key}: {list.Count} fall(s) loaded and drawn (first lip ({list[0].Lip.x:0.0},{list[0].Lip.y:0.0},{list[0].Lip.z:0.0}))"
+                    : $"[FiresWater] fall record for chunk {key}: EMPTY (0 falls) - this chunk once held falls; none are saved now");
+            }
         }
+
+        private static readonly System.Collections.Generic.Dictionary<Vector3Int, int> s_saidRecord = new System.Collections.Generic.Dictionary<Vector3Int, int>();
 
         // FatUndo (one numpad 7/9 history): a chunk's falls before a stroke, and laying them back
         // on undo/redo beside the chunk's edit blob, so undoing a Vfall takes its curtain with its notch. Snapshot is null
@@ -2163,6 +2362,7 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                 pkg.Write(f.Width);
                 pkg.Write(f.LandY);
                 pkg.Write(f.OntoGround);
+                pkg.Write(f.Straight);   // format 2
             }
             return pkg.GetArray();
         }
@@ -2174,9 +2374,9 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
             {
                 var pkg = new ZPackage(bytes);
                 int ver = pkg.ReadInt();
-                if (ver != FormatVersion)
+                if (ver != 1 && ver != FormatVersion)   // 0.2.1467: reads format 1 (no Straight) and 2
                 {
-                    FiresLogger.LogWarning($"[FiresWater] falls on chunk {key} are format {ver} (this FAT reads {FormatVersion}); not shown.");
+                    FiresLogger.LogWarning($"[FiresWater] falls on chunk {key} are format {ver} (this FAT reads 1 and {FormatVersion}); not shown.");
                     return false;
                 }
                 int n = pkg.ReadInt();
@@ -2188,6 +2388,7 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                         Width = pkg.ReadSingle(),
                         LandY = pkg.ReadSingle(),
                         OntoGround = pkg.ReadBool(),
+                        Straight = ver >= 2 && pkg.ReadBool(),
                     });
                 return true;
             }
@@ -2229,6 +2430,15 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
             for (int i = 0; i < list.Count; i++)
             {
                 var f = list[i];
+                if (f.Straight)
+                {
+                    // 0.2.1491: a player's Vfall saved here before 0.2.1491 is drawn the Skylands way, as a new fires_vfall is
+                    if (!AppendSkylandCurtain(f, out Vector3 skySound)) continue;
+                    drawn++;
+                    s_sites.Add(FiresWaterfalls.LastSite);
+                    if (s_sounds.Count < SoundsPerChunk) s_sounds.Add(skySound);
+                    continue;
+                }
                 var out3 = new Vector3(f.Out.x, 0f, f.Out.y);
                 var across = new Vector3(-f.Out.y, 0f, f.Out.x);
                 int n = Mathf.Max(2, Mathf.RoundToInt(f.Width) + 1);
@@ -2246,7 +2456,7 @@ private static bool FillOn => FiresVoxelConfig.RiverBankFill != null && FiresVox
                     });
                 }
                 float seed = (key.x * 73856093 ^ key.y * 19349663 ^ key.z * 83492791 ^ i) & 0xFFFF;
-                if (!FiresWaterfalls.AppendCurtain(s_columns, out3, FiresWaterfalls.EdgeLipOut, 0f, seed, FiresWaterfalls.TerrainProfile, approach: false, placed: true))
+                if (!FiresWaterfalls.AppendCurtain(s_columns, out3, FiresWaterfalls.EdgeLipOut, 0f, seed, ProfileOf(f), approach: false, placed: true))
                     continue;
                 drawn++;
                 s_sites.Add(FiresWaterfalls.LastSite);

@@ -35,7 +35,20 @@ namespace VerdantsAscent.Water.Tools
             FiresLogger.LogInfo("[FloatingIceCommands] Initialized - Floating ice commands registered");
         }
 
-        private static bool RaiseFloatingIce(Terminal.ConsoleEventArgs args)
+        private static bool RaiseFloatingIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return RaiseFloatingIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool RaiseFloatingIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float amount = 0.5f;
@@ -55,7 +68,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool LowerFloatingIce(Terminal.ConsoleEventArgs args)
+        private static bool LowerFloatingIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return LowerFloatingIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool LowerFloatingIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float amount = 0.5f;
@@ -75,7 +101,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool SmoothFloatingIce(Terminal.ConsoleEventArgs args)
+        private static bool SmoothFloatingIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return SmoothFloatingIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool SmoothFloatingIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float dummy = 0f;
@@ -95,7 +134,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool DeleteFloatingIce(Terminal.ConsoleEventArgs args)
+        private static bool DeleteFloatingIce(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return DeleteFloatingIce_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool DeleteFloatingIce_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float dummy = 0f;

@@ -113,7 +113,7 @@ namespace VerdantsAscent.Water.Core
             s_bound = true;
             try
             {
-                var sb = AccessTools.TypeByName("FiresCore.Bridge.SeasonBridge");
+                var sb = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Bridge.SeasonBridge");
                 if (sb != null)
                 {
                     s_available = Getter<bool>(sb, "IsAvailable");
@@ -122,7 +122,7 @@ namespace VerdantsAscent.Water.Core
                     s_thawing = Getter<bool>(sb, "IsThawing");
                     s_mask = Getter<int>(sb, "SnowTerrainBiomeMask");
                 }
-                var sf = AccessTools.TypeByName("FiresCore.Snow.SnowField");
+                var sf = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Snow.SnowField");
                 if (sf != null)
                 {
                     var b = AccessTools.Method(sf, "BaseAt", new[] { typeof(Vector3) });
@@ -154,6 +154,7 @@ namespace VerdantsAscent.Water.Core
             Bind();
             if (biome == Heightmap.Biome.DeepNorth) return true;
             if ((biome & (Heightmap.Biome.Ocean | Heightmap.Biome.AshLands)) != 0 || biome == Heightmap.Biome.None) return false;
+            if (SeasonalIce.External) return (SeasonalIce.BiomeMask & (int)biome) != 0 && SeasonalIce.Exposure > 0f;   // 0.2.1496: the provider decides the season part
             if (IceField.TestForceFreezing) return true;   // 0.2.1168 fat_water_ice_test (cleared in its finally)
             if (!Safe(s_available) || !Safe(s_winter) || !Safe(s_freezes) || Safe(s_thawing)) return false;
             int mask = 0;
@@ -167,6 +168,7 @@ namespace VerdantsAscent.Water.Core
             get
             {
                 Bind();
+                if (SeasonalIce.External) return (1 << 29) | (SeasonalIce.BiomeMask << 4);   // 0.2.1496: tiles drop only when the provider's biomes change
                 int mask = 0;
                 try { mask = s_mask != null ? s_mask() : 0; } catch { }
                 return (Safe(s_available) ? 1 : 0) | (Safe(s_winter) ? 2 : 0) | (Safe(s_freezes) ? 4 : 0) | (Safe(s_thawing) ? 8 : 0) | (mask << 4)
@@ -182,6 +184,7 @@ namespace VerdantsAscent.Water.Core
             Bind();
             if (biome == Heightmap.Biome.DeepNorth) return true;
             if ((biome & (Heightmap.Biome.Ocean | Heightmap.Biome.AshLands)) != 0 || biome == Heightmap.Biome.None) return false;
+            if (SeasonalIce.External) return (SeasonalIce.BiomeMask & (int)biome) != 0;   // 0.2.1496: the provider's biomes (Deep North stays the biome rule above)
             if (IceField.TestForceFreezing) return true;
             if (!Safe(s_available)) return false;
             int mask = 0;
@@ -197,6 +200,7 @@ namespace VerdantsAscent.Water.Core
         internal static string FreezeRuleWhy()
         {
             Bind();
+            if (SeasonalIce.External) return $"seasonal provider '{SeasonalIce.Owner}': biomes {(Heightmap.Biome)SeasonalIce.BiomeMask}, exposure {SeasonalIce.Exposure:0.00}";   // 0.2.1496
             if (IceField.TestForceFreezing) return "test-forced";
             if (!Safe(s_available)) return "no Vedr (seasons unavailable)";
             if (Safe(s_thawing)) return "thawing season";

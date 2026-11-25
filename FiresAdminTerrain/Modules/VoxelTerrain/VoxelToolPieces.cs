@@ -86,9 +86,9 @@ namespace VerdantsAscent.Terrain.Voxel
                 + "Scroll = width, Shift+scroll or PgUp/PgDn = depth.");
             AddTool("Vpond", "LAKE - click to dig a lake or pond and fill it to the rim. River between lakes: click the first lake, "
                 + "LeftAlt+click points along the river's path, then click the end lake. Scroll = size, Shift+scroll or PgUp/PgDn = depth.");
-            AddTool("Vfall", "Waterfall — click the ground just before an edge (a cliff, a sky island's rim): a "
-                + "spillway at the lip, a curtain with mist down to the ground or water below, and a pool where it "
-                + "lands. Scroll = width. Numpad 7 = undo the last fall, Numpad 9 = redo. Remove (middle mouse) = remove the falls in the ring.");
+            AddTool("Vfall", "Waterfall — point where its top goes (ground or water: a pond edge, mid-river or a cliff): "
+                + "places only the waterfall (the Skylands falls' curtain, mist and sound) down to the ground or water below; "
+                + "nothing is dug. The preview shows the fall a click lays: its top at the cursor, falling straight down until it meets ground or water. Scroll = turn it, Shift+scroll = width. Numpad 7 = undo the last fall, Numpad 9 = redo. Remove (middle mouse) = remove the falls near the cursor.");
             AddTool("Vmop", "Water mop — hold LMB and DRAG to remove water in the ring for good: generated rivers, "
                 + "lakes and ponds (sky islands too) AND water you drew. Water outside the ring stays. Redraw with "
                 + "Vpour/Vpool/Vriver and Vfall waterfalls. Scroll = size. Remove (middle mouse) = restore what was mopped in the ring.");

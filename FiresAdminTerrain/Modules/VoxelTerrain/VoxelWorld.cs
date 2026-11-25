@@ -569,7 +569,6 @@ namespace VerdantsAscent.Terrain.Voxel
             if (touched > 0)
             {
                 var centre = new Vector3(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f, origin.z + size.z * 0.5f);
-                FarVegImpostors.Invalidate(centre.x, centre.z);
                 try { VerdantsAscent.Terrain.Clutter.ClutterManager.RespawnInRadius(centre, Mathf.Max(size.x, size.z) * 0.75f); }
                 catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] clutter refresh threw: {ex.Message}"); }
             }
@@ -723,7 +722,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (s_chunks.TryGetValue(key, out var chunk)) s_saveDirty.Remove(chunk);
                 DropChunk(key);
             }
-            if (keys.Count > 0) FarVegImpostors.Invalidate(ZoneSystem.GetZonePos(zone).x, ZoneSystem.GetZonePos(zone).z);
+            // 0.2.1480: FAT far billboards removed (no tile to invalidate)
             return keys.Count;
         }
 
@@ -770,7 +769,6 @@ namespace VerdantsAscent.Terrain.Voxel
             Vector3 centre = ZoneSystem.GetZonePos(zone);
             if (touched > 0)
             {
-                FarVegImpostors.Invalidate(centre.x, centre.z);
                 try { VerdantsAscent.Terrain.Clutter.ClutterManager.RespawnInRadius(centre, Zones.ZoneOpenSet.ZoneSize * 0.75f); }
                 catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] clutter refresh threw: {ex.Message}"); }
             }
@@ -847,21 +845,19 @@ namespace VerdantsAscent.Terrain.Voxel
             if (VToolScope <= 0 && Zones.ZoneModeRefusals.TerrainEditTouchesClosed(center, radius))
                 return "Refused: the brush reaches into a closed zone of this one-zone-at-a-time world.";
             if (VToolScope > 0) WarnIfUnseen();
+            // 0.2.1455 ([ghost]): a soft blend or a turned cube reaches past radius + 1 (VoxelBrushSoft.ExtraReach; 0 = the old range).
+            float extraReach = VoxelBrushSoft.ExtraReach(shape, radius, mode);
             // One undo step per stroke (FatUndo keeps the touched chunks' edit blobs before the first dab).
-            FatUndo.BeforeVoxelEdit($"a V-tool {mode} stroke", center, radius, height);
+            FatUndo.BeforeVoxelEdit($"a V-tool {mode} stroke", center, radius + extraReach, height + 2f * extraReach);
             long carveT0 = VoxelMeshPipeline.CarveTiming.On ? Stopwatch.GetTimestamp() : 0L;
 
-            // Persist-until-edited: a far-impostor tile is a cached function of
-            // the analytic ground — an edit here changes that ground, so drop
-            // the overlapping tile (it rebuilds off-thread). Cheap; far tiles
-            // are out of reach so this almost never actually drops one.
-            FarVegImpostors.Invalidate(center.x, center.z);
 
             float halfH = shape == VoxelBrushShape.Cylinder ? height * 0.5f : radius;
 
             // World-space AABB of affected SAMPLES (+1 for boundary lerp).
-            Vector3 min = new Vector3(center.x - radius - 1f, center.y - halfH - 1f, center.z - radius - 1f);
-            Vector3 max = new Vector3(center.x + radius + 1f, center.y + halfH + 1f, center.z + radius + 1f);
+            float pad = 1f + extraReach;
+            Vector3 min = new Vector3(center.x - radius - pad, center.y - halfH - pad, center.z - radius - pad);
+            Vector3 max = new Vector3(center.x + radius + pad, center.y + halfH + pad, center.z + radius + pad);
 
             // Chunk key k covers world samples [k*32 - 1, k*32 + 32].
             int kMinX = FloorDiv(Mathf.FloorToInt(min.x) - 32, 32), kMaxX = FloorDiv(Mathf.CeilToInt(max.x) + 1, 32);
@@ -1897,4 +1893,369 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static int FloorDiv(int a, int b) => a >= 0 ? a / b : ~(~a / b);
     }
-}
+
+    // 0.2.1469 ([lead] / [generator] for FiresGodComplex 0.8.74: a V-tool brush on a zone that is ALREADY voxel never bumped
+    // VoxelSwapRevision, so the Studio 3D view could not see in-game brush edits). Bumped whenever voxel density edits land in a chunk on
+    // THIS peer: a local brush / stamp / bounds edit (VoxelChunk.ApplyShape, ApplyDensityStamp, ApplyMaskedStamp, ApplyEditBounds, when
+    // something changed) and edits arriving from elsewhere (VoxelChunk.ImportBrushEdits: the chunk anchor's synced blob, undo / redo), on a
+    // client, host or dedicated server alike. Global + per zone (zone = the chunk's centre column). Any thread (edits run on workers);
+    // a getter takes no allocation (one lock + one dictionary read); a zone's first edit adds its entry once.
+    internal static class VoxelEditRevision
+    {
+        private static int s_global;
+        private static readonly object s_lock = new object();
+        private static readonly Dictionary<Vector2s, int> s_byZone = new Dictionary<Vector2s, int>();
+
+        internal static int Global => System.Threading.Volatile.Read(ref s_global);
+
+        internal static void Note(Vector3Int chunkKey)
+        {
+            System.Threading.Interlocked.Increment(ref s_global);
+            var zone = ZoneSystem.GetZone(new Vector3(chunkKey.x * VoxelChunk.CELLS + VoxelChunk.CELLS * 0.5f, 0f, chunkKey.z * VoxelChunk.CELLS + VoxelChunk.CELLS * 0.5f));
+            lock (s_lock)
+            {
+                s_byZone.TryGetValue(zone, out int n);
+                s_byZone[zone] = n + 1;
+            }
+        }
+
+        internal static int At(Vector2s zone)
+        {
+            lock (s_lock) return s_byZone.TryGetValue(zone, out int n) ? n : 0;
+        }
+    }
+
+    // 0.2.1470 ([lead] / [generator]: FiresGodComplex 0.8.74 on the dedi logged "zone -36,13 ground: source worldgen, voxel 0/4225, FAT zone
+    // no, heightmap none" for zones that ARE voxel on the client). Code-proven why: a dedicated server holds NO GameObjects where the players
+    // are (VoxelAnchorPrefab.FindZdo's note: "its reference position is parked off-world, so the component registry is empty there"), so no
+    // VoxelChunkAnchor instance ever runs its Apply there, no chunk imports the edits, VoxelWorld stays empty for those zones, the zone is never
+    // marked brushed / wrapped (VoxelZoneStreamer.IsZoneKnown false), and TrySampleSurfaceY finds nothing. The edits DO live on the dedi:
+    // in the chunk anchor ZDOs ("VAVoxel", vv_kx/ky/kz + vv_edits = the gzipped ExportBrushEdits blob), in ZDOMan's sector lists.
+    // This reads them READ-ONLY, on demand: per chunk the anchor ZDO (FindZdo), decoded once per data revision (re-checked at most every
+    // 2 s), its edit bounds clamped over the column's base density (VoxelChunk generation: d = (ground - y) x QUANT, the ground the column
+    // is built on = VoxelZoneStreamer.TryGroundHeight, else the generator), and the highest solid -> air crossing in the window.
+    // UNCONFIRMED parts, said plainly: generator-side shaping that is not in the edit bounds (caves, generated river-bed carves, cracks,
+    // location pads under edits) is not reproduced; on a ZoneReplace / super-flat world the edits are the whole difference. Main thread.
+    internal static class DediVoxelRead
+    {
+        private sealed class Rec { public uint Rev; public sbyte[] Lo, Hi; public bool Has; public float CheckedAt = -100f; }
+        private static readonly Dictionary<Vector3Int, Rec> s_recs = new Dictionary<Vector3Int, Rec>();
+        private static readonly Dictionary<Vector2s, float> s_zoneCheckedAt = new Dictionary<Vector2s, float>();
+        private static readonly Dictionary<Vector2s, bool> s_zoneHas = new Dictionary<Vector2s, bool>();
+        private const float Recheck = 2f;
+        private const int MaxRecs = 256;   // ~78 KB each: about 20 MB at most, then the cache starts over
+
+        internal static bool Active => ZNet.instance != null && ZNet.instance.IsDedicated();
+
+        private static Rec Get(Vector3Int key)
+        {
+            float now = Time.unscaledTime;
+            if (s_recs.TryGetValue(key, out var r) && now - r.CheckedAt < Recheck) return r;
+            if (r == null)
+            {
+                if (s_recs.Count >= MaxRecs) s_recs.Clear();
+                r = new Rec();
+                s_recs[key] = r;
+            }
+            r.CheckedAt = now;
+            var center = new Vector3(key.x * VoxelChunk.CELLS + 16f, key.y * VoxelChunk.CELLS + 16f, key.z * VoxelChunk.CELLS + 16f);
+            var zdo = VoxelAnchorPrefab.FindZdo(key, center);
+            if (zdo == null) { r.Has = false; r.Lo = r.Hi = null; return r; }
+            uint rev = zdo.DataRevision;
+            if (r.Has && r.Rev == rev) return r;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var packed = zdo.GetByteArray(VoxelAnchorPrefab.ZDO_EDITS);
+            var raw = packed != null ? VerdantsAscent.FatInflate.Gzip(packed, "voxel edits ZDO (dedi read)") : null;
+            if (raw == null || !VoxelChunk.TryReadEditBounds(raw, out var lo, out var hi)) { r.Has = false; r.Lo = r.Hi = null; return r; }
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            bool changed = r.Has && r.Rev != rev;
+            r.Lo = lo; r.Hi = hi; r.Has = true; r.Rev = rev;
+            if (changed) VoxelEditRevision.Note(key);
+            if (FiresLogger.DebugEnabled) LogDecode(key, center, packed.Length, lo, hi, rev, ms);
+            return r;
+        }
+
+        // 0.2.1476 ([lead]: proof join 4's first decode took 6.3 ms on the main thread, later ones far less - UNCONFIRMED how much of it
+        // is first-call JIT of the inflate / decode path versus the record itself; the decode line now carries its own ms). So the first
+        // decodes do not land inside a FiresGodComplex row read: on a dedi, every record the world holds is decoded ahead, ONE per server
+        // ground read (vanilla's AudioMan.IsOceanZone -> GetGroundHeight runs a few times a second there, proof join 4), main thread, from
+        // the moment the first ground read arrives. A world with N records is warm after N reads; nothing is decoded twice (Get's cache).
+        private static List<Vector3Int> s_prewarm;
+        private static int s_prewarmAt;
+        private static double s_prewarmMs;
+        private static void PrewarmOne()
+        {
+            if (s_prewarm == null)
+            {
+                s_prewarm = new List<Vector3Int>();
+                var all = new List<ZDO>();
+                VoxelAnchorPrefab.AllAnchors(all);
+                foreach (var zdo in all)
+                {
+                    int kx = zdo.GetInt(VoxelAnchorPrefab.ZDO_KX, int.MinValue);
+                    if (kx != int.MinValue) s_prewarm.Add(new Vector3Int(kx, zdo.GetInt(VoxelAnchorPrefab.ZDO_KY), zdo.GetInt(VoxelAnchorPrefab.ZDO_KZ)));
+                }
+                if (FiresLogger.DebugEnabled) FiresLogger.LogDebug($"[FiresVoxel] dedi pre-decode: {s_prewarm.Count} voxel record(s) to decode, one per server ground read ({VerdantsAscent.FiresAdminTerrain.PluginVersion})");
+            }
+            if (s_prewarmAt >= s_prewarm.Count) return;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (s_recs.Count < MaxRecs) Get(s_prewarm[s_prewarmAt]);
+            s_prewarmAt++;
+            s_prewarmMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (s_prewarmAt == s_prewarm.Count && FiresLogger.DebugEnabled)
+                FiresLogger.LogDebug($"[FiresVoxel] dedi pre-decode done: {s_prewarm.Count} record(s), {s_prewarmMs:0.00} ms in all, {s_recs.Count} cached ({VerdantsAscent.FiresAdminTerrain.PluginVersion})");
+        }
+
+        // 0.2.1472 ([lead]): one Debug line per record decode - the evidence that the dedi found and read the chunk's edits.
+        private static void LogDecode(Vector3Int key, Vector3 center, int packedBytes, sbyte[] lo, sbyte[] hi, uint rev, double ms)
+        {
+            const int S = VoxelChunk.SAMPLES;
+            int cells = 0, yMin = int.MaxValue, yMax = int.MinValue;
+            for (int i = 0; i < lo.Length; i++)
+            {
+                if (!VoxelChunk.IsEdited(lo[i], hi[i])) continue;
+                cells++;
+                int sy = (i / S) % S - 1;   // SampleIndex = (x+1) + S*((y+1) + S*(z+1))
+                if (sy < yMin) yMin = sy;
+                if (sy > yMax) yMax = sy;
+            }
+            var zone = ZoneSystem.GetZone(center);
+            int baseY = key.y * VoxelChunk.CELLS;
+            FiresLogger.LogDebug($"[FiresVoxel] dedi decoded chunk {key} (zone {zone.x},{zone.y}): {packedBytes} bytes packed, rev {rev}, {cells} edited sample(s)"
+                + (cells > 0 ? $", edited y {baseY + yMin}..{baseY + yMax}" : "") + $", decode {ms:0.00} ms; {s_recs.Count} record(s) cached ({VerdantsAscent.FiresAdminTerrain.PluginVersion})");
+        }
+
+        // 0.2.1472 ([lead]: the 1470 census read 0/4225 voxel columns in zones that hold records). Code-proven cause: the base ground the
+        // record is clamped over came from VoxelZoneStreamer.TryGroundHeight (a loaded Heightmap - none on a dedi - else HeightmapBuildCache,
+        // which answers false while it is empty, HeightmapBuildCache.cs:47, and is filled only by the server voxel-data pass, which runs only
+        // with caves or sky islands on, VoxelZoneStreamer.cs:257 / :1493) else FiresWorldGenBase.TryGetGenGround (the Fires generator's grid,
+        // null unless that generator runs, FiresWaterQueriesSb.cs:377). SeamFlat1462 is Vanilla generation, caves off, sky islands off, so
+        // every column returned false before any record was read. Last fallback now: WorldGenerator.GetHeight, the same function vanilla's
+        // HeightmapBuilder takes a zone's base heights from (what the client's chunks stand on). UNCONFIRMED: vanilla TerrainComp edits
+        // (hoe / pickaxe) in a voxel zone are not in that number.
+        internal static bool TryBaseGround(float x, float z, out float h)
+        {
+            if (VoxelZoneStreamer.TryGroundHeight(x, z, out h)) return true;
+            if (FiresWorldGenBase.TryGetGenGround(x, z, out h)) return true;
+            var wg = WorldGenerator.instance;
+            if (wg == null) { h = 0f; return false; }
+            h = wg.GetHeight(x, z);
+            return !(float.IsNaN(h) || float.IsInfinity(h));
+        }
+
+        // 0.2.1473 ([lead] / [generator]: FiresGodComplex asks 4,225 columns per FAT zone in one frame; 1472 ran WorldGenerator.GetHeight
+        // for every one before looking for a record, and twice where one existed). The chunk columns that hold any record, per zone sector,
+        // re-checked every Recheck s (one sector list walk). No record at ANY height in a column's 32 m chunk column = TrySurface's answer
+        // there is false whatever the window, so callers ask this first and skip the ground work. Main thread.
+        private sealed class ColSet { public float CheckedAt = -100f; public readonly HashSet<long> Cols = new HashSet<long>(); }
+        private static readonly Dictionary<Vector2s, ColSet> s_cols = new Dictionary<Vector2s, ColSet>();
+        internal static bool ColumnHasRecords(float x, float z)
+        {
+            int kx = Fd(Mathf.RoundToInt(x), VoxelChunk.CELLS), kz = Fd(Mathf.RoundToInt(z), VoxelChunk.CELLS);
+            var at = new Vector3(kx * VoxelChunk.CELLS + 16f, 0f, kz * VoxelChunk.CELLS + 16f);   // same sector FindZdo searches for this column
+            var zone = ZoneSystem.GetZone(at);
+            float now = Time.unscaledTime;
+            if (!s_cols.TryGetValue(zone, out var cs))
+            {
+                if (s_cols.Count >= 1024) s_cols.Clear();
+                cs = new ColSet();
+                s_cols[zone] = cs;
+            }
+            if (now - cs.CheckedAt >= Recheck)
+            {
+                cs.CheckedAt = now;
+                cs.Cols.Clear();
+                VoxelAnchorPrefab.CollectColumns(at, cs.Cols);
+            }
+            return cs.Cols.Contains(((long)kx << 32) ^ (uint)kz);
+        }
+
+        // 0.2.1472: once per zone, the first column answer (hit y) or the first miss and why - Debug only.
+        private static readonly HashSet<Vector2s> s_zoneHitLogged = new HashSet<Vector2s>();
+        private static readonly HashSet<Vector2s> s_zoneMissLogged = new HashSet<Vector2s>();
+        private static void LogColumn(float x, float z, bool hit, float y, string why)
+        {
+            if (!FiresLogger.DebugEnabled) return;
+            var zone = ZoneSystem.GetZone(new Vector3(x, 0f, z));
+            if (hit) { if (s_zoneHitLogged.Count < 4096 && s_zoneHitLogged.Add(zone)) FiresLogger.LogDebug($"[FiresVoxel] dedi zone {zone.x},{zone.y}: first voxel column hit at ({x:0},{z:0}) y {y:0.00} (0.2.1472)"); }
+            else if (s_zoneMissLogged.Count < 4096 && s_zoneMissLogged.Add(zone)) FiresLogger.LogDebug($"[FiresVoxel] dedi zone {zone.x},{zone.y}: first voxel column miss at ({x:0},{z:0}): {why} (0.2.1472)");
+        }
+
+        // Any saved voxel edit record in the zone (a ZoneReplace zone is voxel exactly when it holds edits).
+        internal static bool ZoneHasEdits(Vector2s zone)
+        {
+            float now = Time.unscaledTime;
+            if (s_zoneCheckedAt.TryGetValue(zone, out float at) && now - at < Recheck && s_zoneHas.TryGetValue(zone, out bool has)) return has;
+            has = VoxelAnchorPrefab.AnyInSector(ZoneSystem.GetZonePos(zone));
+            s_zoneCheckedAt[zone] = now; s_zoneHas[zone] = has;
+            return has;
+        }
+
+        // 0.2.1471 ([lead]): the dedicated server's OWN ground reads (ZoneSystem.GetGroundHeight, through FAT's one hook,
+        // VoxelOnlyPatches.VoxelGroundHeight) in a zone that holds voxel edit records answer the voxel ground from those records. Key
+        // [Voxel Terrain - World] "Dedicated server reads voxel ground" (default ON). Zones without records: false at once (vanilla answers),
+        // after one cached sector check. Main thread only (the caches are not thread-safe); any other thread gets vanilla. Census at Debug
+        // every 30 s: calls, voxel answers, zones without records, ms.
+        private static int s_gCalls, s_gHits, s_gNoRecords, s_gOffThread;
+        private static double s_gMs;
+        private static float s_gLogAt;
+
+        internal static bool ReadsGround(Vector3 p, out float y)
+        {
+            y = 0f;
+            if (!Active || FiresVoxelConfig.DediReadsVoxelGround == null || !FiresVoxelConfig.DediReadsVoxelGround.Value) return false;
+            if (!VerdantsAscent.Water.Tools.WaterSheets.IsMainThread) { s_gOffThread++; return false; }
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            s_gCalls++;
+            bool hit = false;
+            try
+            {
+                PrewarmOne();   // 0.2.1476: decode the world's records ahead, one per call
+                if (!ZoneHasEdits(ZoneSystem.GetZone(p)))
+                {
+                    s_gNoRecords++; s_lastNoRecAt = p; if (s_firstNoRecAt.y == float.MinValue) s_firstNoRecAt = p;
+                    return false;
+                }
+                s_lastRecAt = p;
+                if (!ColumnHasRecords(p.x, p.z)) return false;   // 0.2.1473: no record in this chunk column = no voxel answer, no ground work
+                if (!TryBaseGround(p.x, p.z, out float h)) return false;
+                hit = TrySurface(p.x, p.z, h + 24f, h - 200f, out y, h);
+                if (hit) s_gHits++;
+                return hit;
+            }
+            finally
+            {
+                s_gMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                float now = Time.unscaledTime;
+                if (now >= s_gLogAt)
+                {
+                    if (s_gLogAt > 0f && FiresLogger.DebugEnabled && (s_gCalls > 0 || s_gOffThread > 0))
+                        FiresLogger.LogDebug($"[FiresVoxel] dedi voxel ground census 30 s: {s_gCalls} ground read(s), {s_gHits} answered from voxel edit records, {s_gNoRecords} in zones without records (vanilla), {s_gOffThread} off the main thread (vanilla), {s_gMs:0.00} ms on the main thread; {s_recs.Count} record(s) cached"
+                            + $"; sample no-record read first {Pos(s_firstNoRecAt)} last {Pos(s_lastNoRecAt)}, last read in a record zone {Pos(s_lastRecAt)} ({VerdantsAscent.FiresAdminTerrain.PluginVersion})");
+                    if (s_gLogAt > 0f && FiresLogger.DebugEnabled) DumpIfPeersMoved();
+                    s_firstNoRecAt = s_lastNoRecAt = s_lastRecAt = new Vector3(0f, float.MinValue, 0f);
+                    s_gLogAt = now + 30f;
+                    s_gCalls = s_gHits = s_gNoRecords = s_gOffThread = 0; s_gMs = 0.0;
+                }
+            }
+        }
+        // 0.2.1474 ([lead]: proof join 2 had 0 records cached and every server read "in zones without records"): sample positions in the
+        // census, and a Debug dump of the anchor records the dedi actually holds - world-wide (count, zones), the 3x3 zones round every
+        // peer's reference position, and zone -36,13 (the FGC census zone) - each anchor's key, position, the zone its key maps to, edit
+        // bytes. Runs at a census when the peers' zones changed since the last dump (at most 6 per session).
+        private static Vector3 s_firstNoRecAt = new Vector3(0f, float.MinValue, 0f), s_lastNoRecAt = new Vector3(0f, float.MinValue, 0f), s_lastRecAt = new Vector3(0f, float.MinValue, 0f);
+        private static string s_dumpSig;
+        private static int s_dumps;
+        private static string Pos(Vector3 p) => p.y == float.MinValue ? "none" : $"({p.x:0},{p.y:0},{p.z:0}) zone {ZoneSystem.GetZone(p).x},{ZoneSystem.GetZone(p).y}";
+
+        private static void DumpIfPeersMoved()
+        {
+            if (s_dumps >= 6 || ZNet.instance == null) return;
+            var peers = ZNet.instance.GetPeers();
+            var sb = new System.Text.StringBuilder();
+            foreach (var peer in peers) { var z = ZoneSystem.GetZone(peer.m_refPos); sb.Append(z.x).Append(',').Append(z.y).Append(';'); }
+            string sig = sb.ToString();
+            if (sig == s_dumpSig) return;
+            s_dumpSig = sig;
+            s_dumps++;
+            try { Dump(peers); }
+            catch (System.Exception ex) { FiresLogger.LogDebug($"[FiresVoxel] dedi anchor dump failed: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        private static void Dump(List<ZNetPeer> peers)
+        {
+            var all = new List<ZDO>();
+            int lists = VoxelAnchorPrefab.AllAnchors(all);
+            var byZone = new Dictionary<Vector2s, int>();
+            foreach (var zdo in all) { var z = ZoneSystem.GetZone(zdo.GetPosition()); byZone.TryGetValue(z, out int n); byZone[z] = n + 1; }
+            var zs = new System.Text.StringBuilder();
+            int shown = 0;
+            foreach (var kv in byZone) { if (shown++ >= 24) { zs.Append(" ..."); break; } zs.Append($" {kv.Key.x},{kv.Key.y}:{kv.Value}"); }
+            FiresLogger.LogDebug($"[FiresVoxel] dedi anchor dump: {all.Count} VAVoxel record(s) in {lists} sector list(s), {byZone.Count} zone(s):{zs} ({VerdantsAscent.FiresAdminTerrain.PluginVersion})");
+            var done = new HashSet<Vector2s>();
+            foreach (var peer in peers)
+            {
+                var pz = ZoneSystem.GetZone(peer.m_refPos);
+                FiresLogger.LogDebug($"[FiresVoxel] dedi anchor dump: peer '{peer.m_playerName}' ref pos ({peer.m_refPos.x:0},{peer.m_refPos.y:0},{peer.m_refPos.z:0}) zone {pz.x},{pz.y}");
+                for (int dz = -1; dz <= 1; dz++)
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        var z = new Vector2s(pz.x + dx, pz.y + dz);
+                        if (done.Add(z)) DumpZone(z);
+                    }
+            }
+            var fgc = new Vector2s(-36, 13);
+            if (done.Add(fgc)) DumpZone(fgc);
+        }
+
+        private static void DumpZone(Vector2s zone)
+        {
+            var list = new List<ZDO>();
+            VoxelAnchorPrefab.AnchorsInSector(ZoneSystem.GetZonePos(zone), list);
+            var sb = new System.Text.StringBuilder();
+            int shown = 0;
+            foreach (var zdo in list)
+            {
+                if (shown++ >= 8) { sb.Append(" ..."); break; }
+                int kx = zdo.GetInt(VoxelAnchorPrefab.ZDO_KX, int.MinValue), ky = zdo.GetInt(VoxelAnchorPrefab.ZDO_KY, int.MinValue), kz = zdo.GetInt(VoxelAnchorPrefab.ZDO_KZ, int.MinValue);
+                var pos = zdo.GetPosition();
+                string keyZone = kx == int.MinValue ? "no key" : $"key zone {ZoneSystem.GetZone(new Vector3(kx * VoxelChunk.CELLS + 16f, 0f, kz * VoxelChunk.CELLS + 16f)).x},{ZoneSystem.GetZone(new Vector3(kx * VoxelChunk.CELLS + 16f, 0f, kz * VoxelChunk.CELLS + 16f)).y}";
+                var edits = zdo.GetByteArray(VoxelAnchorPrefab.ZDO_EDITS);
+                sb.Append($" [({kx},{ky},{kz}) at ({pos.x:0},{pos.y:0},{pos.z:0}) {keyZone}, edits {(edits != null ? edits.Length + " B" : "none")}, ver {zdo.GetInt(VoxelAnchorPrefab.ZDO_VER, -1)}, rev {zdo.DataRevision}]");
+            }
+            FiresLogger.LogDebug($"[FiresVoxel] dedi anchor dump: zone {zone.x},{zone.y}: {list.Count} record(s); ZoneHasEdits {ZoneHasEdits(zone)}, streamer IsZoneKnown {VoxelZoneStreamer.IsZoneKnown(zone)} (FatApi.IsFatZone = either){sb}");
+        }
+
+        private static float Ground(int x, int z) => TryBaseGround(x, z, out float g) ? g : float.NaN;
+
+        private static int Fd(int a, int b) => a >= 0 ? a / b : ~(~a / b);
+
+        // The voxel surface at the sample column nearest (x, z), within [botY, topY]. False when no chunk of that column holds an edit record.
+        // 0.2.1473: `knownBase` = TryBaseGround(x, z) when the caller already has it; used only when (x, z) is the sample column itself
+        // (integer coordinates), where it is the very number Ground(sx, sz) would compute; NaN = compute it here.
+        internal static bool TrySurface(float x, float z, float topY, float botY, out float y, float knownBase = float.NaN)
+        {
+            y = 0f;
+            int sx = Mathf.RoundToInt(x), sz = Mathf.RoundToInt(z);
+            int kx = Fd(sx, VoxelChunk.CELLS), kz = Fd(sz, VoxelChunk.CELLS);
+            int lx = sx - kx * VoxelChunk.CELLS, lz = sz - kz * VoxelChunk.CELLS;
+            int yTop = Mathf.FloorToInt(topY), yBot = Mathf.CeilToInt(botY);
+            if (yTop <= yBot) return false;
+            bool any = false;
+            for (int ky = Fd(yTop, VoxelChunk.CELLS); ky >= Fd(yBot, VoxelChunk.CELLS); ky--)
+                if (Get(new Vector3Int(kx, ky, kz)).Has) { any = true; break; }
+            if (!any) { LogColumn(x, z, false, 0f, $"no edit record in chunk column ({kx},{kz}) y {yBot}..{yTop}"); return false; }
+            float g = !float.IsNaN(knownBase) && sx == x && sz == z ? knownBase : Ground(sx, sz);
+            if (float.IsNaN(g)) { LogColumn(x, z, false, 0f, "no base ground"); return false; }
+
+            Rec rec = null; int recKy = int.MinValue;
+            float above = Density(yTop + 1, g, lx, lz, kx, kz, ref rec, ref recKy);
+            for (int wy = yTop; wy >= yBot; wy--)
+            {
+                float d = Density(wy, g, lx, lz, kx, kz, ref rec, ref recKy);
+                if (d > 0f && above <= 0f)
+                {
+                    y = wy + d / (d - above);   // solid at wy, air at wy + 1: the zero crossing between them
+                    LogColumn(x, z, true, y, null);
+                    return true;
+                }
+                above = d;
+            }
+            LogColumn(x, z, false, 0f, $"no solid-to-air crossing in y {yBot}..{yTop} (base ground {g:0.00})");
+            return false;
+        }
+
+        private static float Density(int wy, float g, int lx, int lz, int kx, int kz, ref Rec rec, ref int recKy)
+        {
+            int ky = Fd(wy, VoxelChunk.CELLS);
+            if (ky != recKy) { rec = Get(new Vector3Int(kx, ky, kz)); recKy = ky; }
+            int q = Mathf.Clamp(Mathf.RoundToInt((g - wy) * VoxelChunk.QUANT), -127, 127);
+            if (rec != null && rec.Has)
+            {
+                int i = VoxelChunk.SampleIndex(lx, wy - ky * VoxelChunk.CELLS, lz);
+                sbyte lo = rec.Lo[i], hi = rec.Hi[i];
+                if (q < lo) q = lo; else if (q > hi) q = hi;
+            }
+            return q;
+        }
+    }}

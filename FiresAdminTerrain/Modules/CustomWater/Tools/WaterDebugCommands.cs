@@ -158,8 +158,12 @@ namespace VerdantsAscent.Water.Core
                 (args) => AutoWaterStatusCommand(args), isCheat: false);
 
             // va_auto_water_generate
-            new Terminal.ConsoleCommand("va_auto_water_generate", "Force re-generates auto water from WorldGenerator data",
+            new Terminal.ConsoleCommand("va_auto_water_generate", "Force re-generates auto water from WorldGenerator data (the water it replaces is backed up first: va_auto_water_undo puts it back)",
                 (args) => AutoWaterGenerateCommand(args), isCheat: true);
+
+            // [ghost] (rivers diff): the whole-run undo of va_auto_water_generate (AutoWaterBackup)
+            new Terminal.ConsoleCommand("va_auto_water_undo", "Puts back the water the last va_auto_water_generate replaced (from its backup; admins; the server does it and saves)",
+                (args) => AutoWaterBackup.UndoCommand(args), isCheat: true);
 
             // va_clear_auto_water
             new Terminal.ConsoleCommand("va_clear_auto_water", "Permanently removes ALL custom water from the entire world (loaded + unloaded zones + save data). Clients send request to server via RPC.",
@@ -928,6 +932,7 @@ namespace VerdantsAscent.Water.Core
             args.Context.AddString($"  Status: {(AutoWaterGenerator.IsGenerating ? "GENERATING..." : "Idle")}");
             args.Context.AddString($"  Global water level: {waterLevel}");
             args.Context.AddString($"  GetRiverWeight available: {hasRiverWeight}");
+            foreach (var line in AutoWaterBackup.StatusLines().Split('\n')) args.Context.AddString(line);   // [ghost]: counts for the undo hand check
             args.Context.AddString($"  Rivers enabled: {AutoWaterGenerator.EnableRivers}");
             args.Context.AddString($"  Streams enabled: {AutoWaterGenerator.EnableStreams}");
             args.Context.AddString($"  Lakes enabled: {AutoWaterGenerator.EnableLakes}");
@@ -967,6 +972,10 @@ namespace VerdantsAscent.Water.Core
             // We are the server/host.
             // STEP 1: Wipe ALL existing custom water first (clean slate)
             int combinersBefore = WaterMeshCombiner.AllCombiners != null ? WaterMeshCombiner.AllCombiners.Count : 0;
+
+            // [ghost] (rivers diff): keep every water anchor before the wipe below, so va_auto_water_undo can put it back
+            int kept = AutoWaterBackup.TakeBeforeWipe("va_auto_water_generate (server console)");
+            if (kept > 0) args.Context.AddString($"Backed up {kept} water anchor(s) first: va_auto_water_undo puts them back.");
 
             if (combinersBefore > 0 || AutoWaterGenerator.IsGenerating)
             {

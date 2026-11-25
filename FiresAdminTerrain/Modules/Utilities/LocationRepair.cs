@@ -74,7 +74,7 @@ namespace VerdantsAscent.Terrain.Utilities
             int worldSeed = WorldGenerator.instance.GetSeed();
             var names = new Dictionary<int, string>();
             foreach (var loc in ZoneSystem.instance.m_locations)
-                if (loc?.m_prefab != null && !string.IsNullOrEmpty(loc.m_prefab.Name)) names[loc.m_prefab.Name.GetStableHashCode()] = loc.m_prefab.Name;
+                if (loc?.m_prefab != null && !string.IsNullOrEmpty(loc.m_prefab.name)) names[loc.m_prefab.name.GetStableHashCode()] = loc.m_prefab.name;
             string Name(int h) => h == 0 ? "none (0)" : names.TryGetValue(h, out var n) ? n : $"unknown ({h})";
 
             var byZone = new Dictionary<Vector2s, List<ZDO>>();
@@ -97,7 +97,7 @@ namespace VerdantsAscent.Terrain.Utilities
                 var inst = kv.Value;
                 if (!inst.m_placed || inst.m_location?.m_prefab == null) continue;
                 placed++;
-                string prefab = inst.m_location.m_prefab.Name;
+                string prefab = inst.m_location.m_prefab.name;
                 int hash = prefab.GetStableHashCode(), seed = worldSeed + kv.Key.x * 4271 + kv.Key.y * 9187;
                 var near = byZone.TryGetValue(kv.Key, out var zl)
                     ? zl.Where(z => Flat(z.GetPosition(), inst.m_position) <= MatchRadius).ToList() : new List<ZDO>();

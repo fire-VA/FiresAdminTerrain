@@ -184,7 +184,7 @@ namespace VerdantsAscent.Water.Core
         private static float s_sendAt, s_logAt;
         internal static void ServerTick(float dtSec)
         {
-            s_snowing = VerdantsAscent.Terrain.Voxel.FatSnowTrailRefill.IsSnowing(out _);
+            s_snowing = SeasonalIce.External ? SeasonalIce.Snowing : VerdantsAscent.Terrain.Voxel.FatSnowTrailRefill.IsSnowing(out _);   // 0.2.1496: the provider says when it snows
             if (!s_snowing || dtSec <= 0f) { MaybeSend(); return; }
             float d = dtSec / FullSec;
             s_base = Mathf.Min(1f, s_base + d);

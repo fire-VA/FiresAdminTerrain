@@ -191,7 +191,20 @@ namespace VerdantsAscent.Water.Tools
         // `va_landsnow_*` keys. Identical UX to LandSnowCommands.PlaceLandSnow
         // but with RulerArgs (IH circle=/height=) parsing instead of
         // positional args.
-        private static void PlaceLandSnowFromBrush(Terminal.ConsoleEventArgs args)
+        private static void PlaceLandSnowFromBrush(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                PlaceLandSnowFromBrush_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void PlaceLandSnowFromBrush_Body(Terminal.ConsoleEventArgs args)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
             float radius = RulerArgs.ResolveRadius(args, defaultRadius: 10f);
@@ -218,7 +231,20 @@ namespace VerdantsAscent.Water.Tools
             }
         }
 
-        private static void PlaceSwimmableLava(Terminal.ConsoleEventArgs args)
+        private static void PlaceSwimmableLava(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                PlaceSwimmableLava_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void PlaceSwimmableLava_Body(Terminal.ConsoleEventArgs args)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
             float radius = RulerArgs.ResolveRadius(args, defaultRadius: 10f);
@@ -246,7 +272,20 @@ namespace VerdantsAscent.Water.Tools
         // raycast, picks radius from IH circle= or positional arg, defaults
         // depth to 3m (deeper than the 1m surface mesh so the disk can
         // visually pool when the area is dug down).
-        private static void PlaceDisk(Terminal.ConsoleEventArgs args, CustomLiquidType liquid, string label)
+        private static void PlaceDisk(Terminal.ConsoleEventArgs args, CustomLiquidType liquid, string label)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                PlaceDisk_Body(args, liquid, label);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void PlaceDisk_Body(Terminal.ConsoleEventArgs args, CustomLiquidType liquid, string label)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
 
@@ -300,7 +339,20 @@ namespace VerdantsAscent.Water.Tools
         // (The grid-sim path, CreateSettlingVolume, remains
         // in the codebase powering the Spring; the Volume tool uses the
         // vanilla system for parity with the vanilla liquid look.)
-        private static void PlaceWaterVolume(Terminal.ConsoleEventArgs args)
+        private static void PlaceWaterVolume(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                PlaceWaterVolume_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void PlaceWaterVolume_Body(Terminal.ConsoleEventArgs args)
         {
             // Entry log BEFORE any early return, so
             // "command never fired" can be told
@@ -347,7 +399,20 @@ namespace VerdantsAscent.Water.Tools
         // instead of a fixed thickness, so the surface FOLLOWS the channel
         // slope and flat ground (bank≈terrain) stays dry. thickness= is now
         // the "height off the bank" X (how far below the rim the water sits).
-        private static void PlaceSpring(Terminal.ConsoleEventArgs args)
+        private static void PlaceSpring(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                PlaceSpring_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void PlaceSpring_Body(Terminal.ConsoleEventArgs args)
         {
             FiresLogger.LogInfo($"[WaterBrushCommands] va_brush_water_spring fired | line='{args.FullLine}'");
             if (!RulerArgs.TryResolveCenter(args, out var center, out _))
@@ -394,7 +459,20 @@ namespace VerdantsAscent.Water.Tools
         //
         // Tighter default radius (4m) → narrow continuous stream rather
         // than a wide sheet. User can override via IH circle= as usual.
-        private static void PlaceWaterfall(Terminal.ConsoleEventArgs args, CustomLiquidType liquid, string label)
+        private static void PlaceWaterfall(Terminal.ConsoleEventArgs args, CustomLiquidType liquid, string label)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                PlaceWaterfall_Body(args, liquid, label);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void PlaceWaterfall_Body(Terminal.ConsoleEventArgs args, CustomLiquidType liquid, string label)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
 
@@ -436,7 +514,20 @@ namespace VerdantsAscent.Water.Tools
         // Remove water disks within radius. Walks WaterMeshCombiner.AllCombiners,
         // removes overlapping disks. The MopWaterAt path is the closest
         // existing API. Each removal triggers persistence + mesh rebuild.
-        private static void DeleteDisks(Terminal.ConsoleEventArgs args)
+        private static void DeleteDisks(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                DeleteDisks_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void DeleteDisks_Body(Terminal.ConsoleEventArgs args)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
             float radius = RulerArgs.ResolveRadius(args, defaultRadius: 10f);
@@ -486,7 +577,20 @@ namespace VerdantsAscent.Water.Tools
         // as delete but only takes a fraction of the depth per pass, so
         // holding it over an edge feathers the water back gradually instead
         // of punching a hard hole. Smaller default radius than delete.
-        private static void MopWater(Terminal.ConsoleEventArgs args)
+        private static void MopWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                MopWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void MopWater_Body(Terminal.ConsoleEventArgs args)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
             float radius = RulerArgs.ResolveRadius(args, defaultRadius: 3f);
@@ -511,7 +615,20 @@ namespace VerdantsAscent.Water.Tools
 
         // Freeze/unfreeze spring flow. Toggles each spring under the
         // ruler: frozen = mesh held, no overflow sim. Persisted.
-        private static void FreezeWater(Terminal.ConsoleEventArgs args)
+        private static void FreezeWater(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                FreezeWater_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static void FreezeWater_Body(Terminal.ConsoleEventArgs args)
         {
             if (!RulerArgs.TryResolveCenter(args, out var center, out _)) return;
             float radius = RulerArgs.ResolveRadius(args, defaultRadius: 8f);
@@ -548,6 +665,7 @@ namespace VerdantsAscent.Water.Tools
         // change syncs to everyone.
         private static (int, float) RemoveLiquidLocal(Vector3 center, float radius, float fraction, bool dam = false)
         {
+            global::VerdantsAscent.Terrain.FatUndo.RemoveLiquidLocalBefore(center, radius);   // 0.2.1502: FatUndo RemoveLiquidLocal_Undo, was a Harmony patch on this FAT method
             int pours = 0;
             float volume = 0f;
             var centerXZ = new Vector2(center.x, center.z);

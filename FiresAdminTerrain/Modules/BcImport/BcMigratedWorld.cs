@@ -99,6 +99,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 _lastLoad.Ready = true;
                 long buildMs = clock.ElapsedMilliseconds - readMs - decodeMs;
                 BcMapReport.Log(worldName, settings, maps, _generator);
+                ReleaseEncodedMaps(worldName, settings, maps);
                 long reportMs = clock.ElapsedMilliseconds - readMs - decodeMs - buildMs;
                 FiresLogger.LogInfo($"[BcImport] '{worldName}' generates as a BetterContinents world: settings v{settings.Version}, "
                     + $"{BcWorldGen.VariantFor(settings)} base height, world {settings.WorldSize} + edge {settings.EdgeSize}, "
@@ -144,6 +145,38 @@ namespace VerdantsAscent.Terrain.BcImport
                         + "join sync?), so this game reads its own copy if it has one.");
                     return LoadOwnCopy(worldName);
             }
+        }
+
+        // 0.2.1487 ([lead] RAM audit 11-19): the settings kept the map images' encoded bytes (BcMapImage.Data) and the raw biome
+        // index bytes after TryDecode had turned them into BcDecodedMaps, so a world held its maps twice: VADN's .bcdata is
+        // 158.5 MB and its biome map 4096² (16 MB of index bytes copied into BcBiomeMap.Biomes at BcImageMaps.cs:141), on the client
+        // and the dedi, for the whole session. After decode nothing reads them: BcWorldGen and the patches only test the image
+        // objects for null (BcWorldGen.cs:65, :201, :208), join sync streams the file from disk (BcJoinSync.cs SendFile), the
+        // console commands re-read the file (BcImportCommands.cs:190), and Convert / StoreInBands serialise a settings object of
+        // their own before this point. The objects stay, so every null test answers as before. SpawnMap / VegetationMap indices
+        // are NOT dropped: BcSpawnLookup shares those arrays (BcImageMaps.cs:679).
+        private static void ReleaseEncodedMaps(string worldName, BcWorldSettings settings, BcDecodedMaps maps)
+        {
+            long freed = 0;
+            foreach (var image in new[] { settings.HeightMap, settings.RoughMap, settings.FlatMap, settings.ForestMap, settings.HeatMap,
+                                          settings.LavaMap, settings.MossMap, settings.TerrainMap, settings.PaintMap, settings.LegacyBiomeImage })
+            {
+                if (image?.Data == null) continue;
+                freed += image.Data.Length;
+                image.Data = null;
+            }
+            if (settings.BiomeIndexMap?.Indices != null)
+            {
+                // 0.2.1490: the decoded biome map now holds these same bytes (BcImageMaps.DecodeBiomeIndexMap shares them), so
+                // dropping the settings' reference frees nothing and is not counted.
+                if (!ReferenceEquals(settings.BiomeIndexMap.Indices, maps?.Biome?.Indices)) freed += settings.BiomeIndexMap.Indices.Length;
+                settings.BiomeIndexMap.Indices = null;
+            }
+            FiresLogger.LogInfo($"[BcImport] encoded map bytes released: {freed / 1048576.0:0.0} MB ('{worldName}', kept after decode until 0.2.1487).");
+            // 0.2.1490 proof line ([lead] RAM audit 11-19): what the biome map holds now against the Heightmap.Biome-per-pixel form.
+            if (maps?.Biome?.Indices != null)
+                FiresLogger.LogInfo($"[BcImport] biome map held as byte indices: {maps.Biome.Length / 1048576.0:0.0} MB (as Heightmap.Biome[] until 0.2.1487: "
+                    + $"{maps.Biome.Length * 4L / 1048576.0:0.0} MB), {maps.Biome.Size}², {(settings.BiomeIndexMap != null ? "index map, bytes shared with the file's" : "biome image, own table")}.");
         }
 
         private static BcWorldSettings LoadOwnCopy(string worldName)

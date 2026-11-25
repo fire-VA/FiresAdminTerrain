@@ -104,7 +104,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 _renderer.enabled = VertexCount > 0 && !_surfaceNotCollidable && !RenderSuppressed && overworldVisible;
             // The water and ice sheets wait for the swap with their ground (a skyland lake no longer shows over its
             // far piece before the island does).
-            if (_waterRenderer != null) _waterRenderer.enabled = overworldVisible && !RenderSuppressed;
+            if (_waterRenderer != null) _waterRenderer.enabled = overworldVisible && !RenderSuppressed && _waterRenderer.sharedMaterial != null;   // 0.2.1478: no sheet material = stood down
             if (_iceRenderer != null) _iceRenderer.enabled = overworldVisible && !RenderSuppressed && !s_stateLook;   // 0.2.1097
         }
 
@@ -746,14 +746,13 @@ namespace VerdantsAscent.Terrain.Voxel
                         s_sheetMat = VerdantsAscent.Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
                         break;
                     }
-                    var inland = FiresCore.Materials.FiresShaderBroker.Get("Custom/FiresInlandWater");
-                    if (inland == null)
-                    {
-                        FiresLogger.LogWarning("[FiresVoxelWater] Custom/FiresInlandWater is not live (Core's shader bundle " +
-                                               "lacks it); falling back to the FiresLiquid sheet material.");
-                        s_sheetMat = VerdantsAscent.Water.Core.FiresLiquidWaterPrefab.GetSharedPourMaterial();
-                        break;
-                    }
+                    // 0.2.1478 (Fire 11-18): the sheets need Custom/FiresInlandWater. [Shaders] Inland water shader off, or the shader not
+                    // live = null: river, lake and placed water surfaces stand down (their renderers go off; swim triggers are untouched).
+                    // No FiresLiquid stand-in any more. Nothing is cached, so each ask re-checks (one log line per change).
+                    bool inlandKeyOn = FatShaders.InlandWater == null || FatShaders.InlandWater.Value;
+                    var inland = inlandKeyOn ? FiresCore.Materials.FiresShaderBroker.Get("Custom/FiresInlandWater") : null;
+                    if (!FatShaders.On(FatShaders.InlandWater, inland != null, "Inland water surfaces (rivers, lakes, placed water)", "Custom/FiresInlandWater"))
+                        return null;
                     var im = new Material(inland) { name = "FiresInlandWater_Sheet" };
                     BindIceTextures(im);   // 0.2.1181: the ice-look textures ship in Core's shader bundle (FiresInlandWater v7)
                     // Borrow the ripple/foam textures the liquid material already
@@ -833,6 +832,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (v._waterRenderer == null) continue;
                 v._waterRenderer.sharedMaterial = mat;
+                VerdantsAscent.Water.Core.WaterLookHost.Adopt(v._waterRenderer, VerdantsAscent.FatWaterKind.InlandSheet);   // 0.2.1455: re-adopt on the new FAT material
                 reskinned++;
             }
             FiresLogger.LogInfo($"[FiresVoxelWater] sheet material mode -> {s_sheetMatMode} " +
@@ -965,13 +965,14 @@ namespace VerdantsAscent.Terrain.Voxel
                                   $"liquid material: {(mat.shader != null ? mat.shader.name : "null")} queue={mat.renderQueue}");
                     }
                 }
-                else if (!s_wMatWarned)
+                else if (!s_wMatWarned && (FatShaders.InlandWater == null || FatShaders.InlandWater.Value))
                 {
                     s_wMatWarned = true;
                     FiresLogger.LogWarning("[FiresVoxelWater] water sheets are building but no sheet material " +
                                      "resolves yet — sheets invisible until it does; retrying on every apply.");
                 }
             }
+            if (_waterRenderer != null && _waterRenderer.sharedMaterial == null) _waterRenderer.enabled = false;   // 0.2.1478: stood down ([Shaders] Inland water shader)
             // 0.2.1097: the per-column ice / lava / crust state texture on the sheet (WaterStateField; replaces 1095's ApplyLavaLook).
             // 0.2.1313: filled from the per-column grid (each column at its own level), not at the middle vertex's height (frame28800
             // ev 5850: chunk (224,800) of a Deep North pond filled all-zero from a height in another 16 m band).
@@ -986,6 +987,8 @@ namespace VerdantsAscent.Terrain.Voxel
             _waterMesh.SetUVs(3, ZeroUv3(s_wVerts.Count));   // explicit zeros (see ZeroUv3)
             _waterMesh.SetColors(s_wCols);
             _waterMesh.SetTriangles(s_wTris, 0, calculateBounds: true);
+            // 0.2.1455 (water look hand-off): the sheet has its material, its state and its new bounds; the top look mod may draw it.
+            VerdantsAscent.Water.Core.WaterLookHost.Adopt(_waterRenderer, VerdantsAscent.FatWaterKind.InlandSheet);
             VoxelSheetFalls.Build(buf, _waterGO, ref _fallsGO, ref _fallsMesh);
             // 0.2.1346: curtains (+ their mist and sounds) wait for the swap too; only the sheet renderers were tied to RenderSuppressed.
             _fallsHeld = false;
@@ -1857,6 +1860,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (_staging != null) Destroy(_staging);
             }
             BodyHold.ChunkGone(this);
+            VerdantsAscent.Water.Core.WaterLookHost.Forget(_waterRenderer);   // 0.2.1455: the sheet dies with the view
             if (_waterMesh != null) Destroy(_waterMesh);
             if (_fallsMesh != null) Destroy(_fallsMesh);
             if (_iceMesh != null) Destroy(_iceMesh);

@@ -62,15 +62,11 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<bool> BuildNearestFirst, WaterGroundSignature, WaterHoldUntilSwap, WaterSheetSliced, MopRefreshQueued;   // 0.2.1344: A/B keys, default ON (regression fixes), off = the 1343 path
         public static ConfigEntry<bool> StreamerScanSpread, TileMeshSpread, DistantPaintSpread, WetMaskRowLimit; // 0.2.1319 perf (A/B keys, PLAN_fat_frame_spread)
         public static ConfigEntry<bool> SnowDepthStepResumable; // 0.2.1322 perf (A/B key, PLAN_fat_driver_stalls F1)
-        public static ConfigEntry<bool> ImpostorRebuildOnChange; // 0.2.1371
         public static ConfigEntry<bool> ShovelOnHeightmap; // 0.2.1376
         public static ConfigEntry<float> SnowSparkle; // 0.2.1405
         public static ConfigEntry<bool> BiomePaintMapTool, BiomePaintCustomBrushes, BiomePaintRegrowOnSave, BiomePaintSwapLocations, BiomePaintChangeHeight; // 0.2.1373
         public static ConfigEntry<float> BiomePaintBlendWidth; // 0.2.1373
         public static ConfigEntry<BepInEx.Configuration.KeyboardShortcut> BiomePaintWipeToggle; // 0.2.1374
-        public static ConfigEntry<bool> ImpostorSkipBehindCamera; // 0.2.1372
-        public static ConfigEntry<bool> ImpostorFrustumCull; // 0.2.1396
-        public static ConfigEntry<bool> ImpostorGpuResident; // 0.2.1399
         public static ConfigEntry<bool> IceCoverOnChange; // 0.2.1292
         public static ConfigEntry<bool> IceCoverReuse; // 0.2.1396
         public static ConfigEntry<bool> IceCoverVedrWaits; // 0.2.1401
@@ -181,7 +177,7 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<float> WaterfallShapeProbeRadius;   // 0.2.1321 (Fire x266 z1114 curtain probe)
         public static float WaterfallShapeProbeMetres => WaterfallShapeProbeRadius != null ? WaterfallShapeProbeRadius.Value : 0f;
         private const float DefaultWaterfallMistRange = 200f;
-        public static bool WaterfallMistOn => WaterfallMist == null || WaterfallMist.Value;
+        public static bool WaterfallMistOn => (WaterfallMist == null || WaterfallMist.Value) && (FatShaders.WaterfallMist == null || FatShaders.WaterfallMist.Value);   // 0.2.1478: + [Shaders] Waterfall mist shader
         public static float WaterfallMistRangeMetres => WaterfallMistRange != null ? WaterfallMistRange.Value : DefaultWaterfallMistRange;
         // (AutoPourWater, WaterfallBreakStep, WaterMaxSheetDepth, PondKeep,
         //  MountainPondKeep DELETED — the systems they tuned are gone: gen
@@ -209,6 +205,9 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<bool> SeamLips;
         public static ConfigEntry<bool> FrontierLips;
         public static ConfigEntry<bool> SeamAuditAuto;
+        public static ConfigEntry<bool> VanillaBorderStitch;   // 0.2.1454
+        public static ConfigEntry<bool> DediReadsVoxelGround;   // 0.2.1471
+        public static ConfigEntry<string> SeamTestCarve;       // 0.2.1454 test-only
         public static ConfigEntry<float> BrushDrawSpeed;
         public static ConfigEntry<bool> FarQuiltEnabled;
         public static ConfigEntry<float> FarQuiltNearRadius;
@@ -247,11 +246,6 @@ namespace VerdantsAscent.Terrain.Voxel
         public static ConfigEntry<bool> BakeReadAhead;
         public static ConfigEntry<float> ClutterDensityScale;
         public static ConfigEntry<float> GrassRenderDistance;
-        public static ConfigEntry<bool> ImpostorsEnabled;
-        public static ConfigEntry<float> ImpostorRadius;
-        public static ConfigEntry<float> ImpostorForwardRadius;
-        public static ConfigEntry<float> ImpostorNearSkip;
-        public static ConfigEntry<float> ImpostorDensity;
         public static ConfigEntry<bool> TerrainCastShadows;
         public static ConfigEntry<int> MeshAppliesPerFrame;
         public static ConfigEntry<int> MeshBufferBudget;
@@ -295,6 +289,12 @@ namespace VerdantsAscent.Terrain.Voxel
 
             Own(SkyIslands); Own(SkyIslandRarity); Own(SkylandMiniSites);   // 0.2.1137
 
+            // 0.2.1489 ([lead] G5e, FatApi v4): the density scale decides which trees and rocks a zone gets, so it is world-shaping, not a local
+            // look: the generating peer's value is the one that counts. Synced so EBM on a joined client replays the server's counts
+            // (FatApi.FarVegetationCounts). A client only uses it when it generates zones itself (host / single player), where it is the server.
+            // A FAT older than 0.2.1489 receiving it logs "Received unknown config entry" and keeps its own (Core ConfigSync.cs:559); no floor raise.
+            Own(VegetationDensityScale);
+
             // 0.2.1135: the rich-cave roll decides WHICH zones get ore, so every peer must roll the same zones (the test and the map read it on a client).
             Own(CaveContentConfig.RichCaveChanceEntry);
             // 0.2.1137: the existing-world location replan (cave sites + sky island sites) must be decided the same on every peer.
@@ -315,16 +315,16 @@ namespace VerdantsAscent.Terrain.Voxel
             FatDiag.Bind(cfg);   // 0.2.1102: per-feature diagnostic log switches (default OFF)
 
             Enabled = cfg.Bind(S, "Enabled", true,
-                "Voxel terrain tools and voxel ground (carve, fill, level, paint). Edits are saved with the world and synced to every player.");
+                "Voxel terrain tools and voxel ground (carve, fill, level, paint). Edits are saved with the world and synced to every player." + " " + FatShaders.VoxelShaderAlwaysOn);
             ShowToolsInBuildMenu = cfg.Bind(S, "Show tools in build menu", true,
                 "List the Fires terrain/water tools on the hammer. They are admin-only regardless; "
                 + "turn this off for a vanilla-looking build menu without giving up admin rights.");
             // 0.2.1098 (Fire: "our cultivated ground still has no depth"; vanilla tilled soil is only a normal map on flat ground): visual-only
             // depth for cultivated voxel ground, read by FiresVoxelHeightmap.shader (_FiresCultDepth / _FiresCultDepthNormal). 0 / 0 = vanilla.
             CultivatedDepth = cfg.Bind(S, "Cultivated depth (m)", 0.12f,
-                new ConfigDescription("Cultivated voxel ground: how deep its furrows and clods read (parallax height, visual only, never terrain data; 0.2.1100). 0 = vanilla flat look.", new AcceptableValueRange<float>(0f, 0.3f)));
+                new ConfigDescription("Cultivated voxel ground: how deep its furrows and clods read (parallax height, visual only, never terrain data; 0.2.1100). 0 = vanilla flat look." + " " + FatShaders.VoxelShaderAlwaysOn, new AcceptableValueRange<float>(0f, 0.3f)));
             CultivatedNormalBoost = cfg.Bind(S, "Cultivated normal boost", 1.5f,
-                new ConfigDescription("Cultivated voxel ground: extra strength of vanilla's tilled-soil normal map plus furrow rows (visual only). 0 = vanilla.", new AcceptableValueRange<float>(0f, 5f)));
+                new ConfigDescription("Cultivated voxel ground: extra strength of vanilla's tilled-soil normal map plus furrow rows (visual only). 0 = vanilla." + " " + FatShaders.VoxelShaderAlwaysOn, new AcceptableValueRange<float>(0f, 5f)));
             // 0.2.1094 (Fire: "Yes, smooth trench"): how far vanilla's deep-snow walk trail sinks the voxel snow raise.
             // 0.2.1301 (Fire 10-30, final: "we will go with Core's raised terrain so it can remain vanilla compatible when it's not over a
             // voxel chunk, and keep our own good voxel snow for voxel chunks"): FAT's heightmap snow skin is OFF for every install - a NEW
@@ -494,6 +494,7 @@ namespace VerdantsAscent.Terrain.Voxel
             VegetationDensityScale = cfg.Bind(PERF, "Vegetation density scale", 0.7f,
                 new ConfigDescription("Multiplies how many TREES/BUSHES each zone places (ZoneVegetation m_min/m_max). 1 = vanilla, 0.4 = 60% fewer. This is the tree tri budget — the single biggest lever on a forest zone. Pickables, ore and spawners are exempt, so berries and copper keep vanilla counts. Only affects zones generated AFTER the change; already-generated zones keep their trees.",
                     new AcceptableValueRange<float>(0.02f, 2f)));
+            VegetationDensityScale.SettingChanged += (_, __) => VerdantsAscent.Terrain.Performance.ZoneSystem_PlaceVegetation_Density.Revision++;   // 0.2.1489: FatApi.FarVegetationRevision
             VegetationWarmUp = cfg.Bind(PERF, "Warm vegetation on the server", true,
                 "Dedicated server only: after the world loads, make and discard one of each vegetation prefab (one a frame), so the "
                 + "first tree or rock of each kind a player's exploration spawns does not stall the server (the first Beech1 cost "
@@ -530,26 +531,8 @@ namespace VerdantsAscent.Terrain.Voxel
             };
             ClutterDensityScale.SettingChanged += clutterRetune;
             GrassRenderDistance.SettingChanged += clutterRetune;
-            // 0.2.1402 (Fire 11-06: hidden-by-terrain impostors not culled, blocky up close, frame drops; "make sure they are off by default for now"):
-            // default false. Same key, so a cfg that already says true keeps it; nothing is rewritten.
-            ImpostorsEnabled = cfg.Bind(PERF, "Impostors enabled", false,
-                new ConfigDescription("Draw far billboard trees and rocks at all. Off by default until the culling and look fix lands. Turning this OFF removes every distant billboard and the cost of baking and drawing them; the distance past where real trees render is simply empty. Applies live."));
-            FarVegImpostors.Enabled = ImpostorsEnabled.Value;
-            ImpostorsEnabled.SettingChanged += (_, __) =>
-            {
-                FarVegImpostors.Enabled = ImpostorsEnabled.Value;
-                FarVegImpostors.MarkDirty();
-            };
-
-            ImpostorRadius = cfg.Bind(PERF, "Impostor radius", 2400f,
-                new ConfigDescription("Far billboard trees/rocks draw radius (metres) around the player, all directions.",
-                    new AcceptableValueRange<float>(600f, 6000f)));
-            ImpostorForwardRadius = cfg.Bind(PERF, "Impostor forward radius", 3000f,
-                new ConfigDescription("Far billboards extend to THIS radius in the direction you're looking (fades out to the sides), so you see trees/rocks up a distant mountain without paying for them behind you. Must be >= Impostor radius.",
-                    new AcceptableValueRange<float>(600f, 10000f)));
-            ImpostorNearSkip = cfg.Bind(PERF, "Impostor near skip", 300f,
-                new ConfigDescription("Billboards start THIS far out (metres), past where the real trees render — closer impostors just hide behind the real forest and waste frames.",
-                    new AcceptableValueRange<float>(96f, 800f)));
+            // 0.2.1480 (Fire 11-18): FAT's far billboard keys ([Voxel Terrain - Performance] Impostor*) are gone with FAT's far billboards;
+            // saved lines for them stay in the cfg, unread. Far trees are EBM's [Far Impostors] (fed by [Far Forest]).
             const string BP = "Biome Paint";
             BiomePaintMapTool = cfg.Bind(BP, "Biome paint: map tool", true, "Admins get a Biome button on the large map: Shift+Alt+drag an outline or a strip, then Paint. Needs no other mod; with RPG Maker it stacks under the Territory button.");
             BiomePaintCustomBrushes = cfg.Bind(BP, "Biome paint: custom biomes on brushes", true, "The Chaos Hammer and the map tool list the biomes Expand World registered from its yamls (0.2.1373). Needs Expand World with Biome data on; with none registered nothing changes.");
@@ -558,27 +541,10 @@ namespace VerdantsAscent.Terrain.Voxel
             BiomePaintChangeHeight = cfg.Bind(BP, "Biome paint: change land height", true, "A custom biome's circle also turns the land to the height from its yaml, on vanilla and converted worlds (0.2.1373). Off: new paint keeps the land's shape.");
             BiomePaintBlendWidth = cfg.Bind(BP, "Biome paint: blend width", 32f, new ConfigDescription("Metres inside a painted edge over which the land blends to the new height. The server's value is used by everyone (0.2.1373).", new AcceptableValueRange<float>(0f, 96f)));
             BiomePaintWipeToggle = cfg.Bind(BP, "Biome paint: wipe builds toggle key", new BepInEx.Configuration.KeyboardShortcut(UnityEngine.KeyCode.Backslash), "With a Paint brush selected, toggles between keeping and wiping builds in the circle. Always starts on keeping; a wipe counts first and asks again (0.2.1374).");
-            SnowSparkle = cfg.Bind(S, "Snow sparkle", FatSnowLookDefaults.DefaultSparkle, new ConfigDescription("How much the snow glints in the light, voxel snow and (while FAT is loaded) FTS's heightmap snow (0.2.1405; was FTS [17 - FiresHeightmap] 08 SnowSparkle, same default).", new AcceptableValueRange<float>(0f, 1f)));
+            SnowSparkle = cfg.Bind(S, "Snow sparkle", FatSnowLookDefaults.DefaultSparkle, new ConfigDescription("How much the snow glints in the light, voxel snow and (while FAT is loaded) FTS's heightmap snow (0.2.1405; was FTS [17 - FiresHeightmap] 08 SnowSparkle, same default)." + " " + FatShaders.VoxelShaderAlwaysOn, new AcceptableValueRange<float>(0f, 1f)));
             ShovelOnHeightmap = cfg.Bind(S, "Snow shovel patches on heightmap", true, "The snow shovel clears its wheel-sized patch on normal heightmap ground with snow too, as on voxel ground (0.2.1376). Off: vanilla's own op, Deep North only.");
-            ImpostorSkipBehindCamera = cfg.Bind(PERF, "Impostor skip behind camera", true, "Far billboards draw only the directions the camera can see, with a wide margin (0.2.1372). Same trees in view. Off: every direction draws every frame, for comparing.");
-            ImpostorSkipBehindCamera.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
-            ImpostorFrustumCull = cfg.Bind(PERF, "Impostor frustum cull", true, "Far billboards also skip groups whose area is outside the camera view, with a margin for fast turns. Same trees in view, less to draw. Off: only the wider direction check runs.");
-            ImpostorGpuResident = cfg.Bind(PERF, "Impostor GPU resident instances", true, "Far billboards keep their positions on the graphics card, uploaded once when they change, instead of sending every position to it each frame. Same trees, same look, less CPU each frame. Falls back to the old way on its own if the GPU cannot. Off: the old way.");
-            ImpostorGpuResident.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
-            ImpostorRebuildOnChange = cfg.Bind(PERF, "Impostor rebuild only on change", true, "Over the tile cap, far billboard batches rebuild only when a tile is really dropped, not every frame (0.2.1371). Same trees. Off: the old every-frame rebuild, for comparing.");
-            ImpostorDensity = cfg.Bind(PERF, "Impostor density", 0.85f,
-                new ConfigDescription("Scales how many billboards get placed. Lower = a thinner, scattered distant-forest feel (and cheaper); higher = continuous distant treeline coverage (distant mountains/forests read as covered, not sparse).",
-                    new AcceptableValueRange<float>(0.1f, 1.5f)));
-
-            // All four are re-read every tick, but the placed tile set is only rebuilt when the
-            // player moves or turns, so a change could sit invisible until then.
-            ImpostorRadius.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
-            ImpostorForwardRadius.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
-            ImpostorNearSkip.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
-            ImpostorDensity.SettingChanged += (_, __) => FarVegImpostors.MarkDirty();
-
             TerrainCastShadows = cfg.Bind(PERF, "Terrain casts shadows", true,
-                new ConfigDescription("Whether voxel terrain chunks cast shadows. Every live chunk is submitted to the shadow pass a SECOND time, so with several hundred chunks loaded this is a large share of draw calls and shadow submissions. Turning it OFF is one of the biggest single frame wins available; the cost is that cliffs/overhangs stop casting onto the ground below (terrain still RECEIVES shadows from trees, buildings and everything else). Applies live."));
+                new ConfigDescription("Whether voxel terrain chunks cast shadows. Every live chunk is submitted to the shadow pass a SECOND time, so with several hundred chunks loaded this is a large share of draw calls and shadow submissions. Turning it OFF is one of the biggest single frame wins available; the cost is that cliffs/overhangs stop casting onto the ground below (terrain still RECEIVES shadows from trees, buildings and everything else). Applies live." + " " + FatShaders.VoxelShaderAlwaysOn));
 
             TerrainCastShadows.SettingChanged += (_, __) =>
             {
@@ -703,7 +669,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     new AcceptableValueRange<float>(8f, 60f)));
 
             VoxelWater = cfg.Bind(SW, "Voxel Water", true,
-                new ConfigDescription("CARVE + FILL in one pass: the voxel terrain emits its river/lake water sheet from the SAME reconciled per-column level the bed carve was cut for. Static mesh — no sim, no threads, no raycasts, no settle, no ZDOs; the z-buffer cuts the shoreline against the banks exactly like vanilla's ocean. Swim reads the same field, so seen == swum."));
+                new ConfigDescription("CARVE + FILL in one pass: the voxel terrain emits its river/lake water sheet from the SAME reconciled per-column level the bed carve was cut for. Static mesh — no sim, no threads, no raycasts, no settle, no ZDOs; the z-buffer cuts the shoreline against the banks exactly like vanilla's ocean. Swim reads the same field, so seen == swum." + " " + FatShaders.Needs(FatShaders.InlandWaterKey)));
             LegacyMeshWater = cfg.Bind(SW, "Legacy Mesh Water", false,
                 new ConfigDescription("OFF (default): generated water comes from vanilla LiquidVolume pours. ON: the old per-zone meshed water field in Modules/VoxelTerrain/LegacyMesh. Two backends drawing the same rivers at once is why work kept splitting — leave this off unless comparing them."));
             WaterPaintShoreBlend = cfg.Bind(SW, "Water Paint Shore Blend", 2.5f,
@@ -719,16 +685,16 @@ namespace VerdantsAscent.Terrain.Voxel
                 new ConfigDescription("How deep the bed is carved under the reconciled water surface. Banks NEVER move with this — only the cut deepens. The sheet/swim sit 0.4m below that surface (bank-relief seat-down), so the actual water column is this minus 0.4: at 1.5 the column is the original 1.1m. Raise for deeper rivers, banks stay put.",
                     new AcceptableValueRange<float>(0f, 4f)));
             WaterfallMist = cfg.Bind(SW, "Waterfall Mist", true,
-                "Mist at every waterfall: spray off the lip, a cloud where the water lands on rock or water (with a faint rainbow when the sun is behind you), and the cloud a skyland fall turns into where it thins out in mid-air. Applies at once.");
+                "Mist at every waterfall: spray off the lip, a cloud where the water lands on rock or water (with a faint rainbow when the sun is behind you), and the cloud a skyland fall turns into where it thins out in mid-air. Applies at once." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey));
             WaterfallMistRange = cfg.Bind(SW, "Waterfall Mist Range", DefaultWaterfallMistRange,
-                new ConfigDescription("Waterfall mist runs only within this many metres of the camera. Applies at once.",
+                new ConfigDescription("Waterfall mist runs only within this many metres of the camera. Applies at once." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey),
                     new AcceptableValueRange<float>(50f, 600f)));
             // 0.2.1321 (Fire x266 z1114: curtains not following an overhang): Debug-only shape probe, 0 = off.
             WaterfallShapeProbeRadius = cfg.Bind(SW, "Waterfall shape probe radius", 0f,
                 new ConfigDescription("Debug only: within this many metres of you, every waterfall curtain column logs its lip, fall length and per-row height / offset / landed / measured face distance when it is shaped. 0 = off. Applies at once.",
                     new AcceptableValueRange<float>(0f, 64f)));
             WaterfallBrightness = cfg.Bind(SW, "Waterfall Brightness", 0.85f,
-                new ConfigDescription("Brightness of the light falling water gives off (1 = full). Lower keeps stacked or overlapping falls from reading as solid white. Applies at once.",
+                new ConfigDescription("Brightness of the light falling water gives off (1 = full). Lower keeps stacked or overlapping falls from reading as solid white. Applies at once." + " " + FatShaders.Needs(FatShaders.WaterfallKey),
                     new AcceptableValueRange<float>(0f, 2f)));
             SkyIslands = cfg.Bind(SW, "Sky Islands", true,
                 "Rare floating islands, 200-300m above the local terrain: flat-ish carved top, pointed ridged underside. Pure voxel additions — the map, spawns and vanilla systems never see them. FullVoxel only. Applied when the world loads; existing chunk caches self-invalidate.");
@@ -809,6 +775,28 @@ namespace VerdantsAscent.Terrain.Voxel
                 "half-cell trench at the loaded-world edge but render as bright ribbons on slopes and " +
                 "wherever a neighbour zone is slow to swap — leave OFF unless the frontier trench bothers " +
                 "you more than the ribbons.");
+            // 0.2.1454 (Fire 11-17, VA flat world: voxel zone borders tear against the vanilla heightmap next door). Default OFF until a rig
+            // leg proves it (va_voxel_seamaudit vanilla, key off then on in one run); live: flipping it re-meshes the border chunks.
+            // 0.2.1460: PROVEN 8/8 on the rig (stitch1459: 8 faces stitched, 0 overhang, 0 coplanar, on-border worst |dy| 0.000 m), so the
+            // default is ON. A Bind default applies only where the key is absent: a cfg that already saved a value keeps it.
+            VanillaBorderStitch = cfg.Bind(SW, "Vanilla Border Stitch", true,
+                "Where a voxel zone meets a zone that is still a vanilla heightmap, end the voxel ground exactly on the heightmap's edge " +
+                "(its own edge heights) instead of overlapping it by half a metre (the flicker / tearing line on flat ground) or tucking a " +
+                "15 degree skirt under it. Faces with caves or overhangs at the border keep the old edge. Live.");
+            VanillaBorderStitch.SettingChanged += (_, __) => VoxelMeshPipeline.RemeshStitchCandidates();
+            // 0.2.1471 ([lead]: the dedicated server's own ground decisions ignored the voxel edits, it holds no voxel chunks where the players
+            // are): a correctness fix, default ON. Zones without saved voxel edit records are untouched.
+            DediReadsVoxelGround = cfg.Bind(SW, "Dedicated server reads voxel ground", true,
+                "On a dedicated server, the game's own ground-height checks (spawn ground, dropped items, placement checks) in zones that hold " +
+                "voxel edits read the voxel ground from the saved edit records, instead of the original ground under the edits. Zones without " +
+                "voxel edits are untouched. No effect on a client or host. Live.");
+            // 0.2.1454 test-only ([lead]: an unattended rig leg needs a zone converted with no input; TD can set cfg keys live but cannot
+            // press tools or type console commands). Setting it LIVE to "x z radius" carves one 2 m-deep disc there (the va_voxel_carve
+            // brush), which converts that zone on a swap-on-edit world. Nothing happens at load or while empty; one Warning per carve.
+            SeamTestCarve = cfg.Bind(SW, "Seam Test Carve", "",
+                new ConfigDescription("TEST ONLY. Set while in a world to \"x z radius\" (metres, e.g. \"200 8 3\") to carve one small voxel disc " +
+                    "there, converting that zone, so a rig leg can test zone borders with no input. Empty = nothing. Only a change made in game carves."));
+            SeamTestCarve.SettingChanged += (_, __) => VoxelSeamAudit.RunTestCarve(SeamTestCarve.Value);
             SeamAuditAuto = cfg.Bind(SW, "Seam Audit Auto", false,
                 "Background MESH-truth seam sentinel: every 8s, compare the actual rendered vertex buffers " +
                 "of adjacent chunks near the player and log any face with tears/holes/shading mismatches " +
@@ -904,6 +892,10 @@ namespace VerdantsAscent.Terrain.Voxel
             EstuaryFlare = cfg.Bind(SW, "Estuary Flare", 2.5f,
                 new ConfigDescription("Channel width multiplier at a river mouth.",
                     new AcceptableValueRange<float>(1f, 6f)));
+
+            // ── [ghost] 0.2.1454 block (Voxheim diff P7 / P1; [worldgen] merges) ──
+            VoxelAnchorGuard.Bind(cfg);   // server guard on non-admin voxel edit records
+            VoxelBrushSoft.Bind(cfg);     // softness / strength keys for the V-tool shape brushes
         }
     }
 }

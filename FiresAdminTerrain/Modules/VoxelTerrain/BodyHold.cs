@@ -264,19 +264,19 @@ namespace VerdantsAscent.Terrain.Voxel
         [HarmonyPatch(typeof(ItemDrop), "TerrainCheck")]
         private static class Patch_ItemDrop_TerrainCheck
         {
-            private static bool Prefix(ItemDrop __instance) => !IsHeld(__instance != null ? __instance.gameObject : null);
+            private static bool Prefix(ItemDrop __instance) => s_held.Count == 0 || !IsHeld(__instance != null ? __instance.gameObject : null);   // 0.2.1500: empty-set test before the native reads (same answer: IsHeld is false with nothing held)
         }
 
         [HarmonyPatch(typeof(Floating), "TerrainCheck")]
         private static class Patch_Floating_TerrainCheck
         {
-            private static bool Prefix(Floating __instance) => !IsHeld(__instance != null ? __instance.gameObject : null);
+            private static bool Prefix(Floating __instance) => s_held.Count == 0 || !IsHeld(__instance != null ? __instance.gameObject : null);   // 0.2.1500: empty-set test before the native reads (same answer: IsHeld is false with nothing held)
         }
 
         [HarmonyPatch(typeof(StaticPhysics), nameof(StaticPhysics.SUpdate))]
         private static class Patch_StaticPhysics_SUpdate
         {
-            private static bool Prefix(StaticPhysics __instance) => !IsHeld(__instance != null ? __instance.gameObject : null);
+            private static bool Prefix(StaticPhysics __instance) => s_held.Count == 0 || !IsHeld(__instance != null ? __instance.gameObject : null);   // 0.2.1500: empty-set test before the native reads (same answer: IsHeld is false with nothing held)
         }
 
         [HarmonyPatch(typeof(ZNet), "OnDestroy")]

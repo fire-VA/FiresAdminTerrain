@@ -32,6 +32,15 @@ namespace VerdantsAscent.Terrain.Voxel
         internal static void Tick(bool farQuiltDraws)
         {
             bool want = FarQuilt.ExtendedReach != null && FarQuilt.ExtendedReach.Value;
+            // 0.2.1509 ([lead] 11-21, Fire: far terrain / trees / rocks / buildings in sync; Tools\DESIGN_far_zone_set_20261121.md): while EBM
+            // owns the far ground (EbmApi.FarGroundOwned, read by name, no compile reference) this ring is not built and a live one is destroyed;
+            // when it goes false the next tick builds it again (ExtendedReach still on). No key: it follows EBM's state.
+            if (want && EbmFarGround.OwnedNow)
+            {
+                if (s_go != null) Destroy("EBM owns the far ground (EbmApi.FarGroundOwned)");
+                Why("EBM owns the far ground (EbmApi.FarGroundOwned); FAT still supplies far data through FatApi");
+                return;
+            }
             if (!want || farQuiltDraws)
             {
                 if (s_go != null) Destroy(farQuiltDraws ? "FAT's far quilt draws this world (its rings extend it)" : "ExtendedReach off");
@@ -113,16 +122,31 @@ namespace VerdantsAscent.Terrain.Voxel
         // Every tick: vanilla's rebuild puts each region back at y = 0 and its ApplySettings writes vanilla's near hide distance.
         private static void Maintain()
         {
+            foreach (var hm in s_go.GetComponentsInChildren<Heightmap>(false)) ApplyOne(hm);
+        }
+
+        // 0.2.1485 ([lead] VADN 11-18, Fire's sheer zone / diamond-shaped walls at the wrong height while moving): vanilla's TerrainLod.RebuildHeightmap
+        // puts each region at y = 0 and Heightmap.Regenerate -> ApplySettings writes vanilla's near hide distance (NearSimulationDistance x the zone
+        // diagonal, ~181 m; installed Heightmap.ApplySettings / GetLodHideDistance). 1418-1484 restored the 8 m sink and our hide distance only on
+        // FarQuilt's 0.5 s tick, so after every rebuild this distant-LOD terrain drew from ~181 m in, at y = 0, for up to half a second, showing
+        // through wherever the near ground is lower or still loading. Now it is restored the moment vanilla resets it: FAT's Heightmap.Regenerate
+        // postfix and a Heightmap.ApplySettings postfix call this for our own regions only.
+        internal static void OnHeightmapReset(Heightmap hm)
+        {
+            if (s_go == null || hm == null || !hm.transform.IsChildOf(s_go.transform)) return;
+            ApplyOne(hm);
+        }
+
+        private static void ApplyOne(Heightmap hm)
+        {
+            if (hm == null) return;
             if (s_mpb == null) s_mpb = new MaterialPropertyBlock();
-            foreach (var hm in s_go.GetComponentsInChildren<Heightmap>(false))
-            {
-                var t = hm.transform;
-                if (t.position.y != -Sink) t.position = new Vector3(t.position.x, -Sink, t.position.z);
-                var mr = hm.GetComponent<MeshRenderer>();
-                if (mr == null) continue;
-                mr.GetPropertyBlock(s_mpb);
-                if (Mathf.Abs(s_mpb.GetFloat("_LodHideDistance") - s_hide) > 0.5f) { s_mpb.SetFloat("_LodHideDistance", s_hide); mr.SetPropertyBlock(s_mpb); }
-            }
+            var t = hm.transform;
+            if (t.position.y != -Sink) t.position = new Vector3(t.position.x, -Sink, t.position.z);
+            var mr = hm.GetComponent<MeshRenderer>();
+            if (mr == null) return;
+            mr.GetPropertyBlock(s_mpb);
+            if (Mathf.Abs(s_mpb.GetFloat("_LodHideDistance") - s_hide) > 0.5f) { s_mpb.SetFloat("_LodHideDistance", s_hide); mr.SetPropertyBlock(s_mpb); }
         }
 
         private static void Destroy(string why)
@@ -130,6 +154,77 @@ namespace VerdantsAscent.Terrain.Voxel
             if (s_go != null) Object.Destroy(s_go);
             s_go = null; s_lod = null;
             FiresLogger.LogInfo($"[FarTerrain] vanilla-terrain reach off ({why}).");
+        }
+    }
+
+    // 0.2.1509: soft bind to EBM 1.2.483+ (consumer owns the code; [2ic] review 11-21 MUSTs 1/2 + SHOULD). FiresEasyBakeMeshes.EbmApi is
+    // looked up ONCE, at FarQuilt's first tick (all plugins are loaded by then); EBM absent or without FarGroundOwned = false for the session
+    // (1508 behaviour, zero cost). FarGroundOwnedChanged only marks the value stale (its thread is UNCONFIRMED, so no Unity call there); the
+    // read happens on FarQuilt's 0.5 s main-thread tick when stale, plus a 10 s safety re-read for a missed event (0.5 s if EBM has no event).
+    // Build once: owned -> FAT stands down at once; not-owned must hold ReleaseHold seconds before FAT's far rings come back.
+    internal static class EbmFarGround
+    {
+        private const float SafetyRead = 10f, NoEventRead = 0.5f, ReleaseHold = 5f;
+        private static bool s_bound, s_stale = true, s_raw, s_owned, s_hasEvent;
+        private static float s_nextRead, s_falseSince = -1f;
+        private static System.Reflection.PropertyInfo s_prop;
+        private static System.Reflection.FieldInfo s_field;
+
+        // The settled value FAT acts on (FarTerrainVanilla.Tick, FarQuilt.ExtOn).
+        internal static bool OwnedNow => s_owned;
+
+        // Once per FarQuilt tick, before anything reads OwnedNow.
+        internal static void Refresh()
+        {
+            if (!s_bound) Bind();
+            if (s_prop == null && s_field == null) return;
+            float now = Time.time;
+            if (s_stale || now >= s_nextRead)
+            {
+                s_stale = false;
+                s_nextRead = now + (s_hasEvent ? SafetyRead : NoEventRead);
+                try { s_raw = (bool)(s_prop != null ? s_prop.GetValue(null, null) : s_field.GetValue(null)); }
+                catch { s_raw = false; }
+            }
+            if (s_raw) { s_falseSince = -1f; Set(true); return; }
+            if (!s_owned) return;
+            if (s_falseSince < 0f) { s_falseSince = now; s_stale = true; }   // keep re-reading through the hold
+            if (now - s_falseSince >= ReleaseHold) Set(false);
+            else s_stale = true;
+        }
+
+        private static void Set(bool owned)
+        {
+            if (owned == s_owned) return;
+            s_owned = owned;
+            FiresLogger.LogInfo(owned
+                ? "[FarTerrain] EBM's far ground covers the view: FAT's far terrain rings (ExtendedReach second TerrainLod, quilt rings 2/3) stand down; FatApi far data still served."
+                : $"[FarTerrain] EBM's far ground released (not owned for {ReleaseHold:0} s): FAT's far terrain rings follow their own keys again.");
+        }
+
+        private static void Bind()
+        {
+            s_bound = true;   // once, found or not
+            if (!BepInEx.Bootstrap.Chainloader.PluginInfos.TryGetValue("com.Fire.FiresEasyBakeMeshes", out var info) && !AnyEbm(out info))
+                return;
+            var t = info.Instance != null ? info.Instance.GetType().Assembly.GetType("FiresEasyBakeMeshes.EbmApi", false) : null;
+            if (t == null) { FiresLogger.LogInfo("[FarTerrain] EBM far-ground bind: EbmApi not found in this EBM (rings follow FAT's own keys)."); return; }
+            const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static;
+            s_prop = t.GetProperty("FarGroundOwned", F);
+            if (s_prop == null) s_field = t.GetField("FarGroundOwned", F);
+            var ev = t.GetEvent("FarGroundOwnedChanged", F);
+            if ((s_prop != null || s_field != null) && ev != null && ev.EventHandlerType == typeof(System.Action))
+                try { ev.AddEventHandler(null, new System.Action(() => s_stale = true)); s_hasEvent = true; } catch { }
+            FiresLogger.LogInfo($"[FarTerrain] EBM far-ground bind: FarGroundOwned {(s_prop != null || s_field != null ? "found" : "not in this EBM (rings follow FAT's own keys)")}, " +
+                                $"event {(s_hasEvent ? "subscribed" : "absent")}.");
+        }
+
+        // EBM GUID "com.Fire.FiresEasyBakeMeshes" (_ebmV_visual_1483 Plugin.cs:16); assembly-name fallback in case the GUID ever changes.
+        private static bool AnyEbm(out BepInEx.PluginInfo info)
+        {
+            foreach (var kv in BepInEx.Bootstrap.Chainloader.PluginInfos)
+                if (kv.Value?.Instance != null && kv.Value.Instance.GetType().Assembly.GetName().Name == "FiresEasyBakeMeshes") { info = kv.Value; return true; }
+            info = null; return false;
         }
     }
 }

@@ -20,10 +20,10 @@ namespace VerdantsAscent.Terrain
     // keeps its own patch method here, declared in run order. Modules expose plain methods and never patch these targets.
     internal static class FatVanillaHooks
     {
-        [HarmonyPatch(typeof(Terminal), nameof(Terminal.InitTerminal))]
-        private static class Terminal_InitTerminal
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Terminal_InitTerminal
         {
-            private static void Postfix()
+            internal static void Postfix()
             {
                 WaterBrushCommands.Register();
                 WaterDebugCommands.Register();
@@ -51,7 +51,9 @@ namespace VerdantsAscent.Terrain
                 FatWorldSize.RegisterProbe();                // fat_worldsize_probe: the world's size and a ray to its edge
                 FatWaterLine.Register();                     // fat_water_line: generated vs stored water across a river
                 Zones.ZoneModeChunkSpawner.RegisterAimProbe();   // fat_hammer_aim: the Chunk Hammer's target zone
+#if FIRES_TESTS   // 0.2.1505 (Fire 11-20): test-build only (csproj FiresTests switch)
                 global::VerdantsAscent.Water.Core.FishCheckCommand.Register();   // va_fish_check / va_fish_spawn: inland fish proof (admin)
+#endif
                 FiresSkyIslands.RegisterCommands();
                 FatHaloArc.RegisterCommand();   // 0.2.1027 fat_halo_arc: the halo ring spike arc
                 FiresWorldClone.RegisterCommands();
@@ -287,6 +289,7 @@ namespace VerdantsAscent.Terrain
                 FatLoadGuard.Step("armor stand fix", Utilities.ArmorStandEffectFix.OnZNetSceneAwake);
                 steps.Lap("armor stands");
                 FiresLogger.LogInfo($"[FiresAdminTerrain] ZNetScene.Awake steps: {steps}.");
+                global::VerdantsAscent.Terrain.Performance.FatLoadClock.World("ZNetScene.Awake steps", steps.TotalMs);   // 0.2.1498
             }
 
             [HarmonyPostfix]
@@ -304,7 +307,10 @@ namespace VerdantsAscent.Terrain
                 steps.Lap("land snow");
                 FatLoadGuard.Step("voxel anchor prefab", () => VoxelAnchorPrefab.Ensure());
                 steps.Lap("voxel anchor");
+                FatLoadGuard.Step("placed waterfall prefab", () => VerdantsAscent.Water.Tools.PlacedFalls.Ensure());   // 0.2.1491: fires_vfall
+                steps.Lap("placed waterfall");
                 FiresLogger.LogInfo($"[FiresAdminTerrain] ZNetScene.Awake anchor steps: {steps}.");
+                global::VerdantsAscent.Terrain.Performance.FatLoadClock.World("ZNetScene.Awake anchors", steps.TotalMs);   // 0.2.1498
             }
         }
 
@@ -564,7 +570,7 @@ namespace VerdantsAscent.Terrain
                 FatLoadGuard.Step("zone seeding", ZoneModeRegistry.SubscribeSeeding);
                 FatLoadGuard.Step("far quilt start", FarQuilt.OnZoneSystemStart);
                 FatLoadGuard.Step("placevegetation patch report", ReportPlaceVegetationPatches);   // 0.2.1415 (EWD proof)
-                FatLoadGuard.Step("far forest start", () => VerdantsAscent.Terrain.FarForest.FarForest.OnZoneSystemStart(__instance));   // 0.2.1412
+                // 0.2.1482: "far forest start" removed with [Far Forest].
                 FatLoadGuard.Step("voxel streamer start", VoxelZoneStreamer.OnZoneSystemStart);
                 FatLoadGuard.Step("vegetation exemptions", () => ZoneSystem_PlaceVegetation_Density.WarmExemptions(__instance));
                 FatLoadGuard.Step("vegetation warm-up", () => VegetationWarmUp.OnZoneSystemStart(__instance));
@@ -584,7 +590,16 @@ namespace VerdantsAscent.Terrain
                 VoxelZoneStreamer.OnHeightmapRegenerate(__instance);
                 DistantPaintCache.OnHeightmapRegenerate(__instance);
                 VerdantsAscent.Water.Core.PlacedWaterField.OnHeightmapRegenerate(__instance);   // 0.2.1331
+                FarTerrainVanilla.OnHeightmapReset(__instance);   // 0.2.1485: our second TerrainLod's sink + hide distance, at once
             }
+        }
+
+        // 0.2.1485: vanilla's Heightmap.ApplySettings (also run by ApplySettingsOnAll on a settings change) writes vanilla's near hide distance on
+        // every heightmap; our second TerrainLod's regions take theirs back at once (FarTerrainVanilla.OnHeightmapReset, own regions only).
+        [HarmonyPatch(typeof(Heightmap), "ApplySettings")]
+        private static class Heightmap_ApplySettings
+        {
+            private static void Postfix(Heightmap __instance) => FarTerrainVanilla.OnHeightmapReset(__instance);
         }
 
         // 0.2.1350 (proof only, Debug): the zone's spawn stamp for the zone stage line. Reads, sets nothing on the heightmap.
@@ -858,7 +873,7 @@ namespace VerdantsAscent.Terrain
             // clearAreas is vanilla's private List<ZoneSystem.ClearArea>, bound as object.
             private static void Prefix(ZoneSystem __instance, Vector3 zoneCenterPos, object clearAreas)
             {
-                VerdantsAscent.Terrain.FarForest.FarForest.BeginPlaceVegetation();   // 0.2.1415: census depth flag (no IL change)
+                // 0.2.1482: the Far Forest census depth flag is gone with [Far Forest].
                 ZoneSystem_PlaceVegetation_Density.Apply(__instance);
                 ZoneSystem_PlaceVegetation_WaterEcology.Apply(__instance);
                 ZoneModeStartCave.KeepMouthClear(zoneCenterPos, clearAreas);
@@ -882,7 +897,6 @@ namespace VerdantsAscent.Terrain
 
             private static void Finalizer(ZoneSystem __instance)
             {
-                VerdantsAscent.Terrain.FarForest.FarForest.EndPlaceVegetation();
                 ZoneSystem_PlaceVegetation_Density.Restore(__instance);
                 ZoneSystem_PlaceVegetation_WaterEcology.Restore(__instance);
             }

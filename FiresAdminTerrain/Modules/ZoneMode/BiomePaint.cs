@@ -90,6 +90,20 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         private static volatile Snapshot s_snapshot = Snapshot.Empty;
+
+        // 0.2.1508 (Fire 11-21: build each chunk once on arrival): the circle sets replaced since the last re-colour pass.
+        // RefreshPainted pokes a heightmap painted under the current set OR any of these, so a removed or moved circle still
+        // re-colours the ground it left. Main thread only (Install / Reset / TickDeepRecolour). Over the cap: poke all, as before.
+        private const int RecolourOldCap = 16;
+        private static readonly List<Snapshot> s_recolourOld = new List<Snapshot>();
+        private static bool s_recolourAll;
+
+        private static void NoteRecolourOld(Snapshot old)
+        {
+            if (s_recolourAll || old == null || old.Circles.Length == 0) return;
+            if (s_recolourOld.Count >= RecolourOldCap) { s_recolourOld.Clear(); s_recolourAll = true; return; }
+            s_recolourOld.Add(old);
+        }
         private static readonly List<Circle> s_circles = new List<Circle>();
         private static uint s_nextId = 1;
         private static uint s_hash;
@@ -235,6 +249,93 @@ namespace VerdantsAscent.Terrain.Zones
             return true;
         }
 
+        // ── 0.2.1494: God Complex Phase 1 ([ghost], Fire "yes go on phase 1"; Fire's rule "cleanly through an api"): paint undo / redo / list
+        // for FatApi, SERVER side, main thread. The circle Id is the handle: a stroke is the circles whose ids came out between two reads of
+        // LastIssuedId. Undo takes circles back through TryTakeBack (the Chaos Hammer history's own move) and keeps their records on THIS
+        // stack; Redo lays the newest kept group again through TryPutBack (new ids, reported). The hammer's own Undo/Redo
+        // (ZoneModeChunkBlueprint) is a separate stack: a circle taken back here makes its later hammer undo report "no longer there".
+        private const int ApiRedoDepth = 64;
+        private static readonly List<List<byte[]>> s_apiRedo = new List<List<byte[]>>();
+
+        internal static int CircleCount { get { EnsureWorld(); return s_circles.Count; } }
+
+        // 0.2.1495 ([lead]): TryGetCircle allocates nothing. A circle's id is unique in its world session and its brush never changes, so
+        // its key string is built once and kept by id (cleared on world change / Reset, when ids restart).
+        private static readonly Dictionary<uint, string> s_keyCache = new Dictionary<uint, string>();
+
+        private static string CachedKey(in Circle c)
+        {
+            if (s_keyCache.TryGetValue(c.Id, out string key)) return key;
+            key = KeyOf(c.Brush, c.Ground, c.Blend);
+            s_keyCache[c.Id] = key;
+            return key;
+        }
+
+        /// <summary>The id the last successful paint or put-back was given (0 = none yet this session). Ids only grow.</summary>
+        internal static uint LastIssuedId => s_nextId - 1u;
+
+        internal static bool TryGetCircle(int index, out uint id, out string key, out float x, out float z, out float radius, out float blendWidth, out bool isArea)
+        {
+            id = 0u; key = string.Empty; x = z = radius = 0f; blendWidth = -1f; isArea = false;
+            if (index < 0 || index >= s_circles.Count) return false;
+            var c = s_circles[index];
+            id = c.Id; key = CachedKey(in c); x = c.X; z = c.Z; radius = c.R; blendWidth = c.BlendWidth;   // 0.2.1495: the key is cached, no string built per call
+            isArea = c.Outline != null || c.Mask != null;
+            return true;
+        }
+
+        /// <summary>Takes back the given circles (those still there; missing ids are counted, not an error) as ONE redo group.</summary>
+        internal static bool ApiUndoIds(uint[] ids, out string report)
+        {
+            if (!ZoneModeChunkBlueprint.ServerReady(out report)) return false;
+            EnsureWorld();
+            if (ids == null || ids.Length == 0) { report = "No paint named to undo."; return false; }
+            var group = new List<byte[]>();
+            int missing = 0;
+            var said = new System.Text.StringBuilder();
+            for (int i = ids.Length - 1; i >= 0; i--)   // newest first, so a redo lays them back oldest first in their old order
+            {
+                if (!TryTakeBack(ids[i], out byte[] record, out string one)) { missing++; continue; }
+                group.Add(record);
+                if (said.Length < 400) said.Append(one).Append(' ');
+            }
+            if (group.Count == 0) { report = $"None of those {ids.Length} paint(s) is there any more."; return false; }
+            s_apiRedo.Add(group);
+            while (s_apiRedo.Count > ApiRedoDepth) s_apiRedo.RemoveAt(0);
+            report = $"Undid {group.Count} paint(s){(missing > 0 ? $" ({missing} already gone)" : "")}. {said.ToString().Trim()}";
+            return true;
+        }
+
+        /// <summary>Takes back the newest circle on the list, whoever painted it.</summary>
+        internal static bool ApiUndoLast(out string report)
+        {
+            if (!ZoneModeChunkBlueprint.ServerReady(out report)) return false;
+            EnsureWorld();
+            if (s_circles.Count == 0) { report = "Nothing to undo: there is no biome paint."; return false; }
+            return ApiUndoIds(new[] { s_circles[s_circles.Count - 1].Id }, out report);
+        }
+
+        /// <summary>Lays the newest group ApiUndo* kept back again (as the newest paint; new ids). newIds = their ids now.</summary>
+        internal static bool ApiRedo(out uint[] newIds, out string report)
+        {
+            newIds = new uint[0];
+            if (!ZoneModeChunkBlueprint.ServerReady(out report)) return false;
+            if (s_apiRedo.Count == 0) { report = "Nothing to redo."; return false; }
+            var group = s_apiRedo[s_apiRedo.Count - 1];
+            s_apiRedo.RemoveAt(s_apiRedo.Count - 1);
+            var laid = new List<uint>();
+            var said = new System.Text.StringBuilder();
+            for (int i = group.Count - 1; i >= 0; i--)   // kept newest first: laid back oldest first
+            {
+                if (!TryPutBack(group[i], out uint id, out string one)) continue;
+                laid.Add(id);
+                if (said.Length < 400) said.Append(one).Append(' ');
+            }
+            newIds = laid.ToArray();
+            report = laid.Count == group.Count ? $"Redid {laid.Count} paint(s). {said.ToString().Trim()}" : $"Redid {laid.Count} of {group.Count} paint(s). {said.ToString().Trim()}";
+            return laid.Count > 0;
+        }
+
         internal static string Describe(string key)
             => TryParseKey(key, out var brush, out var ground, out string blend)
                 ? Describe(new Circle { Brush = brush, Ground = ground, Blend = blend })
@@ -296,7 +397,7 @@ namespace VerdantsAscent.Terrain.Zones
             for (int i = 0; i < circles.Count; i++) sectors[i] = SectorFor(circles[i]);
             s_snapshot = new Snapshot(circles.ToArray(), sectors);
             uint hash = Hash(Pack(circles));
-            if (hash != s_hash) BiomePaintVersion.Bump();   // 0.2.1058: the paint changed (FatApi.PaintVersion)
+            if (hash != s_hash) { BiomePaintVersion.Bump(); NoteRecolourOld(old); }   // 0.2.1058: the paint changed (FatApi.PaintVersion); 0.2.1508: the old set joins the next re-colour pass
             s_hash = hash;
             if (s_snapshot.AnyHeight || old.AnyHeight)
             {
@@ -348,6 +449,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (ReferenceEquals(world, s_world)) return;
             s_world = world;
             s_circles.Clear();
+            s_apiRedo.Clear(); s_keyCache.Clear();   // 0.2.1495: ids restart per world   // 0.2.1494: kept records belong to the world they came from
             s_holdMap = new Dictionary<uint, byte[]>();
             s_pending.Clear();
             ResetLocations();
@@ -560,7 +662,7 @@ namespace VerdantsAscent.Terrain.Zones
             t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.BiomeRefresh, t);
             TickDeepRecolour();   // 0.2.1063: re-colour deep ground after a paint change
             t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.BiomeDeepRecolour, t);
-            TickDeepCells();      // 0.2.1086: deep-ground cell cache life + budget re-pokes
+            if (!DediSkipsTint) TickDeepCells();      // 0.2.1086: deep-ground cell cache life + budget re-pokes (0.2.1487: not on a dedi)
             t = ZoneUpdateTimes.Add(ZoneUpdateTimes.Cause.BiomeDeepCells, t);
             LogCounts();
             if (ZNet.instance.IsServer())
@@ -616,8 +718,10 @@ namespace VerdantsAscent.Terrain.Zones
         {
             s_world = null;
             s_circles.Clear();
+            s_apiRedo.Clear(); s_keyCache.Clear();   // 0.2.1495: ids restart per world   // 0.2.1494
             s_holdMap = new Dictionary<uint, byte[]>();
             s_snapshot = Snapshot.Empty;
+            s_recolourOld.Clear(); s_recolourAll = false;   // 0.2.1508: a world change drops the last world's paint; it never widens the next world's pass
             if (s_hash != 0u) BiomePaintVersion.Bump();
             s_hash = 0u;
             s_asked = 0f;

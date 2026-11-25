@@ -54,7 +54,20 @@ namespace VerdantsAscent.Water.Tools
 
         #region Place / Delete
 
-        private static bool PlaceLandSnow(Terminal.ConsoleEventArgs args)
+        private static bool PlaceLandSnow(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return PlaceLandSnow_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool PlaceLandSnow_Body(Terminal.ConsoleEventArgs args)
         {
             Player player = Player.m_localPlayer;
             if (player == null)
@@ -93,7 +106,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool DeleteLandSnow(Terminal.ConsoleEventArgs args)
+        private static bool DeleteLandSnow(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return DeleteLandSnow_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool DeleteLandSnow_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float dummy = 0f;
@@ -116,7 +142,20 @@ namespace VerdantsAscent.Water.Tools
 
         #region Height Modification
 
-        private static bool RaiseLandSnow(Terminal.ConsoleEventArgs args)
+        private static bool RaiseLandSnow(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return RaiseLandSnow_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool RaiseLandSnow_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float amount = 0.5f;
@@ -136,7 +175,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool LowerLandSnow(Terminal.ConsoleEventArgs args)
+        private static bool LowerLandSnow(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return LowerLandSnow_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool LowerLandSnow_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float amount = 0.5f;
@@ -156,7 +208,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool LevelLandSnow(Terminal.ConsoleEventArgs args)
+        private static bool LevelLandSnow(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return LevelLandSnow_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool LevelLandSnow_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float level = float.MinValue;
@@ -177,7 +242,20 @@ namespace VerdantsAscent.Water.Tools
             return true;
         }
 
-        private static bool SmoothLandSnow(Terminal.ConsoleEventArgs args)
+        private static bool SmoothLandSnow(Terminal.ConsoleEventArgs args)   // 0.2.1502: FatUndo IceWaterCommands_Undo, was a Harmony patch on this FAT method
+        {
+            try
+            {
+                global::VerdantsAscent.Terrain.FatUndo.BeginCommandEdit(args);
+                return SmoothLandSnow_Body(args);
+            }
+            finally
+            {
+                global::VerdantsAscent.Terrain.FatUndo.EndPlayerEdit();
+            }
+        }
+
+        private static bool SmoothLandSnow_Body(Terminal.ConsoleEventArgs args)
         {
             float radius = 5f;
             float dummy = 0f;

@@ -31,17 +31,17 @@ namespace VerdantsAscent.Water.Core
             Mode = cfg.Bind(Section, "Lake reflection", "Sky",   // Sky until the probe is fixed (white chunk blocks under rain/fog)
                 new ConfigDescription("What lakes and ponds reflect. Sky = only the sky (as before). Probe = the trees, shore and mountains around the "
                     + "nearest lake (a soft mirror, cheap). Mirror = an exact mirror (costly; not built yet - uses Probe).",
-                    new AcceptableValueList<string>("Sky", "Probe", "Mirror")));
+                    new AcceptableValueList<string>("Sky", "Probe", "Mirror" + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey))));
             Range = cfg.Bind(Section, "Lake reflection range (m)", 150f,
-                new ConfigDescription("How near a lake must be for its reflection to be rendered.", new AcceptableValueRange<float>(30f, 400f)));
+                new ConfigDescription("How near a lake must be for its reflection to be rendered." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(30f, 400f)));
             Resolution = cfg.Bind(Section, "Lake reflection resolution", 128,
-                new ConfigDescription("Reflection texture size per face. Higher = sharper and slower.", new AcceptableValueList<int>(64, 128, 256, 512)));
+                new ConfigDescription("Reflection texture size per face. Higher = sharper and slower." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueList<int>(64, 128, 256, 512)));
             RefreshSeconds = cfg.Bind(Section, "Lake reflection refresh (s)", 3f,
-                new ConfigDescription("How often the lake's reflection is re-rendered (time of day, moving trees).", new AcceptableValueRange<float>(0.5f, 30f)));
+                new ConfigDescription("How often the lake's reflection is re-rendered (time of day, moving trees)." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey), new AcceptableValueRange<float>(0.5f, 30f)));
             // The probe made the water look white, so it stays off unless this NEW key is set, so a
             // config saved with "Probe" falls back to the sky without a migration. Lake reflection = Probe/Mirror needs this too.
             Experimental = cfg.Bind(Section, "Lake reflection probe (experimental)", false,
-                "Allow the lake reflection probe (Lake reflection = Probe). Off: lakes reflect the sky, whatever Lake reflection says.");
+                "Allow the lake reflection probe (Lake reflection = Probe). Off: lakes reflect the sky, whatever Lake reflection says." + " " + VerdantsAscent.Terrain.Voxel.FatShaders.Needs(VerdantsAscent.Terrain.Voxel.FatShaders.InlandWaterKey));
         }
 
         internal static void EnsureAttached()

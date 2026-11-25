@@ -442,7 +442,7 @@ namespace VerdantsAscent.Water.Core
                             _waterMesh.SetTriangles(shell.Triangles, 0);
                             _waterMesh.SetUVs(0, shell.UVs);
                             _waterMesh.SetNormals(shell.Normals);
-                            _waterMesh.SetColors(shell.Colors);
+                            _waterMesh.SetColors(shell.Colors); InlandVanillaMatch.MeshTangents(_waterMesh);   // 0.2.1466
                             _waterMesh.RecalculateBounds();
                             // Skip RecalculateNormals — the shell already
                             // authored consistent top/bottom/wall normals.
@@ -453,7 +453,7 @@ namespace VerdantsAscent.Water.Core
                             _waterMesh.SetTriangles(meshResult.Triangles, 0);
                             _waterMesh.SetUVs(0, meshResult.UVs);
                             _waterMesh.SetNormals(meshResult.Normals);
-                            _waterMesh.SetColors(meshResult.Colors);
+                            _waterMesh.SetColors(meshResult.Colors); InlandVanillaMatch.MeshTangents(_waterMesh);   // 0.2.1466
                             _waterMesh.RecalculateBounds();
                             _waterMesh.RecalculateNormals();
                         }
@@ -2571,7 +2571,7 @@ namespace VerdantsAscent.Water.Core
                     _waterMesh.SetTriangles(shell.Triangles, 0);
                     _waterMesh.SetUVs(0, shell.UVs);
                     _waterMesh.SetNormals(shell.Normals);
-                    _waterMesh.SetColors(shell.Colors);
+                    _waterMesh.SetColors(shell.Colors); InlandVanillaMatch.MeshTangents(_waterMesh);   // 0.2.1466
                     _waterMesh.RecalculateBounds();
                 }
                 else
@@ -2580,7 +2580,7 @@ namespace VerdantsAscent.Water.Core
                     _waterMesh.SetTriangles(triangles, 0);
                     _waterMesh.SetUVs(0, uvs);
                     _waterMesh.SetNormals(normals);
-                    _waterMesh.SetColors(colors);
+                    _waterMesh.SetColors(colors); InlandVanillaMatch.MeshTangents(_waterMesh);   // 0.2.1466
                     _waterMesh.RecalculateBounds();
                     _waterMesh.RecalculateNormals();
                 }
@@ -2741,7 +2741,7 @@ namespace VerdantsAscent.Water.Core
                     _waterMesh.SetTriangles(shell.Triangles, 0);
                     _waterMesh.SetUVs(0, shell.UVs);
                     _waterMesh.SetNormals(shell.Normals);
-                    _waterMesh.SetColors(shell.Colors);
+                    _waterMesh.SetColors(shell.Colors); InlandVanillaMatch.MeshTangents(_waterMesh);   // 0.2.1466
                     _waterMesh.RecalculateBounds();
                 }
                 else
@@ -2750,7 +2750,7 @@ namespace VerdantsAscent.Water.Core
                     _waterMesh.SetTriangles(triangles, 0);
                     _waterMesh.SetUVs(0, uvs);
                     _waterMesh.SetNormals(normals);
-                    _waterMesh.SetColors(colors);
+                    _waterMesh.SetColors(colors); InlandVanillaMatch.MeshTangents(_waterMesh);   // 0.2.1466
                     _waterMesh.RecalculateBounds();
                     _waterMesh.RecalculateNormals();
                 }
@@ -2926,6 +2926,7 @@ namespace VerdantsAscent.Water.Core
             {
                 _waterMaterial = dbg;
                 _meshRenderer.material = dbg;
+                WaterLookHost.Forget(_meshRenderer);   // 0.2.1455: a debug material is never handed off
                 FiresLogger.LogInfo($"[WaterMeshCombiner] SetupMaterial DEBUG override mode={DebugMaterialMode} mat={dbg.name} shader={dbg.shader?.name} queue={dbg.renderQueue}");
                 return;
             }
@@ -2939,10 +2940,11 @@ namespace VerdantsAscent.Water.Core
 
             if (_waterMaterial != null)
             {
-                _meshRenderer.material = _waterMaterial;
+                if (!WaterLookHost.Keeps(_meshRenderer, _waterMaterial)) _meshRenderer.material = _waterMaterial;   // 0.2.1455: a look mod's material on FAT's own stays
                 PlacedWaterSheets.SayMaterial("combined water mesh", _meshRenderer);   // 0.2.1086
                 UpdateLavaWaterOverlay();
                 ToolWaterStencil.OnCombiner(_meshRenderer, transform.position);
+                WaterLookHost.Adopt(_meshRenderer, FatWaterKind.Body, IsPlacedFreshWater);   // 0.2.1455: rebuilt body (level / size may have moved)
                 return;
             }
 
@@ -2955,16 +2957,24 @@ namespace VerdantsAscent.Water.Core
             {
                 // Placed water is calm like inland rivers (no wind or ocean waves):
                 // plain placed water wears the generated rivers' calm Custom/FiresInlandWater sheet
-                // material and has no gameplay waves, so its surface stays exactly at the swim trigger's height. The ocean
-                // wrap is the fallback when the inland shader is not loaded.
-                _waterMaterial = VerdantsAscent.Terrain.Voxel.VoxelChunkView.ResolveSheetMaterial()
-                    ?? WaterMaterialManager.GetWaterMaterial(LiquidType);
+                // material and has no gameplay waves, so its surface stays exactly at the swim trigger's height.
+                // 0.2.1478 (Fire 11-18): no ocean-wrap fallback any more. No inland sheet material ([Shaders] Inland water shader off
+                // or the shader not live) = this surface stands down (renderer off; the swim trigger is a separate object and stays).
+                _waterMaterial = VerdantsAscent.Terrain.Voxel.VoxelChunkView.ResolveSheetMaterial();
                 WaveIntensity = 0f;
+                // A dedicated server draws nothing and keeps the old path (no behaviour change there).
+                if (_waterMaterial == null && SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
+                    _waterMaterial = WaterMaterialManager.GetWaterMaterial(LiquidType);
+                else if (_waterMaterial == null)
+                {
+                    if (_meshRenderer != null) _meshRenderer.enabled = false;
+                    return;
+                }
             }
 
             if (_waterMaterial != null)
             {
-                _meshRenderer.material = _waterMaterial;
+                if (!WaterLookHost.Keeps(_meshRenderer, _waterMaterial)) _meshRenderer.material = _waterMaterial;   // 0.2.1455
             }
             else
             {
@@ -2974,6 +2984,7 @@ namespace VerdantsAscent.Water.Core
             ToolWaterStencil.OnCombiner(_meshRenderer, transform.position);   // 0.2.1068: stable draw order + the stencil proof toggle
             // Rebuild the lava water overlay after material setup
             UpdateLavaWaterOverlay();
+            WaterLookHost.Adopt(_meshRenderer, FatWaterKind.Body, IsPlacedFreshWater);   // 0.2.1455: water look hand-off
         }
 
         private void CreateFallbackMaterial()

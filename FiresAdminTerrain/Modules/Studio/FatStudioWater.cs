@@ -28,7 +28,7 @@ namespace VerdantsAscent.Terrain.Studio
             h = null; s = null;
             if (!Ready(out reason)) return false;
             if (a == null || !(a.Radius >= 1f) || a.Radius > MaxRadius || !(a.Depth > 0f)) { reason = $"bad args: radius 1..{MaxRadius}, depth > 0"; return false; }
-            if (!ZoneSystem.instance.GetGroundHeight(a.Center, out float ground)) { reason = $"not loaded: no ground at ({a.Center.x:0},{a.Center.z:0})"; return false; }
+            if (!ZoneSystem.instance.GetGroundHeight(a.Center, out float ground)) { reason = FatStudioNotLoaded.Log($"not loaded: no ground at ({a.Center.x:0},{a.Center.z:0})", a.Center); return false; }
             var c = new Vector3(a.Center.x, ground, a.Center.z);
             if (!Snap(new List<FatStudioRegion.Circle> { Circle(c, a.Radius * WaterShapingTools.BankSpread + Margin) }, WaterKind, out s, out reason)) return false;
             string done = WaterShapingTools.StudioPond(c, a.Radius, a.Depth, a.Level, a.Shore);
@@ -53,7 +53,7 @@ namespace VerdantsAscent.Terrain.Studio
             float r = a.Width * 0.5f;
             foreach (var p in a.Path)
             {
-                if (!ZoneSystem.instance.GetGroundHeight(p, out float g)) { reason = $"not loaded: no ground at ({p.x:0},{p.z:0})"; return false; }
+                if (!ZoneSystem.instance.GetGroundHeight(p, out float g)) { reason = FatStudioNotLoaded.Log($"not loaded: no ground at ({p.x:0},{p.z:0})", p); return false; }
                 path.Add(new Vector3(p.x, g, p.z));
             }
             for (int i = 0; i < path.Count; i++)

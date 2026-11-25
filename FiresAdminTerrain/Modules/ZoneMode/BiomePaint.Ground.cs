@@ -47,9 +47,11 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // Every ground a circle touching this square turns to (a quick yes/no for whole-zone questions).
-        private static Heightmap.Biome GroundsIn(Vector3 centre, float size)
+        private static Heightmap.Biome GroundsIn(Vector3 centre, float size) => GroundsIn(s_snapshot, centre, size);
+
+        // 0.2.1508: the same test against a given circle set (RefreshPainted asks the replaced sets too).
+        private static Heightmap.Biome GroundsIn(Snapshot snapshot, Vector3 centre, float size)
         {
-            var snapshot = s_snapshot;
             if (snapshot.Circles.Length == 0) return Heightmap.Biome.None;
             float half = size * 0.5f;
             var grounds = Heightmap.Biome.None;
@@ -110,6 +112,13 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── The look ────────────────────────────────────────────────────────
+        // 0.2.1487 ([lead] RAM audit 11-19): the heightmap tint and its deep-ground cell cache only make vertex colours
+        // (mesh.SetColors), which a dedicated server never draws. Vanilla still runs RebuildRenderMesh there, so the dedi built
+        // s_deepCells (Core census on VADN's dedi: 41,868 -> 167,340 entries, ~9 MB of slots, up to ~19 MB at the cap) plus its
+        // queues, asked Core's DeepGroundAt per 4 m cell and spent FatBudget on it. A dedicated server now skips the tint and the
+        // cell pump. ZNet.IsDedicated, not "no graphics device": the headless test bot is a client (FiresAdminTerrain.cs:287-289).
+        internal static bool DediSkipsTint => ZNet.instance != null && ZNet.instance.IsDedicated();
+
         private static readonly AccessTools.FieldRef<Heightmap, Mesh> RenderMesh = AccessTools.FieldRefAccess<Heightmap, Mesh>("m_renderMesh");
         private static readonly List<Color32> s_hmapColors = new List<Color32>();
 
@@ -125,6 +134,7 @@ namespace VerdantsAscent.Terrain.Zones
                 // 0.2.1088 (Fire, live 1086: 20-40 ms a call, ~600 calls / 10 s): 1086 counted every per-vertex lookup past its
                 // budget (4 per vertex, 16,900 a heightmap) and re-poked every such heightmap each frame, so each paid vanilla's
                 // RebuildRenderMesh plus this walk again: a self-sustaining loop. Now no Core question is asked here at all.
+                if (DediSkipsTint) return;
                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 s_cFill = s_cDecide = s_cBlocks = s_cUpload = s_cCache = s_cKey = 0;   // 0.2.1317: per-call phase timing
                 TintHeightmap(__instance);
@@ -386,6 +396,11 @@ namespace VerdantsAscent.Terrain.Zones
                 DeepGroundAt(job.Centre);   // binds Core once
                 job.AnyDeep = false; job.Unknown = 0;
                 if (s_deepGroundAt == null) { job.RW = 0; job.RH = 0; s_rW = 0; s_rH = 0; return true; }
+                // 0.2.1485 ([visual]/[lead] VADN 11-18: "worst unit 1709.3 ms (Tint)", fill phase up to 281.8 ms, the slowest at zone (5,-39), ~2.9 km
+                // out): a DISTANT-LOD heightmap (vanilla's TerrainLod and [Far Terrain] ExtendedReach's second one: regions ~1.6 km across) asked for
+                // ~170k 4 m deep cells per job, flooding the cell cache (540k) so CapEvict ran on the main thread for 0.5-1.7 s. Deep ground
+                // (Core snow bases / Winter territories) is a NEAR look; a distant-LOD heightmap keeps paint circles and territories only.
+                if (job.Hmap != null && job.Hmap.IsDistantLod) { job.RW = 0; job.RH = 0; s_rW = 0; s_rH = 0; s_distantSkipped++; return true; }
                 job.RX0 = Mathf.FloorToInt((job.X0 - DeepCell) / DeepCell); job.RZ0 = Mathf.FloorToInt((job.Z0 - DeepCell) / DeepCell);
                 job.RW = Mathf.FloorToInt((job.X0 + job.Size + DeepCell) / DeepCell) - job.RX0 + 1;
                 job.RH = Mathf.FloorToInt((job.Z0 + job.Size + DeepCell) / DeepCell) - job.RZ0 + 1;
@@ -580,7 +595,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (!s_deepGroundBound)
             {
                 s_deepGroundBound = true;
-                var type = AccessTools.TypeByName("FiresCore.Snow.SnowField");
+                var type = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Snow.SnowField");
                 var method = type != null ? AccessTools.Method(type, "DeepGroundAt", new[] { typeof(Vector3) }) : null;
                 if (method != null && method.IsStatic && method.ReturnType == typeof(bool))
                 {
@@ -608,7 +623,7 @@ namespace VerdantsAscent.Terrain.Zones
                 // plain Meadows winter): Core's SnowField.WinterGroundAt(Vector3) (its winter build, after 0.2.1051) is ORed in; an older
                 // Core has none and nothing changes
                 s_winterBound = true;
-                var wt = AccessTools.TypeByName("FiresCore.Snow.SnowField");
+                var wt = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Snow.SnowField");
                 var wm = wt != null ? AccessTools.Method(wt, "WinterGroundAt", new[] { typeof(Vector3) }) : null;
                 if (wm != null && wm.IsStatic && wm.ReturnType == typeof(bool))
                 {
@@ -723,7 +738,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (!s_zoneMayLooked)
             {
                 s_zoneMayLooked = true;
-                var t = AccessTools.TypeByName("FiresCore.Snow.SnowField");
+                var t = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Snow.SnowField");
                 // 0.2.1369 (winter audit: 0 zones skipped, queue mean 164k, FatBudget up to 30 ms/s): ZoneMayHaveDeepGround says yes everywhere while Vedr's winter cover is up, for
                 // the winter ground FAT stopped asking about in 0.2.1304. A deep-ground answer has no winter term (Core's Evaluate reads biome + providers), so the snow-base-only
                 // question gives the same tint. Bound softly: an older Core keeps the old question.
@@ -1110,7 +1125,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static System.Reflection.PropertyInfo s_winterCover; private static bool s_winterCoverLooked; private static int s_winterOn = -1;
         private static void WatchWinterCover()
         {
-            if (!s_winterCoverLooked) { s_winterCoverLooked = true; s_winterCover = AccessTools.TypeByName("FiresCore.Snow.SnowField")?.GetProperty("WinterCover", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static); }
+            if (!s_winterCoverLooked) { s_winterCoverLooked = true; s_winterCover = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Snow.SnowField")?.GetProperty("WinterCover", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static); }
             if (s_winterCover == null) return;
             int on;
             try { on = (float)s_winterCover.GetValue(null, null) > 0f ? 1 : 0; } catch { s_winterCover = null; return; }
@@ -1141,7 +1156,7 @@ namespace VerdantsAscent.Terrain.Zones
                 s_deepCells.Clear();
                 s_passZones = 0; s_passGreen = 0;
                 s_passEndsAt = Time.time + PassWindow;
-                RefreshForced();
+                RefreshPainted();   // 0.2.1508: was RefreshForced (every loaded heightmap); every pass here is paint-caused (Bump: Install / Reset only)
             }
             if (s_passEndsAt >= 0f && Time.time >= s_passEndsAt)
             {
@@ -1156,7 +1171,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (!s_invalidateBound)
             {
                 s_invalidateBound = true;
-                var type = AccessTools.TypeByName("FiresCore.Snow.SnowField");
+                var type = global::VerdantsAscent.FatTypeLookup.Core("FiresCore.Snow.SnowField");
                 var method = type != null ? AccessTools.Method(type, "InvalidateBaseCache", System.Type.EmptyTypes) : null;
                 if (method != null && method.IsStatic)
                     s_invalidateBase = (System.Action)System.Delegate.CreateDelegate(typeof(System.Action), method);
@@ -1181,6 +1196,40 @@ namespace VerdantsAscent.Terrain.Zones
             }
             s_forcedLogged.Clear();
             FiresLogger.LogDebug($"[BiomePaint] biome overrides changed: {poked} heightmap(s) rebuild their vertex colours.");
+        }
+
+        // 0.2.1508 (Fire 11-21: build each chunk once on arrival; audit Tools\_saddles_FAT_arrival_builds_20261121.md): the paint
+        // re-colour pass. Same clears as RefreshForced, but a heightmap is poked only when a circle of the current set OR of a set
+        // replaced since the last pass touches it (a removed / moved circle re-colours the ground it left). 0 circles before and
+        // after = 0 pokes. FatApi.RefreshBiomeOverrides keeps RefreshForced (an outside change can touch any ground).
+        private static void RefreshPainted()
+        {
+            if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) { s_recolourOld.Clear(); s_recolourAll = false; return; }
+            NoteDeepClear("biome overrides refreshed");
+            s_deepCells.Clear();
+            var now = s_snapshot;
+            bool all = s_recolourAll;
+            int poked = 0, skipped = 0;
+            foreach (var hmap in Heightmap.GetAllHeightmaps())
+            {
+                if (hmap == null) continue;
+                if (!all && !PaintedUnder(now, hmap)) { skipped++; continue; }
+                hmap.Poke(HeightmapRebuildDelay);
+                poked++;
+            }
+            s_recolourOld.Clear(); s_recolourAll = false;
+            s_forcedLogged.Clear();
+            FiresLogger.LogDebug($"[BiomePaint] paint re-colour pass (0.2.1508): {poked} heightmap(s) poked, {skipped} skipped (unpainted under the old and new circles){(all ? "; over the cap, all poked" : "")}.");
+        }
+
+        private static bool PaintedUnder(Snapshot now, Heightmap hmap)
+        {
+            Vector3 centre = hmap.transform.position;
+            float size = hmap.m_width * hmap.m_scale;
+            if (GroundsIn(now, centre, size) != Heightmap.Biome.None) return true;
+            for (int i = 0; i < s_recolourOld.Count; i++)
+                if (GroundsIn(s_recolourOld[i], centre, size) != Heightmap.Biome.None) return true;
+            return false;
         }
 
 
@@ -1222,12 +1271,28 @@ namespace VerdantsAscent.Terrain.Zones
         private static int s_capNow = DeepCacheCap;
         private static int s_evictRuns, s_evictKept, s_evictDropped, s_evictHard; private static double s_evictMs;
         private static readonly List<long> s_evictScratch = new List<long>(65536);
+        // 0.2.1485: the live cells as ONE set, built once per eviction from the running jobs' and waiting heightmaps' ranges; 1437 asked
+        // InLiveRange (a scan of every job + waiting range) per cached cell: ~540k cells x ~170 ranges on the main thread (0.5-1.7 s on VADN).
+        private static readonly HashSet<long> s_liveCells = new HashSet<long>();
+        private static int s_distantSkipped;
         private static void CapEvict()
         {
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             s_evictScratch.Clear();
+            s_liveCells.Clear();
+            foreach (var kv in s_tintJobs)
+            {
+                var j = kv.Value; if (j == null || j.RW <= 0) continue;
+                for (int z = 0; z < j.RH; z++) for (int x = 0; x < j.RW; x++) s_liveCells.Add(CellKey(j.RX0 + x, j.RZ0 + z));
+            }
+            foreach (var kv in s_tintWaiting)
+            {
+                var r = kv.Value;
+                for (int z = 0; z < r.H; z++) for (int x = 0; x < r.W; x++) s_liveCells.Add(CellKey(r.X0 + x, r.Z0 + z));
+            }
             foreach (var kv in s_deepCells)
-                if (!InLiveRange(kv.Key)) s_evictScratch.Add(kv.Key);
+                if (!s_liveCells.Contains(kv.Key)) s_evictScratch.Add(kv.Key);
+            s_liveCells.Clear();
             for (int i = 0; i < s_evictScratch.Count; i++) s_deepCells.Remove(s_evictScratch[i]);
             int kept = s_deepCells.Count;
             s_evictRuns++; s_evictDropped += s_evictScratch.Count; s_evictKept = kept; s_capClears++;
@@ -1266,9 +1331,9 @@ namespace VerdantsAscent.Terrain.Zones
                 int unknown = 0; foreach (var kv in s_tintJobs) if (kv.Value != null) unknown += kv.Value.Unknown;
                 FiresLogger.LogDebug($"[BiomePaint] deep-cells 10 s (0.2.1437): tint pump {s_probeTintMs:0.0} ms, wait scan {s_probeScanMs:0.0} ms, jobs started {s_probeStarted}, running {s_tintJobs.Count} ({unknown} cell(s) unanswered), waiting {s_tintWaiting.Count}, cached tints {s_tintCache.Count}; "
                     + $"cache {s_deepCells.Count} / cap {s_capNow}; cap evictions {s_evictRuns} (kept {s_evictKept}, dropped {s_evictDropped}, hard clears {s_evictHard}, {s_evictMs:0.0} ms), "
-                    + (s_evictRuns == 0 ? "no eviction: cache under cap" : "evicted: cache reached cap, live-job cells kept, tints NOT invalidated"));
+                    + (s_evictRuns == 0 ? "no eviction: cache under cap" : "evicted: cache reached cap, live-job cells kept, tints NOT invalidated") + $"; distant-LOD heightmaps tinted without deep cells {s_distantSkipped} (0.2.1485)");
             }
-            s_probeTintMs = s_probeScanMs = s_evictMs = 0; s_probeStarted = 0; s_evictRuns = s_evictDropped = s_evictHard = 0;
+            s_probeTintMs = s_probeScanMs = s_evictMs = 0; s_probeStarted = 0; s_evictRuns = s_evictDropped = s_evictHard = 0; s_distantSkipped = 0;
         }
 
         private static void OnSeasonChanged(int season, int stage)

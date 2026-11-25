@@ -137,9 +137,12 @@ namespace VerdantsAscent.Terrain.BcImport
             if (size * size != indexMap.Indices.Length)
                 throw new Exception($"the biome map holds {indexMap.Indices.Length} bytes, which is not a square");
 
-            var biomes = new Heightmap.Biome[indexMap.Indices.Length];
-            for (int at = 0; at < biomes.Length; at++) biomes[at] = BiomeFromIndex(indexMap.Indices[at]);
-            return new BcBiomeMap { Biomes = biomes, Size = size };
+            // 0.2.1490 ([lead] RAM audit 11-19): the map keeps the file's own index bytes (shared, not copied) and reads them
+            // through a 256-entry table holding exactly BiomeFromIndex's answers, instead of a Heightmap.Biome (int) per pixel:
+            // VADN's 4096² biome map was 64 MiB as ints plus the 16 MiB of indices it was copied from, now 16 MiB.
+            var table = new Heightmap.Biome[BcBiomeMap.TableSize];
+            for (int index = 0; index < table.Length; index++) table[index] = BiomeFromIndex((byte)index);
+            return new BcBiomeMap { Indices = indexMap.Indices, Table = table, Size = size };
         }
 
         /// <summary>Index 0 is None, index i is the flag 1 &lt;&lt; (i - 1). Heightmap.Biome's flag values are
@@ -160,7 +163,12 @@ namespace VerdantsAscent.Terrain.BcImport
             List<KeyValuePair<Heightmap.Biome, Color32>> palette = ParseBiomeColors(
                 string.IsNullOrEmpty(image.ColorTable) ? DefaultBiomeColors : image.ColorTable);
 
-            var biomes = new Heightmap.Biome[width * height];
+            // 0.2.1490: one byte per pixel naming an entry of a small table of the distinct biomes found (was a Heightmap.Biome
+            // per pixel). The palette holds a handful of biomes, so 256 entries is far more than any map uses; past that it stops
+            // with a clear error rather than guess.
+            var biomes = new byte[width * height];
+            var table = new Heightmap.Biome[BcBiomeMap.TableSize];
+            var slotOf = new Dictionary<Heightmap.Biome, byte>();
             var seen = new Dictionary<int, Heightmap.Biome>();
             var exact = new Dictionary<int, bool>();
             var far = new Dictionary<int, long>();
@@ -184,7 +192,15 @@ namespace VerdantsAscent.Terrain.BcImport
                     if (!exact[key]) snapped++;
                     long farSeen;
                     if (far.TryGetValue(key, out farSeen)) far[key] = farSeen + 1L;
-                    biomes[targetRow + column] = biome;
+                    if (!slotOf.TryGetValue(biome, out byte slot))
+                    {
+                        if (slotOf.Count >= BcBiomeMap.TableSize)
+                            throw new System.IO.InvalidDataException($"the biome image names more than {BcBiomeMap.TableSize} different biomes");
+                        slot = (byte)slotOf.Count;
+                        slotOf[biome] = slot;
+                        table[slot] = biome;
+                    }
+                    biomes[targetRow + column] = slot;
                 }
             }
 
@@ -198,7 +214,7 @@ namespace VerdantsAscent.Terrain.BcImport
                 + $"{snapped * PercentScale / total:0.0}% of pixels not an exact palette colour and snapped to the "
                 + "nearest. Black means 'leave the biome here to whatever is underneath' and is not a miss.");
             ReportFarColours(far, seen, total);
-            return new BcBiomeMap { Biomes = biomes, Size = width };
+            return new BcBiomeMap { Indices = biomes, Table = table, Size = width };
         }
 
         // The black entry is a SENTINEL, not a colour to compete on distance. It means "leave the biome here to
@@ -583,8 +599,16 @@ namespace VerdantsAscent.Terrain.BcImport
         [ThreadStatic] private static Heightmap.Biome[] t_found;
         [ThreadStatic] private static float[] t_weights;
 
-        public Heightmap.Biome[] Biomes;
+        // 0.2.1490 ([lead] RAM audit 11-19): one byte per pixel (Indices) naming an entry of Table, instead of a Heightmap.Biome
+        // (4-byte int) per pixel. Every answer is Table[Indices[i]], the same biome the int array held. An index map's bytes are
+        // the file's own (shared with the settings); a biome image gets a table of its distinct biomes.
+        internal const int TableSize = 256;
+        public byte[] Indices;
+        public Heightmap.Biome[] Table;
         public int Size;
+
+        public int Length => Indices.Length;
+        public Heightmap.Biome At(int index) => Table[Indices[index]];
 
         public Heightmap.Biome GetValue(float x, float y)
         {
@@ -610,7 +634,7 @@ namespace VerdantsAscent.Terrain.BcImport
 
         private void Accumulate(int column, int row, float weight, Heightmap.Biome[] found, float[] weights, ref int count, ref int heaviest)
         {
-            Heightmap.Biome biome = Biomes[Mathf.Clamp(row, 0, Size - 1) * Size + Mathf.Clamp(column, 0, Size - 1)];
+            Heightmap.Biome biome = Table[Indices[Mathf.Clamp(row, 0, Size - 1) * Size + Mathf.Clamp(column, 0, Size - 1)]];
             for (int at = 0; at < count; at++)
             {
                 if (found[at] != biome) continue;

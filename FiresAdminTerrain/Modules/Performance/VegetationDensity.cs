@@ -102,8 +102,9 @@ namespace VerdantsAscent.Terrain.Performance
                 s_minBackup.Add(v != null ? v.m_min : 0f);
                 s_maxBackup.Add(v != null ? v.m_max : 0f);
                 if (v == null || IsExempt(v.m_prefab)) { exempt++; continue; }
-                v.m_min *= k;
-                v.m_max *= k;
+                Effective(v, k, out float scaledMin, out float scaledMax);   // 0.2.1489: the one formula FatApi.FarVegetationCounts also answers with
+                v.m_min = scaledMin;
+                v.m_max = scaledMax;
                 scaled++;
             }
             s_scaled = true;
@@ -114,6 +115,36 @@ namespace VerdantsAscent.Terrain.Performance
                 FiresLogger.LogInfo($"[FiresVeg] vegetation density ×{k:0.00} — scaling {scaled} entr(ies), " +
                           $"{exempt} exempt (pickables/ore/spawners keep vanilla counts).");
             }
+        }
+
+        // ── 0.2.1489 FatApi v4 ([lead] G5e, [visual]: EBM's far vegetation replay read m_min / m_max outside this call, so it saw the
+        // unscaled counts and placed ~1/0.7 of each scaled entry plus phantom rocks that blocked the rest). The same rule, read without
+        // touching the list. k is THIS peer's "Vegetation density scale"; it is server-synced from 0.2.1489 (FiresVoxelConfig
+        // RegisterServerAuthority), so a joined client answers with the generating server's k.
+
+        /// <summary>The scale PlaceVegetation applies on this peer (1 = none). Any thread (reads one config value).</summary>
+        internal static float CurrentScale => Mathf.Approximately(Scale, 1f) ? 1f : Scale;
+
+        /// <summary>Bumps when the scale changes (a cfg edit, or the server's value arriving on join).</summary>
+        internal static volatile int Revision;
+
+        /// <summary>MAIN thread (component test on the prefab, cached). True = the entry keeps vanilla counts.</summary>
+        internal static bool Exempt(GameObject prefab) => IsExempt(prefab);
+
+        // The scaled pair for a non-exempt entry: the same float multiply Apply writes into the list.
+        private static void Effective(ZoneSystem.ZoneVegetation v, float k, out float min, out float max)
+        {
+            min = v.m_min * k;
+            max = v.m_max * k;
+        }
+
+        /// <summary>MAIN thread. The m_min / m_max PlaceVegetation uses for this entry on this peer, exactly as Apply sets them.</summary>
+        internal static void EffectiveCounts(ZoneSystem.ZoneVegetation v, out float min, out float max)
+        {
+            min = v.m_min; max = v.m_max;
+            float k = Scale;
+            if (Mathf.Approximately(k, 1f) || IsExempt(v.m_prefab)) return;
+            Effective(v, k, out min, out max);
         }
 
         internal static void Restore(ZoneSystem __instance)

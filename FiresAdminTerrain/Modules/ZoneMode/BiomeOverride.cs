@@ -301,13 +301,13 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── fat_biome_paths: what each biome-keyed path answers where you stand (one Debug line per path) ──
-        [HarmonyPatch(typeof(Terminal), "InitTerminal")]
-        private static class Command
+        // 0.2.1501: was [HarmonyPatch(typeof(Terminal), "InitTerminal")]; now called from FatTerminalCommands (one InitTerminal postfix for FAT)
+        internal static class Command
         {
             private static bool s_registered;
 
-            [HarmonyPostfix]
-            private static void Register()
+            // 0.2.1501: [HarmonyPostfix] removed (not a patch any more)
+            internal static void Register()
             {
                 if (s_registered) return;
                 s_registered = true;

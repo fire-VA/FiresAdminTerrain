@@ -272,6 +272,7 @@ namespace VerdantsAscent.Terrain.Zones
             long parkMs = clock.ElapsedMilliseconds;
             if (net.IsServer()) InitializeAuthoritative(world);
             else BindHandshake(world);
+            global::VerdantsAscent.Terrain.Performance.FatLoadClock.World("world init (profile, guards, park, registry)", clock.ElapsedMilliseconds);   // 0.2.1498
             if (!net.IsServer()) return;
             // A server's first start after a reboot met a cold file cache here (10.5 s). This line shows which step.
             FiresLogger.LogInfo($"[FiresZones] world init: profile {profileMs} ms, water guards {guardsMs - profileMs} ms, park "

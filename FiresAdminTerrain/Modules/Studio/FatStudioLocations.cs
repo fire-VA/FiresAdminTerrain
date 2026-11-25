@@ -37,10 +37,10 @@ namespace VerdantsAscent.Terrain.Studio
             var loc = Find(zs, a.Name);
             if (loc == null) { reason = $"bad args: no enabled location named '{a.Name}'"; return false; }
             Vector2s zone = ZoneSystem.GetZone(a.Position);
-            if (!zs.IsZoneGenerated(zone)) { reason = $"not loaded: zone {zone.x},{zone.y} is not generated"; return false; }
+            if (!zs.IsZoneGenerated(zone)) { reason = FatStudioNotLoaded.Log($"not loaded: zone {zone.x},{zone.y} is not generated", FatStudioNotLoaded.ZoneCentre(zone.x, zone.y)); return false; }
             if (zs.m_locationInstances.TryGetValue(zone, out var had))
             { reason = $"zone {zone.x},{zone.y} already has {BcRegenCommand.LocName(had.m_location)} at ({had.m_position.x:0},{had.m_position.z:0}): remove it first (one location per zone)"; return false; }
-            if (!zs.GetGroundHeight(a.Position, out float ground)) { reason = $"not loaded: no ground at ({a.Position.x:0},{a.Position.z:0})"; return false; }
+            if (!zs.GetGroundHeight(a.Position, out float ground)) { reason = FatStudioNotLoaded.Log($"not loaded: no ground at ({a.Position.x:0},{a.Position.z:0})", a.Position); return false; }
             if (!zs.PokeCanSpawnLocation(loc, true)) { reason = $"loading: {BcRegenCommand.LocName(loc)}'s prefab is loading, retry in a moment"; return false; }
 
             Vector3 pos = new Vector3(a.Position.x, loc.m_snapToWater ? zs.m_waterLevel : ground, a.Position.z);
@@ -395,7 +395,7 @@ namespace VerdantsAscent.Terrain.Studio
         {
             if (zs.m_locations == null) return null;
             foreach (var l in zs.m_locations) if (l != null && l.m_enable && l.m_prefab.IsValid && BcRegenCommand.LocName(l) == name) return l;
-            foreach (var l in zs.m_locations) if (l != null && l.m_enable && l.m_prefab.IsValid && (l.m_name == name || l.m_prefab.Name == name)) return l;
+            foreach (var l in zs.m_locations) if (l != null && l.m_enable && l.m_prefab.IsValid && (l.m_name == name || l.m_prefab.name == name)) return l;
             return null;
         }
 

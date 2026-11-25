@@ -32,16 +32,16 @@ namespace VerdantsAscent.Water.Core
         internal static void Bind(ConfigFile cfg)
         {
             Enabled = cfg.Bind(Section, "Steam over warm water", true,
-                "A light steam rising off still lakes and ponds in warm biomes (Plains, Ashlands by default). Strongest at dawn and dusk.");
+                "A light steam rising off still lakes and ponds in warm biomes (Plains, Ashlands by default). Strongest at dawn and dusk." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey));
             Range = cfg.Bind(Section, "Steam range (m)", 80f,
-                new ConfigDescription("Steam shows only on water this near the player.", new AcceptableValueRange<float>(20f, 200f)));
+                new ConfigDescription("Steam shows only on water this near the player." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey), new AcceptableValueRange<float>(20f, 200f)));
             MaxEmitters = cfg.Bind(Section, "Steam emitters (max)", 6,
-                new ConfigDescription("Most steam patches at once (the frame-time budget).", new AcceptableValueRange<int>(0, 16)));
+                new ConfigDescription("Most steam patches at once (the frame-time budget)." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey), new AcceptableValueRange<int>(0, 16)));
             for (int b = 0; b < 8; b++)
             {
-                s_biomeOn[b] = cfg.Bind(Section, BiomeNames[b] + " steam", DefaultDensity[b] > 0f, $"Steam over still water in {BiomeNames[b]}.");
+                s_biomeOn[b] = cfg.Bind(Section, BiomeNames[b] + " steam", DefaultDensity[b] > 0f, $"Steam over still water in {BiomeNames[b]}." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey));
                 s_biomeDensity[b] = cfg.Bind(Section, BiomeNames[b] + " steam density", DefaultDensity[b] > 0f ? DefaultDensity[b] : 0.4f,
-                    new ConfigDescription("How thick the steam is (0-1).", new AcceptableValueRange<float>(0f, 1f)));
+                    new ConfigDescription("How thick the steam is (0-1)." + " " + FatShaders.Needs(FatShaders.WaterfallMistKey), new AcceptableValueRange<float>(0f, 1f)));
             }
         }
 
@@ -116,7 +116,11 @@ namespace VerdantsAscent.Water.Core
                 if (_emitters[i] != null && i >= n && _emitters[i].gameObject.activeSelf) _emitters[i].gameObject.SetActive(false);
             if (n == 0) { if (_placedLogged != 0 && _placedLogged != -1) FiresLogger.LogDebug("[InlandWater] steam off (no warm still water in range)"); if (_placedLogged != -1) _placedLogged = 0; return; }
             var mat = FiresWaterfalls.MistMaterial;
-            if (mat == null) return;
+            if (mat == null)   // 0.2.1478: no mist material ([Shaders] Waterfall mist shader off or not loaded) = steam stands down, live emitters too
+            {
+                for (int i = 0; i < _emitters.Count; i++) if (_emitters[i] != null && _emitters[i].gameObject.activeSelf) _emitters[i].gameObject.SetActive(false);
+                return;
+            }
             float t = Strength();
             for (int i = 0; i < n; i++)
             {

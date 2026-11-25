@@ -40,8 +40,14 @@ namespace VerdantsAscent.Terrain.Voxel
                         return;
                     }
                     float radius = 64f;
-                    if (args.Args.Length > 1 && float.TryParse(args.Args[1], out float r)) radius = Mathf.Clamp(r, 16f, 256f);
                     var p = Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : Vector3.zero;
+                    if (args.Args.Length > 1 && args.Args[1].ToLowerInvariant() == "vanilla")   // 0.2.1454
+                    {
+                        if (args.Args.Length > 2 && float.TryParse(args.Args[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float rv)) radius = Mathf.Clamp(rv, 16f, 256f);
+                        args.Context.AddString(AuditVanillaBorders(p, radius));
+                        return;
+                    }
+                    if (args.Args.Length > 1 && float.TryParse(args.Args[1], out float r)) radius = Mathf.Clamp(r, 16f, 256f);
                     int faces = AuditAround(p, radius, int.MaxValue, out int bad, out string worst);
                     args.Context.AddString($"seamaudit → {faces} face(s) audited, {bad} with findings." +
                         (bad > 0 ? $" Worst: {worst} (full reports in the log)" : " Meshes are vertex-identical at every audited face — a visible line now can only be material/lighting or a non-chunk surface (quilt/water)."));
@@ -50,8 +56,61 @@ namespace VerdantsAscent.Terrain.Voxel
 
         // Sentinel — called from the pipeline driver. Logs only on findings.
         private static float s_nextAuto;
+
+        // 0.2.1454: [Vanilla Border Stitch] flipped -> the vanilla-border audit runs at once (the state before the re-mesh) and again
+        // StitchAuditDelay s later (after it), around the local player, so a rig leg's log carries both numbers without a console step.
+        private const float StitchAuditDelay = 3f;
+        // 0.2.1457 ([lead] 11-17, stitch1454 leg: the edit chunk's remesh went through the deferred lane and landed after the 3 s audit, so its
+        // two faces were never measured stitched): one more audit StitchAuditLate s after the flip, when every border remesh has landed.
+        private const float StitchAuditLate = 20f;
+        private static float s_stitchAuditAt = -1f, s_stitchAuditLateAt = -1f;
+        internal static void OnStitchToggled()
+        {
+            var pl = Player.m_localPlayer;
+            if (pl == null) return;
+            AuditVanillaBorders(pl.transform.position, 64f, "at the flip, before the re-mesh");
+            s_stitchAuditAt = Time.time + StitchAuditDelay;
+            s_stitchAuditLateAt = Time.time + StitchAuditLate;   // 0.2.1457
+        }
+
+        // 0.2.1454 test-only: [Seam Test Carve] "x z radius" set live -> one va_voxel_carve-style disc (2 m deep, the flat-ruler default) at
+        // the ground there. On a swap-on-edit world the brush marks the zone, so it converts (VoxelZoneStreamer.MarkZoneBrushed).
+        internal static void RunTestCarve(string spec)
+        {
+            if (string.IsNullOrWhiteSpace(spec)) return;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var w = spec.Split(new[] { ' ', ',', ';' }, System.StringSplitOptions.RemoveEmptyEntries);
+            if (w.Length < 3 || !float.TryParse(w[0], System.Globalization.NumberStyles.Float, inv, out float x)
+                || !float.TryParse(w[1], System.Globalization.NumberStyles.Float, inv, out float z)
+                || !float.TryParse(w[2], System.Globalization.NumberStyles.Float, inv, out float r))
+            { FiresLogger.LogWarning($"[FiresVoxel] Seam Test Carve '{spec}': want \"x z radius\"; nothing carved."); return; }
+            if (Player.m_localPlayer == null || ZoneSystem.instance == null) { FiresLogger.LogWarning("[FiresVoxel] Seam Test Carve: no world / player yet; nothing carved."); return; }
+            r = Mathf.Clamp(r, 0.5f, 8f);
+            float y;
+            if (!Heightmap.GetHeight(new Vector3(x, 0f, z), out y) && !VoxelWorld.TryFindSurfaceY(x, z, 60f, 200f, out y))
+            { FiresLogger.LogWarning($"[FiresVoxel] Seam Test Carve at ({x:0.#}, {z:0.#}): no ground loaded there; nothing carved."); return; }
+            try
+            {
+                string summary = VoxelWorld.ApplyBrush(new Vector3(x, y, z), r, 2f, VoxelBrushShape.Cylinder, VoxelBrushMode.Carve);
+                FiresLogger.LogWarning($"[FiresVoxel] Seam Test Carve at ({x:0.#}, {y:0.#}, {z:0.#}) r {r:0.#}: {summary} (zone {ZoneSystem.GetZone(new Vector3(x, 0f, z))}; test-only key)");
+            }
+            catch (System.Exception ex) { FiresLogger.LogWarning($"[FiresVoxel] Seam Test Carve threw: {ex.Message}"); }
+        }
+
         public static void AutoTick()
         {
+            if (s_stitchAuditAt > 0f && Time.time >= s_stitchAuditAt)
+            {
+                s_stitchAuditAt = -1f;
+                var p = Player.m_localPlayer;
+                if (p != null) AuditVanillaBorders(p.transform.position, 64f, $"{StitchAuditDelay:0} s after the flip");
+            }
+            if (s_stitchAuditLateAt > 0f && Time.time >= s_stitchAuditLateAt)   // 0.2.1457
+            {
+                s_stitchAuditLateAt = -1f;
+                var p = Player.m_localPlayer;
+                if (p != null) AuditVanillaBorders(p.transform.position, 64f, $"{StitchAuditLate:0} s after the flip (every border remesh landed)");
+            }
             if (FiresVoxelConfig.SeamAuditAuto == null || !FiresVoxelConfig.SeamAuditAuto.Value) return;
             if (Time.time < s_nextAuto) return;
             s_nextAuto = Time.time + 8f;
@@ -126,6 +185,100 @@ namespace VerdantsAscent.Terrain.Voxel
                 }
             }
             return faces;
+        }
+
+        // ---- 0.2.1454 (Fire 11-17, VA flat world tearing): the VOXEL / VANILLA border, which the face audit above never sees (it pairs
+        // chunk with chunk). For every chunk face whose far side is a vanilla heightmap zone (another zone, not voxel territory), every
+        // rendered vertex in the 1.05 m band is compared with that heightmap's surface at the same x, z (bilinear over its 1 m vertices):
+        //   overhang = vertices PAST the border (inside the vanilla zone): coplanar (|dy| < 1 cm: the z-fight), above, below;
+        //   on-edge  = vertices ON the border (|d| <= 1 cm; the stitch puts them there): their worst |dy| against vanilla's edge.
+        // One Warning summary line + one per face with an overhang (first 6), so a rig leg's log carries the numbers.
+        private static string AuditVanillaBorders(Vector3 center, float radius, string when = "on demand")
+        {
+            int faces = 0, facesOverhang = 0, over = 0, coplanar = 0, above = 0, below = 0, onEdge = 0, stitchedFaces = 0, reported = 0;
+            float worstOver = 0f, worstEdge = 0f, sumOver = 0f;
+            const float C = VoxelChunk.CELLS;
+            var sb = new StringBuilder(256);
+            foreach (var c in VoxelWorld.AllChunks)
+            {
+                if (c == null || c.PendingGenerate || !c.MeshAll || c.Kind != ChunkKind.Full) continue;
+                var o = c.WorldOrigin;
+                if (Mathf.Abs(o.x + 16f - center.x) > radius || Mathf.Abs(o.z + 16f - center.z) > radius) continue;
+                if (!VoxelWorld.TryGetView(c.Key, out var view) || view == null) continue;
+                var mesh = view.AuditMesh;
+                if (mesh == null || view.VertexCount == 0) continue;
+                var inside = ZoneSystem.GetZone(new Vector3(o.x + 16f, 0f, o.z + 16f));
+                Vector3[] verts = null;
+                for (int f = 0; f < 4; f++)
+                {
+                    bool xFace = f < 2, pos = (f & 1) == 0;
+                    float plane = xFace ? (pos ? o.x + C : o.x) : (pos ? o.z + C : o.z);
+                    float outward = pos ? 1f : -1f;
+                    var mid = xFace ? new Vector3(plane + outward, 0f, o.z + 16f) : new Vector3(o.x + 16f, 0f, plane + outward);
+                    var zone = ZoneSystem.GetZone(mid);
+                    if (zone == inside || VoxelZoneStreamer.IsZoneKnown(zone)) continue;
+                    var hm = Heightmap.FindHeightmap(mid);
+                    if (hm == null) continue;
+                    if (verts == null) verts = mesh.vertices;
+                    faces++;
+                    if ((c.AppliedStitchMask & (1 << f)) != 0) stitchedFaces++;
+                    int fOver = 0, fCop = 0; float fWorst = 0f;
+                    for (int i = 0; i < verts.Length; i++)
+                    {
+                        var v = verts[i];
+                        float along = xFace ? v.z - o.z : v.x - o.x;
+                        if (along < -0.6f || along > C + 0.6f) continue;
+                        float dOut = ((xFace ? v.x : v.z) - plane) * outward;   // > 0 = past the border, into the vanilla zone
+                        if (dOut < -1.05f || dOut > 1.05f) continue;
+                        if (!VanillaSurfaceAt(hm, v.x, v.z, out float hv)) continue;
+                        float dy = v.y - hv;
+                        if (Mathf.Abs(dy) > 4f) continue;   // another layer (a cave roof / floor), not the border ground
+                        if (dOut > 0.01f)
+                        {
+                            over++; fOver++; sumOver += Mathf.Abs(dy);
+                            if (Mathf.Abs(dy) < 0.01f) { coplanar++; fCop++; } else if (dy > 0f) above++; else below++;
+                            if (Mathf.Abs(dy) > worstOver) worstOver = Mathf.Abs(dy);
+                            if (Mathf.Abs(dy) > fWorst) fWorst = Mathf.Abs(dy);
+                        }
+                        else if (dOut >= -0.01f)
+                        {
+                            onEdge++;
+                            if (Mathf.Abs(dy) > worstEdge) worstEdge = Mathf.Abs(dy);
+                        }
+                    }
+                    if (fOver > 0)
+                    {
+                        facesOverhang++;
+                        if (reported++ < 6)
+                            FiresLogger.LogWarning($"[FiresVoxel] SEAM AUDIT (vanilla border) chunk {c.Key} face {(xFace ? "X" : "Z")}{(pos ? "+" : "-")}={plane:F0} vs vanilla zone ({zone.x},{zone.y}): {fOver} vert(s) overhang the border, {fCop} coplanar within 1 cm (z-fight), worst |dy| {fWorst:F3} m; stitched={(c.AppliedStitchMask & (1 << f)) != 0}");
+                    }
+                }
+            }
+            sb.Append($"[FiresVoxel] SEAM AUDIT (vanilla border, {when}, at ({center.x:0}, {center.z:0}) r {radius:0} m, stitch {(FiresVoxelConfig.VanillaBorderStitch != null && FiresVoxelConfig.VanillaBorderStitch.Value ? "ON" : "OFF")}): {faces} voxel face(s) against a vanilla heightmap ({stitchedFaces} stitched); ");
+            sb.Append($"{over} vertex(es) overhang the border into the vanilla zone ({coplanar} coplanar within 1 cm = z-fight, {above} above, {below} below; mean |dy| {(over > 0 ? sumOver / over : 0f):F3} m, worst {worstOver:F3} m) on {facesOverhang} face(s); ");
+            sb.Append($"{onEdge} vertex(es) on the border, worst |dy| vs vanilla's edge {worstEdge:F3} m. Applies so far: {VoxelMeshPipeline.s_stitchApplies} stitched mesh(es), {VoxelMeshPipeline.s_stitchVertsApplied} vertex(es) moved.");
+            FiresLogger.LogWarning(sb.ToString());
+            return sb.ToString();
+        }
+
+        // The vanilla heightmap's surface at (x, z): bilinear over its 1 m vertices (vanilla's mesh is those vertices, triangulated).
+        private static bool VanillaSurfaceAt(Heightmap hm, float x, float z, out float h)
+        {
+            h = 0f;
+            try
+            {
+                var lp = new Vector3(x, 0f, z) - hm.transform.position;
+                float s = hm.m_scale > 0f ? hm.m_scale : 1f;
+                float fx = lp.x / s + hm.m_width / 2, fz = lp.z / s + hm.m_width / 2;
+                int ix = Mathf.FloorToInt(fx), iz = Mathf.FloorToInt(fz);
+                if (ix < 0 || iz < 0 || ix > hm.m_width || iz > hm.m_width) return false;
+                int ix1 = Mathf.Min(ix + 1, hm.m_width), iz1 = Mathf.Min(iz + 1, hm.m_width);
+                float tx = fx - ix, tz = fz - iz;
+                float h00 = hm.GetHeight(ix, iz), h10 = hm.GetHeight(ix1, iz), h01 = hm.GetHeight(ix, iz1), h11 = hm.GetHeight(ix1, iz1);
+                h = Mathf.Lerp(Mathf.Lerp(h00, h10, tx), Mathf.Lerp(h01, h11, tx), tz) + hm.transform.position.y;
+                return true;
+            }
+            catch (System.ArgumentOutOfRangeException) { return false; }
         }
 
         // A has geometry in the face band but the owning neighbour chunk does

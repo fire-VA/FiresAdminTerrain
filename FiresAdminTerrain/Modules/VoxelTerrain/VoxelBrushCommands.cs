@@ -448,6 +448,8 @@ namespace VerdantsAscent.Terrain.Voxel
             // Arm the drag pump so holding LMB keeps painting this brush.
             VoxelBrushDrag.RecordCylinder(mode, radius, signedH);
 
+            // 0.2.1455 ([ghost], Voxheim diff P6): a console brush is an undo step too (Numpad 7 / 9), like a V-tool stroke
+            FatUndo.BeginPlayerEdit($"the {cmd} command");
             try
             {
                 string summary = VoxelWorld.ApplyBrush(center, radius, height, VoxelBrushShape.Cylinder, mode);
@@ -458,6 +460,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 args.Context.AddString($"{cmd} FAILED: {ex.Message}");
                 FiresLogger.LogError($"[FiresVoxel] {cmd} threw: {ex}");
             }
+            finally { FatUndo.EndPlayerEdit(); }
         }
 
         // Gizmo tools: the command stamps ONCE at the ruler point (size/mode
@@ -477,6 +480,7 @@ namespace VerdantsAscent.Terrain.Voxel
             }
 
             var mode = VerdantsAscent.Terrain.FatInput.AltHeld ? VoxelBrushMode.Carve : VoxelBrushMode.Fill;
+            FatUndo.BeginPlayerEdit($"the {cmd} command");   // 0.2.1455 ([ghost], Voxheim diff P6): undoable like a V-tool stroke
             try
             {
                 string summary = VoxelWorld.ApplyBrush(center, VoxelBrushDrag.EffectiveGizmoRadius(), 0f, shape, mode);
@@ -487,6 +491,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 args.Context.AddString($"{cmd} FAILED: {ex.Message}");
                 FiresLogger.LogError($"[FiresVoxel] {cmd} threw: {ex}");
             }
+            finally { FatUndo.EndPlayerEdit(); }
         }
 
         private static bool s_terminalHooked;

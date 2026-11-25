@@ -54,6 +54,82 @@ namespace VerdantsAscent.Terrain.Voxel
         /// <summary>Season-free colours are kept per chunk view only when Vedr is installed, so nothing is spent without it.</summary>
         internal static bool Tracking => SeasonBridge.IsAvailable;
 
+        // ── 0.2.1492 GRADUAL SNOW (Fire 11-19, verbatim: "all snow in all forms should gradually melt from the beginning of spring it should never
+        // be a hard switch") ──
+        // With Vedr 0.8.297's gradual snow the snow CLASS mask (WHERE snow can lie; all year) gates, and the world's winter-ground fill (HOW MUCH,
+        // the x of what Vedr pushes as _VedrSnowA) scales every FAT snow share and snow delta: voxel ground, FarQuilt, painted circles, skylands /
+        // legacy tiles / env boxes (BiomeColour), the distant-LOD ring and FatApi's far colour for EBM. Read through Core's SeasonBridge
+        // ("Core = bridges"), bound by reflection so FAT runs on an older Core: any getter missing, or Vedr's gradual snow off = the 0.2.1491
+        // behaviour (the winter-only SnowTerrainBiomeMask, full snow). The fill is read on the main thread a few times a second (FillDriver, gated
+        // by SnowFillRevision when present), quantised to FillStep, and each step recolours the live meshes nearest first, RecoloursPerFrame a
+        // frame (distant tiles included), never per vertex.
+        private const string ClassMaskName = "SnowClassMask", FillName = "WorldSnowFill", GradualName = "GradualSnow", FillRevisionName = "SnowFillRevision";
+        private const float FillStep = 0.05f;
+        // 0.2.1495 ([lead]: summer byte-identical to 0.2.1491): Vedr turns its vertex snow paint off at a fill <= 0.0001 (its SnowPaintOn).
+        // A fill above that which rounds to 0 is kept as MinFill (no visible snow, but the distant-ring splat reset still runs); 0 = no snow.
+        private const float MinFill = 0.0001f;
+        /// <summary>0.2.1495: no snow lies anywhere now (no snow biomes, or the gradual fill is 0): every winterize path returns its input.</summary>
+        private static bool NoSnow => s_mask == 0 || s_fill <= 0f;
+        private const float FillPollSeconds = 0.25f;
+        private static System.Func<int> s_classMaskGet, s_fillRevGet;
+        private static System.Func<Vector4> s_fillGet;
+        private static System.Func<bool> s_gradualGet;
+        private static volatile bool s_gradual;
+        private static volatile float s_fill = 1f;   // quantised winter-ground fill; 1 = full snow (the 0.2.1491 look)
+        private static int s_lastFillRev = int.MinValue;
+        private static int s_fillSteps;
+
+        private static System.Func<T> BridgeGetter<T>(string name)
+        {
+            try
+            {
+                var m = typeof(SeasonBridge).GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetGetMethod();
+                return m != null && m.ReturnType == typeof(T) ? (System.Func<T>)System.Delegate.CreateDelegate(typeof(System.Func<T>), m, false) : null;
+            }
+            catch { return null; }
+        }
+
+        private static void BindGradual()
+        {
+            s_classMaskGet = BridgeGetter<int>(ClassMaskName);
+            s_fillGet = BridgeGetter<Vector4>(FillName);
+            s_gradualGet = BridgeGetter<bool>(GradualName);
+            s_fillRevGet = BridgeGetter<int>(FillRevisionName);
+        }
+
+        private static bool GradualBound => s_classMaskGet != null && s_fillGet != null && s_gradualGet != null;
+
+        // MAIN thread (the bridge getters). The gate and the amount as Vedr has them now.
+        private static void ReadLive(out bool gradual, out int mask, out float fill)
+        {
+            gradual = false;
+            try { gradual = GradualBound && SeasonBridge.IsAvailable && s_gradualGet(); } catch { gradual = false; }
+            if (!gradual) { mask = SeasonBridge.SnowTerrainBiomeMask; fill = 1f; return; }
+            mask = s_classMaskGet();
+            float f = Mathf.Clamp01(s_fillGet().x);
+            fill = Mathf.Clamp01(Mathf.Round(f / FillStep) * FillStep);
+            if (fill <= 0f && f > MinFill) fill = MinFill;   // 0.2.1495: a last trace (Vedr still paints the splat above 0.0001) keeps the distant-ring reset running; 0 only when Vedr says 0
+        }
+
+        private sealed class FillDriver : MonoBehaviour
+        {
+            private float _next;
+
+            private void Update()
+            {
+                if (Time.unscaledTime < _next) return;
+                _next = Time.unscaledTime + FillPollSeconds;
+                if (s_fillRevGet != null)
+                {
+                    int rev;
+                    try { rev = s_fillRevGet(); } catch { rev = int.MinValue; }
+                    if (rev == s_lastFillRev) return;
+                    s_lastFillRev = rev;
+                }
+                Refresh("Vedr's snow fill moved");
+            }
+        }
+
         internal static void Register()
         {
             SeasonBridge.RegisterGroundOwner(VoxelZoneStreamer.OwnsGround);
@@ -68,6 +144,13 @@ namespace VerdantsAscent.Terrain.Voxel
                 FiresLogger.LogInfo("[FiresSeasons] Vedr is not installed: FAT ground and water keep their summer look.");
                 return;
             }
+            BindGradual();   // 0.2.1492
+            ReadLive(out bool gradual, out s_mask, out float fill);
+            s_gradual = gradual; s_fill = fill;
+            FiresLogger.LogInfo(GradualBound
+                ? $"[FiresSeasons] gradual snow: SeasonBridge {ClassMaskName} / {FillName} / {GradualName} found{(s_fillRevGet != null ? $" (+ {FillRevisionName})" : "")}; Vedr's gradual snow is {(gradual ? "on" : "off")}: FAT ground snow = class mask x winter-ground fill in {FillStep:0.00} steps (0.2.1492)."
+                : $"[FiresSeasons] gradual snow unavailable (this Core's SeasonBridge has no {ClassMaskName} / {FillName} / {GradualName}): FAT ground snows by the winter mask, full or none, as before 0.2.1492.");
+            if (GradualBound) Object.DontDestroyOnLoad(new GameObject("FiresSeasonFill").AddComponent<FillDriver>().gameObject);
             Object.DontDestroyOnLoad(new GameObject("FiresSeasonIce").AddComponent<IceDriver>().gameObject);
             FiresLogger.LogInfo("[FiresSeasons] Vedr seasons found: voxel ground snows at render time, still water freezes in winter; " +
                                 "quake scars, 3D cracks and meteor craters are cut into voxel ground, Vedr's lake ice stays off it and FAT water.");
@@ -93,6 +176,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (st.Ice >= VerdantsAscent.Water.Core.WaterStateField.IceSolid) return AlwaysFrozenReachM;
                 if (st.Lava >= 0.05f || st.Crust >= 0.05f || st.Ice >= 0.2f) return 0f;
             }
+            if (VerdantsAscent.Water.Core.SeasonalIce.External) return 0f;   // 0.2.1496: with a seasonal provider the ice is the state field above only (no second, instant season rule)
             if (s_iceStep == 0 || (SeasonBridge.WinterBiomeMask & (int)BiomeManager.GetBiomeAt(wx, wz)) == 0) return 0f;
             return FiresWorldGenBase.MaxSeasonalIceDepthM * s_iceStep / IceSteps;
         }
@@ -106,6 +190,7 @@ namespace VerdantsAscent.Terrain.Voxel
             {
                 if (Time.unscaledTime < _nextPoll) return;
                 _nextPoll = Time.unscaledTime + IcePollSeconds;
+                if (VerdantsAscent.Water.Core.SeasonalIce.External) return;   // 0.2.1496: no instant season reach with a seasonal provider (IceReachAt)
                 bool freezing = SeasonBridge.FreezesLakes;
                 int step = freezing ? Mathf.Clamp(Mathf.FloorToInt(SeasonBridge.SnowAmount01 * IceSteps), 0, IceSteps) : 0;
                 if (step == s_iceStep) return;
@@ -132,22 +217,41 @@ namespace VerdantsAscent.Terrain.Voxel
             return count;
         }
 
-        private static void OnVisualsChanged(int season, int stage)
+        private static void OnVisualsChanged(int season, int stage) => Refresh("Vedr's season visuals changed");
+
+        // 0.2.1492: the one place the snow gate (mask) and amount (fill) change; a change recolours the live meshes nearest first.
+        private static void Refresh(string why)
         {
-            int mask = SeasonBridge.SnowTerrainBiomeMask;
-            if (mask == s_mask) return;
+            ReadLive(out bool gradual, out int mask, out float fill);
+            if (mask == s_mask && fill == s_fill && gradual == s_gradual) return;
+            bool fillOnly = mask == s_mask && gradual == s_gradual;
             s_mask = mask;
+            s_fill = fill;
+            s_gradual = gradual;
             s_memoZx = int.MinValue;
             System.Threading.Interlocked.Increment(ref s_winterRevision);   // 0.2.1444: FatApi.FarWinterRevision
+            if (fillOnly) s_fillSteps++;
             if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
-            FarQuilt.RecolourForSeason();
-            if (DistantSnow != null && DistantSnow.Value) RebuildDistantLod("Vedr's snow biomes changed");   // 0.2.1441
             s_jobs.Clear();
+            // 0.2.1441 distant ring: since 0.2.1492 queued with the other recolours (a few a frame, nearest first), not all poked in one frame
+            int distant = 0;
+            if (DistantSnow != null && DistantSnow.Value)
+            {
+                var tiles = VerdantsAscent.Terrain.Paint.DistantHeightCache.DistantTiles();   // 0.2.1442: GetAllHeightmaps() holds NEAR tiles only
+                for (int i = 0; i < tiles.Count; i++)
+                {
+                    var hm = tiles[i];
+                    if (hm == null || !hm.isActiveAndEnabled) continue;
+                    s_jobs.Add(new Recolour(hm.transform.position, () => { if (hm != null && hm.isActiveAndEnabled) try { hm.Poke(); } catch { } }));
+                    distant++;
+                }
+            }
             VoxelWorld.CollectViews(s_views);
             foreach (VoxelChunkView view in s_views)
                 if (view != null) s_jobs.Add(new Recolour(view.WorldCentre, () => { if (view != null) view.RecolourForSeason(); }));
             s_views.Clear();
-            int views = s_jobs.Count;
+            int views = s_jobs.Count - distant;
+            FarQuilt.CollectSeasonRecolours(s_jobs);   // 0.2.1492: queued per tile (was FarQuilt.RecolourForSeason, every tile in one frame)
             ZoneModeBorderWalls.CollectSeasonRecolours(s_jobs);
             ZoneModeSkylands.CollectSeasonRecolours(s_jobs);
             Persistence.TileMeshRenderer.CollectSeasonRecolours(s_jobs);
@@ -156,8 +260,12 @@ namespace VerdantsAscent.Terrain.Voxel
             s_nextJob = 0;
             if (s_recolour == null) s_recolour = new GameObject("FiresSeasons").AddComponent<RecolourDriver>();
             s_recolour.enabled = true;
-            FiresLogger.LogInfo($"[FiresSeasons] snow biomes now {(Heightmap.Biome)mask}: recolouring {views} voxel chunk view(s) and " +
-                                $"{s_jobs.Count - views} border wall / far top / skyland / legacy tile piece(s) nearest first.");
+            string head = fillOnly
+                ? $"[FiresSeasons] snow fill now {fill:0.00} (step {s_fillSteps} this session; {why})"
+                : $"[FiresSeasons] snow biomes now {(Heightmap.Biome)mask}, fill {fill:0.00}{(gradual ? " (gradual)" : "")} ({why})";
+            int resetSince = s_lodReset; s_lodReset = 0;   // counted as the distant tiles rebuild (after their Poke), so this is the LAST step's total
+            FiresLogger.LogInfo($"{head}: recolouring {views} voxel chunk view(s), {distant} distant tile(s), {resetSince} splat vertex(es) reset since the last step, and " +
+                                $"{s_jobs.Count - views - distant} far quilt tile / border wall / far top / skyland / legacy tile piece(s) nearest first, {RecoloursPerFrame} a frame (0.2.1492).");
         }
 
         /// <summary>
@@ -191,7 +299,7 @@ namespace VerdantsAscent.Terrain.Voxel
         /// <summary>The colours a voxel mesh is drawn with: the season-free ones, plus winter where it is winter.</summary>
         internal static List<Color32> RenderColors(List<Color32> seasonFree, List<Vector3> worldVerts)
         {
-            if (s_mask == 0) return seasonFree;
+            if (NoSnow) return seasonFree;
             s_colorScratch.Clear();
             for (int i = 0; i < seasonFree.Count; i++)
                 s_colorScratch.Add(WinterizeVoxel(seasonFree[i], worldVerts[i]));
@@ -200,8 +308,13 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static List<Color32> RenderColors(Color32[] seasonFree, int count, Mesh mesh)
         {
-            mesh.GetVertices(s_vertexScratch);
             s_colorScratch.Clear();
+            if (NoSnow)   // 0.2.1495: the season-free colours as they are (what 0.2.1491's summer drew), no vertex read, no per-vertex work
+            {
+                for (int i = 0; i < count; i++) s_colorScratch.Add(seasonFree[i]);
+                return s_colorScratch;
+            }
+            mesh.GetVertices(s_vertexScratch);
             for (int i = 0; i < count; i++)
                 s_colorScratch.Add(WinterizeVoxel(seasonFree[i], s_vertexScratch[i]));
             return s_colorScratch;
@@ -213,7 +326,7 @@ namespace VerdantsAscent.Terrain.Voxel
         /// </summary>
         internal static Color32 Winterize(Color32 c, float wx, float wz)
         {
-            if (s_mask == 0) return c;
+            if (NoSnow) return c;
             if (BiomePaint.TryGround(wx, wz, out var ground, out var circle)) return WinterizePainted(c, ground, circle, wx, wz);
             return WorldWinter(c, wx, wz);
         }
@@ -226,8 +339,14 @@ namespace VerdantsAscent.Terrain.Voxel
         /// biome's colour, or the snow splat while Vedr snows over that biome. Reads Vedr's live mask, because Vedr starts
         /// repainting vanilla heightmaps before it raises the season event.
         /// </summary>
-        internal static Color32 BiomeColour(Heightmap.Biome biome) =>
-            (SeasonBridge.SnowTerrainBiomeMask & (int)biome) != 0 ? SnowColour : Heightmap.GetBiomeColor(biome);
+        internal static Color32 BiomeColour(Heightmap.Biome biome)
+        {
+            if (!s_gradual) return (SeasonBridge.SnowTerrainBiomeMask & (int)biome) != 0 ? SnowColour : Heightmap.GetBiomeColor(biome);
+            // 0.2.1492 gradual: the class mask gates, the fill decides how white (cached by Refresh, so no bridge call per vertex)
+            float fill = s_fill;
+            if ((s_mask & (int)biome) == 0 || fill <= 0f) return Heightmap.GetBiomeColor(biome);
+            return fill >= 1f ? SnowColour : Color32.Lerp(Heightmap.GetBiomeColor(biome), SnowColour, fill);
+        }
 
         private static Color32 WinterizeVoxel(Color32 c, Vector3 v)
         {
@@ -255,7 +374,7 @@ namespace VerdantsAscent.Terrain.Voxel
         /// </summary>
         private static Color32 WorldWinter(Color32 c, float wx, float wz)
         {
-            if (s_mask == 0) return c;
+            if (NoSnow) return c;
             CornerWeights(wx, wz, out float ix, out float iz);
             if (s_memoFlat) return c;
             Vector4 d = Vector4.Lerp(Vector4.Lerp(s_d0, s_d1, ix), Vector4.Lerp(s_d2, s_d3, ix), iz);
@@ -270,7 +389,7 @@ namespace VerdantsAscent.Terrain.Voxel
         /// </summary>
         internal static Color32 WinterizePainted(Color32 painted, Heightmap.Biome ground, BiomePaint.Circle circle, float wx, float wz)
         {
-            if (s_mask == 0) return painted;
+            if (NoSnow) return painted;
             CornerWeights(wx, wz, out float ix, out float iz);
             float worldSnow = Mathf.Lerp(Mathf.Lerp(s_s0, s_s1, ix), Mathf.Lerp(s_s2, s_s3, ix), iz);
             float band = Mathf.Min(PaintRimBlendM, circle.R * PaintRimBlendMaxShareOfRadius);
@@ -323,6 +442,7 @@ namespace VerdantsAscent.Terrain.Voxel
         private static readonly AccessTools.FieldRef<Heightmap, bool> s_lodIsDistant = AccessTools.FieldRefAccess<Heightmap, bool>("m_isDistantLod");
         private static readonly List<Color32> s_lodCols = new List<Color32>(8192);
         private static int s_lodTiles, s_lodChanged; private static double s_lodMs; private static float s_lodLogAt; private static bool s_lodSaid;
+        private static int s_lodReset;   // 0.2.1492: snow-splat distant vertices reset to their true biome colour since the last fill step
 
         internal static void BindDistantSnow(BepInEx.Configuration.ConfigFile cfg)
         {
@@ -335,7 +455,7 @@ namespace VerdantsAscent.Terrain.Voxel
         /// <summary>FAT's one Heightmap.RebuildRenderMesh postfix (after the env-box and biome-paint colours): winter on a distant-LOD tile.</summary>
         internal static void WinterizeDistantLod(Heightmap hm)
         {
-            if (s_mask == 0 || DistantSnow == null || !DistantSnow.Value || hm == null || !s_lodIsDistant(hm)) return;
+            if (NoSnow || DistantSnow == null || !DistantSnow.Value || hm == null || !s_lodIsDistant(hm)) return;
             if (!VoxelOnlyRenderMesh.Allow(hm)) return;   // FAT's prefix skipped vanilla's rebuild (voxel-only world with FarQuilt): colours are old, never winterize twice
             var mesh = s_lodMesh(hm);
             if (mesh == null) return;
@@ -347,6 +467,14 @@ namespace VerdantsAscent.Terrain.Voxel
             Vector3 p = hm.transform.position;
             float x0 = p.x - hm.m_width * scale * 0.5f, z0 = p.z - hm.m_width * scale * 0.5f;   // vanilla's own vertex origin (RebuildRenderMesh)
             int changed = 0;
+            // 0.2.1492 ([lead] GO, Fire "never a hard switch"): Vedr 0.8.297 paints the snow splat into every terrain build while its fill > 0,
+            // distant tiles included, and those draw no fill-aware shader, so the ring stayed fully white through the melt and flipped at fill 0.
+            // While gradual and part-melted, a vertex that is EXACTLY the snow splat over a snow-class worldgen biome whose own colour is not the
+            // splat (never real Mountain / Deep North) goes back to that biome's true colour (FatFarData.SplatOf, pure table) BEFORE Winterize,
+            // so the fill decides its whiteness in the same 0.05 steps as FAT's ground. A boundary vertex vanilla blended from two biomes is not
+            // exactly the splat and is left as it is (UNCONFIRMED how many there are).
+            bool reset = s_gradual && s_fill < 1f && WorldGenerator.instance != null;
+            Color32 splat = FatFarData.SplatOf(Heightmap.Biome.Mountain);
             for (int i = 0; i < n; i++)
             {
                 float wz = z0 + i * scale;
@@ -354,6 +482,15 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int j = 0; j < n; j++)
                 {
                     Color32 c = s_lodCols[row + j];
+                    if (reset && SameColour(c, splat))
+                    {
+                        var b = WorldGenerator.instance.GetBiome(x0 + j * scale, wz);
+                        if ((s_mask & (int)b) != 0 && b != Heightmap.Biome.Mountain && b != Heightmap.Biome.DeepNorth)
+                        {
+                            var own = FatFarData.SplatOf(b);
+                            if (!SameColour(own, splat)) { c = own; s_lodReset++; }
+                        }
+                    }
                     Color32 w = Winterize(c, x0 + j * scale, wz);
                     if (w.r == c.r && w.g == c.g && w.b == c.b && w.a == c.a) continue;
                     s_lodCols[row + j] = w;
@@ -388,13 +525,14 @@ namespace VerdantsAscent.Terrain.Voxel
         }
 
         /// <summary>1 where the ground is white now: a biome Vedr snows over, or one whose own colour is the snow splat.</summary>
+        // 0.2.1492: a biome Vedr snows over is white by the fill (1 outside gradual snow); one whose own colour is the snow splat stays 1.
         private static float SnowShare(Heightmap.Biome biome) =>
-            (s_mask & (int)biome) != 0 || SameColour(Heightmap.GetBiomeColor(biome), SnowColour) ? 1f : 0f;
+            SameColour(Heightmap.GetBiomeColor(biome), SnowColour) ? 1f : (s_mask & (int)biome) != 0 ? s_fill : 0f;
 
         private static bool SameColour(Color32 a, Color32 b) => a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
 
         private static Vector4 SnowDelta(Heightmap.Biome biome) =>
-            (s_mask & (int)biome) == 0 ? Vector4.zero : AsVector(SnowColour) - AsVector(Heightmap.GetBiomeColor(biome));
+            (s_mask & (int)biome) == 0 || s_fill <= 0f ? Vector4.zero : (AsVector(SnowColour) - AsVector(Heightmap.GetBiomeColor(biome))) * s_fill;   // 0.2.1492: x fill
 
         private static Vector4 AsVector(Color32 c) => new Vector4(c.r, c.g, c.b, c.a);
 
@@ -409,8 +547,8 @@ namespace VerdantsAscent.Terrain.Voxel
 
         internal static Color32 WinterizeAnyThread(Color32 c, float wx, float wz, WorldGenerator wg)
         {
-            int mask = s_mask;
-            if (mask == 0 || wg == null) return c;
+            int mask = s_mask; float fill = s_fill;   // 0.2.1492: one read of each, any thread (volatile)
+            if (mask == 0 || fill <= 0f || wg == null) return c;   // 0.2.1495: no snow lying = the 0.2.1491 summer (nothing added)
             int zx = Mathf.FloorToInt((wx + ZoneHalf) / ZoneSize), zz = Mathf.FloorToInt((wz + ZoneHalf) / ZoneSize);
             float x0 = zx * ZoneSize - ZoneHalf, z0 = zz * ZoneSize - ZoneHalf;
             float ix = (wx - x0) / ZoneSize, iz = (wz - z0) / ZoneSize;
@@ -418,21 +556,22 @@ namespace VerdantsAscent.Terrain.Voxel
             Heightmap.Biome b2 = wg.GetBiome(x0, z0 + ZoneSize), b3 = wg.GetBiome(x0 + ZoneSize, z0 + ZoneSize);
             if (BiomePaint.TryGround(wx, wz, out var ground, out var circle))
             {
-                float worldSnow = Mathf.Lerp(Mathf.Lerp(SnowShare(mask, b0), SnowShare(mask, b1), ix), Mathf.Lerp(SnowShare(mask, b2), SnowShare(mask, b3), ix), iz);
+                float worldSnow = Mathf.Lerp(Mathf.Lerp(SnowShare(mask, fill, b0), SnowShare(mask, fill, b1), ix), Mathf.Lerp(SnowShare(mask, fill, b2), SnowShare(mask, fill, b3), ix), iz);
                 float band = Mathf.Min(PaintRimBlendM, circle.R * PaintRimBlendMaxShareOfRadius);
                 float inward = Mathf.Clamp01(circle.Rim(wx, wz, band) / band);
-                return Color32.Lerp(c, FatFarData.SplatOf(Heightmap.Biome.Mountain), Mathf.Lerp(worldSnow, SnowShare(mask, ground), inward));   // 0.2.1446: pure table, never the patched GetBiomeColor off the main thread
+                return Color32.Lerp(c, FatFarData.SplatOf(Heightmap.Biome.Mountain), Mathf.Lerp(worldSnow, SnowShare(mask, fill, ground), inward));   // 0.2.1446: pure table, never the patched GetBiomeColor off the main thread
             }
-            Vector4 d0 = SnowDelta(mask, b0), d1 = SnowDelta(mask, b1), d2 = SnowDelta(mask, b2), d3 = SnowDelta(mask, b3);
+            Vector4 d0 = SnowDelta(mask, fill, b0), d1 = SnowDelta(mask, fill, b1), d2 = SnowDelta(mask, fill, b2), d3 = SnowDelta(mask, fill, b3);
             if (d0 == Vector4.zero && d1 == Vector4.zero && d2 == Vector4.zero && d3 == Vector4.zero) return c;
             Vector4 d = Vector4.Lerp(Vector4.Lerp(d0, d1, ix), Vector4.Lerp(d2, d3, ix), iz);
             return new Color32(Channel(c.r, d.x), Channel(c.g, d.y), Channel(c.b, d.z), Channel(c.a, d.w));
         }
 
-        private static float SnowShare(int mask, Heightmap.Biome biome) =>
-            (mask & (int)biome) != 0 || SameColour(FatFarData.SplatOf(biome), FatFarData.SplatOf(Heightmap.Biome.Mountain)) ? 1f : 0f;
+        // 0.2.1492: x the fill, as the main-thread SnowShare / SnowDelta above (pure table, thread-safe)
+        private static float SnowShare(int mask, float fill, Heightmap.Biome biome) =>
+            SameColour(FatFarData.SplatOf(biome), FatFarData.SplatOf(Heightmap.Biome.Mountain)) ? 1f : (mask & (int)biome) != 0 ? fill : 0f;
 
-        private static Vector4 SnowDelta(int mask, Heightmap.Biome biome) =>
-            (mask & (int)biome) == 0 ? Vector4.zero : AsVector(FatFarData.SplatOf(Heightmap.Biome.Mountain)) - AsVector(FatFarData.SplatOf(biome));   // 0.2.1446: pure table (thread-safe)
+        private static Vector4 SnowDelta(int mask, float fill, Heightmap.Biome biome) =>
+            (mask & (int)biome) == 0 || fill <= 0f ? Vector4.zero : (AsVector(FatFarData.SplatOf(Heightmap.Biome.Mountain)) - AsVector(FatFarData.SplatOf(biome))) * fill;   // 0.2.1446: pure table (thread-safe)
     }
 }

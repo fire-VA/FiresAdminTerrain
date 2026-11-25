@@ -120,6 +120,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void Initialize(Vector3 center, float radius)
         {
+            global::VerdantsAscent.Terrain.FatUndo.IceSheetBefore(this, true);   // 0.2.1502: FatUndo IceSheetMade_Undo, was a Harmony patch on this FAT method
             _noiseSeed = (s_instanceCounter++) * 137.5f;
             IceSurfaceY = center.y;
             _iceMaterial = WaterMaterialManager.GetMaterial(CustomLiquidType.Ice);
@@ -154,6 +155,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void AddFootprint(Vector3 center, float radius)
         {
+            global::VerdantsAscent.Terrain.FatUndo.IceSheetBefore(this, false);   // 0.2.1502: FatUndo IceSheetEdits_Undo, was a Harmony patch on this FAT method
             _footprints.Add(new IceDiskFootprint { Center = center, Radius = radius });
             ExpandHeightGrid();
             RebuildMesh();
@@ -187,6 +189,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void ModifyHeights(Vector3 worldPos, float delta, float radius)
         {
+            global::VerdantsAscent.Terrain.FatUndo.IceSheetBefore(this, false);   // 0.2.1502: FatUndo IceSheetEdits_Undo, was a Harmony patch on this FAT method
             if (_heights == null || _heights.Length == 0) return;
 
             bool modified = false;
@@ -228,6 +231,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void LevelHeights(Vector3 worldPos, float radius, float targetHeight)
         {
+            global::VerdantsAscent.Terrain.FatUndo.IceSheetBefore(this, false);   // 0.2.1502: FatUndo IceSheetEdits_Undo, was a Harmony patch on this FAT method
             if (_heights == null || _heights.Length == 0) return;
 
             bool modified = false;
@@ -268,6 +272,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void SmoothHeights(Vector3 worldPos, float radius, int passes = 3)
         {
+            global::VerdantsAscent.Terrain.FatUndo.IceSheetBefore(this, false);   // 0.2.1502: FatUndo IceSheetEdits_Undo, was a Harmony patch on this FAT method
             if (_heights == null || _heights.Length == 0) return;
 
             float[] smoothed = new float[_heights.Length];
@@ -355,6 +360,7 @@ namespace VerdantsAscent.Water.Core
         /// </summary>
         public void Remove()
         {
+            global::VerdantsAscent.Terrain.FatUndo.IceSheetBefore(this, false);   // 0.2.1502: FatUndo IceSheetEdits_Undo, was a Harmony patch on this FAT method
             s_allLandIce.Remove(this);
             Cleanup();
 

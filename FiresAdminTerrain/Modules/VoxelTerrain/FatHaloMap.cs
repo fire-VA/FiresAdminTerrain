@@ -43,20 +43,20 @@ namespace VerdantsAscent.Terrain.Voxel
             return o + new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * (r - 1.5f) + Vector3.up * (sz / k);
         }
 
-        [HarmonyPatch(typeof(Minimap), "WorldToMapPoint")]
-        private static class StripWorldToMapPoint
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class StripWorldToMapPoint
         {
             private static void Prefix(Minimap __instance, ref Vector3 p) { if (FatHaloArc.RingOnly) p = Unroll(__instance, p); }
         }
 
-        [HarmonyPatch(typeof(Minimap), "WorldToPixel")]
-        private static class StripWorldToPixel
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class StripWorldToPixel
         {
             private static void Prefix(Minimap __instance, ref Vector3 p) { if (FatHaloArc.RingOnly) p = Unroll(__instance, p); }
         }
 
-        [HarmonyPatch(typeof(Minimap), "MapPointToWorld")]
-        private static class StripMapPointToWorld
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class StripMapPointToWorld
         {
             private static void Postfix(Minimap __instance, ref Vector3 __result)
             {
@@ -69,8 +69,8 @@ namespace VerdantsAscent.Terrain.Voxel
         // tangent) and map up = the axis, at the same metres-per-pixel, so the heading is the camera forward split into those two.
         private static bool s_arrowLogged;
 
-        [HarmonyPatch(typeof(Minimap), "UpdatePlayerMarker")]
-        private static class StripPlayerArrow
+        // 0.2.1479: patched only on a ring world (FatRingPatches), no [HarmonyPatch] attribute
+        internal static class StripPlayerArrow
         {
             private static void Postfix(Minimap __instance, Player player, Quaternion playerRot)
             {
