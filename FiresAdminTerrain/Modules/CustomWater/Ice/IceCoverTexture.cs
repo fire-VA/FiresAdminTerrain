@@ -30,6 +30,22 @@ namespace VerdantsAscent.Water.Core
 
         private static Texture2D s_tex;
         private static readonly byte[] s_back = new byte[Size * Size];
+        // 0.2.1446 (Fire's ice spec, agreed with [seasons] + [visual]): G = CALM. 1 where open water cannot reach the rect border through open water
+        // (enclosed by fixed ice and / or land); EBM's water scales tide + waves by (1 - max(R, G)). Flood fill from the border water texels after
+        // each fill (land texels at the border are NOT seeds, so a lake touching the rect edge across land is not opened by it). Vedr 0.8.264 runs
+        // the same rule on its own lake grid for the physics. R is unchanged; the texture is RG8 (TextureFormat.RG16 = two 8-bit channels), linear.
+        private const byte IcedAt = 128;   // R >= 0.5 counts as frozen (Vedr's IsLakeIceAt is binary per 1 m cell: a plate rim reads ~0.5 on a 2 m texel)
+        private static readonly byte[] s_landMask = new byte[Size * Size], s_movedLand = new byte[Size * Size], s_calm = new byte[Size * Size];
+        // 0.2.1448 ([lead] / [visual] spec, EBM 1.2.422 + FTS 0.3.402 read it): B = ice PROXIMITY, the fixed-ice cover R blurred over ~32 m
+        // (separable tent = two box passes of radius ProxBoxRadius texels on the 2 m grid, zero outside the rect, border ring forced to 0), linear.
+        // The texture is RGBA32 (A unused, 0). _FiresIceProxOn = 1 while B is valid. CPU: FatApi.TryIceProxAt (same snapshot as TryCalmAt).
+        private const int ProxBoxRadius = 4;   // 9 texels = 18 m per box; two boxes = a tent ~34 m wide
+        private static readonly byte[] s_rgba = new byte[Size * Size * 4];
+        private static readonly byte[] s_prox = new byte[Size * Size];
+        private static readonly float[] s_blurA = new float[Size * Size], s_blurB = new float[Size * Size];
+        private static readonly int ProxOnId = Shader.PropertyToID("_FiresIceProxOn");
+        private static readonly int[] s_queue = new int[Size * Size];
+        private static int s_calmTexels; private static double s_floodMs;
         private static Vector2 s_origin, s_building;
         private static int s_row = -1, s_iced, s_uploads, s_fills;
         private static float s_nextAt, s_logAt;
@@ -48,7 +64,7 @@ namespace VerdantsAscent.Water.Core
         private static Func<int> s_vedrRevGet;
 
         // 0.2.1360 ([seasons] for Fire 11-03: "so we dont show the water and waves swelling over the ice"; fires_mesh_at -4170 9145 16: 6 vanilla IceShore_1 plates, top y 30.43, sea 30, none in the cover):
-        // vanilla sea ice plates register a disc while they exist (VanillaIcePlate, event driven, grid bucketed) and Vedr's floes join by VedrApi.IsSeaIceAt / SeaIceRevision. Both refill the cover at most every RefreshSeconds.
+        // vanilla sea ice plates register a disc while they exist (VanillaIcePlate, event driven, grid bucketed) (Vedr's floes joined too until 0.2.1446: no longer, they ride the tide). Plates refill the cover at most every RefreshSeconds.
         private static readonly string[] VanillaIcePrefabs = { "IceShore_1", "IceShore", "ice1" };
         private const float PlateCellM = 32f, PlateAtSeaM = 0.5f;
         internal sealed class Plate { public float X, Z, R; }
@@ -151,7 +167,7 @@ namespace VerdantsAscent.Water.Core
                 if (sm != null && sm.ReturnType == typeof(bool)) s_seaIce = (Func<Vector3, bool>)Delegate.CreateDelegate(typeof(Func<Vector3, bool>), sm);
                 var sp = t.GetProperty("SeaIceRevision", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
                 if (sp != null && sp.PropertyType == typeof(int)) s_seaRevGet = (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), sp.GetGetMethod());
-                FiresLogger.LogInfo($"[IceCover] Vedr sea ice (floes) joins _FiresIceCover: IsSeaIceAt {(s_seaIce != null ? "bound" : "not in this Vedr")}, SeaIceRevision {(s_seaRevGet != null ? "bound" : "not in this Vedr")} (0.2.1360; Info since 0.2.1418)");
+                FiresLogger.LogInfo("[IceCover] Vedr sea ice (floes) stays OUT of _FiresIceCover: floes ride the real tide and waves, the cover holds fixed ice only (0.2.1446)");
                 FiresLogger.LogInfo($"[IceCover] Vedr lake ice joins _FiresIceCover: IsLakeIceAt {(s_vedrIce != null ? "bound" : "MISSING")}, LakeIceRevision {(s_vedrRevGet != null ? "bound" : "not in this Vedr (timer refresh only)")} (0.2.1260)");
             }
             catch (Exception ex) { s_vedrIce = null; s_vedrRevGet = null; FiresLogger.LogDebug($"[IceCover] Vedr bind threw: {ex.Message}"); }
@@ -197,8 +213,7 @@ namespace VerdantsAscent.Water.Core
                 if (now >= s_nextAt)   // 0.2.1360: plates load in bursts and floes drift, so these two wait for the refresh
                 {
                     if (s_plateRev != s_plateRevSeen) { s_plateRevSeen = s_plateRev; moved = true; cameraOnly = false; }
-                    int srev = SeaRevision();
-                    if (srev != s_seaRev) { s_seaRev = srev; moved = true; cameraOnly = false; }
+                    // 0.2.1446: floes are out of the cover, so Vedr's SeaIceRevision no longer refills it
                 }
                 // 0.2.1401 (ptimer4b fly circle: ice cover 12.8 ms/s mean, 70 peak; Vedr's LakeIceRevision rose 62 -> 422 while flying, each rise a
                 // whole 16384-texel fill that also threw away the camera-move reuse): with the key on a lake ice change waits for the refresh.
@@ -244,11 +259,17 @@ namespace VerdantsAscent.Water.Core
                     if (prof) { t1 = Stopwatch.GetTimestamp(); s_tIce += t1 - t0; t0 = t1; }
                     if (v == 0) { if (VedrIce(new Vector3(x, water, z))) { v = 255; s_iced++; s_vedr++; } if (prof) { t1 = Stopwatch.GetTimestamp(); s_tVedr += t1 - t0; t0 = t1; } }   // 0.2.1260: Vedr's lake ice counts as a full sheet
                     if (v == 0) { if (PlateIce(x, z)) { v = 255; s_iced++; s_plateTexels++; } if (prof) { t1 = Stopwatch.GetTimestamp(); s_tPlate += t1 - t0; t0 = t1; } }   // 0.2.1360
-                    if (v == 0) { if (SeaIce(new Vector3(x, water, z))) { v = 255; s_iced++; s_seaTexels++; } if (prof) { t1 = Stopwatch.GetTimestamp(); s_tSea += t1 - t0; t0 = t1; } }   // 0.2.1360
+                    // 0.2.1446 ([lead] / [seasons] for Fire's ice spec): Vedr's sea FLOES no longer join the cover. They float on the real tide and waves
+                    // now, so the cover holds FIXED ice only (FAT ice, Vedr lake sheets, vanilla plates); with a floe in it the water shader zeroed tide
+                    // and waves under the floe and drew a 1.55 m mound / wall (log :36427 "219 from Vedr floes"). The 0.2.1360 SeaIce lookup was here.
+                    long tl = prof ? Stopwatch.GetTimestamp() : 0;
+                    bool land = IsLand(x, z, water) && !GenWaterAt(x, z);   // 0.2.1446: every fill (the calm flood needs it), was Debug only; FAT generated water above the sea (Fires worlds' inland lakes) is water, not land
+                    s_landMask[s_row * Size + i] = land ? (byte)1 : (byte)0;
                     if (prof)
                     {
                         s_texels++;
-                        if (IsLand(x, z, water))
+                        s_tLand += Stopwatch.GetTimestamp() - tl;
+                        if (land)
                         {
                             s_land++;
                             if (v != 0)
@@ -261,7 +282,6 @@ namespace VerdantsAscent.Water.Core
                                 else s_landIcedField++;
                             }
                         }
-                        s_tLand += Stopwatch.GetTimestamp() - t0;
                     }
                     s_back[s_row * Size + i] = v;
                 }
@@ -294,6 +314,13 @@ namespace VerdantsAscent.Water.Core
             return hm != null && hm.GetWorldHeight(p, out float h) && h > water + LandMarginM;
         }
 
+        // 0.2.1446: FAT's generated river / lake water (inland, above the sea on Fires worlds); vanilla worlds have none (Ready false or no water).
+        private static bool GenWaterAt(float x, float z)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.GenWaterField.Ready && global::VerdantsAscent.Terrain.Voxel.GenWaterField.TryWaterSurfaceSmooth(x, z, out _, out float depth) && depth > 0.05f; }
+            catch { return false; }
+        }
+
         private static double TickMs(long t) => t * 1000.0 / Stopwatch.Frequency;
 
         private static bool? s_vedrWaitsSaid;   // 0.2.1401
@@ -315,33 +342,190 @@ namespace VerdantsAscent.Water.Core
                 for (int i = 0; i < Size; i++)
                 {
                     int oldI = i + s_reuseDx, oldR = r + s_reuseDz;
-                    byte v = oldI >= 0 && oldI < Size && oldR >= 0 && oldR < Size ? s_back[oldR * Size + oldI] : (byte)0;
+                    bool inOld = oldI >= 0 && oldI < Size && oldR >= 0 && oldR < Size;
+                    byte v = inOld ? s_back[oldR * Size + oldI] : (byte)0;
                     s_moved[r * Size + i] = v;
+                    s_movedLand[r * Size + i] = inOld ? s_landMask[oldR * Size + oldI] : (byte)0;   // 0.2.1446: the land mask moves with R
                     if (v != 0) s_iced++;
                 }
             System.Buffer.BlockCopy(s_moved, 0, s_back, 0, s_moved.Length);
+            System.Buffer.BlockCopy(s_movedLand, 0, s_landMask, 0, s_movedLand.Length);
         }
 
         private static void Upload()
         {
             if (s_tex == null)
             {
-                s_tex = new Texture2D(Size, Size, TextureFormat.R8, false, true) { name = "FiresIceCover", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-                FiresLogger.LogInfo($"[IceCover] _FiresIceCover on: {Size}x{Size} R8 over {SideM:0} m around the camera ({StepM:0.0} m per texel) for water shaders (0.2.1227)");
+                s_tex = new Texture2D(Size, Size, TextureFormat.RGBA32, false, true) { name = "FiresIceCover", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+                FiresLogger.LogInfo($"[IceCover] _FiresIceCover on: {Size}x{Size} RGBA8 over {SideM:0} m around the camera ({StepM:0.0} m per texel) for water shaders: R = fixed ice cover (0.2.1227), G = calm open water enclosed by ice / land (0.2.1446), B = ice proximity, R blurred over ~32 m (0.2.1448)");
             }
-            s_tex.LoadRawTextureData(s_back);
+            Flood();
+            BlurProximity();   // 0.2.1448
+            for (int k = 0; k < Size * Size; k++) { int o = 4 * k; s_rgba[o] = s_back[k]; s_rgba[o + 1] = s_calm[k]; s_rgba[o + 2] = s_prox[k]; s_rgba[o + 3] = 0; }
+            PublishCalm(s_building);   // 0.2.1447: CPU copy for FatApi.TryCalmAt (boats / swimmers / tide); 0.2.1448: + proximity
+            s_tex.LoadRawTextureData(s_rgba);
             s_tex.Apply(false, false);
             s_origin = s_building;
             Shader.SetGlobalTexture(TexId, s_tex);
             Shader.SetGlobalVector(RectId, new Vector4(s_origin.x, s_origin.y, SideM, 1f));
+            Shader.SetGlobalFloat(ProxOnId, 1f);   // 0.2.1448: B valid
             s_on = true; s_uploads++; s_fills++;
+        }
+
+        // 0.2.1446: G = calm. Open water = not land and R < IcedAt. Seeds = open water on the rect border (land at the border is never a seed);
+        // a 4-connected flood through open water marks what can reach out. Open water the flood never reached is enclosed: G = 255. Iced and
+        // land texels, and everything the flood reached (the border water included), are G = 0, so the clamp past the rect is never calm.
+        private static void Flood()
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            const byte Reached = 1;
+            System.Array.Clear(s_calm, 0, s_calm.Length);   // s_calm doubles as the visited mark during the flood
+            int head = 0, tail = 0;
+            for (int i = 0; i < Size; i++)
+            {
+                Seed(i, ref tail); Seed((Size - 1) * Size + i, ref tail);
+                Seed(i * Size, ref tail); Seed(i * Size + Size - 1, ref tail);
+            }
+            while (head < tail)
+            {
+                int k = s_queue[head++], r = k / Size, c = k - r * Size;
+                if (c > 0) Seed(k - 1, ref tail);
+                if (c < Size - 1) Seed(k + 1, ref tail);
+                if (r > 0) Seed(k - Size, ref tail);
+                if (r < Size - 1) Seed(k + Size, ref tail);
+            }
+            int calm = 0;
+            for (int k = 0; k < Size * Size; k++)
+            {
+                bool open = s_landMask[k] == 0 && s_back[k] < IcedAt;
+                byte g = open && s_calm[k] != Reached ? (byte)255 : (byte)0;
+                s_calm[k] = g;
+                if (g != 0) calm++;
+            }
+            s_calmTexels = calm;
+            s_floodMs += (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+        }
+
+        // ── 0.2.1447 ([lead] / [seasons], Fire's enclosed-calm rule, physics half): the G grid for CPU readers ──
+        // FiresWaterAuthority's CalcWave (boats, swimming, Floating: also called off the main thread) and Galaxies' tide hold read the same
+        // calm the water shaders draw. An immutable snapshot (grid copy + origin) swapped in on each upload, so any thread reads one consistent
+        // fill. Value = smoothstep(0.1, 0.9, bilinear G), the curve EBM's water uses. Client only (the cover never runs on a dedicated server).
+        private sealed class CalmSnap { public byte[] G; public byte[] P; public float X0, Z0; }   // 0.2.1448: P = proximity (B)
+
+        // 0.2.1448: B = R blurred. Two box passes per axis (= a tent), sliding sums, zero padding past the rect; the outermost texel ring is 0.
+        private static void BlurProximity()
+        {
+            for (int k = 0; k < Size * Size; k++) s_blurA[k] = s_back[k];
+            BoxH(s_blurA, s_blurB); BoxV(s_blurB, s_blurA);   // first box
+            BoxH(s_blurA, s_blurB); BoxV(s_blurB, s_blurA);   // second box (tent)
+            for (int r = 0; r < Size; r++)
+                for (int i = 0; i < Size; i++)
+                {
+                    int k = r * Size + i;
+                    bool border = r == 0 || i == 0 || r == Size - 1 || i == Size - 1;
+                    s_prox[k] = border ? (byte)0 : (byte)Mathf.Clamp(Mathf.RoundToInt(s_blurA[k]), 0, 255);
+                }
+        }
+
+        private static void BoxH(float[] src, float[] dst)
+        {
+            const int R = ProxBoxRadius; const float inv = 1f / (2 * R + 1);
+            for (int r = 0; r < Size; r++)
+            {
+                int row = r * Size; float sum = 0f;
+                for (int i = 0; i <= R && i < Size; i++) sum += src[row + i];   // window [-R, R] around column 0 (left of 0 = 0)
+                for (int i = 0; i < Size; i++)
+                {
+                    dst[row + i] = sum * inv;
+                    int add = i + R + 1, sub = i - R;
+                    if (add < Size) sum += src[row + add];
+                    if (sub >= 0) sum -= src[row + sub];
+                }
+            }
+        }
+
+        private static void BoxV(float[] src, float[] dst)
+        {
+            const int R = ProxBoxRadius; const float inv = 1f / (2 * R + 1);
+            for (int c = 0; c < Size; c++)
+            {
+                float sum = 0f;
+                for (int r = 0; r <= R && r < Size; r++) sum += src[r * Size + c];
+                for (int r = 0; r < Size; r++)
+                {
+                    dst[r * Size + c] = sum * inv;
+                    int add = r + R + 1, sub = r - R;
+                    if (add < Size) sum += src[add * Size + c];
+                    if (sub >= 0) sum -= src[sub * Size + c];
+                }
+            }
+        }
+
+        /// <summary>Any thread. Ice proximity 0..1 at (x, z): the fixed-ice cover blurred over ~32 m (linear, bilinear on the 2 m grid). False (0)
+        /// outside the cover rect, before the first fill, or on a dedicated server.</summary>
+        internal static bool TryIceProxAt(float x, float z, out float prox)
+        {
+            prox = 0f;
+            var s = s_calmSnap;
+            if (s == null || s.P == null) return false;
+            float fx = (x - s.X0) / StepM - 0.5f, fz = (z - s.Z0) / StepM - 0.5f;
+            if (fx < -0.5f || fz < -0.5f || fx > Size - 0.5f || fz > Size - 0.5f) return false;
+            int ix = Mathf.Clamp(Mathf.FloorToInt(fx), 0, Size - 1), iz = Mathf.Clamp(Mathf.FloorToInt(fz), 0, Size - 1);
+            int ix1 = Mathf.Min(ix + 1, Size - 1), iz1 = Mathf.Min(iz + 1, Size - 1);
+            float tx = Mathf.Clamp01(fx - ix), tz = Mathf.Clamp01(fz - iz);
+            var p = s.P;
+            float a = p[iz * Size + ix], b = p[iz * Size + ix1], c = p[iz1 * Size + ix], d = p[iz1 * Size + ix1];
+            prox = Mathf.Lerp(Mathf.Lerp(a, b, tx), Mathf.Lerp(c, d, tx), tz) / 255f;
+            return true;
+        }
+        private static volatile CalmSnap s_calmSnap;
+        private static int s_calmRevision;
+        internal static int CalmRevision => System.Threading.Volatile.Read(ref s_calmRevision);
+
+        private static void PublishCalm(Vector2 origin)
+        {
+            var g = new byte[Size * Size];   // 16 KB per fill (fills run on change / at most every 30 s)
+            System.Buffer.BlockCopy(s_calm, 0, g, 0, g.Length);
+            var p = new byte[Size * Size];   // 0.2.1448: + 16 KB, proximity
+            System.Buffer.BlockCopy(s_prox, 0, p, 0, p.Length);
+            s_calmSnap = new CalmSnap { G = g, P = p, X0 = origin.x, Z0 = origin.y };
+            System.Threading.Interlocked.Increment(ref s_calmRevision);
+        }
+
+        /// <summary>Any thread. Calm 0..1 at (x, z): 1 = open water enclosed by fixed ice / land (no tide, no waves). False outside the cover rect,
+        /// before the first fill, or on a dedicated server.</summary>
+        internal static bool TryCalmAt(float x, float z, out float calm)
+        {
+            calm = 0f;
+            var s = s_calmSnap;
+            if (s == null) return false;
+            float fx = (x - s.X0) / StepM - 0.5f, fz = (z - s.Z0) / StepM - 0.5f;   // texel centres at (i + 0.5) * StepM
+            if (fx < -0.5f || fz < -0.5f || fx > Size - 0.5f || fz > Size - 0.5f) return false;
+            int ix = Mathf.Clamp(Mathf.FloorToInt(fx), 0, Size - 1), iz = Mathf.Clamp(Mathf.FloorToInt(fz), 0, Size - 1);
+            int ix1 = Mathf.Min(ix + 1, Size - 1), iz1 = Mathf.Min(iz + 1, Size - 1);
+            float tx = Mathf.Clamp01(fx - ix), tz = Mathf.Clamp01(fz - iz);
+            var g = s.G;
+            float a = g[iz * Size + ix], b = g[iz * Size + ix1], c = g[iz1 * Size + ix], d = g[iz1 * Size + ix1];
+            float v = Mathf.Lerp(Mathf.Lerp(a, b, tx), Mathf.Lerp(c, d, tx), tz) / 255f;
+            float t = Mathf.Clamp01((v - 0.1f) / 0.8f);
+            calm = t * t * (3f - 2f * t);
+            return true;
+        }
+
+        private static void Seed(int k, ref int tail)
+        {
+            if (s_calm[k] != 0 || s_landMask[k] != 0 || s_back[k] >= IcedAt) return;
+            s_calm[k] = 1;
+            s_queue[tail++] = k;
         }
 
         private static void Off()
         {
             if (!s_on) return;
             s_on = false; s_row = -1;
+            s_calmSnap = null; System.Threading.Interlocked.Increment(ref s_calmRevision);   // 0.2.1447: no cover = no calm
             Shader.SetGlobalVector(RectId, Vector4.zero);
+            Shader.SetGlobalFloat(ProxOnId, 0f);   // 0.2.1448: B not valid
         }
 
         private static void Log(float now)
@@ -351,7 +535,8 @@ namespace VerdantsAscent.Water.Core
             if (s_uploads == 0) return;
             FiresLogger.LogDebug($"[IceCover] last 30 s: {s_uploads} upload(s), fill {s_fillMs:0.0} ms total over {s_fills} fill(s); last fill {s_iced} of {Size * Size} texel(s) iced, "
                 + $"rect ({s_origin.x:0},{s_origin.y:0}) {SideM:0} m (0.2.1227); [WaterIce] cover: {s_vedr} texel(s) from Vedr lake ice ({(s_vedrIce != null ? "Vedr bound" : "no Vedr")}, revision {(s_vedrRevGet != null ? s_vedrRev.ToString() : "n/a")})");
-            FiresLogger.LogDebug($"[IceCover] last fill also: {s_reuseFills} fill(s) kept the shared texels, {s_plateTexels} texel(s) from {s_plateCount} vanilla plate(s), {s_seaTexels} from Vedr floes (0.2.1360); whole fills from a Vedr lake ice change {s_whyVedr}, frames a change waited for the refresh {s_vedrHeld} (0.2.1401)");
+            FiresLogger.LogDebug($"[IceCover] last fill also: {s_reuseFills} fill(s) kept the shared texels, {s_plateTexels} texel(s) from {s_plateCount} vanilla plate(s) (0.2.1360); whole fills from a Vedr lake ice change {s_whyVedr}, frames a change waited for the refresh {s_vedrHeld} (0.2.1401); calm (G) {s_calmTexels} enclosed open-water texel(s), flood {s_floodMs:0.00} ms over the last 30 s (0.2.1446)");
+            s_floodMs = 0;
             if (s_texels > 0)
             {
                 FiresLogger.LogDebug($"[IceCover] lookups last 30 s over {s_texels} texel(s): IceField {TickMs(s_tIce):0.0} ms, Vedr lake {TickMs(s_tVedr):0.0} ms, plates {TickMs(s_tPlate):0.0} ms, Vedr floes {TickMs(s_tSea):0.0} ms, land check {TickMs(s_tLand):0.0} ms; land texels {s_land} ({100.0 * s_land / s_texels:0}%), land texels with ice {s_landIced} (IceField {s_landIcedField}, Vedr lake {s_landIcedVedr}, plates {s_landIcedPlate}, Vedr floes {s_landIcedSea}) (0.2.1403)");

@@ -1,208 +1,164 @@
 # Fires Admin Terrain
 
+## What's new in 0.2.1452
+
+- **World Convert / clone** (right-click a world in Select World) works on every world, also one converted before, and the copy keeps painted biomes, removed water and ice.
+- Far rivers and lakes are a setting (`[Far Terrain] FarWater`, off by default).
+- Vanilla water is left to the game or Vedr; chunk-by-chunk worlds show their real biomes on clients.
+
 **Updated for Valheim 1.0.**
 
-The world-shaping toolkit of the Fires mod family. Sculpt terrain, dig real 3D tunnels and caves, place water,
-lava, tar, ice and snow at any height, paint biomes, and carve rivers and lakes into an existing world. Or let
-it generate whole new FIRES worlds, including "one zone at a time" worlds where you open the map square by
-square.
+The world-shaping toolkit of the Fires mod family. Sculpt terrain, dig real 3D tunnels and caves, place water, lava, ice and snow at any height, paint biomes (including your own custom ones), and carve rivers and lakes into your world. Or generate whole new FIRES worlds, including "one zone at a time" worlds where you open the map square by square.
 
 Every edit is saved with the world, so every player sees the same ground.
 
-## Requirements
+## What's new in 0.2.1430
 
-- **FiresUnifiedCore** (the version this release lists as its dependency).
-- **Install on the server and every client, on the same version.** A player without the mod (or on another
-  version) sees different ground from everyone else. Since 0.2.974 a client and server whose synced settings
-  differ (below 0.2.974 on one side) refuse each other's settings with a version message. In a one-zone world, a
-  client on an older version logs `the server speaks zone protocol N`, and its closed zones won't match the server's.
-- Optional:
-  - **Infinity Hammer**: its ruler aims the terrain brushes, the mouse wheel sets their size, and holding the
-    mouse paints continuously.
-  - **ServerDevcommands**: lets admins run the editing commands on a dedicated server, and its `undo` / `redo`
-    also undo terrain brushes.
-  - **FiresTossinShade**: the water shaders. Without it, water uses a plainer vanilla look.
+Since 0.2.1327: custom biome painting on the map, one regeneration command for any world, each world now remembers
+its own terrain type, rivers and placed water survive a relog, and winter is much smoother on normal worlds.
 
-## Settings
+### Biggest changes
 
-The config window shows only the basics by default: the preset picker and the super flat grid keys. Everything
-else is under **Show Advanced**, each with a one-line description. The voxel settings sit together as
-`Voxel Terrain`, `Voxel Terrain - World`, `- Performance`, `- Tools`, `- Cave clutter`, `- Cave content` and
-`- Tree seeds`. A config from before 0.2.974 (the old `VoxelTerrain ...` sections) is moved over once on the
-first start, keeping every value.
+- **Paint your own custom biomes**, with the Chaos Hammer and on the large map, using Expand World's biome data (needs
+  Expand World Data with biome data turned on). Admins can draw a closed outline on the map to paint a whole area at
+  once. The map now shows the painted biomes.
+- **Biome painting has its own map button and panel**, so it works without Fires RPG Maker. With RPG Maker it sits
+  under the Territory button.
+- **The biome brush can keep or wipe the builds** inside a painted area (a toggle on the brush).
+- **One regeneration command, `fires_regen`, for any world**, not only imported ones. It can redo locations, plants
+  and spawners for the whole world in one run. The old name still works. Options: ignore safe zones (builds are never
+  removed; the reset happens around them), thin every type evenly by a percentage, keep ore from being re-rolled, and
+  keep chosen dungeons where they are. Zones far past the world edge that are not a build area are only cleaned out,
+  never regenerated, and anything players built or placed is never removed by that cleanup.
+- **Environment boxes now really change the ground texture inside them.** They never did on Valheim 1.0.
 
-## Upgrading from 0.2.382 or earlier
+### Fixed
 
-- `[Voxel Terrain - World] Terrain Mode` now defaults to `Off`, but an existing config keeps its old value, which
-  was `FullVoxel`. Check it before you start the server.
-- With any mode other than `Off`, rivers and lakes get carved into vanilla-generated worlds, and trees and
-  bushes standing in the new water are removed. Set `Hydrology Enabled` and `Hydrology Place Water` to false if
-  you only want tunnels.
-- Voxel edits saved by 0.2.384 or older are removed on load.
-- FIRES-generated worlds generate differently now, so back them up first. A baked cache from before 0.2.423 has
-  to be baked again.
-- Expect a one-time rebuild of the terrain cache and a redrawn minimap on the first join.
+- Rivers and placed water no longer break when you log out and back in.
+- The water mop no longer stacks water levels when you redraw, and removed water stays removed for players who were
+  away.
+- River water and waterfalls fit the slope better and match the river's level. No more giant spikes along rivers on
+  super flat worlds.
+- Swimming under winter ice no longer drops you out of the water as soon as you go under, and sea waves no longer
+  swell up through sea ice.
+- Terrain loads from the ground nearest you outward, so the ground under you is ready first, and it no longer
+  flickers between two versions while it loads.
+- After a relog you are held in place until there is ground under you, instead of dropping onto terrain that isn't
+  built yet.
+- Far terrain edges now meet exactly, with no thin lines of sky across distant land.
+- A long regeneration scan no longer drops the player from the server, and the Deep North ring at the far edge of the
+  world is now included in regeneration.
+- Location pieces no longer double up when a location is placed again.
+- Custom biome painting works again with Expand World Data 1.79 and newer, and Expand World Data's plant placement
+  works again alongside FAT.
+- The shovel works on Vedr snow on normal ground the same as on voxel ground, and snow lowered by terrain tools fills
+  back in.
+- Seasonal flowers no longer show where no grass is drawn.
+- A refused dungeon entrance no longer retries every frame.
+- Stricter size checks on terrain and water data received from other players.
 
-## Defaults that differ from vanilla
+### Looks
 
-- `Vegetation density scale` 0.7 and `Clutter density scale` 0.55 (`[Voxel Terrain - Performance]`): fewer trees
-  and bushes in newly generated zones, and less grass. Set both to 1 for vanilla density.
-- Creating a new world opens a dialog for its terrain and features (see Creating and cloning worlds) when the voxel
-  module (VoxelTerrain Enabled and Custom Generation) or `[Zone Mode] Offer at world creation` is on. With neither,
-  worlds are created exactly as in vanilla.
-- Pickaxe hits on voxel ground dig 3D tunnels. Wards and no-build areas still apply.
+- Lily pads grow in deeper water and reeds stay along the shallows.
+- Fire rings in the snow blend in softly instead of making perfect circles.
+- The ruler is drawn on top of the snow instead of under it.
+- Frozen lake ice looks less like TV static up close.
+- Player trails in the snow are narrower, and a companion, tame or mount walking with you no longer cuts a second wide
+  trail.
 
-## Terrain Mode
+### Smoother play
 
-Worlds created or cloned from the main menu keep their own terrain choices, and the server and every client follow
-them whatever their Terrain Mode and feature settings say; a machine with the voxel module switched off still runs
-without it. `[Voxel Terrain - World] Terrain Mode` sets the defaults the New World dialog offers,
-and decides what the mod does to a world without saved choices. The server's value applies to everyone.
+- Much smoother in winter on normal (heightmap) worlds: cave and deep-ground checks are skipped where there is no
+  voxel ground.
+- Ice near you is cheaper to refresh while you move.
+- A river stroke re-grows grass once instead of on every dab, and terrain edits no longer re-roll grass on ground that
+  did not change.
+- Building pieces on islands check their ground far less often.
+- Season snow is already in place when an area first builds, without a second terrain pass.
+- Distant tree billboards draw only what the camera can see.
 
-| Mode | What happens |
-|---|---|
-| `Off` (default) | Vanilla terrain. Brushes, water, ice and snow work; voxel tools only add shapes. |
-| `ZoneReplace` | Vanilla ground until you edit it. A zone becomes voxel terrain on its first voxel brush or pickaxe dig. On vanilla-generated worlds, rivers and lakes are carved in as well. |
-| `PlacedOnly` | Currently the same as `ZoneReplace`. |
-| `FullVoxel` | Every nearby zone is voxel terrain, with generated caves, caverns and sinkholes. Needed for FIRES worlds, sky islands and skylands. |
+### Settings that moved or changed
 
-## Tools
+- **Terrain Mode is no longer a setting.** Each world keeps its own choice (heightmap or voxel) from when it was
+  created on the New World screen. Old worlds read your old setting once, automatically. **No world reset is needed.**
+- **Settings that used to live in Fires Unified Core** (cave ore regrow, undo, location loot refresh, snow) are now
+  in FAT's own config, with the same names and defaults, and the server keeps them in sync. Your saved values are
+  copied over.
+- **Ocean swim settings** come from Fires Advanced Player Movement when it is installed.
+- **With Vedr installed**, Vedr draws the sky rainbow and owns the snow sparkle setting, so you only get one of each.
+- **Distant tree billboards are off by default for now** (they could show through hills and look blocky up close).
+  If you had changed this setting yourself, your choice is kept.
 
-- **Hammer V-tools**, on the Hammer's Misc tab for admins: Vcarve, Vfill, Vdelete, Vcube, Vsphere, Vriver
-  (drag a river bed), Vpour (drag a ribbon of water) and Vpool (dig and fill a pool; click again downstream to
-  join them with a channel). The mouse wheel sets the size and PgUp/PgDn the height. Hide them with
-  `Show tools in build menu`.
-- **Console commands**: every brush, water, ice, snow, paint and world tool is a command (`va_*`, `place_*`,
-  `ice_*`, `paint_*`, `fires_*`). Most need devcommands. In game, the full list with arguments is in the pause
-  menu under **? Help > Fires Admin Terrain**.
+## What you get
 
-## What's in it
+- **Terrain sculpting**: flat, raise, lower, smooth, grab, noise and floating-island brushes, with ground paint and undo.
+- **Voxel terrain**: real 3D overhangs, tunnels and caves. Full voxel worlds grow their own cave networks, stocked with the biome's ore, pickables and spawners, which restock over time.
+- **Water and liquids**: water, lava, tar, boiling and freezing water, waterfalls and springs, at any height. Swim in them and sail rivers.
+- **Ice and snow**: floating ice, ice sheets and snow layers, all shapeable.
+- **Biome paint**: paint snow, lava, swamp, forest, plains, mistlands or meadows onto the ground, or your own custom biomes with Expand World Data. Paint with the Chaos Hammer or on the large map.
+- **World regeneration**: `fires_regen` redoes locations, plants and spawners on any world, around your builds.
+- **Rivers and lakes** carved into existing worlds, with beaches, reeds and lilies.
+- **FIRES worlds**: continents, erosion, climate-driven biomes, rivers, volcanoes and sky islands, or start from your own heightmap image.
+- **Super flat** admin build world with a build grid.
+- **Faster joins**: players download the server's finished world once instead of building it.
 
-- **Terrain sculpting**: flat, raise, lower, smooth, grab, noise and floating-island brushes on persistent 64 m
-  tiles, with ground paint, per-tile biomes, hole punching and undo.
-- **Voxel terrain**: true 3D edits for overhangs, tunnels and caves. In `FullVoxel`, the world grows its own cave
-  networks with a dark cave mood. The server dresses them with the biome's pickables, ore, rubble, props and
-  hanging roots. Chests and picked stones, bones and crystals restock, and monster spawners re-arm, a few in-game
-  days later while nobody is near (`[Voxel Terrain - Cave content]`). Each client adds loose floor clutter in scattered
-  patches (`[Voxel Terrain - Cave clutter]`).
-- **Water and liquids**: water, lava, tar, boiling and freezing water, waterfalls, springs that flow downhill,
-  and pools that settle to their level, at any height and each with its own waterline. You can swim in them and
-  sail boats on river currents. Where water steps down (a pond spilling into a lake, a channel dropping to a lower
-  reach, a sheet ending over an edge) it pours over as a waterfall that follows the ground below.
-- **Ice and snow**: floating ice with holes you can climb out of, ice sheets on land, and snow layers, all
-  shapeable.
-- **Biome paint**: paint snow, lava, swamp, forest, plains, mistlands or meadows onto vanilla ground, or set a
-  biome per sculpted tile.
-- **Rivers and lakes for existing worlds**: winding river channels and dug-out lakes with beaches, reeds and
-  lilies.
-- **FIRES worlds**: choose the Fires terrain generator in the New World dialog (it needs voxel terrain) for FIRES
-  terrain: continents, erosion, climate-driven biomes, carved rivers, lakes, volcanoes and sky islands. You can
-  also start from your own greyscale heightmap or biome image.
-- **Faster joins**: clients of a dedicated server keep the world map between joins, and a server's pre-built
-  terrain downloads once.
+## How to use
 
-## One zone at a time (experimental)
-
-You start on a small patch of land in an endless sea and open the world one 64 m square at a time. Choose it in
-the New World dialog or when cloning a world, or start a dedicated server's brand-new world with the `-fireszones`
-launch flag. It runs on stock Valheim generation for now.
-
-- **Chunk Generators make Chunk Seeds.** An indestructible Meadows Chunk Generator stands next to the start, and it
-  comes back within a minute if it ever goes missing. Feed a
-  generator any two different materials of its biome, 50 of each, for one seed. Generators burn no fuel, the Meadows
-  one takes every biome's materials, and hovering one shows what it has counted so far.
-- **The Chunk Hammer plants them.** Your first Chunk Hammer is in a chest in the start cave, inside the rocky hill
-  beside the start temple; the cave mouth faces the temple. The chest can't be broken; once its hammer is taken it
-  disappears and comes back the next in-game day with a new one. Once you have held a hammer, you can craft more with
-  the build hammer's recipe. Seeds are its ammo: with the hammer in hand, look
-  out over the closed land beside your own (within 48 m). A ghost of the square shows the land that will rise there,
-  and turns red when it can't. Strike, confirm, and the square rises. A seed and 1 durability are only used up when
-  the land rises.
-- **A seed raises its own biome.** A square the world planned as that biome rises as itself. Any other square, sea
-  included, gets real land of that biome. Seeds of one biome side by side continue the same land, and different lands
-  meet as straight cliffs.
-- **Each boss unlocks the next biome's generator** on the hammer. A new generator also takes 100 each of the previous
-  biome's pair, which is how its first seeds get made:
-
-  | Biome | Unlocked by | Some of its materials | Or 100 each of |
-  |---|---|---|---|
-  | Black Forest | Eikthyr | Round Log, Copper Ore, Tin Ore, Greydwarf Eye, Troll Hide | Stone + Wood |
-  | Swamp | The Elder | Iron Scrap, Ancient Bark, Guck, Bloodbag, Ooze | Round Log + Copper Ore |
-  | Mountain | Bonemass | Silver Ore, Obsidian, Wolf Pelt, Freeze Gland, Crystal | Iron Scrap + Ancient Bark |
-  | Plains | Moder | Black Metal Scrap, Flax, Barley, Lox Pelt, Needle | Silver Ore + Obsidian |
-  | Mistlands | Yagluth | Yggdrasil Wood, Black Marble, Soft Tissue, Carapace, Sap | Black Metal Scrap + Flax |
-  | Ashlands | The Queen | Ashwood, Grausten, Flametal Ore, Charred Bone, Asksvin Hide | Yggdrasil Wood + Black Marble |
-  | Deep North | Fader | Timberwood, Petrified Tissue, Ice, Moose Hide, Seal Pelt | Ashwood + Grausten |
-
-- **Location seeds** come from the forge, made from two kinds of Chunk Seed. A biome with Meadows seeds gives its
-  dungeon, a biome with the next biome's seeds gives its boss altar, and the other pairs give landmarks. The place
-  rises on land copied from where the world planned one.
-- **Unique seeds** (15 each of two biome seeds plus 3 location seeds) raise one-of-a-kind places again: Haldor's and
-  Hildir's camps, the Bog Witch, the Forge of Potential, the three Places of Mystery and the Rock Clearing.
-- **The Eye of the Beholder**, a helmet from the workbench, names the land a square was meant to be while you aim the
-  Chunk Hammer.
-- **Hugin explains it.** Hugin comes down at your first spawn, the first time you hold a Chunk Hammer and at your first
-  Chunk Generator, once per character like the vanilla tutorials.
-- **Progression can't be blocked.** Boss altars, and the places their summon items and key materials come from, rise
-  on their own the first time a player comes near. The server's `[Zone Mode] Progression locations` lists them.
-- Some points of interest rise from the sea as islands when you come near, and closed edges are cliff walls with
-  cave mouths and waterfalls. Skylands float above your land, each with a biome (mostly the one below) and its
-  weather. They come in many shapes and sizes, from small islets to great skylands several zones across, and a rare
-  few form chains or atolls round a lagoon. The bigger ones carry hills, cliff terraces and tiers, ponds, and rivers
-  that spill off the rim as falls, plus caves dressed from their own biome and sometimes a place from their biome,
-  set away from the water.
-- You can't build, dig or teleport over closed sea, and nothing spawns there. Admins can open squares with
-  `fires_zones_open`, and `fires_zones_find` shows where the starter generator and the hammer chest are.
-- A square can never be closed again. Existing worlds become one-zone worlds by cloning them (below).
-- **Converted worlds keep what you built.** When a cloned world first loads as one zone at a time, every zone it had
-  already explored is parked: closed, with everything in it saved. Opening that square again brings it all back as
-  it was. Only a seed planted while wearing the Eye of the Beholder, whose land doesn't match that square's own land
-  (its biome, or the place it held), raises that seed's land instead and discards what was parked there. Before you
-  confirm, the planting prompt says which will happen and how many built pieces stood there. A converted world gets no start-cave hill.
+- **V-tools** (admins, Chaos Hammer, Voxel tab): Vcarve, Vfill, Vdelete, Vcube, Vsphere, Vlevel, Vriver, Vpour, Vpool, Vfall and Vmop.
+  - **Mouse wheel** = size, **Shift + mouse wheel** = height (PgUp / PgDn also work).
+  - **Vlevel** flattens to the height you first click. **Vpool** digs and fills a pool, or a river between two clicks (higher one first). **Vfall** hangs a waterfall from an edge. **Vmop** removes water; LeftAlt brings it back.
+- **Biome painting on the map**: open the large map and use the biome button (under Territory if Fires RPG Maker is installed). Admins can draw a closed outline to paint a whole area. The brush has a toggle to keep or wipe the builds inside.
+- **Undo / redo**: numpad 7 / 9, or ServerDevcommands' `undo` / `redo`.
+- **Console commands**: every tool is also a command (`va_*`, `place_*`, `ice_*`, `paint_*`, `fires_*`). Most need devcommands. The full list is in the pause menu under **? Help > Fires Admin Terrain**.
 
 ## Creating and cloning worlds
 
-- **New World:** after Done, a dialog asks for the terrain generator (Stock Valheim or Fires), terrain (Heightmap,
-  Voxel wrap or Full voxel), one zone at a time, sky islands, rivers and lakes, and caves. Only what your install
-  can build is offered (with neither the voxel module nor one zone at a time available there is no dialog), and
-  Cancel goes back to New World. The world keeps these answers, and the server and every client follow them whatever
-  their Terrain Mode and feature settings say; a machine with the voxel module switched off still runs without it.
-- **Clone:** right-click a world in Select World and pick Clone as one zone at a time, full voxel, voxel wrap or
-  heightmap. The same dialog opens, set up for that choice: the new name, terrain (or as the original), one zone at a
-  time, and sky islands, rivers and lakes and caves (as the original, on or off). The original world is never
-  touched: the copy gets its own world ID and brings FAT's baked terrain, painted biomes, and cave and island records along.
-- Two rules apply to both: the Fires generator needs voxel terrain, and one zone at a time runs on stock Valheim
-  generation for now.
-- From the main-menu console:
-  `fires_world_clone <world> <new name> [chunks] [heightmap|voxelwrap|voxelonly] [sky=on|off] [rivers=on|off] [caves=on|off]`
+- **New World**: under Seed, pick the generator (Stock Valheim or Fires), terrain (Heightmap, Voxel wrap or Full voxel), one zone at a time, sky islands, rivers and lakes, and caves. If a combination can't work, the reason shows in red. Each world remembers its choices, including its terrain type.
+- **Clone**: right-click a world in Select World and pick Clone. The original is never touched.
+- The Fires generator needs voxel terrain. FIRES worlds take a few minutes to generate the first time.
 
-## Back up these files with the world
+## One zone at a time
 
-FAT keeps per-world data next to the world save, in the `FiresWorldGen` folder: every `firesgen_<world>*` file and
-folder (zones, islands, skylands, caves, the hammer chest, the world's saved choices, its mode and bake, and a
-converted world's parked zones and conversion marker), plus `<world>.biomedata`. Back them all up with the world,
-and copy them whenever you move it. Without them a FIRES
-world loads as a normal one. A one-zone world also keeps a copy of its zone state inside the save, so it stays a
-one-zone world, but the rest of its data, including its parked zones, is still in that folder.
+Start on a small patch of land in an endless sea and open the world one 64 m square at a time.
 
-## Performance
+- **Chunk Generators make Chunk Seeds.** One stands next to the start. Feed it 50 each of two different materials of its biome for one seed.
+- **The Chunk Hammer plants them.** Your first one is in a chest in the cave beside the start temple. Look at closed land next to yours, strike, confirm, and the square rises.
+- **Each boss unlocks the next biome's generator:**
 
-- `Terrain Mode` `Off` keeps the voxel systems asleep.
-- `[Voxel Terrain - Performance]`: `Voxel wrap radius (headless)` is the biggest dedicated-server lever. On clients,
-  use `Terrain casts shadows`, `Grass render distance`, the two density scales and the impostor settings.
-- `Chunk cache` keeps generated chunks on disk (up to 512 MB by default) so revisits load instantly.
-- FIRES worlds take a few minutes to generate the first time and are cached afterwards. A high
-  `WorldGen Resolution` uses a lot of memory.
+  | Biome | Unlocked by | Some of its materials |
+  |---|---|---|
+  | Black Forest | Eikthyr | Round Log, Copper Ore, Tin Ore, Greydwarf Eye, Troll Hide |
+  | Swamp | The Elder | Iron Scrap, Ancient Bark, Guck, Bloodbag, Ooze |
+  | Mountain | Bonemass | Silver Ore, Obsidian, Wolf Pelt, Freeze Gland, Crystal |
+  | Plains | Moder | Black Metal Scrap, Flax, Barley, Lox Pelt, Needle |
+  | Mistlands | Yagluth | Yggdrasil Wood, Black Marble, Soft Tissue, Carapace, Sap |
+  | Ashlands | The Queen | Ashwood, Grausten, Flametal Ore, Charred Bone, Asksvin Hide |
+  | Deep North | Fader | Timberwood, Petrified Tissue, Ice, Moose Hide, Seal Pelt |
 
-## Known issues
+- **Location seeds** from the forge raise dungeons, boss altars and landmarks; **unique seeds** raise the traders, the Bog Witch and other one-of-a-kind places.
+- **The Eye of the Beholder** helmet shows what a square was meant to be.
+- **Progression can't be blocked**: boss altars and the places their items come from rise on their own when you come near.
+- Hugin explains it in game. Admins can open squares with `fires_zones_open`.
+- Cloned worlds keep what you built: explored zones are parked and come back when reopened.
 
-- One zone at a time is new:
-  - skylands don't show on the minimap
-  - the later tiers' costs are still being tuned
-- Dedicated servers keep vanilla ground under voxel terrain unless `World Terrain Mode` is `VoxelOnly`.
-  Tunnels and carves are built on each player's machine.
-- The waterfall shader is Direct3D 11 only and may not draw on Vulkan.
-- Small gaps can show along some riverbanks.
+## Install
+
+- **Server and every client, on the same version.** A player without it, or on another version, sees different ground.
+
+## Requires
+
+- **FiresUnifiedCore**
+- Optional: **Infinity Hammer** (aims the brushes and paints while you hold the mouse), **ServerDevcommands** (commands on a dedicated server, plus undo / redo), **FiresTossinShade** (nicer water), **Expand World Data** with biome data on (custom biome painting), **Fires Advanced Player Movement** (ocean swim settings), **Fires RPG Maker** (biome painting under the Territory button).
+- **Not compatible with Valheim Performance Optimizations**: Fires Admin Terrain won't load while it is installed.
+
+## Good to know
+
+- Each world keeps the terrain type it was created with (heightmap or voxel); there is no longer a global Terrain Mode setting. Brushes work on every world. Full voxel worlds get caves.
+- Fewer trees, bushes and grass than vanilla by default. Set `Vegetation density scale` and `Clutter density scale` to 1 for vanilla.
+- Distant tree billboards are off by default for now.
+- Pickaxe hits on voxel ground dig tunnels. Wards still protect.
+- **Back up** the `FiresWorldGen` folder next to your world save (every `firesgen_<world>*` file and `<world>.biomedata`) together with the world. Without them a FIRES world loads as a normal one.
+- Performance: heightmap worlds skip the cave and deep-ground work. On a dedicated server, `Voxel wrap radius (headless)` matters most.
 
 ## Issues / questions
 

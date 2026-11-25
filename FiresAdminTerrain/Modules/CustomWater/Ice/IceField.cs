@@ -443,7 +443,7 @@ namespace VerdantsAscent.Water.Core
         // last read cover > 0.5 - only a real change (a break/hole, thaw below cover 0.5, a fire) clears it. Thread-safe (no Unity calls
         // in the hold path); deterministic for a static point. Why each held miss happened is counted and logged (Debug).
         private const float HoldSeconds = 10f;
-        private struct IceHold { public float Cover, Thick; public double At; public int Revision; }
+        private sealed class IceHold { public float Cover, Thick; public double At; public int Revision; }   // 0.2.1436: a class updated in place (a ConcurrentDictionary set allocates a node every call: TryIceAt 9.8 MB/min at the shore)
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, IceHold> s_iceHold = new System.Collections.Concurrent.ConcurrentDictionary<long, IceHold>();
         internal static int s_iceFlips, s_iceHeld;
         private static double s_iceWhyAt;
@@ -472,7 +472,7 @@ namespace VerdantsAscent.Water.Core
                 p2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (cover > 0.5f)
                 {
-                    s_iceHold[k] = new IceHold { Cover = cover, Thick = thick, At = Now(), Revision = s_revision };
+                    if (s_iceHold.TryGetValue(k, out var held)) { held.Cover = cover; held.Thick = thick; held.At = Now(); held.Revision = s_revision; } else s_iceHold[k] = new IceHold { Cover = cover, Thick = thick, At = Now(), Revision = s_revision };
                     return true;
                 }
                 if (cover <= 0f) why = "the column read cover 0 this call";

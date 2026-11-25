@@ -294,6 +294,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 receiveShadows = true,
                 layer = LayerMask.NameToLayer("InstanceRenderer") >= 0 ? LayerMask.NameToLayer("InstanceRenderer") : 0,
                 lightProbeUsage = LightProbeUsage.Off,
+                motionVectorMode = MotionVectorGenerationMode.Camera,   // 0.2.1434: keep instanced draws out of Unity's per-object MV pass (TAA smear, Fire 11-13)
             };
             s_params[key] = rp;
             return true;

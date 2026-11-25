@@ -51,8 +51,37 @@ namespace VerdantsAscent.Terrain.Voxel
         private const string IslandsSuffix = "_islands.bin";
         private const string SkylandsSuffix = "_skylands.txt";
 
+        // 0.2.1451 (lead 11-16, Fire: "the clone UI must work properly to ship"; VA DN -> VA-Chunk lost its RedThicket paint,
+        // hand-removed water and ice): every per-world record that describes the WORLD travels with the copy.
+        private const string SinkFallsSuffix = FatSinkFallCuts.Suffix;           // the bake's big-sinkhole cuts; a studio bake's are not re-made
+        private const string WaterRemovedSuffix = "_water_removed.bin";          // WaterRemovedDisks.cs:20, water removed by hand (no uid inside)
+        private const string IceSuffix = "_ice.txt";                             // IceField.cs:379, the freeze state and holes (no uid inside)
+        private const string HaloSuffix = ".halo";                               // FatHaloArc.cs:499, the ring (seed-keyed, the copy keeps the seed)
+        private const string HaloZonesSuffix = ".halozones";                     // FatHaloVegetation.cs:48, ring cells already planted (their trees are in the save)
+        private const string LocationLevelSuffix = "_locationlevel.txt";         // FatLocationAccelerator.cs:518, set once at first play; a copy would read "off"
+        private const string LocationReplanSuffix = "_locreplan.txt";            // FatLocationReplan.cs:62, one-time replan steps already taken
+        private static readonly string BiomePaintSuffix = Zones.BiomePaint.RecordSuffix;        // painted biomes: uid in the header, rewritten
+        private static readonly string RegenQueueSuffix = Zones.BiomePaint.RegenQueueSuffix;    // regrow work still owed: uid in the header, rewritten
+
         private static readonly string[] CarriedRecordSuffixes =
-            { BakeSuffix, BakeFlowSuffix, CavesSuffix, IslandsSuffix, SkylandsSuffix, BcImport.BcWorldData.RecordsFolderSuffix };
+        {
+            BakeSuffix, BakeFlowSuffix, SinkFallsSuffix, CavesSuffix, IslandsSuffix, SkylandsSuffix, BcImport.BcWorldData.RecordsFolderSuffix,
+            WaterRemovedSuffix, IceSuffix, HaloSuffix, HaloZonesSuffix, LocationLevelSuffix, LocationReplanSuffix,
+            BiomePaintSuffix, RegenQueueSuffix,
+        };
+        // NOT carried, and why (every other FiresWorldRecords.PathFor suffix in FAT, 0.2.1451):
+        //   .profile              the copy's own, written below from the source's with the options laid over it.
+        //   .mode                 the older generator choice (FiresWorldGenBase.cs:4102); the copy's profile states its generator.
+        //   .convert, _zones.bin  one zone at a time: written fresh for the copy (CreateForNewWorld, WriteConvertMarker); a source
+        //                         that is already one zone at a time is refused (CloneAsync), so it has none to give.
+        //   _park (folder)        made by the copy's first load (ZoneModePark.ParkEverything) from the copied save.
+        //   _hammer.txt, _cultivator.txt, _returns.dat   one-zone-at-a-time play state (first-hammer / cultivator chest, zones
+        //                         returning over closed ones); only such a world has them, and those are refused as sources.
+        //   _waterguards.bin      frozen with the world's uid; FiresWaterGuards freezes it again for a copy on its first load
+        //                         (FiresWaterGuards.cs:253-255), from the same builds, before anything is parked.
+        //   _surface_*.bin        FiresSurfaceCache: a cache, rebuilt on demand.
+        //   .lock, .saves-*, .tileheal-*   a running process's lock and this machine's safety snapshots of the source's save.
+        // The seed grids (SeedCaches) are carried below; vanilla's minimap caches stay with the source's save (StageSaveAsync).
 
         private static bool s_registered;
 
@@ -230,7 +259,7 @@ namespace VerdantsAscent.Terrain.Voxel
             try
             {
                 FiresWorldRecords.ClearLeftovers(cloneName);
-                carried = CarryRecords(source, cloneName, profile);
+                carried = CarryRecords(source, cloneName, cloneUid, profile);
                 // BC's file is named after the SAVE ("<save name>.BetterContinents"), and a renamed world's save name is not
                 // the name inside it: CratersAshlands.BetterContinents holds 'CratersAshlands', so looking it up by the inner
                 // name found nothing and the clone silently lost its whole BC map.
@@ -510,7 +539,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // the source's bake: a bake IS voxel terrain, and the generator prefers it over the land in the save, so
         // carrying it turns a plain copy of a map into whatever voxel world the source happened to be. Cave, sky
         // island and seed-grid records go the same way - they belong to features the copy was not asked for.
-        private static int CarryRecords(World source, string cloneName, FiresWorldProfile profile)
+        private static int CarryRecords(World source, string cloneName, long cloneUid, FiresWorldProfile profile)
         {
             int carried = 0;
             foreach (string suffix in CarriedRecordSuffixes)
@@ -523,7 +552,22 @@ namespace VerdantsAscent.Terrain.Voxel
                         + "asked for terrain that has no use for it.");
                     continue;
                 }
-                File.Copy(from, FiresWorldRecords.PathFor(cloneName, suffix));
+                string to = FiresWorldRecords.PathFor(cloneName, suffix);
+                if (File.Exists(to)) throw new IOException($"{Path.GetFileName(to)} is already there and is never overwritten");
+                // 0.2.1451: the two records keyed to the world's uid get the copy's uid; the rest are copied byte for byte.
+                if (suffix == BiomePaintSuffix)
+                {
+                    byte[] paint = Zones.BiomePaint.RetargetRecord(File.ReadAllBytes(from), source.m_uid, source.m_seed, cloneUid);
+                    if (paint == null) { SkipStale(cloneName, from); continue; }
+                    File.WriteAllBytes(to, paint);
+                }
+                else if (suffix == RegenQueueSuffix)
+                {
+                    string[] queue = Zones.BiomePaint.RetargetRegenQueue(File.ReadAllLines(from), source.m_uid, source.m_seed, cloneUid);
+                    if (queue == null) { SkipStale(cloneName, from); continue; }
+                    File.WriteAllLines(to, queue);
+                }
+                else File.Copy(from, to);
                 carried++;
             }
             string paintedBiomes = Biome.BiomeFilePersistence.LocalPathFor(source.m_name);
@@ -543,11 +587,16 @@ namespace VerdantsAscent.Terrain.Voxel
             return carried;
         }
 
+        // A record left by an earlier world of the source's name (another uid): the source itself never read it.
+        private static void SkipStale(string cloneName, string from)
+            => FiresLogger.LogInfo($"[FiresWorldGen] '{cloneName}' was not given {Path.GetFileName(from)}: it belongs to an earlier world "
+                + "by the source's name, so the source never used it either.");
+
         /// <summary>Which of a world's records a copy with this profile has any use for. Null means the option was
         /// never stated, which is the console's old behaviour: carry it.</summary>
         private static bool ProfileWants(FiresWorldProfile profile, string suffix)
         {
-            if (suffix == BakeSuffix || suffix == BakeFlowSuffix) return profile.Terrain != ProfileTerrain.Heightmap;
+            if (suffix == BakeSuffix || suffix == BakeFlowSuffix || suffix == SinkFallsSuffix) return profile.Terrain != ProfileTerrain.Heightmap;
             if (suffix == CavesSuffix) return profile.Caves ?? true;
             if (suffix == IslandsSuffix || suffix == SkylandsSuffix) return profile.SkyIslands ?? true;
             return true;

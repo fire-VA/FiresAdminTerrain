@@ -234,10 +234,15 @@ namespace VerdantsAscent.Terrain.Zones
             float size = hmap.m_width * hmap.m_scale;
             var centre = hmap.transform.position;
             var job = new TintJob { Hmap = hmap, Size = size, Centre = centre, Row = hmap.m_width + 1, X0 = centre.x - size * 0.5f, Z0 = centre.z - size * 0.5f };
+            // 0.2.1435 ([lead] profiler, dock stand: BiomePaint FillCellsStep / RunTintJob 33.9 MB/min): a restarted job hands its cell range to the new one,
+            // and a stale cached tint (other key) hands its colour array over, so a re-tint of the same heightmap allocates neither again
+            if (s_tintJobs.TryGetValue(hmap, out var old) && old != null) { job.Range = old.Range; if (old.Cols != null) job.Cols = old.Cols; }
+            else if (s_rangePool.Count > 0) job.Range = s_rangePool.Pop();
+            if (job.Cols == null && s_tintCache.TryGetValue(hmap, out var stale) && stale.Key != key && stale.Cols != null) { job.Cols = stale.Cols; s_tintCache.Remove(hmap); }
             s_tintJobs[hmap] = job;
             s_jobKey[hmap] = key;
-            s_jobKeyParts[hmap] = TintKeyParts();
-            s_jobsStarted++;
+            if (FiresLogger.DebugEnabled) s_jobKeyParts[hmap] = TintKeyParts();   // 0.2.1435: the key-parts string only feeds the Debug restart line
+            s_jobsStarted++; s_probeStarted++;
             RunTintJob(job);
         }
 
@@ -251,9 +256,8 @@ namespace VerdantsAscent.Terrain.Zones
             var cam = Utils.GetMainCamera();
             if (cam != null && s_tintJobKeys.Count > 1)
             {
-                Vector3 p = cam.transform.position;
-                s_tintJobKeys.Sort((a, b) => (a == null ? float.MaxValue : (a.transform.position - p).sqrMagnitude)
-                    .CompareTo(b == null ? float.MaxValue : (b.transform.position - p).sqrMagnitude));
+                s_sortFrom = cam.transform.position;   // 0.2.1435: one static comparer, no closure per frame
+                s_tintJobKeys.Sort(s_byDistance);
             }
             for (int i = 0; i < s_tintJobKeys.Count && BudgetLeftMs() > 0.05; i++)
             {
@@ -264,6 +268,14 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         private static double BudgetLeftMs() => VerdantsAscent.Terrain.Voxel.FatBudget.LeftMs();
+
+        // 0.2.1435: allocation-free helpers for the tint pump
+        private static Vector3 s_sortFrom;
+        private static readonly System.Comparison<Heightmap> s_byDistance = (a, b) =>
+            (a == null ? float.MaxValue : (a.transform.position - s_sortFrom).sqrMagnitude).CompareTo(b == null ? float.MaxValue : (b.transform.position - s_sortFrom).sqrMagnitude);
+        private static readonly Stack<bool[]> s_rangePool = new Stack<bool[]>();
+        private const int RangePoolCap = 32;
+        private static readonly (int dx, int dz, int mine, int theirs)[] s_ringDirs = { (0, -1, 0, 1), (0, 1, 1, 0), (-1, 0, 2, 3), (1, 0, 3, 2) };
 
         private static readonly List<Heightmap> s_pruneScratch = new List<Heightmap>();
         private static void PruneTintCache()
@@ -341,6 +353,7 @@ namespace VerdantsAscent.Terrain.Zones
             if (done)
             {
                 s_tintJobs.Remove(hmap);
+                if (job.Range != null && job.Range.Length > 0 && s_rangePool.Count < RangePoolCap) { s_rangePool.Push(job.Range); job.Range = null; }   // 0.2.1435
                 // 0.2.1188: cache the finished result (only when every deep cell was answered; otherwise the re-poke redoes it)
                 if (job.Unknown == 0 && s_jobKey.TryGetValue(hmap, out int jk))
                 {
@@ -361,7 +374,7 @@ namespace VerdantsAscent.Terrain.Zones
             int n = job.Row * job.Row;
             job.Mesh.GetColors(s_hmapColors);
             if (s_hmapColors.Count != n) { job.Cols = null; return; }
-            job.Cols = new Color32[n];
+            if (job.Cols == null || job.Cols.Length != n) job.Cols = new Color32[n];   // 0.2.1435: a handed-over array of the right size is reused
             s_hmapColors.CopyTo(job.Cols);
         }
 
@@ -411,7 +424,7 @@ namespace VerdantsAscent.Terrain.Zones
                             if (s_pendingCells.Add(key)) { if (EnqueueCell(key)) s_cellY[key] = job.Centre.y; s_queuedTotal++; }
                             continue;
                         }
-                        if (s_deepCells.Count >= DeepCacheCap) { NoteDeepClear("cache cap"); s_deepCells.Clear(); s_capClears++; }
+                        if (s_deepCells.Count >= s_capNow) CapEvict();   // 0.2.1437: keeps the cells live jobs need, no tint invalidation
                         s_deepCells[key] = rd; s_ringSync++;
                         job.Range[j * job.RW + i] = rd; job.AnyDeep |= rd;
                         continue;
@@ -495,12 +508,15 @@ namespace VerdantsAscent.Terrain.Zones
             int row = job.Row; var cols = job.Cols; if (cols == null || row < 2) return;
             var zone = ZoneSystem.GetZone(job.Centre);
             if (job.RingMs > 0.0) { s_ringChunks++; if (job.RingMs > s_ringChunkWorst) s_ringChunkWorst = job.RingMs; }
-            var e = new Color32[4][];   // 0 S (z 0), 1 N (z row-1), 2 W (x 0), 3 E (x row-1)
-            for (int k = 0; k < 4; k++) e[k] = new Color32[row];
+            // 0.2.1435: a zone's edge arrays are reused when it is re-tinted (same row length), and the 4 directions are one static table
+            if (!s_edgeCols.TryGetValue(zone, out var e) || e[0].Length != row)
+            {
+                e = new Color32[4][];   // 0 S (z 0), 1 N (z row-1), 2 W (x 0), 3 E (x row-1)
+                for (int k = 0; k < 4; k++) e[k] = new Color32[row];
+            }
             for (int t = 0; t < row; t++) { e[0][t] = cols[t]; e[1][t] = cols[(row - 1) * row + t]; e[2][t] = cols[t * row]; e[3][t] = cols[t * row + row - 1]; }
             s_edgeCols[zone] = e;
-            var dirs = new[] { (0, -1, 0, 1), (0, 1, 1, 0), (-1, 0, 2, 3), (1, 0, 3, 2) };
-            foreach (var (dx, dz, mine, theirs) in dirs)
+            foreach (var (dx, dz, mine, theirs) in s_ringDirs)
             {
                 if (!s_edgeCols.TryGetValue(new Vector2s(zone.x + dx, zone.y + dz), out var n) || n[theirs].Length != row) continue;
                 for (int t = 0; t < row; t++)
@@ -613,7 +629,7 @@ namespace VerdantsAscent.Terrain.Zones
         private delegate bool TryDeepFn(Vector3 p, out bool deep);
         private static TryDeepFn s_tryDeepGroundAt;
         private const float DeepDeferMaxSeconds = 30f;   // bounded retry: a cell Core defers this long takes DeepGroundAt's answer (pre-1319 behaviour)
-        private static readonly Dictionary<long, float> s_deferTries = new Dictionary<long, float>();   // cell -> first deferral (unscaled time)
+        private static readonly Dictionary<long, float> s_deferTries = new Dictionary<long, float>(16384);   // 0.2.1435: pre-sized   // cell -> first deferral (unscaled time)
         private static int s_deferPump, s_deferRing, s_deferGaveUp; private static float s_deferLogAt;
         private static bool TryDeepGround(long key, Vector3 p, out bool deep)
         {
@@ -656,7 +672,7 @@ namespace VerdantsAscent.Terrain.Zones
         // so no snow base slips between probe points (1062's 9 x 9 at 8 m could). Answers are kept per cell for the vertex pass.
         private const float DeepCell = 4f;
         private static readonly Color32 DeepNorthColour = new Color32(0, 255, 0, 0);
-        private static readonly Dictionary<long, bool> s_deepCells = new Dictionary<long, bool>();
+        private static readonly Dictionary<long, bool> s_deepCells = new Dictionary<long, bool>(65536);   // 0.2.1435: pre-sized (profiler: 7.8 MB/min of dictionary resizes at the dock)
 
         // 0.2.1086: the cell answers persist across heightmaps and rebuilds (neighbours share their margin cells, and a zone
         // rebuilds many times), cleared when the snow base can change (paint pass, overrides refresh, season) and every 60 s.
@@ -682,9 +698,9 @@ namespace VerdantsAscent.Terrain.Zones
         private static bool[] s_rangeDeep = new bool[512];
         private static int s_rX0, s_rZ0, s_rW, s_rH, s_lastUnknown;
         private struct WaitRange { public int X0, Z0, W, H, Next; public float Y; public bool Deep; }   // 0.2.1100: Next = resume index, Deep = any answered cell deep
-        private static readonly HashSet<long> s_pendingCells = new HashSet<long>();
-        private static readonly Queue<long> s_cellQueue = new Queue<long>();
-        private static readonly Dictionary<long, float> s_cellY = new Dictionary<long, float>();
+        private static readonly HashSet<long> s_pendingCells = new HashSet<long>();   // (0.2.1435: HashSet has no capacity ctor on this runtime; Clear keeps its buckets)
+        private static readonly Queue<long> s_cellQueue = new Queue<long>(262144);   // 0.2.1436: pre-sized (profiler: EnqueueCell 2 x 2 MB queue growth; winter audit queue mean 164k)
+        private static readonly Dictionary<long, float> s_cellY = new Dictionary<long, float>(16384);   // 0.2.1435: pre-sized
         private static readonly Dictionary<Heightmap, WaitRange> s_tintWaiting = new Dictionary<Heightmap, WaitRange>();
         private static readonly List<Heightmap> s_waitScratch = new List<Heightmap>();
         private static int s_pumpAsked, s_queuedTotal;
@@ -788,7 +804,9 @@ namespace VerdantsAscent.Terrain.Zones
             // tint waits for those answers, so neither ever finished: a 15 ms/s loop forever. Key "Deep-cell pump before the tint": the pump
             // runs first on its OWN credit (a question costs ~0.001 ms, so the queue drains in seconds), then the tint finishes and both idle.
             bool pumpFirst = VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.DeepPumpFirst == null || VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.DeepPumpFirst.Value;
+            long tTint0 = System.Diagnostics.Stopwatch.GetTimestamp();
             if (!pumpFirst) PumpTintJobs();   // 0.2.1187: continue the budgeted heightmap tint jobs
+            s_probeTintMs += Ms(tTint0);
             long tTick = System.Diagnostics.Stopwatch.GetTimestamp();
             int resolved = 0;
             bool idle = PumpIdle();   // 0.2.1267
@@ -815,7 +833,7 @@ namespace VerdantsAscent.Terrain.Zones
                     s_cellY.Remove(key);
                     if (s_deepCells.ContainsKey(key)) continue;
                     int cx = (int)(key >> 32), cz = (int)(uint)key;
-                    if (s_deepCells.Count >= DeepCacheCap) { NoteDeepClear("cache cap"); s_deepCells.Clear(); s_capClears++; }
+                    if (s_deepCells.Count >= s_capNow) CapEvict();   // 0.2.1437: keeps the cells live jobs need, no tint invalidation
                     long q0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     // 0.2.1319: deferred = not stored; the cell stays pending and is queued again AFTER this loop (asked once per call)
                     if (TryDeepGround(key, new Vector3((cx + 0.5f) * DeepCell, y, (cz + 0.5f) * DeepCell), out bool dg)) s_deepCells[key] = dg;
@@ -848,11 +866,15 @@ namespace VerdantsAscent.Terrain.Zones
                 long ts = System.Diagnostics.Stopwatch.GetTimestamp();
                 ScanWaiting();
                 double scanMs = (System.Diagnostics.Stopwatch.GetTimestamp() - ts) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                s_probeScanMs += scanMs;   // 0.2.1437
                 s_deepCreditMs -= scanMs;
                 VerdantsAscent.Terrain.Voxel.FatBudget.Spend(VerdantsAscent.Terrain.Voxel.FatBudget.Who.DeepPump, scanMs);
             }
+            long tTint1 = System.Diagnostics.Stopwatch.GetTimestamp();
             if (pumpFirst) PumpTintJobs();   // 0.2.1268: after the pump
+            s_probeTintMs += Ms(tTint1);   // 0.2.1437
             DeferLog();   // 0.2.1319
+            ProbeLine();   // 0.2.1437
             s_tickTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tTick;
         }
 
@@ -1189,6 +1211,65 @@ namespace VerdantsAscent.Terrain.Zones
         }
         private static int s_deepClears;
         private static float s_clearLogAt;
+
+        // 0.2.1437 ([lead] 11-13, LoopTimers 1203 dock stand: "ZoneSystem.Update 21.25 ms/s: FiresAdminTerrain ZoneMode_ZoneSystem_Update.Postfix
+        // 18.89 ms/s" = BiomeDeepCells 21.4 ms/s, [FatBudget] tint 120-205 ms / 10 s all run). Proven loop: 8 waiting ~800 m heightmaps need
+        // ~330k cells, the cache cap was 200k, the cap Clear() dropped every answer AND bumped s_deepClearRev (in TintKey), so no waiting map
+        // ever finished and every finished tint went stale: re-tint forever. Now a cap eviction (1) never bumps the rev (an evicted answer is
+        // still the same answer when asked again), (2) keeps every cell inside a running or waiting heightmap's range, and (3) lets the
+        // working cap float to kept + DeepCapHeadroom (hard max DeepCapHardMax, ~15 MB); past the hard max it clears all, still without a rev bump.
+        private const int DeepCapHeadroom = 50000, DeepCapHardMax = 600000;
+        private static int s_capNow = DeepCacheCap;
+        private static int s_evictRuns, s_evictKept, s_evictDropped, s_evictHard; private static double s_evictMs;
+        private static readonly List<long> s_evictScratch = new List<long>(65536);
+        private static void CapEvict()
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            s_evictScratch.Clear();
+            foreach (var kv in s_deepCells)
+                if (!InLiveRange(kv.Key)) s_evictScratch.Add(kv.Key);
+            for (int i = 0; i < s_evictScratch.Count; i++) s_deepCells.Remove(s_evictScratch[i]);
+            int kept = s_deepCells.Count;
+            s_evictRuns++; s_evictDropped += s_evictScratch.Count; s_evictKept = kept; s_capClears++;
+            if (kept + DeepCapHeadroom > DeepCapHardMax) { s_deepCells.Clear(); s_evictHard++; s_capNow = DeepCacheCap; }
+            else s_capNow = System.Math.Max(DeepCacheCap, kept + DeepCapHeadroom);
+            s_evictScratch.Clear();
+            s_evictMs += Ms(t0);
+        }
+
+        // A cell a running tint job or a waiting heightmap still reads (the same ranges FillCellsStep / ScanWaiting walk).
+        private static bool InLiveRange(long key)
+        {
+            int cx = (int)(key >> 32), cz = (int)(uint)key;
+            foreach (var kv in s_tintJobs)
+            {
+                var j = kv.Value; if (j == null || j.RW <= 0) continue;
+                if (cx >= j.RX0 && cz >= j.RZ0 && cx < j.RX0 + j.RW && cz < j.RZ0 + j.RH) return true;
+            }
+            foreach (var kv in s_tintWaiting)
+            {
+                var r = kv.Value;
+                if (cx >= r.X0 && cz >= r.Z0 && cx < r.X0 + r.W && cz < r.Z0 + r.H) return true;
+            }
+            return false;
+        }
+
+        // 0.2.1437 (c): every 10 s whether or not a job finished (the 1185 job line prints only on a finish), the proof of which part moved the number.
+        private static float s_probeAt; private static double s_probeTintMs, s_probeScanMs; private static int s_probeStarted;
+        private static void ProbeLine()
+        {
+            float now = Time.unscaledTime;
+            if (now < s_probeAt) return;
+            s_probeAt = now + 10f;
+            if (FiresLogger.DebugEnabled && (s_tintJobs.Count > 0 || s_tintWaiting.Count > 0 || s_probeTintMs > 0 || s_evictRuns > 0))
+            {
+                int unknown = 0; foreach (var kv in s_tintJobs) if (kv.Value != null) unknown += kv.Value.Unknown;
+                FiresLogger.LogDebug($"[BiomePaint] deep-cells 10 s (0.2.1437): tint pump {s_probeTintMs:0.0} ms, wait scan {s_probeScanMs:0.0} ms, jobs started {s_probeStarted}, running {s_tintJobs.Count} ({unknown} cell(s) unanswered), waiting {s_tintWaiting.Count}, cached tints {s_tintCache.Count}; "
+                    + $"cache {s_deepCells.Count} / cap {s_capNow}; cap evictions {s_evictRuns} (kept {s_evictKept}, dropped {s_evictDropped}, hard clears {s_evictHard}, {s_evictMs:0.0} ms), "
+                    + (s_evictRuns == 0 ? "no eviction: cache under cap" : "evicted: cache reached cap, live-job cells kept, tints NOT invalidated"));
+            }
+            s_probeTintMs = s_probeScanMs = s_evictMs = 0; s_probeStarted = 0; s_evictRuns = s_evictDropped = s_evictHard = 0;
+        }
 
         private static void OnSeasonChanged(int season, int stage)
         {

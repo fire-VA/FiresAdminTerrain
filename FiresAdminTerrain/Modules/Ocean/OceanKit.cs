@@ -168,14 +168,16 @@ namespace VerdantsAscent.Ocean
 
         private static PropertyInfo s_headUnder;
         private static float s_nextCoreLookup;
+        private static bool s_lookupGivenUp;   // 0.2.1438 ([2ic] review): a failed lookup in a running world is final (every plugin has loaded by then)
 
         internal static bool HeadUnderwater(Player me)
         {
-            if (s_headUnder == null && Time.unscaledTime >= s_nextCoreLookup)
+            if (s_headUnder == null && !s_lookupGivenUp && Time.unscaledTime >= s_nextCoreLookup)
             {
                 s_nextCoreLookup = Time.unscaledTime + 2f;
-                s_headUnder = Type.GetType("FiresCore.Movement.PlayerSwim, FiresUnifiedCore")?.GetProperty("HeadUnderwater", BindingFlags.Public | BindingFlags.Static);
-                if (s_headUnder != null) FiresLogger.LogDebug("[Ocean] breath reads Core's PlayerSwim.HeadUnderwater");
+                s_headUnder = (Type.GetType("FiresCore.Movement.PlayerSwim, FiresUnifiedCore") ?? Type.GetType("FiresAPM.Swimming.PlayerSwim, FiresAdvancedPlayerMovement"))?.GetProperty("HeadUnderwater", BindingFlags.Public | BindingFlags.Static);   // 0.2.1438: Core first (old Core owns swimming), else APM
+                if (s_headUnder != null) FiresLogger.LogDebug("[Ocean] breath reads PlayerSwim.HeadUnderwater");
+                else if (me != null) { s_lookupGivenUp = true; FiresLogger.LogDebug("[Ocean] no PlayerSwim (Advanced Player Movement not installed): breath stays off; lookup stopped"); }   // in a world every plugin has loaded: stop retrying
             }
             if (s_headUnder == null || !(bool)s_headUnder.GetValue(null)) return false;
             // No drowning in a dry cave under the sea - FAT's own cave roof answer, the same one Core's swim asks.

@@ -209,7 +209,20 @@ namespace VerdantsAscent.Terrain.Zones
         }
 
         // ── The queue file: "veg x y" / "loc x y" lines under a "world <uid> <seed>" header ──
-        private static string RegenQueuePath() => FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_regenqueue.txt");
+        internal const string RegenQueueSuffix = "_regenqueue.txt";
+        private static string RegenQueuePath() => FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", RegenQueueSuffix);
+
+        // 0.2.1451 (lead 11-16, the world clone): the queue is work the source still owes its zones (cleared zones not grown yet,
+        // new locations not placed yet); a copy of the world owes the same. Its header names the world's uid, which a copy does not
+        // share, so the copy gets the lines under its own header. Null when the file is not this world's queue (the copy then has
+        // none, as the source would have read none).
+        internal static string[] RetargetRegenQueue(string[] lines, long sourceUid, int seed, long cloneUid)
+        {
+            if (lines == null || lines.Length == 0 || lines[0] != $"world {sourceUid} {seed}") return null;
+            var copy = (string[])lines.Clone();
+            copy[0] = $"world {cloneUid} {seed}";
+            return copy;
+        }
 
         private static void EnsureRegenWorld()
         {

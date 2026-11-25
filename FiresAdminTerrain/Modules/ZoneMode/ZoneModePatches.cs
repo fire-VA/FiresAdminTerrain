@@ -108,10 +108,15 @@ namespace VerdantsAscent.Terrain.Zones
     [HarmonyPatch(typeof(AltBiomeWorldData), nameof(AltBiomeWorldData.GenerateBiomePoints))]
     internal static class ZoneMode_AltBiome_GenerateBiomePoints
     {
-        private static void Prefix() => ZoneModeGate.EnterPlanning();
+        private static void Prefix()
+        {
+            ZoneModeGate.EnterPlanning();
+            ZoneModeGate.EnterGridBuild();   // 0.2.1452: and any thread it queues
+        }
 
         private static Exception Finalizer(Exception __exception)
         {
+            ZoneModeGate.ExitGridBuild();
             ZoneModeGate.ExitPlanning();
             return __exception;
         }

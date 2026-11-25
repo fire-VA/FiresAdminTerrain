@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using HarmonyLib;
@@ -33,12 +34,13 @@ namespace VerdantsAscent.Terrain.BcImport
             // This row takes every world. BetterContinents data is an EXTRA the converter carries across
             // when it is there, not a precondition for using it - the clone, the 1.0 save format and the
             // terrain options are the same work either way. Only a world the game itself cannot read is
-            // refused, and "already converted" is kept because re-converting one is genuinely a no-op.
-            string refusal = world.m_dataError != World.SaveDataError.None
-                ? "This world could not be read."
-                : BcWorldData.Exists(name, out BcSaveLocation existing)
-                    ? $"'{name}' is already converted ({existing.Path})."
-                    : null;
+            // refused.
+            // 0.2.1451 (Fire 11-16: "clicking convert does nothing" on Verdant's Ascent DN): an already-converted world (it carries
+            // FAT's own terrain record, firesgen_<world>.bcdata) was refused here, and Core draws a refused row dim, never shows its
+            // tooltip and ignores the click, so nothing happened and nothing was logged. This row IS the clone: copying a converted
+            // world is real work (the copy keeps FAT's record, FiresWorldClone.CarryRecords / BcConvert.TryCarryTerrainToClone), so
+            // only a world the game cannot read is refused.
+            string refusal = world.m_dataError != World.SaveDataError.None ? "This world could not be read." : null;
             var row = ContextMenuItem.Row("Convert...", () => BcConvertDialog.Open(world), refusal == null);
             row.Tooltip = refusal;
             yield return row;
@@ -95,6 +97,8 @@ namespace VerdantsAscent.Terrain.BcImport
         public static void Open(World world)
         {
             Close();
+            FiresLogger.LogInfo($"[BcImport] convert dialog opening for '{(world == null ? "?" : string.IsNullOrEmpty(world.m_worldName) ? world.m_name : world.m_worldName)}'.");
+            if (world == null) { FiresLogger.LogWarning("[BcImport] the convert dialog was asked for no world; it cannot open."); return; }
             var fejd = FejdStartup.instance;
             if (fejd == null || fejd.m_removeWorldDialog == null)
             {
@@ -106,7 +110,15 @@ namespace VerdantsAscent.Terrain.BcImport
             var host = new GameObject(RootName);
             _open = host.AddComponent<BcConvertDialog>();
             _open._sourceName = string.IsNullOrEmpty(world.m_worldName) ? world.m_name : world.m_worldName;
-            if (!_open.Build(fejd)) Close();
+            bool built;
+            try { built = _open.Build(fejd); }
+            catch (Exception ex)
+            {
+                built = false;
+                FiresLogger.LogWarning($"[BcImport] the convert dialog could not be built ({ex.GetType().Name}: {ex.Message}).");
+            }
+            if (!built) { Close(); return; }
+            FiresLogger.LogInfo($"[BcImport] convert dialog open for '{_open._sourceName}'.");
         }
 
         public static void Close()
@@ -142,21 +154,19 @@ namespace VerdantsAscent.Terrain.BcImport
             // where the explanation used to be.
             bool hasBc = BcSaveLocator.TryLocate(_sourceName, out BcSaveLocation source);
 
-            // Every readable world can convert now; the only thing that makes it pointless is a world that
-            // already IS converted. The row greys that case out, so this is normally true - it stays computed
-            // rather than hardcoded so opening the dialog directly still shows the right buttons.
-            bool canConvert = !BcWorldData.Exists(_sourceName, out BcSaveLocation already);
-            if (!canConvert)
-                source = already;
+            // 0.2.1451: every readable world can be cloned, an already-converted one included (it was refused, so the row did
+            // nothing). Its copy keeps FAT's own terrain record, the same data this world loads from.
+            bool canConvert = true;
+            bool converted = BcWorldData.Exists(_sourceName, out BcSaveLocation already);
+            if (converted) { hasBc = false; source = already; }
 
             topic.text = "Convert";
-            body.text = !canConvert
-                ? $"'{_sourceName}' is already converted ({source.Path})."
-                : (hasBc ? $"'{_sourceName}' carries BetterContinents data:\n{source.Path}\n\n" : string.Empty)
+            body.text = (converted ? $"'{_sourceName}' was converted before; its copy keeps FAT's terrain data:\n{source.Path}\n\n" : string.Empty)
+                + (hasBc ? $"'{_sourceName}' carries BetterContinents data:\n{source.Path}\n\n" : string.Empty)
                     + "Converting CLONES the world first and converts the copy. This original is never modified - "
                     + "open it afterwards and it is exactly what it was. Items from mods that are not installed now "
                     + "do not carry into the copy (Valheim drops them as it loads it); the original keeps them.\n\n"
-                    + (hasBc
+                    + (hasBc || converted
                         ? "With nothing ticked below, the copy is the same map on stock Valheim terrain."
                         : "With nothing ticked below, the copy is the same world in the Valheim 1.0 save format.");
 

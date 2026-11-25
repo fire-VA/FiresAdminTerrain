@@ -58,7 +58,6 @@ namespace VerdantsAscent.Water.Core
         internal static void Tick()
         {
             s_mainThread = System.Threading.Thread.CurrentThread.ManagedThreadId;   // 0.2.1177: the roof test reads voxel chunks (main thread only)
-            FiresWaves.Tick();        // 0.2.1175: wave multiplier (server computes, peers receive), shader globals
             IceField.Tick();          // 0.2.1168: the timed ice exposure (own 2 s gate)
             RefreshStale();           // 0.2.1168: refill state textures left stale by an ice step (budgeted, no sheet rebuild)
             if (Time.time < s_nextTick) return;

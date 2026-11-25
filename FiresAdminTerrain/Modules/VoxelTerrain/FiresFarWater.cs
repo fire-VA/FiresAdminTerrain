@@ -47,6 +47,7 @@ namespace VerdantsAscent.Terrain.Voxel
         // for "is this static stepped water layer the far quilt?" (pale squares along a shore).
         internal static bool Hidden;
         private static bool s_clipLogged;
+        private static bool s_offSaid;   // 0.2.1431
 
         internal static void RegisterCommand()
         {
@@ -67,6 +68,14 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (s_tiles.Count > 0) Clear();
                 return;
             }
+            // 0.2.1431: [Far Terrain] FarWater (default off). Off = nothing built or kept; the stale / hole lists are not walked either.
+            if (FarQuilt.FarWater == null || !FarQuilt.FarWater.Value)
+            {
+                if (s_tiles.Count > 0) { Clear(); FiresLogger.LogInfo("[FiresFarWater] far water off ([Far Terrain] FarWater): far tiles removed."); }
+                if (!s_offSaid) { s_offSaid = true; FiresLogger.LogDebug("[FiresFarWater] far water off ([Far Terrain] FarWater = false): no far-water work runs."); }
+                return;
+            }
+            s_offSaid = false;
             if (Time.time < s_nextTick) return;
             s_nextTick = Time.time + 0.25f;
             // NEVER build without the material: a tile built before the near

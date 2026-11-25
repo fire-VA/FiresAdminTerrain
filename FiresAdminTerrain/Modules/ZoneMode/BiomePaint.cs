@@ -317,9 +317,28 @@ namespace VerdantsAscent.Terrain.Zones
         private const byte SwapsFileFormat = 2;
         private const byte FileFormat = HoldsFileFormat;   // 0.2.1374: format 3 adds the held ground; written only when there is any, so an older FAT still reads the rest
 
+        internal const string RecordSuffix = "_biomepaint.bin";
+
         private static string FilePath()
         {
-            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", "_biomepaint.bin");
+            return VerdantsAscent.Terrain.Voxel.FiresWorldRecords.PathFor(ZNet.World?.m_name ?? "world", RecordSuffix);
+        }
+
+        // 0.2.1451 (lead 11-16, the world clone dropped the paint): a copy of a world gets a new uid, and Load refuses a file whose
+        // uid is not the world's. Hands back the file with the copy's uid written over the source's (magic, format byte, then the
+        // uid), or null when it is not this world's paint file (wrong magic / format / uid / seed): the copy then starts unpainted,
+        // exactly as the source would have shown it.
+        internal static byte[] RetargetRecord(byte[] file, long sourceUid, int seed, long cloneUid)
+        {
+            const int uidAt = sizeof(uint) + sizeof(byte);
+            if (file == null || file.Length < uidAt + sizeof(long) + sizeof(int)) return null;
+            if (BitConverter.ToUInt32(file, 0) != FileMagic) return null;
+            byte format = file[sizeof(uint)];
+            if (format < FirstFileFormat || format > FileFormat) return null;
+            if (BitConverter.ToInt64(file, uidAt) != sourceUid || BitConverter.ToInt32(file, uidAt + sizeof(long)) != seed) return null;
+            var copy = (byte[])file.Clone();
+            Buffer.BlockCopy(BitConverter.GetBytes(cloneUid), 0, copy, uidAt, sizeof(long));
+            return copy;
         }
 
         // The server reads its list once per world; a client starts empty and asks.

@@ -177,13 +177,41 @@ namespace VerdantsAscent.Terrain.Zones
             return rect.width > 0f;
         }
 
+        // 0.2.1450 (lead 11-16, Fire: the pills covered vanilla's biome / zone / coordinates readout): LiveMap 0.1.8+ measures the
+        // readout's real bottom (LiveMapApi.DockAnchor, public static, returns the rect other mods' map pills stack under). Read by
+        // name, looked up once; null when LiveMap is absent, older, or the call throws, and the pill docks to vanilla's biome text.
+        private static bool s_dockLooked;
+        private static Func<RectTransform> s_dockAnchor;
+
+        private static RectTransform LiveMapDockAnchor()
+        {
+            if (!s_dockLooked)
+            {
+                s_dockLooked = true;
+                var method = FatSoftTypes.Find("Fires.Supercalifragilisticexpialidocious.map.Live.LiveMapApi")
+                    ?.GetMethod("DockAnchor", BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null);
+                if (method != null && method.ReturnType == typeof(RectTransform))
+                    s_dockAnchor = (Func<RectTransform>)Delegate.CreateDelegate(typeof(Func<RectTransform>), method);
+                FiresLogger.LogDebug($"[BiomePaint] map tool: LiveMap dock anchor {(s_dockAnchor != null ? "found, docking under it" : "not installed, docking under vanilla's biome text")}");
+            }
+            if (s_dockAnchor == null) return null;
+            try { return s_dockAnchor(); }
+            catch (Exception ex)
+            {
+                s_dockAnchor = null;
+                FiresLogger.LogDebug($"[BiomePaint] map tool: LiveMap dock anchor threw ({ex.GetType().Name}: {ex.Message}); docking under vanilla's biome text");
+                return null;
+            }
+        }
+
         private void PlacePill()
         {
             float w = 220f, x = Screen.width / _scale - w - 16f, y = 120f;
             try
             {
                 if (TerritoryPill(out var territory)) { _pillRect = new Rect(territory.x, territory.yMax + StackGap, territory.width, territory.height); return; }
-                var anchor = Minimap.instance != null && Minimap.instance.m_biomeNameLarge != null ? Minimap.instance.m_biomeNameLarge.rectTransform : null;
+                var anchor = LiveMapDockAnchor()
+                    ?? (Minimap.instance != null && Minimap.instance.m_biomeNameLarge != null ? Minimap.instance.m_biomeNameLarge.rectTransform : null);
                 if (anchor != null)
                 {
                     var c = new Vector3[4];

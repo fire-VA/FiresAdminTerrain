@@ -126,6 +126,36 @@ namespace VerdantsAscent.Terrain.BcImport
             }
         }
 
+        /// <summary>0.2.1451: hands a copy of a world the record its source loads from, byte for byte, out of whichever storage
+        /// holds it. Into the copy's world folder when it has one (a 1.0 save), else FAT's records folder, as TryWrite places a
+        /// new record. Never overwrites: a record already there is the copy's own.</summary>
+        public static bool TryCopyRecord(BcSaveLocation from, string cloneName, out string report)
+        {
+            string folder = $"{SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local)}/{cloneName}";
+            string to = Directory.Exists(folder) ? PathFor(cloneName, FileHelpers.FileSource.Local) : RecordsFolderPathFor(cloneName);
+            if (File.Exists(to)) { report = null; return true; }
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(to));
+                var reader = new FileReader(from.Path, from.Source);
+                try
+                {
+                    using (var output = new FileStream(to, FileMode.CreateNew, FileAccess.Write))
+                        reader.m_binary.BaseStream.CopyTo(output);
+                }
+                finally { reader.Dispose(); }
+                report = $"'{cloneName}' keeps FAT's terrain data ({to}, copied from {from.Path}).";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                try { if (File.Exists(to)) File.Delete(to); } catch { }
+                report = $"FAT's terrain data ({from.Path}) could not be copied to '{cloneName}' ({ex.GetType().Name}: {ex.Message}), "
+                    + "so it would generate as VANILLA and must not be played.";
+                return false;
+            }
+        }
+
         /// <summary>The package reads straight from the file: a whole-file byte[] and the ZPackage's own copy of it
         /// were two needless copies of 150+ MB on every load and every join.</summary>
         public static bool TryRead(BcSaveLocation location, out BcWorldSettings settings, out string failure) =>

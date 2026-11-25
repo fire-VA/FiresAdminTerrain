@@ -170,7 +170,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (!patch.Built) continue;
                 foreach (var kv in patch.Batches)
                 {
-                    var rp = new RenderParams(kv.Key.Item3) { camera = cam, shadowCastingMode = patch.Shadows[kv.Key], receiveShadows = true, layer = 0 };
+                    var rp = new RenderParams(kv.Key.Item3) { camera = cam, shadowCastingMode = patch.Shadows[kv.Key], receiveShadows = true, layer = 0, motionVectorMode = MotionVectorGenerationMode.Camera };   // 0.2.1434: camera motion only (default Object put instanced draws in Unity's per-object MV pass = TAA smear, Fire 11-13)
                     var list = kv.Value;
                     for (int start = 0; start < list.Count; start += MaxPerDraw)
                     {

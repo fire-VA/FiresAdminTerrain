@@ -64,21 +64,14 @@ namespace VerdantsAscent
 
         // 0.2.1175 (Fire: "work with vedr for tsunamis"; names locked with [seasons]): a timed wave multiplier from a named owner.
         // Overrides combine by max(1, ...) and expire after `seconds`; the SERVER's value is the one every peer uses, so call it there.
-        public static void SetWaveOverride(string owner, float multiplier, float seconds)
-        {
-            try { global::VerdantsAscent.Water.Core.FiresWaves.SetOverride(owner, multiplier, seconds); } catch (System.Exception) { }
-        }
+        // 0.2.1448 (Fire: "fat needs the code for its own custom water, but vanilla oceans and water will be handled by vedr or vanilla or any
+        // other mod hooking them"): FAT no longer touches the sea's waves (FiresWaves removed). Kept as no-ops for the add-only contract.
+        public static void SetWaveOverride(string owner, float multiplier, float seconds) { }
 
-        public static void ClearWaveOverride(string owner)
-        {
-            try { global::VerdantsAscent.Water.Core.FiresWaves.ClearOverride(owner); } catch (System.Exception) { }
-        }
+        public static void ClearWaveOverride(string owner) { }
 
-        // The final sea wave multiplier in use on this peer (slider x weather x overrides; the server's value on clients).
-        public static float WaveMultiplier
-        {
-            get { try { return global::VerdantsAscent.Water.Core.FiresWaves.Final; } catch (System.Exception) { return 1f; } }
-        }
+        // 0.2.1448: always 1 (FAT no longer scales the sea's waves).
+        public static float WaveMultiplier => 1f;
 
         // 0.2.1155: the sky-island top surface at a world x/z. true = (x, z) is inside an island's footprint, y = its top there
         // (Core's TerrainGuard measures snow / trail / shovel ops against it). false = no island there (y = 0).
@@ -866,6 +859,81 @@ namespace VerdantsAscent
         {
             try { return global::VerdantsAscent.Terrain.Studio.FatStudioTerrain.Revision(zone); }
             catch (System.Exception) { return 0u; }
+        }
+
+        // ── 0.2.1444 far-terrain DATA for EBM (lead 11-16: all far drawing lives in EBM; FAT supplies data only). ──
+        // Every call below is safe from any thread (EBM's far-tile builder) and never draws, builds or touches scene objects.
+        // On a Fires-generated (voxel-only) world they answer false: FAT's FarQuilt still draws the far ground there (FarFiresWorld).
+        // Doc: Tools\FARLANDS_TERRAIN_SOURCE_READ_20261116.md §5.
+
+        /// <summary>Version of the far-data calls below. 1 = 0.2.1444; 2 = 0.2.1446: TryFarHeight / TryFarEditDelta / TryFarColor are thread-safe (no call to a vanilla method another mod patches with shared state; 1444-1445 raced Vedr's GetBiomeColor counter).</summary>
+        public const int FarDataApiVersion = 2;   // 0.2.1446
+
+        /// <summary>True on a Fires-generated (voxel-only) world: FAT draws the far ground there, the far-data calls answer false.</summary>
+        public static bool FarFiresWorld => global::VerdantsAscent.Terrain.Voxel.FatFarData.FiresWorld;
+
+        /// <summary>
+        /// World-gen height at (x, z) by a vanilla NEAR zone's method (4 corner biomes, smoothstep bilinear), so far tiles meet the loaded
+        /// ground without a step. No player edits (see TryFarEditDelta). False without a world or on a Fires-generated world.
+        /// </summary>
+        public static bool TryFarHeight(float x, float z, out float height)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarData.TryHeight(x, z, out height); }
+            catch (System.Exception) { height = 0f; return false; }
+        }
+
+        /// <summary>
+        /// The zone's player terrain edits as a height delta in metres (final minus world-gen), loaded or not: 65 x 65 floats, 1 m apart,
+        /// row-major (index z * 65 + x), vertex (0,0) at world (zoneX * 64 - 32, zoneZ * 64 - 32). print = edit print (changes when the
+        /// edit changes). False (array untouched, print 0) when the zone has no cached edit, the cache is off ([DistantHeightCache]
+        /// Enabled) or delta65x65 is shorter than 4225. Edits are learned while the player is near a zone (FAT 0.2.1440).
+        /// </summary>
+        public static bool TryFarEditDelta(int zoneX, int zoneZ, float[] delta65x65, out uint print)
+        {
+            try { return global::VerdantsAscent.Terrain.Paint.DistantHeightCache.TryZoneDelta(zoneX, zoneZ, delta65x65, out print); }
+            catch (System.Exception) { print = 0u; return false; }
+        }
+
+        /// <summary>Bumps whenever the set of cached edits changes (published at most every 0.5 s), on world change and on the key toggle.</summary>
+        public static int FarEditRevision => global::VerdantsAscent.Terrain.Paint.DistantHeightCache.Revision;
+
+        /// <summary>
+        /// Ground splat colour at (x, z) as terrain splat weights (Heightmap.GetBiomeColor convention): vanilla distant colour (biome
+        /// sector, alt-biome override) -> FAT biome paint -> Vedr winter snow. False without a world or on a Fires-generated world.
+        /// </summary>
+        public static bool TryFarColor(float x, float z, out UnityEngine.Color32 color)
+        {
+            try { return global::VerdantsAscent.Terrain.Voxel.FatFarData.TryColor(x, z, out color); }
+            catch (System.Exception) { color = default; return false; }
+        }
+
+        /// <summary>Bumps when Vedr's snow biomes change (TryFarColor answers change). Biome paint changes: PaintVersion.</summary>
+        public static int FarWinterRevision => global::VerdantsAscent.Terrain.Voxel.FatSeasons.WinterRevision;
+
+        // ── 0.2.1447 enclosed-water calm for CPU water readers (Fire's ice rule; contract agreed with [seasons] + [visual]) ──
+        /// <summary>
+        /// Any thread. calm 0..1 at (x, z): 1 = open water enclosed by fixed ice (R >= 0.5) and / or land, where tide and waves are flat; the same
+        /// value the water shaders draw (_FiresIceCover.g, bilinear, smoothstep 0.1-0.9). False (calm 0) outside the 256 m cover rect around the
+        /// camera, before the first fill, or on a dedicated server (the cover is client-only). FAT's CalcWave already applies it while FAT owns waves.
+        /// </summary>
+        public static bool TryCalmAt(float x, float z, out float calm)
+        {
+            try { return global::VerdantsAscent.Water.Core.IceCoverTexture.TryCalmAt(x, z, out calm); }
+            catch (System.Exception) { calm = 0f; return false; }
+        }
+
+        /// <summary>Bumps each time the calm grid is republished (each ice cover fill) or cleared.</summary>
+        public static int CalmRevision => global::VerdantsAscent.Water.Core.IceCoverTexture.CalmRevision;
+
+        /// <summary>
+        /// 0.2.1448. Any thread. Ice proximity 0..1 at (x, z): the fixed-ice cover (R) blurred over ~32 m, linear, bilinear on the 2 m grid; the same
+        /// value as _FiresIceCover.b (valid while the global _FiresIceProxOn = 1). False (0) outside the 256 m cover rect, before the first fill, or on
+        /// a dedicated server. [seasons]' damping: 1 - 0.85 * smoothstep(0, 1, max(prox, calm)). Bumps with CalmRevision.
+        /// </summary>
+        public static bool TryIceProxAt(float x, float z, out float prox01)
+        {
+            try { return global::VerdantsAscent.Water.Core.IceCoverTexture.TryIceProxAt(x, z, out prox01); }
+            catch (System.Exception) { prox01 = 0f; return false; }
         }
     }
 

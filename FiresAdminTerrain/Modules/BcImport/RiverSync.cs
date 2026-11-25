@@ -100,8 +100,10 @@ namespace VerdantsAscent.Terrain.BcImport
             var clock = Stopwatch.StartNew();
             if (passes.Count != PassCount)
             {
-                FiresLogger.LogWarning($"[BcImport] rivers: this world's pregeneration drew {passes.Count} river pass(es), not {PassCount}, "
-                    + "so joining clients search for their own rivers (vanilla).");
+                // 0.2.1449: names the usual cause (another mod restored the rivers from its own cache and skipped vanilla's body)
+                FiresLogger.LogWarning($"[BcImport] rivers: this world's pregeneration drew {passes.Count} river pass(es), not {PassCount}: "
+                    + "another mod restored the rivers without vanilla's search (a river cache), so FAT has no river lists to send and "
+                    + "joining clients search for their own rivers (vanilla).");
                 return;
             }
             var lakes = LakesOf(generator) ?? new List<Vector2>();
@@ -133,8 +135,8 @@ namespace VerdantsAscent.Terrain.BcImport
                     FiresLogger.LogWarning("[BcImport] rivers: the server's lists did not arrive intact, so this client searches for its own (vanilla).");
                     return false;
                 default:
-                    FiresLogger.LogInfo("[BcImport] rivers: the server sent none this join (its FAT predates them), so this client searches "
-                        + "for its own (vanilla).");
+                    FiresLogger.LogInfo("[BcImport] rivers: the server had no river lists to send this join (its log says why), so this "
+                        + "client searches for its own (vanilla).");   // 0.2.1449: was "its FAT predates them"
                     return false;
             }
             if (!Replayable)

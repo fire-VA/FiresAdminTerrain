@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using HarmonyLib;
 using FiresCore.Bridge;
 using UnityEngine;
 using VerdantsAscent.Terrain.Biome;
@@ -137,8 +138,10 @@ namespace VerdantsAscent.Terrain.Voxel
             if (mask == s_mask) return;
             s_mask = mask;
             s_memoZx = int.MinValue;
+            System.Threading.Interlocked.Increment(ref s_winterRevision);   // 0.2.1444: FatApi.FarWinterRevision
             if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
             FarQuilt.RecolourForSeason();
+            if (DistantSnow != null && DistantSnow.Value) RebuildDistantLod("Vedr's snow biomes changed");   // 0.2.1441
             s_jobs.Clear();
             VoxelWorld.CollectViews(s_views);
             foreach (VoxelChunkView view in s_views)
@@ -308,6 +311,82 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static Color32 SnowColour => Heightmap.GetBiomeColor(Heightmap.Biome.Mountain);
 
+        // ── 0.2.1441 (Fire 11-16, frozen lake x -1338 z 726: "run out of distance the fucking color fades and it just looks black") ──
+        // Vanilla's distant-LOD tiles (TerrainLod, and FAT's FarTerrainVanilla ring) take their vertex colours from the worldgen biome
+        // only (Heightmap.RebuildRenderMesh: m_isDistantLod -> GetBiomeColor(GetBiomeSector(wx, wz))), and Vedr's ground snow skips
+        // every distant-LOD heightmap (Vedr SnowBaseMask / SnowHeightmapInject return on IsDistantLod). So in Vedr winter the near
+        // ground is white and the far terrain keeps its summer biome colour, which reads dark under winter light. FarQuilt tiles and
+        // voxel ground already go through Winterize; this gives the vanilla distant tiles the same winter, after vanilla (and FAT's
+        // env-box / biome paint colours) wrote them. Season changes rebuild the distant tiles once (OnVisualsChanged).
+        internal static BepInEx.Configuration.ConfigEntry<bool> DistantSnow;
+        private static readonly AccessTools.FieldRef<Heightmap, Mesh> s_lodMesh = AccessTools.FieldRefAccess<Heightmap, Mesh>("m_renderMesh");
+        private static readonly AccessTools.FieldRef<Heightmap, bool> s_lodIsDistant = AccessTools.FieldRefAccess<Heightmap, bool>("m_isDistantLod");
+        private static readonly List<Color32> s_lodCols = new List<Color32>(8192);
+        private static int s_lodTiles, s_lodChanged; private static double s_lodMs; private static float s_lodLogAt; private static bool s_lodSaid;
+
+        internal static void BindDistantSnow(BepInEx.Configuration.ConfigFile cfg)
+        {
+            DistantSnow = cfg.Bind("Far Terrain", "WinterSnow", true,
+                "In Vedr's winter, the distant terrain (past the loaded ground) is drawn with the same snow as the near ground, instead of its summer colour. "
+                + "Off = vanilla: the far terrain keeps its summer biome colour. Applies live (the far terrain rebuilds once). Needs Vedr; does nothing without it.");
+            DistantSnow.SettingChanged += (_, __) => RebuildDistantLod("[Far Terrain] WinterSnow changed");
+        }
+
+        /// <summary>FAT's one Heightmap.RebuildRenderMesh postfix (after the env-box and biome-paint colours): winter on a distant-LOD tile.</summary>
+        internal static void WinterizeDistantLod(Heightmap hm)
+        {
+            if (s_mask == 0 || DistantSnow == null || !DistantSnow.Value || hm == null || !s_lodIsDistant(hm)) return;
+            if (!VoxelOnlyRenderMesh.Allow(hm)) return;   // FAT's prefix skipped vanilla's rebuild (voxel-only world with FarQuilt): colours are old, never winterize twice
+            var mesh = s_lodMesh(hm);
+            if (mesh == null) return;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            mesh.GetColors(s_lodCols);
+            int n = hm.m_width + 1;
+            if (s_lodCols.Count != n * n) return;
+            float scale = hm.m_scale;
+            Vector3 p = hm.transform.position;
+            float x0 = p.x - hm.m_width * scale * 0.5f, z0 = p.z - hm.m_width * scale * 0.5f;   // vanilla's own vertex origin (RebuildRenderMesh)
+            int changed = 0;
+            for (int i = 0; i < n; i++)
+            {
+                float wz = z0 + i * scale;
+                int row = i * n;
+                for (int j = 0; j < n; j++)
+                {
+                    Color32 c = s_lodCols[row + j];
+                    Color32 w = Winterize(c, x0 + j * scale, wz);
+                    if (w.r == c.r && w.g == c.g && w.b == c.b && w.a == c.a) continue;
+                    s_lodCols[row + j] = w;
+                    changed++;
+                }
+            }
+            if (changed > 0) mesh.SetColors(s_lodCols);
+            s_lodTiles++; s_lodChanged += changed;
+            s_lodMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (!s_lodSaid && changed > 0) { s_lodSaid = true; FiresLogger.LogInfo($"[FiresSeasons] winter snow drawn on the distant terrain too (first tile at {p.x:0},{p.z:0}: {changed} of {n * n} vertices whitened; 0.2.1441)"); }
+            if (FiresLogger.DebugEnabled && Time.unscaledTime >= s_lodLogAt)
+            {
+                s_lodLogAt = Time.unscaledTime + 60f;
+                FiresLogger.LogDebug($"[FiresSeasons] distant winter, last 60 s: {s_lodTiles} far tile(s), {s_lodChanged} vertices whitened, {s_lodMs:0.0} ms");
+                s_lodTiles = s_lodChanged = 0; s_lodMs = 0;
+            }
+        }
+
+        // Season change or key flip: vanilla rebuilds each distant tile from its biome colours, then the postfix above applies (or not).
+        private static void RebuildDistantLod(string why)
+        {
+            if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
+            int n = 0;
+            var all = VerdantsAscent.Terrain.Paint.DistantHeightCache.DistantTiles();   // 0.2.1442: GetAllHeightmaps() holds NEAR tiles only
+            for (int i = 0; i < all.Count; i++)
+            {
+                var hm = all[i];
+                if (hm == null || !hm.isActiveAndEnabled) continue;
+                try { hm.Poke(); n++; } catch { }
+            }
+            if (n > 0) FiresLogger.LogInfo($"[FiresSeasons] {n} distant terrain tile(s) rebuilt ({why})");
+        }
+
         /// <summary>1 where the ground is white now: a biome Vedr snows over, or one whose own colour is the snow splat.</summary>
         private static float SnowShare(Heightmap.Biome biome) =>
             (s_mask & (int)biome) != 0 || SameColour(Heightmap.GetBiomeColor(biome), SnowColour) ? 1f : 0f;
@@ -320,5 +399,40 @@ namespace VerdantsAscent.Terrain.Voxel
         private static Vector4 AsVector(Color32 c) => new Vector4(c.r, c.g, c.b, c.a);
 
         private static byte Channel(byte value, float delta) => (byte)Mathf.Clamp(Mathf.RoundToInt(value + delta), byte.MinValue, byte.MaxValue);
+
+        // ── 0.2.1444 (lead 11-16: far drawing lives in EBM, FAT supplies data; FatApi.TryFarColor from EBM's builder thread) ──
+        // The same winter as Winterize, with no shared memo, so any thread may call it. Corner biomes come from the patched
+        // WorldGenerator.GetBiome (BiomeManager.GetBiomeAt also reads environment boxes, which are scene objects: main thread only),
+        // so ground an environment box forces keeps its world biome's winter here. Painted ground goes through the same rim blend.
+        private static int s_winterRevision;
+        internal static int WinterRevision => System.Threading.Volatile.Read(ref s_winterRevision);
+
+        internal static Color32 WinterizeAnyThread(Color32 c, float wx, float wz, WorldGenerator wg)
+        {
+            int mask = s_mask;
+            if (mask == 0 || wg == null) return c;
+            int zx = Mathf.FloorToInt((wx + ZoneHalf) / ZoneSize), zz = Mathf.FloorToInt((wz + ZoneHalf) / ZoneSize);
+            float x0 = zx * ZoneSize - ZoneHalf, z0 = zz * ZoneSize - ZoneHalf;
+            float ix = (wx - x0) / ZoneSize, iz = (wz - z0) / ZoneSize;
+            Heightmap.Biome b0 = wg.GetBiome(x0, z0), b1 = wg.GetBiome(x0 + ZoneSize, z0);
+            Heightmap.Biome b2 = wg.GetBiome(x0, z0 + ZoneSize), b3 = wg.GetBiome(x0 + ZoneSize, z0 + ZoneSize);
+            if (BiomePaint.TryGround(wx, wz, out var ground, out var circle))
+            {
+                float worldSnow = Mathf.Lerp(Mathf.Lerp(SnowShare(mask, b0), SnowShare(mask, b1), ix), Mathf.Lerp(SnowShare(mask, b2), SnowShare(mask, b3), ix), iz);
+                float band = Mathf.Min(PaintRimBlendM, circle.R * PaintRimBlendMaxShareOfRadius);
+                float inward = Mathf.Clamp01(circle.Rim(wx, wz, band) / band);
+                return Color32.Lerp(c, FatFarData.SplatOf(Heightmap.Biome.Mountain), Mathf.Lerp(worldSnow, SnowShare(mask, ground), inward));   // 0.2.1446: pure table, never the patched GetBiomeColor off the main thread
+            }
+            Vector4 d0 = SnowDelta(mask, b0), d1 = SnowDelta(mask, b1), d2 = SnowDelta(mask, b2), d3 = SnowDelta(mask, b3);
+            if (d0 == Vector4.zero && d1 == Vector4.zero && d2 == Vector4.zero && d3 == Vector4.zero) return c;
+            Vector4 d = Vector4.Lerp(Vector4.Lerp(d0, d1, ix), Vector4.Lerp(d2, d3, ix), iz);
+            return new Color32(Channel(c.r, d.x), Channel(c.g, d.y), Channel(c.b, d.z), Channel(c.a, d.w));
+        }
+
+        private static float SnowShare(int mask, Heightmap.Biome biome) =>
+            (mask & (int)biome) != 0 || SameColour(FatFarData.SplatOf(biome), FatFarData.SplatOf(Heightmap.Biome.Mountain)) ? 1f : 0f;
+
+        private static Vector4 SnowDelta(int mask, Heightmap.Biome biome) =>
+            (mask & (int)biome) == 0 ? Vector4.zero : AsVector(FatFarData.SplatOf(Heightmap.Biome.Mountain)) - AsVector(FatFarData.SplatOf(biome));   // 0.2.1446: pure table (thread-safe)
     }
 }

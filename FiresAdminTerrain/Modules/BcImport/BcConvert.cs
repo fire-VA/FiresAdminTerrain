@@ -173,12 +173,11 @@ namespace VerdantsAscent.Terrain.BcImport
             // file beside it - so a plain world, the common case, could not be cloned or updated at
             // all. The clone, the 1.0 save format and the terrain options are the same work either
             // way; BC data is one more thing to hand the copy WHEN the source has some.
-            // Re-converting a world that already carries the data is still refused: that is a no-op.
-            if (BcWorldData.Exists(sourceName, out BcSaveLocation already))
-            {
-                report = $"'{sourceName}' is already converted ({already.Path}).";
-                return false;
-            }
+            // 0.2.1451 (Fire 11-16, Verdant's Ascent DN -> VA-Chunk): a world that already carries FAT's own terrain record was
+            // refused here ("already converted"), so a converted world could never be cloned through the menu. Its copy now keeps
+            // that record (FiresWorldClone.CarryRecords for the records-folder form, TryCarryTerrainToClone for the in-folder
+            // form) and BetterContinents' own file, if any is still beside it, is not read: FAT's record is what the world loads.
+            bool alreadyConverted = BcWorldData.Exists(sourceName, out BcSaveLocation already);
             if (!FiresWorldClone.IsUsableName(cloneName, out string nameProblem))
             {
                 report = nameProblem;
@@ -189,7 +188,8 @@ namespace VerdantsAscent.Terrain.BcImport
 
             // A source with no BC file, or with BC switched off for it, converts as a normal world:
             // hasBcTerrain stays false and the hand-over below is skipped. Neither is an error now.
-            bool hasBcTerrain = BcSaveLocator.TryLocate(sourceName, out BcSaveLocation source);
+            BcSaveLocation source = default(BcSaveLocation);
+            bool hasBcTerrain = !alreadyConverted && BcSaveLocator.TryLocate(sourceName, out source);
             BcWorldSettings settings = default(BcWorldSettings);
             if (hasBcTerrain)
             {
@@ -218,7 +218,18 @@ namespace VerdantsAscent.Terrain.BcImport
             }
 
             string ownership = null;
-            if (hasBcTerrain && BcWorldData.Exists(cloneName, out BcSaveLocation carried))
+            if (alreadyConverted)
+            {
+                // TryClone carried FAT's record (CarryRecords / TryCarryTerrainToClone); without it the copy would load as vanilla.
+                if (!BcWorldData.Exists(cloneName, out BcSaveLocation kept))
+                {
+                    report = $"Cloned '{sourceName}' as '{cloneName}', but FAT's terrain data ({already.Path}) did not reach the copy, "
+                        + "so it would generate as VANILLA and must not be played. The original is untouched.";
+                    return false;
+                }
+                ownership = $"'{cloneName}' keeps FAT's terrain data ({kept.Path}).";
+            }
+            else if (hasBcTerrain && BcWorldData.Exists(cloneName, out BcSaveLocation carried))
                 ownership = $"'{cloneName}' carries FAT's own terrain data ({carried.Path}).";
             else if (hasBcTerrain && !TryGiveCloneTheData(cloneName, settings, out ownership))
             {
@@ -227,7 +238,7 @@ namespace VerdantsAscent.Terrain.BcImport
             }
 
             report = $"Converted '{sourceName}' to '{cloneName}' in {timer.ElapsedMilliseconds} ms. "
-                + (hasBcTerrain ? ownership + " " : string.Empty)
+                + (hasBcTerrain || alreadyConverted ? ownership + " " : string.Empty)
                 + $"{DescribeTerrain(options)} "
                 + "The original is untouched - open it any time and it is exactly what it was.";
             return true;
@@ -242,6 +253,10 @@ namespace VerdantsAscent.Terrain.BcImport
         {
             report = null;
             if (BcWorldData.Exists(cloneName, out BcSaveLocation _)) return true;
+            // 0.2.1451: a source already converted keeps its record INSIDE its world folder when it has one, and the save copy
+            // takes only .chunk / _main.* files (FiresWorldClone.StageSaveAsync), so that record is handed over here. (The
+            // records-folder form, firesgen_<world>.bcdata, is carried by FiresWorldClone.CarryRecords and returned above.)
+            if (BcWorldData.Exists(sourceName, out BcSaveLocation fat)) return BcWorldData.TryCopyRecord(fat, cloneName, out report);
             if (!BcSaveLocator.TryLocate(sourceName, out BcSaveLocation source)) return true;
 
             if (!BcSaveReader.TryReadFile(source, out BcWorldSettings settings, out string readFailure))

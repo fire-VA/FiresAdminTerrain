@@ -860,6 +860,14 @@ namespace VerdantsAscent.Terrain.Voxel
         // 0.2.1350 (proof only, client, every 30 s): the near heightmaps actually drawn against wrap reach and the active area. A drawn one outside
         // reach can never wrap while it stays there; isVisible says whether a camera (or shadow pass) took it in the last frame.
         private static float s_drawnReachLogAt;
+        // 0.2.1442: the line used to print ZoneSystem.m_simulationDistance as "simulation distance"; vanilla copies it from
+        // ZNet.GetSyncedSimulationDistance() only in ZoneSystem.ApplySettings, so it can differ from the live synced value FF reads.
+        private static string SyncedSd()
+        {
+            if (ZNet.instance == null) return "no ZNet";
+            var sd = ZNet.instance.GetSyncedSimulationDistance();
+            return $"near {sd.NearSimulationDistance}, far {sd.FarSimulationDistance}, classic {sd.IsClassic}";
+        }
         private static void LogDrawnReach(float reach)
         {
             if (Time.realtimeSinceStartup < s_drawnReachLogAt || s_centers.Count == 0 || ZoneSystem.instance == null) return;
@@ -895,7 +903,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (d < nearestOut) nearestOut = d;
                 if (sampled < 6) { sampled++; sample.Append($" ({zone.x},{zone.y}){(visible ? "v" : "")}@{d:0}m"); }
             }
-            FiresLogger.LogDebug($"[FiresVoxel] drawn heightmaps: loaded zones {zs.m_zones.Count} (the HUD's count), near heightmaps {near}, drawn {drawn} ({drawnVisible} visible), wrapped {wrapped}, swapped {swapped}; wrap reach {reach:0} m: drawn in reach still vanilla {inReachVanilla}, drawn outside reach {outReach} ({outReachVisible} visible{(outReach > 0 ? $", nearest {nearestOut:0} m" : "")}{sample}); outside active area {area * 2 + 1}x{area * 2 + 1} (simulation distance near {area}, far {zs.m_simulationDistance.FarSimulationDistance}, classic {zs.m_simulationDistance.IsClassic}): {outActive} ({outActiveVisible} visible); not wrapped with anchors known {anchoredNoWrap} (0.2.1350)");
+            FiresLogger.LogDebug($"[FiresVoxel] drawn heightmaps: loaded zones {zs.m_zones.Count} (the HUD's count), near heightmaps {near}, drawn {drawn} ({drawnVisible} visible), wrapped {wrapped}, swapped {swapped}; wrap reach {reach:0} m: drawn in reach still vanilla {inReachVanilla}, drawn outside reach {outReach} ({outReachVisible} visible{(outReach > 0 ? $", nearest {nearestOut:0} m" : "")}{sample}); outside active area {area * 2 + 1}x{area * 2 + 1} (ZoneSystem's zone-loading distance, copied at the last ApplySimulationDistance: near {area}, far {zs.m_simulationDistance.FarSimulationDistance}, classic {zs.m_simulationDistance.IsClassic}; ZNet synced now: {SyncedSd()}): {outActive} ({outActiveVisible} visible); not wrapped with anchors known {anchoredNoWrap} (0.2.1350)");
         }
 
         private static void ShowEditChunksAtSwap(ZoneWrap wrap)
@@ -3783,6 +3791,7 @@ namespace VerdantsAscent.Terrain.Voxel
 
         private static void Postfix(Heightmap __instance)
         {
+            VerdantsAscent.Terrain.Paint.DistantHeightCache.AfterApplyModifiers(__instance);   // 0.2.1440: returns on its first line when [DistantHeightCache] Enabled is off
             if (!GenWaterField.Ready) return;
             long t0 = Zones.ZoneUpdateTimes.Now();
             Stamp(__instance);

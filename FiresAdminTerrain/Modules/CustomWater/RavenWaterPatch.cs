@@ -114,6 +114,18 @@ namespace VerdantsAscent.Water.Core
             return generated > NoWater ? Mathf.Max(level, generated) : level;
         }
 
+        // 0.2.1448 (Fire: "fat needs the code for its own custom water, but vanilla oceans and water will be handled by vedr or vanilla"):
+        // FAT's OWN water only: pours, placed water bodies and the generated lakes / rivers (FatWaterLevelGate.Apply from a floor, which never
+        // includes vanilla's sea or any mod's tide), plus the voxel sheet. NoWater (-9999) when FAT has no water here. The spawn / raven /
+        // ghost / fish checks below use this, so the sea and tide water stay vanilla's (and other mods') call.
+        internal static float FatOnlySurfaceAt(Vector3 p)
+        {
+            float level = NoWater;
+            FatWaterLevelGate.Apply(p, ref level);
+            float generated = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(p);
+            return generated > level ? generated : level;
+        }
+
         // ── ONE inland-water query (carved ponds and filled water must spawn fish and
         // vegetation") ─────────────────────────────────────────────────────────────────────────────────────────────
         // The generated field (GenWaterField: hydrology or the Fires generator) first. Otherwise every other water FAT
@@ -205,7 +217,7 @@ namespace VerdantsAscent.Water.Core
             var piece = ghost.GetComponent<Piece>();
             if (piece == null || !piece.m_noInWater) return;
             Vector3 p = ghost.transform.position;
-            if (SurfaceAt(p) <= p.y) return;
+            if (FatOnlySurfaceAt(p) <= p.y) return;   // 0.2.1448: FAT water only (vanilla turns ghosts red in its own water)
             VerdantsAscent.Terrain.Zones.ZoneModeRefusals.RefuseGhost(player, Player.PlacementStatus.Invalid);
         }
     }
@@ -222,7 +234,7 @@ namespace VerdantsAscent.Water.Core
         private static void Postfix(ref bool __result, ref Vector3 point)
         {
             if (!__result) return;
-            float surface = FatWaterChecks.SurfaceAt(point);
+            float surface = FatWaterChecks.FatOnlySurfaceAt(point);   // 0.2.1448: FAT water only
             if (surface <= point.y + DryMargin) return;
             __result = false;
             if (s_logged) return;
@@ -243,7 +255,7 @@ namespace VerdantsAscent.Water.Core
         private static void Postfix(SpawnSystem.SpawnData spawn, ref Vector3 spawnPoint, ref bool __result)
         {
             if (!__result || spawn == null || spawn.m_minOceanDepth != spawn.m_maxOceanDepth || InlandFishSpawns.IsFish(spawn)) return;
-            if (FatWaterChecks.SurfaceAt(spawnPoint) > spawnPoint.y + LandDepth) __result = false;
+            if (FatWaterChecks.FatOnlySurfaceAt(spawnPoint) > spawnPoint.y + LandDepth) __result = false;   // 0.2.1448: FAT water only
         }
     }
 
@@ -510,12 +522,15 @@ namespace VerdantsAscent.Water.Core
     {
         private static readonly AccessTools.FieldRef<Fish, WaterVolume> VolumeOf = AccessTools.FieldRefAccess<Fish, WaterVolume>("m_waterVolume");
         private const float NoWater = -1000f;
+        private const float AboveSurface = 1.5f;   // the same "in that water" gate as GeneratedWaterFeeder.Feed
 
         private static void Postfix(Fish __instance, Vector3 point, ref float __result)
         {
             if (VolumeOf(__instance) != null) return;
-            float surface = FatWaterChecks.SurfaceAt(point);
-            if (surface > NoWater) __result = surface;
+            float surface = FatWaterChecks.FatOnlySurfaceAt(point);   // 0.2.1448: FAT water only
+            // 0.2.1448 (lead 11-16, fish in the sky by the town shore): only water the fish is actually in steers it. A FAT surface
+            // standing above a fish that is not in it (a sheet, pond or river higher up the slope) never becomes its swim level.
+            if (surface > NoWater && __instance.transform.position.y < surface + AboveSurface) __result = surface;
         }
     }
 }

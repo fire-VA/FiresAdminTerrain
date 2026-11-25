@@ -132,6 +132,45 @@ namespace VerdantsAscent.Terrain.Zones
 
         internal static void ResumePlanning(int depth) => t_planningDepth = depth;
 
+        // ── The biome grid build (0.2.1452, lead 11-16, VA-Chunk clients placed 0 alt biomes) ──────────────────────────
+        // AltBiomeWorldData's 2048² grid must be the REAL world: its sectors decide alt biomes, environments and spawns, and closed
+        // zones are already gated where they are READ (GetBiomeSector, ZoneModePatches.cs). The planning scope above is per
+        // thread, and FiresFixes' "Parallel Biome Points" builds the grid on ThreadPool workers inside VerifyBiomeData: on a
+        // client (the zone view arrives in the handshake, before the grid) every closed point came back Ocean / sea floor, and
+        // FF cached that grid (Fire's VA-Chunk cache: 256 land points of 4,194,304).
+        // The scope rides the ExecutionContext (AsyncLocal), which ThreadPool.QueueUserWorkItem, Task and Parallel carry into
+        // the work they queue, so ONLY work started inside the grid build reads the real world. Threads that were already
+        // running - the HeightmapBuilder thread (pinned to its own view anyway, PinForBuild), voxel and far-tile workers -
+        // never see it and stay gated. A global count keeps the hot path to one volatile read outside the build.
+        private static int s_gridBuilds;
+        private static readonly AsyncLocal<int> s_gridScope = new AsyncLocal<int>();
+        // Write-once proof flags (no per-read cost): a closed point read through the scope on the caller's thread, on another
+        // thread (a helper the build queued), and a closed point read gated by a thread outside the scope during the build.
+        private static int s_gridOnCaller, s_gridOnHelper, s_gridOutsiders;
+        private static int s_gridCallerThread;
+
+        internal static void EnterGridBuild()
+        {
+            s_gridScope.Value = s_gridScope.Value + 1;
+            if (Interlocked.Increment(ref s_gridBuilds) != 1) return;
+            s_gridCallerThread = Thread.CurrentThread.ManagedThreadId;
+            Volatile.Write(ref s_gridOnCaller, 0); Volatile.Write(ref s_gridOnHelper, 0); Volatile.Write(ref s_gridOutsiders, 0);
+        }
+
+        internal static void ExitGridBuild()
+        {
+            if (s_gridScope.Value > 0) s_gridScope.Value = s_gridScope.Value - 1;
+            if (Interlocked.Decrement(ref s_gridBuilds) > 0) return;
+            if (Volatile.Read(ref s_view) == null) return;   // no zone view during the build (a server's first load): nothing was gated either way
+            bool caller = Volatile.Read(ref s_gridOnCaller) != 0, helper = Volatile.Read(ref s_gridOnHelper) != 0, outsiders = Volatile.Read(ref s_gridOutsiders) != 0;
+            FiresLogger.LogInfo($"[FiresZones] biome grid built from the real world on a zone-mode world: closed points read through the build's "
+                + $"scope on its own thread: {(caller ? "yes" : "no")}, on helper threads it queued: {(helper ? "yes" : "no")}; other threads "
+                + $"that stayed gated meanwhile: {(outsiders ? "yes (terrain work running alongside, correctly gated)" : "none")}.");
+        }
+
+        // True on the grid build's own threads (the caller and everything it queued) while the build runs.
+        private static bool InGridBuild => !t_pinned && Volatile.Read(ref s_gridBuilds) > 0 && s_gridScope.Value > 0;
+
         // The view a sample is gated against, or null when it must read the real world.
         private static View SampleView(float wx, float wy)
         {
@@ -142,6 +181,16 @@ namespace VerdantsAscent.Terrain.Zones
             {
                 Tally.PlanningClosedReads++;
                 return null;
+            }
+            if (Volatile.Read(ref s_gridBuilds) > 0)
+            {
+                if (InGridBuild)
+                {
+                    if (Thread.CurrentThread.ManagedThreadId == s_gridCallerThread) { if (s_gridOnCaller == 0) Volatile.Write(ref s_gridOnCaller, 1); }
+                    else if (s_gridOnHelper == 0) Volatile.Write(ref s_gridOnHelper, 1);
+                    return null;
+                }
+                if (s_gridOutsiders == 0) Volatile.Write(ref s_gridOutsiders, 1);
             }
             return view;
         }
@@ -170,6 +219,7 @@ namespace VerdantsAscent.Terrain.Zones
         private static View LiveView()
         {
             if (t_bypassDepth > 0 || (t_planningDepth > 0 && !t_populationSet)) return null;
+            if (Volatile.Read(ref s_gridBuilds) > 0 && InGridBuild) return null;   // 0.2.1452: the grid is the world's own plan, like a planning pass
             return t_pinned ? t_pinnedView : Volatile.Read(ref s_view);
         }
 

@@ -267,11 +267,11 @@ namespace VerdantsAscent.Terrain.Voxel
             if (!s_coreRoofLookedUp)
             {
                 s_coreRoofLookedUp = true;
-                var swim = System.Type.GetType("FiresCore.Movement.PlayerSwim, FiresUnifiedCore");
+                var swim = System.Type.GetType("FiresCore.Movement.PlayerSwim, FiresUnifiedCore") ?? System.Type.GetType("FiresAPM.Swimming.PlayerSwim, FiresAdvancedPlayerMovement");   // 0.2.1438: Core first (an old Core that still has PlayerSwim owns swimming; APM stands down then), else APM (Core 1243+)
                 s_coreRoofField = swim?.GetField("RoofAbove", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
                 FiresLogger.LogDebug(s_coreRoofField != null
                     ? "[FiresVoxel] Core's swimming asks FAT whether a point is in a cave under the sea (PlayerSwim.RoofAbove)."
-                    : "[FiresVoxel] this Core has no PlayerSwim.RoofAbove (older than 0.2.298): the sea in caves stays FAT's own deep-water gate.");
+                    : "[FiresVoxel] no PlayerSwim.RoofAbove (Advanced Player Movement not installed): the sea in caves stays FAT's own deep-water gate.");
             }
             if (s_coreRoofField == null) return;
             try

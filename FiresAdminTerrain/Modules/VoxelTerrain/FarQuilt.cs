@@ -53,7 +53,12 @@ namespace VerdantsAscent.Terrain.Voxel
             ReachMeters = cfg.Bind("Far Terrain", "ReachMeters", 4096f,
                 new BepInEx.Configuration.ConfigDescription("How far the extended far terrain reaches (m). Fog and the camera's far clip decide how much of it shows.",
                     new BepInEx.Configuration.AcceptableValueRange<float>(1536f, 6000f)));
+            // 0.2.1431 (Fire 11-10 4:17 AM: "any other far rendering code would default off"): FiresFarWater had no key and ran on every
+            // Fires-generated world. Off = no far-water tiles built, ticked or kept (existing ones are destroyed). Per machine, not synced.
+            FarWater = cfg.Bind("Far Terrain", "FarWater", false,
+                "Far water: rivers and lakes drawn past the loaded area, out to about 3 km, on Fires-generated worlds (render only). Default off; off = no far-water work at all.");
         }
+        internal static BepInEx.Configuration.ConfigEntry<bool> FarWater;
 
         private static bool ExtOn => ExtendedReach != null && ExtendedReach.Value;
         private static float RingSize(int ring) => ring == 0 ? 64f : ring == 1 ? 256f : ring == 2 ? 512f : 1024f;
@@ -172,6 +177,7 @@ namespace VerdantsAscent.Terrain.Voxel
                     if (t.Mask != null) Destroy(t.Mask);
                 }
                 s_tiles.Clear();
+                s_rebuild.Clear();   // 0.2.1440
                 s_root = null;
             }
         }
@@ -283,6 +289,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (BuildTile(key, c, near)) built++;
             }
 
+            DrainRebuild(c, near);   // 0.2.1440 DistantHeightCache: in-place rebuilds (empty unless the cache queued tiles)
             DrainMasks();
 
             // Status heartbeat — the lod must never fail silently again.
@@ -642,7 +649,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int x = 0; x < verts; x++)
                 {
                     float wx = ox + x * step, wz = oz + z * step;
-                    float h = FarHeight(wx, wz);
+                    float h = FarHeight(wx, wz) + VerdantsAscent.Terrain.Paint.DistantHeightCache.FarDelta(wx, wz, step);   // 0.2.1440: visited zones' terrain edits (0 when off)
                     if (h > maxH) maxH = h;
                     int i = z * verts + x;
                     vs[i] = new Vector3(wx - ox, h, wz - oz);
@@ -673,10 +680,10 @@ namespace VerdantsAscent.Terrain.Voxel
                 for (int x = 0; x < verts; x++)
                 {
                     int i = z * verts + x;
-                    float hl = x > 0 ? vs[(x - 1) + z * verts].y : FarHeight(ox - step, oz + z * step);
-                    float hr = x < verts - 1 ? vs[(x + 1) + z * verts].y : FarHeight(ox + size + step, oz + z * step);
-                    float hd = z > 0 ? vs[x + (z - 1) * verts].y : FarHeight(ox + x * step, oz - step);
-                    float hu = z < verts - 1 ? vs[x + (z + 1) * verts].y : FarHeight(ox + x * step, oz + size + step);
+                    float hl = x > 0 ? vs[(x - 1) + z * verts].y : FarHeightEdited(ox - step, oz + z * step, step);
+                    float hr = x < verts - 1 ? vs[(x + 1) + z * verts].y : FarHeightEdited(ox + size + step, oz + z * step, step);
+                    float hd = z > 0 ? vs[x + (z - 1) * verts].y : FarHeightEdited(ox + x * step, oz - step, step);
+                    float hu = z < verts - 1 ? vs[x + (z + 1) * verts].y : FarHeightEdited(ox + x * step, oz + size + step, step);
                     norms[i] = new Vector3(hl - hr, 2f * step, hd - hu).normalized;
                 }
             }
@@ -798,6 +805,49 @@ namespace VerdantsAscent.Terrain.Voxel
             }
         }
 
+        // 0.2.1440 DistantHeightCache: edge normals sample the same edited height as the vertices.
+        private static float FarHeightEdited(float wx, float wz, float step)
+            => FarHeight(wx, wz) + VerdantsAscent.Terrain.Paint.DistantHeightCache.FarDelta(wx, wz, step);
+
+        // 0.2.1440 DistantHeightCache: tiles over a zone whose cached edit changed (or all of them, on the key's toggle) rebuild IN PLACE,
+        // a few per tick from the driver (Release + BuildTile in the same call: never a hole). Tombstones (sea-floor tiles) rebuild too,
+        // in case an edit now breaks the waterline.
+        private static readonly HashSet<Vector3Int> s_rebuild = new HashSet<Vector3Int>();
+        private static readonly List<Vector3Int> s_rebuildScratch = new List<Vector3Int>(16);
+        private const int RebuildPerTick = 4;
+
+        internal static void RebuildTilesFor(Vector2s zone)
+        {
+            if (s_tiles.Count == 0) return;
+            float zx0 = zone.x * 64f - 32f, zz0 = zone.y * 64f - 32f;
+            foreach (var kv in s_tiles)
+            {
+                TileCenter(kv.Key, out float cx, out float cz, out float size);
+                float h = size * 0.5f;
+                if (zx0 + 64f < cx - h || zx0 > cx + h || zz0 + 64f < cz - h || zz0 > cz + h) continue;
+                s_rebuild.Add(kv.Key);
+            }
+        }
+
+        internal static void RebuildAllTiles()
+        {
+            foreach (var kv in s_tiles) s_rebuild.Add(kv.Key);
+        }
+
+        private static void DrainRebuild(Vector3 c, float near)
+        {
+            if (s_rebuild.Count == 0) return;
+            s_rebuildScratch.Clear();
+            foreach (var k in s_rebuild) { s_rebuildScratch.Add(k); if (s_rebuildScratch.Count >= RebuildPerTick) break; }
+            foreach (var k in s_rebuildScratch)
+            {
+                s_rebuild.Remove(k);
+                if (!s_tiles.ContainsKey(k)) continue;   // dropped out of range meanwhile
+                Release(k);
+                BuildTile(k, c, near);
+            }
+        }
+
         private static void Release(Vector3Int key)
         {
             if (!s_tiles.TryGetValue(key, out var t)) return;
@@ -816,6 +866,7 @@ namespace VerdantsAscent.Terrain.Voxel
                 if (kv.Value.Mask != null) Object.Destroy(kv.Value.Mask);
             }
             s_tiles.Clear();
+            s_rebuild.Clear();   // 0.2.1440
             // Pooled tiles hold GOs/meshes/masks too — HideAndDontSave masks
             // survive scene unloads, so they MUST be destroyed explicitly.
             while (s_pool.Count > 0)

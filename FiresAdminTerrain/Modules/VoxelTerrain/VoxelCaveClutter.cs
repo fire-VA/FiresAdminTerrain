@@ -395,6 +395,7 @@ namespace VerdantsAscent.Terrain.Voxel
                             layer = renderer.gameObject.layer,
                             lightProbeUsage = LightProbeUsage.Off,
                             reflectionProbeUsage = renderer.reflectionProbeUsage,
+                            motionVectorMode = MotionVectorGenerationMode.Camera,   // 0.2.1434: keep instanced draws out of Unity's per-object MV pass (TAA smear, Fire 11-13)
                         },
                     });
                 }

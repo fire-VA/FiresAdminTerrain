@@ -282,7 +282,22 @@ namespace VerdantsAscent.Water.Core
 
         internal static float Canonical(float x, float z, float yLow, float yHigh, bool main)
         {
-            System.Func<float, float> bedFn = l => BedUnder(x, z, l, main);
+            // 0.2.1436 ([lead] profiler, shore stand: Canonical 14.9 MB/min, 78 B per call = this closure + its delegate): the bed question keeps
+            // its arguments in per-thread fields and ONE cached delegate per thread; the previous values are put back at the end (re-entrant safe).
+            float px = t_bx, pz = t_bz; bool pm = t_bmain;
+            t_bx = x; t_bz = z; t_bmain = main;
+            var bedFn = t_bedFn ?? (t_bedFn = BedUnderCurrent);
+            try { return CanonicalCore(x, z, yLow, yHigh, main, bedFn); }
+            finally { t_bx = px; t_bz = pz; t_bmain = pm; }
+        }
+
+        [System.ThreadStatic] private static float t_bx, t_bz;
+        [System.ThreadStatic] private static bool t_bmain;
+        [System.ThreadStatic] private static System.Func<float, float> t_bedFn;
+        private static float BedUnderCurrent(float level) => BedUnder(t_bx, t_bz, level, t_bmain);
+
+        private static float CanonicalCore(float x, float z, float yLow, float yHigh, bool main, System.Func<float, float> bedFn)
+        {
             float first = WaterSheets.SupportedSurfaceAt(x, z, yLow, yHigh, bedFn);
             if (float.IsNaN(first)) return first;
             float floor = bedFn(first);

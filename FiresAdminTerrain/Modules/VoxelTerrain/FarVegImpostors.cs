@@ -483,9 +483,11 @@ namespace VerdantsAscent.Terrain.Voxel
                         // DrawMeshInstanced without a probe provider.
                         VerdantsAscent.Terrain.FatPerfCensus.InstancedCalls++;
                         drawCalls++; drawInstances += n;
-                        Graphics.DrawMeshInstanced(sp.Quad, 0, sp.Mat, chunks[c], n, null,
-                            UnityEngine.Rendering.ShadowCastingMode.Off, false, DefaultDrawLayer, null,
-                            UnityEngine.Rendering.LightProbeUsage.Off);
+                        // 0.2.1434: RenderMeshInstanced with motionVectorMode = Camera (the old DrawMeshInstanced put these quads in
+                        // Unity's per-object motion-vector pass = TAA history smear, Fire 11-13); same mesh, material, layer, no shadows / probes.
+                        var rpv = new RenderParams(sp.Mat) { layer = DefaultDrawLayer, shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off, receiveShadows = false,
+                            lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off, motionVectorMode = MotionVectorGenerationMode.Camera };
+                        Graphics.RenderMeshInstanced(in rpv, sp.Quad, 0, chunks[c], n);
                     }
                     catch (System.Exception ex)
                     {
@@ -599,9 +601,12 @@ namespace VerdantsAscent.Terrain.Voxel
                     var box = new Bounds(); box.SetMinMax(s_slotMin[slot], s_slotMax[slot]);
                     VerdantsAscent.Terrain.FatPerfCensus.InstancedCalls++;
                     drawCalls++; drawInstances += n;
-                    Graphics.DrawMeshInstancedProcedural(sp.Quad, 0, sp.GpuMat, box, n, s_gpuMpb[idx],
-                        UnityEngine.Rendering.ShadowCastingMode.Off, false, DefaultDrawLayer, null,
-                        UnityEngine.Rendering.LightProbeUsage.Off);
+                    // 0.2.1434: RenderMeshPrimitives with motionVectorMode = Camera (was DrawMeshInstancedProcedural, which joined Unity's
+                    // per-object motion-vector pass = TAA history smear, Fire 11-13); same bounds, property block, layer, no shadows / probes.
+                    var rpg = new RenderParams(sp.GpuMat) { worldBounds = box, matProps = s_gpuMpb[idx], layer = DefaultDrawLayer,
+                        shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off, receiveShadows = false,
+                        lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off, motionVectorMode = MotionVectorGenerationMode.Camera };
+                    Graphics.RenderMeshPrimitives(in rpg, sp.Quad, 0, n);
                 }
                 return true;
             }

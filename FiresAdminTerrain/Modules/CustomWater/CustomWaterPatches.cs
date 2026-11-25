@@ -145,12 +145,17 @@ namespace VerdantsAscent.Water.Core
             FiresLogger.LogDebug($"[WaterRoof] {name} over the water path at ({hit.point.x:0.0},{hit.point.y:0.0},{hit.point.z:0.0}), its top {top:0.00}, water {waterSurfaceY:0.00}: {(cover ? "surface cover, the water stands" : "a roof, no water here")} (0.2.1367)");
         }
 
-        private static bool IsTerrainBlockingVertically(Vector3 playerPos, float waterSurfaceY)
+        // 0.2.1448: terrainOnly = the vanilla-water cave gate (Character.SetLiquidLevel): only FAT's voxel ground (layer "terrain",
+        // VoxelChunkView.cs:149-150) counts as a roof, so a dock or any piece over the SEA never takes the water away. FAT's own custom water
+        // (line 72) keeps the full mask (pieces roof a FAT pond in a tunnel).
+        private static int s_terrainOnlyLayerMask = -1;
+        private static bool IsTerrainBlockingVertically(Vector3 playerPos, float waterSurfaceY, bool terrainOnly = false)
         {
             // Initialize layer mask once
             if (s_terrainBlockingLayerMask == -1)
             {
                 s_terrainBlockingLayerMask = LayerMask.GetMask("terrain", "Default", "static_solid", "piece");
+                s_terrainOnlyLayerMask = LayerMask.GetMask("terrain");
             }
 
             // Raycast from player head upward toward the water surface
@@ -161,7 +166,7 @@ namespace VerdantsAscent.Water.Core
                 return false; // Water is at or below head level, no blocking needed
 
             long rs = global::VerdantsAscent.Terrain.Voxel.FatHooks.Start();
-            bool blocked = Physics.Raycast(rayStart, Vector3.up, out RaycastHit hit, rayDistance, s_terrainBlockingLayerMask);
+            bool blocked = Physics.Raycast(rayStart, Vector3.up, out RaycastHit hit, rayDistance, terrainOnly ? s_terrainOnlyLayerMask : s_terrainBlockingLayerMask);
             global::VerdantsAscent.Terrain.Voxel.FatHooks.WaterStage(4, rs);
             if (blocked)
             {
@@ -308,13 +313,40 @@ namespace VerdantsAscent.Water.Core
             return s_genKeyOn;
         }
 
+        private static long s_probeGenOn, s_probeLookup, s_probeSurface, s_probeCalls; private static float s_probeAt;
+        private static float ProbedSurfaceAt(Vector3 pos, bool probe)
+        {
+            long a = probe ? System.GC.GetAllocatedBytesForCurrentThread() : 0;
+            float v = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
+            if (probe) { s_probeSurface += System.GC.GetAllocatedBytesForCurrentThread() - a; ProbeLine(Time.time); }
+            return v;
+        }
+        private static void ProbeLine(float now)
+        {
+            if (!FiresLogger.DebugEnabled) return;
+            s_probeCalls++;
+            if (now < s_probeAt) return;
+            s_probeAt = now + 10f;
+            FiresLogger.LogDebug($"[FatHooks] generated water lookup allocations last 10 s ({s_probeCalls} calls): GenCacheOn {s_probeGenOn} B, cache lookup {s_probeLookup} B, VoxelWaterSurface.SurfaceAt {s_probeSurface} B (0.2.1436 probe, Debug only)");
+            s_probeGenOn = s_probeLookup = s_probeSurface = s_probeCalls = 0;
+        }
+
         private static float GenSurfaceCached(Vector3 pos)
         {
-            if (!GenCacheOn()) return VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
+            // 0.2.1436 ([lead] profiler: 24 B per call attributed to GenCacheOn, whose body cannot allocate): Debug-only allocation probe. It measures the
+            // bytes this thread allocates in GenCacheOn, the cache lookup and SurfaceAt separately, one line per 10 s, so the allocating part is named by measurement.
+            bool probe = FiresLogger.DebugEnabled;
+            long a0 = probe ? System.GC.GetAllocatedBytesForCurrentThread() : 0;
+            bool on = GenCacheOn();
+            if (probe) s_probeGenOn += System.GC.GetAllocatedBytesForCurrentThread() - a0;
+            if (!on) return ProbedSurfaceAt(pos, probe);
             float now = Time.time;
             long k = ((long)Mathf.FloorToInt(pos.x * 0.5f) << 32) ^ (uint)Mathf.FloorToInt(pos.z * 0.5f);
-            if (s_genCache.TryGetValue(k, out var e) && now - e.At < 1f) { s_genHits++; return e.Level; }
-            float level = VerdantsAscent.Terrain.Voxel.VoxelWaterSurface.SurfaceAt(pos);
+            long a1 = probe ? System.GC.GetAllocatedBytesForCurrentThread() : 0;
+            bool hit = s_genCache.TryGetValue(k, out var e) && now - e.At < 1f;
+            if (probe) s_probeLookup += System.GC.GetAllocatedBytesForCurrentThread() - a1;
+            if (hit) { s_genHits++; ProbeLine(now); return e.Level; }
+            float level = ProbedSurfaceAt(pos, probe);
             if (s_genCache.Count > 4096) s_genCache.Clear();
             s_genCache[k] = new GenEntry { Level = level, At = now };
             s_genMiss++;
@@ -390,7 +422,7 @@ namespace VerdantsAscent.Water.Core
             if (VerdantsAscent.Terrain.Voxel.FiresVoxelConfig.WorldKind == VerdantsAscent.Terrain.Voxel.VoxelWorldMode.Vanilla) return true;
             Vector3 pos = __instance.transform.position;
             if (level - pos.y < 1.5f) return true;
-            if (!IsTerrainBlockingVertically(pos, level)) return true;
+            if (!IsTerrainBlockingVertically(pos, level, terrainOnly: true)) return true;   // 0.2.1448: voxel ground only (never a piece over the sea)
 
             s_waterLevelRef(__instance) = -10000f;
             s_liquidLevelRef(__instance) = Mathf.Max(-10000f, s_tarLevelRef(__instance));
@@ -755,7 +787,6 @@ namespace VerdantsAscent.Water.Core
                 WaterOperationRPC.Initialize();
                 global::VerdantsAscent.Water.Tools.WaterCleanupCommand.EnsureRpcs();   // va_water_cleanup_spread runs on the server
                 global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // va_ground_probe
-                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // wavematch_test server step
                 WaterPersistence.Initialize();
 
                 // Initialize file-based water cache (mirrors DirtFloorCombinerCache)
@@ -813,7 +844,6 @@ namespace VerdantsAscent.Water.Core
                 WaterOperationRPC.Initialize();
                 global::VerdantsAscent.Water.Tools.WaterCleanupCommand.EnsureRpcs();   // va_water_cleanup_spread runs on the server
                 global::VerdantsAscent.Terrain.Voxel.FatGroundProbe.EnsureRegistered();   // va_ground_probe
-                global::VerdantsAscent.Water.Core.FiresWaveDepthMatch.EnsureRegistered();   // wavematch_test server step
                 WaterPersistence.Initialize();
             }
             catch (System.Exception ex)
@@ -990,6 +1020,7 @@ namespace VerdantsAscent.Water.Core
         {
             WaterCombinerCache.Update();
             VerdantsAscent.Water.Core.SeasonalWaterFreeze.Tick();   // Vedr winter freezes/thaws FAT custom water (2 s throttle inside)
+            VerdantsAscent.Water.Core.FiresWaterAuthority.Tick();   // 0.2.1448: FAT's private water clock (no longer vanilla's UpdateWaterTime)
         }
 
         #endregion

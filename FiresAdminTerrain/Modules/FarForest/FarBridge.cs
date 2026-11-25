@@ -54,6 +54,17 @@ namespace VerdantsAscent.Terrain.FarForest
             try { return s_coreAsm?.GetType(name, false); } catch { return null; }
         }
 
+        // 0.2.1433: EBM's assembly, looked up quietly like Core's (GetType(name, false)); null when EBM is not installed.
+        private static System.Reflection.Assembly s_ebmAsm;
+        internal static Type EbmType(string name)
+        {
+            if (s_ebmAsm == null)
+            {
+                foreach (var a in AppDomain.CurrentDomain.GetAssemblies()) { try { if (a.GetName().Name == "FiresEasyBakeMeshes") { s_ebmAsm = a; break; } } catch { } }
+            }
+            try { return s_ebmAsm?.GetType(name, false); } catch { return null; }
+        }
+
         internal static void InitCoreFar(BepInEx.Configuration.ConfigFile cfg)
         {
             var done = new List<string>();
@@ -194,7 +205,7 @@ namespace VerdantsAscent.Terrain.FarForest
             {
                 s_nextLog = now + 30f;
                 FiresLogger.LogDebug($"[FarForest] bridge: {s_live.Count} cell(s) live, {s_cellsSent} sent, {s_instancesSent} instance(s) sent; worker {(s_workerCells > 0 ? s_workerMs / s_workerCells : 0):0.0} ms/cell avg; " +
-                                     $"sinks: core {(s_core != null ? "on" : "none")}, canopy {(s_canopy != null ? "on" : "none")}; seen trees: {s_zonesSeen} zone(s) read from real ZDOs ({s_zoneReads} reads, {s_zoneChanges} changed since)");
+                                     $"sinks: impostors {(s_core != null ? s_core.Engine : "none")}, canopy {(s_canopy != null ? "on" : "none")}; seen trees: {s_zonesSeen} zone(s) read from real ZDOs ({s_zoneReads} reads, {s_zoneChanges} changed since)");
             }
         }
 
@@ -202,8 +213,11 @@ namespace VerdantsAscent.Terrain.FarForest
         {
             bool coreLive = false;
             try { coreLive = FiresCore.Config.CoreFeatures.IsLive("FarImpostors"); } catch { }
-            s_core = coreLive ? ImpostorSink.TryBind(out string coreWhy) : null;
-            string why = coreLive ? (s_core == null ? ImpostorSink.LastWhy : null) : "CoreFeatures FarImpostors is not live (no owner / older Core)";
+            // 0.2.1433: Core's live gate applies only to Core's own engine; EBM's engine is live whenever EBM is loaded on a client (its own
+            // [Far Impostors] Enabled decides whether it draws, as Core's did), so the EBM path is tried when Core's flag is down too.
+            s_core = ImpostorSink.TryBind(out string coreWhy);
+            if (s_core != null && s_core.Engine == "Core" && !coreLive) s_core = null;
+            string why = s_core == null ? (coreLive ? ImpostorSink.LastWhy : ImpostorSink.LastWhy + "; CoreFeatures FarImpostors is not live") : null;
             s_canopy = CanopySink.TryBind();
             if (s_core == null && s_canopy == null)
             {
@@ -229,7 +243,7 @@ namespace VerdantsAscent.Terrain.FarForest
             s_started = true;
             s_saidDown = false;
             if (s_worker == null) { s_worker = new Thread(WorkerLoop) { IsBackground = true, Name = "FAT FarBridge", Priority = System.Threading.ThreadPriority.BelowNormal }; s_worker.Start(); }
-            FiresLogger.LogInfo($"[FarForest] bridge on: FarVegImpostors placement -> {(s_core != null ? $"Core impostor engine (ApiVersion {s_core.ApiVersion}, {registered} of {n} kind(s) registered)" : "no Core engine (" + why + ")")}" +
+            FiresLogger.LogInfo($"[FarForest] bridge on: FarVegImpostors placement -> {(s_core != null ? $"{s_core.Engine} impostor engine (ApiVersion {s_core.ApiVersion}, {registered} of {n} kind(s) registered)" : "no impostor engine (" + why + ")")}" +
                                 $"{(s_canopy != null ? " + FatFarCanopy" : "")}; 512 m cells to {FarForest.ReachMeters.Value:0} m, built on a worker.");
             return true;
         }
@@ -327,6 +341,7 @@ namespace VerdantsAscent.Terrain.FarForest
         {
             internal static string LastWhy = "";
             public int ApiVersion;
+            public string Engine = "Core";   // 0.2.1433: "Core" or "EBM", for the bridge line
             private MethodInfo m_register, m_setCell, m_clearCell;
             private Type m_inst, m_opts;
             private FieldInfo f_pos, f_scale, f_yaw, f_kind, f_tx, f_tz, o_mid, o_distant, o_reach;
@@ -337,8 +352,14 @@ namespace VerdantsAscent.Terrain.FarForest
             {
                 why = LastWhy = "";
                 var t = CoreType("FiresCore.Far.ImpostorEngine");   // 0.2.1425: quiet (was AccessTools.TypeByName: a warning per retry once Core's Far\ is gone)
-                if (t == null) { why = LastWhy = "FiresCore.Far.ImpostorEngine not in this Core build (EBM 1.2.210+ owns the far systems)"; return null; }
-                var s = new ImpostorSink { m_engine = t };
+                string engine = "Core";
+                // 0.2.1433 ([ghost], lead 11-12, Fire's run_6 bare mountain: "sinks: core none ... 167796 instance(s) sent" = every far tree
+                // computed and never drawn): Core's engine moved into EBM 1.2.210 as the public FiresEasyBakeMeshes.EasyBake.Far.ImpostorEngine,
+                // the same API (ApiVersion, RegisterKind(string, GameObject, KindOptions), SetCell(string, long, Bounds, ImpostorInstance[]),
+                // ClearCell, MarkZoneStanding). Bound the same way, by presence in EBM's own assembly: no hard reference, FAT runs without EBM.
+                if (t == null) { t = EbmType("FiresEasyBakeMeshes.EasyBake.Far.ImpostorEngine"); engine = "EBM"; }
+                if (t == null) { why = LastWhy = "no impostor engine: FiresCore.Far.ImpostorEngine is gone (EBM 1.2.210+ owns it) and EBM's FiresEasyBakeMeshes.EasyBake.Far.ImpostorEngine is not loaded"; return null; }
+                var s = new ImpostorSink { m_engine = t, Engine = engine };
                 var apiF = t.GetField("ApiVersion", BindingFlags.Public | BindingFlags.Static);
                 var apiP = t.GetProperty("ApiVersion", BindingFlags.Public | BindingFlags.Static);
                 object api = apiF != null ? apiF.GetValue(null) : apiP?.GetValue(null);

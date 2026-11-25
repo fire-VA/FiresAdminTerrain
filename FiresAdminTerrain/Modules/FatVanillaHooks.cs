@@ -76,7 +76,6 @@ namespace VerdantsAscent.Terrain
                 Testing.LoadTest.Register();        // fat_load_test: load, log, config, save and sync checks
                 Testing.SkylandCheck.Register();    // skyland_check: far shape vs near voxels, floating dressing, pad slope
                 Testing.ClutterFloatTest.Register();   // clutterfloat_test: grass floating over edited ground
-                Testing.WaveMatchTest.Register();      // wavematch_test: swim/float wave vs the drawn wave
 #endif
                 Utilities.LocationRepair.RegisterCommand();   // va_location_repair: re-point damaged location proxies
             }
@@ -97,9 +96,14 @@ namespace VerdantsAscent.Terrain
         [HarmonyPatch(typeof(AltBiomeWorldData), nameof(AltBiomeWorldData.VerifyBiomeData))]
         private static class AltBiomeWorldData_VerifyBiomeData
         {
+            // 0.2.1452 (lead 11-16, VA-Chunk clients placed 0 alt biomes): Priority.First, so the server's grid is taken before any
+            // other prefix builds one (FiresFixes' cache / parallel build stands down when the original is already skipped), and
+            // the grid-build scope covers every thread the build queues, not just this one (ZoneModeGate.EnterGridBuild).
+            [HarmonyPriority(Priority.First)]
             private static bool Prefix(World world)
             {
                 ZoneModeGate.EnterPlanning();
+                ZoneModeGate.EnterGridBuild();
                 return !BcImport.BiomeGridSync.TryTakeServerGrid(world);
             }
 
@@ -107,6 +111,7 @@ namespace VerdantsAscent.Terrain
 
             private static Exception Finalizer(Exception __exception)
             {
+                ZoneModeGate.ExitGridBuild();
                 ZoneModeGate.ExitPlanning();
                 return __exception;
             }
@@ -186,7 +191,6 @@ namespace VerdantsAscent.Terrain
 #if FIRES_TESTS
                 FatLoadGuard.Step("AdminToolsProbe RPCs", Testing.AdminToolsProbe.EnsureRpcs);
 #endif
-                FatLoadGuard.Step("sea wind init", global::VerdantsAscent.Water.Core.FiresSeaWind.Init);
             }
 
             // After every registration, this mod's and ConfigSync's, so the counts it reports are real.
@@ -251,6 +255,7 @@ namespace VerdantsAscent.Terrain
                 CustomWaterPatches.SaveOnShutdown();
                 ZoneStreamTiming.OnShutdown();
                 try { DistantPaintCache.Save(); } catch { }
+                try { DistantHeightCache.Save(); } catch { }   // 0.2.1440: writes only when something was learned (never when off)
             }
 
             // Shutdown saves the world synchronously, so the lock can go here. The OnDestroy postfix
@@ -624,6 +629,13 @@ namespace VerdantsAscent.Terrain
                 global::VerdantsAscent.Terrain.Biome.BiomePaintPersistence.BiomePaintPatches.ApplyPaintColors(__instance);
                 ZoneUpdateTimes.AddIfInside(ZoneUpdateTimes.Cause.HmPaintColours, t0);   // 0.2.1089 [ZoneUpdate]
             }
+
+            // 0.2.1441: Vedr winter on DISTANT-LOD tiles, after the env-box and biome-paint colours (returns at once off-season,
+            // key off, or on a near heightmap).
+            [HarmonyPostfix]
+            [HarmonyPriority(Priority.Last - 10)]
+            private static void DistantWinter(Heightmap __instance)
+                => global::VerdantsAscent.Terrain.Voxel.FatSeasons.WinterizeDistantLod(__instance);
         }
 
         [HarmonyPatch(typeof(ClutterSystem), "GenerateVegPatch")]
